@@ -83,7 +83,7 @@ with st.sidebar:
     tickers_input = st.text_area("Lista Spółek:", value=saved_list, height=150)
     if tickers_input != saved_list: save_tickers(tickers_input)
     tickers = [x.strip().upper() for x in tickers_input.split(",") if x.strip()]
-    refresh_val = st.select_slider("Odświeżanie (sek)", options=, value=60)
+    refresh_val = st.select_slider("Odświeżanie (sek)", options=[30, 60, 300, 600], value=60)
 
 st_autorefresh(interval=refresh_val * 1000, key="fscounter")
 
