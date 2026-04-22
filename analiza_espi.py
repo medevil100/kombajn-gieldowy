@@ -7,7 +7,7 @@ from streamlit_autorefresh import st_autorefresh
 import os
 
 # --- 1. PAMIĘĆ SPÓŁEK ---
-DB_FILE = "moje_spolki.txt"
+DB_FILE = "moje.txt"
 
 def save_tickers(text):
     with open(DB_FILE, "w") as f:
