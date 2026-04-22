@@ -23,7 +23,7 @@ def load_tickers():
     return "PKO.WA, BTC-USD, NVDA, IOVA"
 
 # --- 2. STYLE PRO ---
-st.set_page_config(page_title="AI Alpha Terminal v9.5 Ultimate", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="AI Alpha Terminal v9.6 ELITE", page_icon="⚡", layout="wide")
 
 st.markdown("""
     <style>
@@ -32,9 +32,8 @@ st.markdown("""
     .buy-signal { border: 2px solid #00ff88 !important; box-shadow: 0 0 25px rgba(0, 255, 136, 0.3); }
     .verdict-box { background: #07121d; padding: 15px; border-radius: 10px; border-left: 5px solid #00e5ff; margin-top: 10px; font-size: 1.1rem; color: #00e5ff; font-weight: bold; }
     .price-text { font-size: 3.2rem; font-weight: 900; color: #ffffff; margin: 0; line-height: 1; }
-    .status-badge { padding: 8px 15px; border-radius: 8px; font-size: 1rem; font-weight: bold; border: 1px solid #333; margin-right: 10px; }
     .label-desc { color: #888; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 5px; }
-    .legend-item { font-size: 0.8rem; margin-right: 15px; display: inline-block; }
+    .top-rank-box { background: linear-gradient(135deg, #07121d 0%, #0a0b10 100%); padding: 15px; border-radius: 12px; border: 1px solid #00ff88; margin-bottom: 30px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -65,7 +64,6 @@ def get_data(symbol):
 
         sma_d = d1d['Close'].rolling(100).mean().iloc[-1]
         pivot = (d1d['High'].iloc[-2] + d1d['Low'].iloc[-2] + d1d['Close'].iloc[-2]) / 3
-        
         atr = (d1d['High'] - d1d['Low']).rolling(20).mean().iloc[-1]
         if pd.isna(atr) or atr == 0: atr = price * 0.03
         
@@ -78,7 +76,7 @@ def get_data(symbol):
         }
     except: return None
 
-# --- 4. PANEL ---
+# --- 4. PANEL BOCZNY ---
 with st.sidebar:
     st.header("⚙️ TERMINAL")
     api_key = st.text_input("OpenAI API Key:", type="password")
@@ -86,7 +84,7 @@ with st.sidebar:
     tickers_input = st.text_area("Lista Spółek:", value=saved_list, height=150)
     if tickers_input != saved_list: save_tickers(tickers_input)
     tickers = [x.strip().upper() for x in tickers_input.split(",") if x.strip()]
-    refresh_val = st.select_slider("Odświeżanie (sek)", options=[30, 60, 300, 600], value=60)
+    refresh_val = st.select_slider("Odświeżanie (sek)", options=, value=60)
 
 st_autorefresh(interval=refresh_val * 1000, key="fscounter")
 
@@ -94,10 +92,30 @@ st_autorefresh(interval=refresh_val * 1000, key="fscounter")
 if api_key:
     client = OpenAI(api_key=api_key)
     
+    # --- POBIERANIE WSZYSTKICH DANYCH DLA RANKINGU ---
+    all_stocks = []
     for t in tickers:
-        data = get_data(t)
-        if not data: continue
+        d = get_data(t)
+        if d: all_stocks.append(d)
+    
+    # --- TOP 10 SYGNAŁÓW NA GÓRZE ---
+    if all_stocks:
+        st.markdown('<div class="top-rank-box"><h4>🏆 TOP 10: NAJWIĘKSZE WYPRZEDANIE / WOLUMEN</h4>', unsafe_allow_html=True)
+        # Sortujemy po najniższym RSI
+        sorted_stocks = sorted(all_stocks, key=lambda x: x['rsi'])[:10]
         
+        cols = st.columns(5) # 2 rzędy po 5
+        for i, stock in enumerate(sorted_stocks):
+            with cols[i % 5]:
+                color = "#00ff88" if stock['rsi'] < 35 else "#ffffff"
+                st.markdown(f"**{stock['symbol']}**")
+                st.markdown(f"<span style='color:{color};'>RSI: {stock['rsi']:.1f}</span>", unsafe_allow_html=True)
+                if stock['vol_spike']: st.caption("🔥 VOL SPIKE")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # --- KARTY SZCZEGÓŁOWE ---
+    for data in all_stocks:
+        t = data['symbol']
         is_buy_zone = data['rsi'] < 32 or data['price'] < data['lbb']
         if is_buy_zone: play_sound()
 
@@ -105,63 +123,39 @@ if api_key:
         c1, c2 = st.columns([1.6, 2.4])
         
         with c1:
-            st.markdown(f"### {t}")
+            st.subheader(t)
             st.markdown(f'<div class="label-desc">Aktualna Cena</div>', unsafe_allow_html=True)
             st.markdown(f"<p class='price-text'>{data['price']:.4f}</p>", unsafe_allow_html=True)
             
-            if data['vol_spike']: st.markdown('<p style="color:#ff00ff; font-weight:bold; margin:10px 0;">🔥 SKOK WOLUMENU (Duży kapitał!)</p>', unsafe_allow_html=True)
-            
-            st.write("")
-            st.markdown(f"""
-                <span class="status-badge" style="color:{'#00ff88' if 'HOSSA' in data['trend'] else '#ff4b4b'}">{data['trend']}</span>
-                <span class="status-badge" style="color:{'#00e5ff' if data['rsi'] < 70 else '#ff4b4b'}">RSI: {data['rsi']:.1f}</span>
-            """, unsafe_allow_html=True)
+            if data['vol_spike']: st.markdown('<p style="color:#ff00ff; font-weight:bold; margin:10px 0;">🔥 SKOK WOLUMENU (Aktywność!)</p>', unsafe_allow_html=True)
             
             st.markdown(f"""
                 <div style="background:#12141d; padding:20px; border-radius:10px; margin:20px 0; border:1px solid #333;">
-                    <div class="label-desc">Poziomy Wyjścia (Zasada ATR)</div>
                     <b style="color:#00ff88; font-size:1.4rem;">🎯 CEL (TP): {data['tp']:.4f}</b><br>
-                    <b style="color:#ff4b4b; font-size:1.4rem;">🛑 STOP (SL): {data['sl']:.4f}</b>
+                    <b style="color:#ff4b4b; font-size:1.4rem;">🛑 STOP (SL): {data['sl']:.4f}</b><br>
                     <hr style='margin:15px 0; border-color:#333;'>
-                    <div style="display:flex; justify-content:space-between;">
-                        <span><small class="label-desc">Pivot (Równowaga):</small><br><b>{data['pivot']:.4f}</b></span>
-                        <span><small class="label-desc">Wsparcie BB:</small><br><b>{data['lbb']:.4f}</b></span>
-                    </div>
+                    <span class='label-desc'>Trend: {data['trend']} | RSI: {data['rsi']:.1f}</span>
                 </div>
             """, unsafe_allow_html=True)
 
             if st.button(f"🧠 DECYZJA AI DLA {t}", key=f"ai_{t}"):
-                p = f"Analiza {t}: Cena {data['price']}, RSI {data['rsi']:.1f}, Trend {data['trend']}, Pivot {data['pivot']:.4f}. WYDAJ WERDYKT: KUPUJ, CZEKAJ lub SPRZEDAJ. Podaj ocenę 1-10 i konkretne uzasadnienie."
+                p = f"Analiza {t}: Cena {data['price']}, RSI {data['rsi']:.1f}, Trend {data['trend']}. WYDAJ WERDYKT: KUPUJ, CZEKAJ lub SPRZEDAJ. Konkretna ocena 1-10 i dlaczego."
                 res = client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": p}])
-                st.session_state[f"v_{t}"] = res.choices[0].message.content
+                st.session_state[f"v_{t}"] = res.choices.message.content
                 st.rerun()
 
             if f"v_{t}" in st.session_state:
                 st.markdown(f'<div class="verdict-box">{st.session_state[f"v_{t}"]}</div>', unsafe_allow_html=True)
 
         with c2:
-            st.markdown(f"""
-                <div style="text-align:right; margin-bottom:10px;">
-                    <span class="legend-item" style="color:white;">⚪ Pivot</span>
-                    <span class="legend-item" style="color:#00e5ff;">🔵 Wstęgi Bollingera</span>
-                    <span class="legend-item" style="color:#00ff88;">🟩 TP</span>
-                    <span class="legend-item" style="color:#ff4b4b;">🟥 SL</span>
-                </div>
-            """, unsafe_allow_html=True)
-            
-            fig = go.Figure(data=[go.Candlestick(x=data['df'].index[-60:], open=data['df']['Open'][-60:], high=data['df']['High'][-60:], low=data['df']['Low'][-60:], close=data['df']['Close'][-60:], name="Cena")])
-            
-            # Wstęgi Bollingera
-            fig.add_trace(go.Scatter(x=data['df'].index[-60:], y=data['upper_bb'][-60:], line=dict(color='rgba(0, 229, 255, 0.4)', width=1.5), name="Opór BB"))
-            fig.add_trace(go.Scatter(x=data['df'].index[-60:], y=data['lower_bb'][-60:], line=dict(color='rgba(0, 229, 255, 0.4)', width=1.5), fill='tonexty', name="Wsparcie BB"))
-            
-            # Linie poziomów
+            fig = go.Figure(data=[go.Candlestick(x=data['df'].index[-60:], open=data['df']['Open'][-60:], high=data['df']['High'][-60:], low=data['df']['Low'][-60:], close=data['df']['Close'][-60:])])
+            fig.add_trace(go.Scatter(x=data['df'].index[-60:], y=data['upper_bb'][-60:], line=dict(color='rgba(0, 229, 255, 0.4)', width=1.5), name="BB Góra"))
+            fig.add_trace(go.Scatter(x=data['df'].index[-60:], y=data['lower_bb'][-60:], line=dict(color='rgba(0, 229, 255, 0.4)', width=1.5), fill='tonexty'))
             fig.add_hline(y=data['pivot'], line_dash="dot", line_color="white", line_width=2)
             fig.add_hline(y=data['tp'], line_dash="dash", line_color="#00ff88", line_width=2)
             fig.add_hline(y=data['sl'], line_dash="dash", line_color="#ff4b4b", line_width=2)
-            
             fig.update_layout(template="plotly_dark", height=450, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False, showlegend=False)
             st.plotly_chart(fig, use_container_width=True, key=f"ch_{t}", config={'displayModeBar': False})
         st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.info("Wprowadź API Key OpenAI w panelu bocznym.")
+    st.info("Wprowadź API Key OpenAI.")
