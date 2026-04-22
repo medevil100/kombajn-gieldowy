@@ -10,8 +10,10 @@ import os
 DB_FILE = "moje.txt" 
 
 def save_tickers(text):
-    with open(DB_FILE, "w") as f:
-        f.write(text)
+    try:
+        with open(DB_FILE, "w") as f:
+            f.write(text)
+    except: pass
 
 def load_tickers():
     if os.path.exists(DB_FILE):
@@ -21,7 +23,7 @@ def load_tickers():
         except: return "PKO.WA, BTC-USD, NVDA, IOVA"
     return "PKO.WA, BTC-USD, NVDA, IOVA"
 
-# --- 2. KONFIGURACJA ---
+# --- 2. KONFIGURACJA I STYLE ---
 st.set_page_config(page_title="AI Alpha Kombajn v9.1 GOLD", page_icon="💰", layout="wide")
 
 st.markdown("""
@@ -57,7 +59,7 @@ def get_data(symbol):
         vol_spike = d15['Volume'].iloc[-1] > (avg_vol * 1.5)
 
         delta = d15['Close'].diff()
-        rsi = 100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / delta.where(delta < 0, 0).abs().rolling(14).mean() + 1e-9))).iloc[-1]
+        rsi = 100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / (delta.where(delta < 0, 0).abs().rolling(14).mean() + 1e-9)))).iloc[-1]
         
         sma_d = d1d['Close'].rolling(100).mean().iloc[-1]
         prev = d1d.iloc[-2]
@@ -77,11 +79,16 @@ def get_data(symbol):
 with st.sidebar:
     st.header("⚙️ KONFIGURACJA")
     api_key = st.text_input("OpenAI API Key:", type="password")
+    
     saved_list = load_tickers()
     tickers_input = st.text_area("Lista Spółek:", value=saved_list, height=150)
-    if tickers_input != saved_list: save_tickers(tickers_input)
+    if tickers_input != saved_list:
+        save_tickers(tickers_input)
+    
     tickers = [x.strip().upper() for x in tickers_input.split(",") if x.strip()]
-    refresh_val = st.select_slider("Odświeżanie (sek)", options=, value=60)
+    
+    # LINIA 84 - NAPRAWIONA SKŁADNIA
+    refresh_val = st.select_slider("Odświeżanie (sek)", options=[30, 60, 300, 600], value=60)
 
 st_autorefresh(interval=refresh_val * 1000, key="fscounter")
 
@@ -113,7 +120,7 @@ if api_key:
             if st.button(f"🧠 WERDYKT {t}", key=f"ai_{t}"):
                 p = f"Analiza {t}: Cena {data['price']}, RSI {data['rsi']:.1f}, Skok Wolumenu: {data['vol_spike']}. Daj werdykt i techniczne uzasadnienie."
                 res = client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": p}])
-                st.session_state[f"v_{t}"] = res.choices.message.content
+                st.session_state[f"v_{t}"] = res.choices[0].message.content
 
             if f"v_{t}" in st.session_state:
                 st.markdown(f'<div class="verdict-box">{st.session_state[f"v_{t}"]}</div>', unsafe_allow_html=True)
@@ -124,11 +131,10 @@ if api_key:
                 low=data['df']['Low'][-50:], close=data['df']['Close'][-50:], name="Cena"
             )])
             
-            # Wstęgi i opisy
-            fig.add_trace(go.Scatter(x=data['df'].index[-50:], y=data['upper_bb'][-50:], line=dict(color='rgba(0, 229, 255, 0.3)', width=1), name="BB Góra (Opór)"))
-            fig.add_trace(go.Scatter(x=data['df'].index[-50:], y=data['lower_bb'][-50:], line=dict(color='rgba(0, 229, 255, 0.3)', width=1), fill='tonexty', name="BB Dół (Wsparcie)"))
+            fig.add_trace(go.Scatter(x=data['df'].index[-50:], y=data['upper_bb'][-50:], line=dict(color='rgba(0, 229, 255, 0.3)', width=1), name="BB Góra"))
+            fig.add_trace(go.Scatter(x=data['df'].index[-50:], y=data['lower_bb'][-50:], line=dict(color='rgba(0, 229, 255, 0.3)', width=1), fill='tonexty', name="BB Dół"))
             
-            fig.add_hline(y=data['pivot'], line_dash="dot", line_color="white", annotation_text="PIVOT", annotation_position="top left")
+            fig.add_hline(y=data['pivot'], line_dash="dot", line_color="white", annotation_text="P")
             
             fig.update_layout(
                 template="plotly_dark", height=300, 
