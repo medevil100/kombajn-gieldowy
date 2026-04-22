@@ -77,8 +77,7 @@ with st.sidebar:
         save_tickers(tickers_input)
         
     tickers = [x.strip().upper() for x in tickers_input.split(",") if x.strip()]
-    refresh_val = st.select_slider("Auto-odświeżanie (sek)", options=, value=60)
-
+ refresh_val = st.select_slider("Auto-odświeżanie (sek)", options=[30, 60, 300, 600], value=60)
 st_autorefresh(interval=refresh_val * 1000, key="fscounter")
 
 # --- 5. WYŚWIETLANIE ---
