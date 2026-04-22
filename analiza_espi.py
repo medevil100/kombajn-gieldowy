@@ -114,7 +114,7 @@ if api_key:
         if is_buy_zone: play_sound()
 
         st.markdown(f'<div class="ticker-card {"buy-signal" if is_buy_zone else ""}">', unsafe_allow_html=True)
-       c1, c2 = st.columns([1.5, 2.5])
+        c1, c2 = st.columns([1.5, 2.5])
         
         with c1:
             st.subheader(t)
