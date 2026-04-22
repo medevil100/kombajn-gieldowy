@@ -84,7 +84,9 @@ with st.sidebar:
     tickers_input = st.text_area("Lista Spółek:", value=saved_list, height=150)
     if tickers_input != saved_list: save_tickers(tickers_input)
     tickers = [x.strip().upper() for x in tickers_input.split(",") if x.strip()]
-    refresh_val = st.select_slider("Odświeżanie (sek)", options=, value=60)
+    
+    # POPRAWIONA LINIA Z OPCJAMI:
+    refresh_val = st.select_slider("Odświeżanie (sek)", options=[30, 60, 300, 600], value=60)
 
 st_autorefresh(interval=refresh_val * 1000, key="fscounter")
 
@@ -92,19 +94,16 @@ st_autorefresh(interval=refresh_val * 1000, key="fscounter")
 if api_key:
     client = OpenAI(api_key=api_key)
     
-    # --- POBIERANIE WSZYSTKICH DANYCH DLA RANKINGU ---
     all_stocks = []
     for t in tickers:
         d = get_data(t)
         if d: all_stocks.append(d)
     
-    # --- TOP 10 SYGNAŁÓW NA GÓRZE ---
+    # --- RANKING NA GÓRZE ---
     if all_stocks:
         st.markdown('<div class="top-rank-box"><h4>🏆 TOP 10: NAJWIĘKSZE WYPRZEDANIE / WOLUMEN</h4>', unsafe_allow_html=True)
-        # Sortujemy po najniższym RSI
         sorted_stocks = sorted(all_stocks, key=lambda x: x['rsi'])[:10]
-        
-        cols = st.columns(5) # 2 rzędy po 5
+        cols = st.columns(5)
         for i, stock in enumerate(sorted_stocks):
             with cols[i % 5]:
                 color = "#00ff88" if stock['rsi'] < 35 else "#ffffff"
@@ -126,7 +125,6 @@ if api_key:
             st.subheader(t)
             st.markdown(f'<div class="label-desc">Aktualna Cena</div>', unsafe_allow_html=True)
             st.markdown(f"<p class='price-text'>{data['price']:.4f}</p>", unsafe_allow_html=True)
-            
             if data['vol_spike']: st.markdown('<p style="color:#ff00ff; font-weight:bold; margin:10px 0;">🔥 SKOK WOLUMENU (Aktywność!)</p>', unsafe_allow_html=True)
             
             st.markdown(f"""
@@ -141,7 +139,8 @@ if api_key:
             if st.button(f"🧠 DECYZJA AI DLA {t}", key=f"ai_{t}"):
                 p = f"Analiza {t}: Cena {data['price']}, RSI {data['rsi']:.1f}, Trend {data['trend']}. WYDAJ WERDYKT: KUPUJ, CZEKAJ lub SPRZEDAJ. Konkretna ocena 1-10 i dlaczego."
                 res = client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": p}])
-                st.session_state[f"v_{t}"] = res.choices.message.content
+                # POPRAWIONA LINIA OpenAI (indeks 0):
+                st.session_state[f"v_{t}"] = res.choices[0].message.content
                 st.rerun()
 
             if f"v_{t}" in st.session_state:
@@ -158,4 +157,4 @@ if api_key:
             st.plotly_chart(fig, use_container_width=True, key=f"ch_{t}", config={'displayModeBar': False})
         st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.info("Wprowadź API Key OpenAI.")
+    st.info("Wprowadź API Key OpenAI w panelu bocznym.")
