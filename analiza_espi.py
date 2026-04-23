@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 # --- 1. KONFIGURACJA ---
 DB_FILE = "tickers_db.txt"
-st.set_page_config(page_title="AI ALPHA GOLDEN v16.1", page_icon="🍯", layout="wide")
+st.set_page_config(page_title="AI ALPHA GOLDEN v16.2", page_icon="🍯", layout="wide")
 
 def load_tickers():
     if os.path.exists(DB_FILE):
@@ -28,7 +28,7 @@ st.markdown("""
     .v-buy { background: #238636; color: white; }
     .v-sell { background: #da3633; color: white; }
     .v-wait { background: #8b949e; color: white; }
-    .analysis-box { background: #070a0e; padding: 15px; border-left: 5px solid #f1c40f; border-radius: 5px; margin: 10px 0; font-family: sans-serif; }
+    .analysis-box { background: #070a0e; padding: 15px; border-left: 5px solid #f1c40f; border-radius: 5px; margin: 10px 0; }
     .metric-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
     .metric-table td { padding: 8px; border-bottom: 1px solid #21262d; font-size: 0.85rem; }
     </style>
@@ -38,7 +38,7 @@ st.markdown("""
 def get_data(symbol):
     try:
         t_obj = yf.Ticker(symbol)
-        inf = t_obj.info
+        inf = t_obj.info if t_obj.info else {}
         d1d = yf.download(symbol, period="2y", interval="1d", progress=False)
         d15 = yf.download(symbol, period="5d", interval="15m", progress=False)
         
@@ -49,21 +49,17 @@ def get_data(symbol):
         price = float(d15['Close'].iloc[-1])
         sma200 = d1d['Close'].rolling(200).mean().iloc[-1]
         
-        # PIVOT POINT (Standard)
         high_p, low_p, close_p = d1d['High'].iloc[-2], d1d['Low'].iloc[-2], d1d['Close'].iloc[-2]
         pivot = (high_p + low_p + close_p) / 3
         
-        # RSI
         delta = d15['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (delta.where(delta < 0, 0).abs()).rolling(14).mean()
         rsi = 100 - (100 / (1 + (gain / (loss + 1e-9)))).iloc[-1]
         
-        # Ekstrema
         peak_52w = d1d['High'].max()
         bottom_52w = d1d['Low'].min()
 
-        # KROPLA MIODU (Verdict)
         if rsi < 32: verdict, v_class = "KUP", "v-buy"
         elif rsi > 68: verdict, v_class = "SPRZEDAJ", "v-sell"
         else: verdict, v_class = "CZEKAJ", "v-wait"
@@ -84,7 +80,7 @@ def get_data(symbol):
 
 # --- 4. UI SIDEBAR ---
 with st.sidebar:
-    st.title("🍯 v16.1 GOLDEN")
+    st.title("🍯 v16.2 GOLDEN")
     api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
     tickers_input = st.text_area("Symbole (przecinek)", value=load_tickers())
     if st.button("Zapisz Listę"):
@@ -99,10 +95,9 @@ with ThreadPoolExecutor(max_workers=10) as executor:
     data_list = [r for r in list(executor.map(get_data, tickers_list)) if r]
 
 if data_list:
-    # --- TOP 10 DASHBOARD ---
     st.subheader("🔥 TOP 10 - SYGNAŁY")
     sorted_top = sorted(data_list, key=lambda x: abs(50 - x['rsi']), reverse=True)[:10]
-    t_cols = st.columns(5)
+    t_cols = st.columns(min(len(sorted_top), 5))
     for i, d in enumerate(sorted_top):
         with t_cols[i % 5]:
             st.markdown(f'''<div style="background:#0d1117; padding:10px; border-radius:10px; border:1px solid #30363d; text-align:center;">
@@ -110,13 +105,11 @@ if data_list:
                 <span class="verdict-badge {d['v_class']}">{d['verdict']}</span><br>
                 <b>{d['price']:.2f}</b></div>''', unsafe_allow_html=True)
 
-    # --- LISTA SZCZEGÓŁOWA ---
     for d in data_list:
-        # Alert jeśli cena przebije SL
         alert_class = "sl-alert" if d['price'] <= d['sl'] else ""
         st.markdown(f'<div class="ticker-card {alert_class}">', unsafe_allow_html=True)
         
-        c1, c2 = st.columns([1, 2])
+        c1, c2 = st.columns()
         with c1:
             st.markdown(f'### {d["symbol"]} <span class="verdict-badge {d["v_class"]}">{d["verdict"]}</span>', unsafe_allow_html=True)
             st.metric("AKTUALNA CENA", f"{d['price']:.2f}", f"{d['change']:.2f}%")
@@ -136,10 +129,11 @@ if data_list:
                 client = OpenAI(api_key=api_key)
                 prompt = (f"Jesteś starszym traderem. Asset: {d['symbol']}. Cena: {d['price']}, SMA200: {d['sma200']:.2f}, "
                           f"Pivot: {d['pivot']:.2f}, RSI: {d['rsi']:.1f}, Szczyt: {d['peak']:.2f}, Dołek: {d['bottom']:.2f}. "
-                          f"PODAJ KONKRET: 1. Werdykt (KUP/SPRZEDAJ/CZEKAJ), 2. Cena Wejścia, 3. Dlaczego (1 zdanie). "
-                          f"Nie pisz o potrzebie dodatkowych danych.")
+                          f"PODAJ KONKRET: 1. Werdykt (KUP/SPRZEDAJ/CZEKAJ), 2. Cena Wejścia, 3. Dlaczego (1 zdanie).")
+                
+                # POPRAWKA BŁĘDU .content
                 resp = client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": prompt}])
-                st.session_state[f"res_{d['symbol']}"] = resp.choices.message.content
+                st.session_state[f"res_{d['symbol']}"] = resp.choices[0].message.content
             
             if f"res_{d['symbol']}" in st.session_state:
                 st.markdown(f'<div class="analysis-box"><b>WERDYKT AI:</b><br>{st.session_state[f"res_{d['symbol']}"]}</div>', unsafe_allow_html=True)
@@ -153,4 +147,4 @@ if data_list:
             st.plotly_chart(fig, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.error("Wprowadź poprawne symbole lub sprawdź połączenie z internetem.")
+    st.error("Wprowadź poprawne symbole lub sprawdź połączenie.")
