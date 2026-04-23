@@ -6,33 +6,30 @@ import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 import os
 
-# --- 1. KONFIGURACJA I PAMIĘĆ ---
+# --- KONFIGURACJA ---
 DB_FILE = "tickers_db.txt"
-if 'ai_cache' not in st.session_state: st.session_state.ai_cache = {}
-
-def save_tickers(text):
-    with open(DB_FILE, "w") as f: f.write(text)
+st.set_page_config(page_title="AI ALPHA SUPERKOMBAJN v11", page_icon="🏦", layout="wide")
 
 def load_tickers():
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r") as f: return f.read()
-    return "PKO.WA, BTC-USD, NVDA, TSLA, AAPL, ETH-USD"
+    return "PKO.WA, BTC-USD, NVDA, TSLA, ALE.WA"
 
-st.set_page_config(page_title="AI ALPHA SUPERKOMBAJN v10", page_icon="🚀", layout="wide")
-
-# --- 2. STYLE PRO ---
+# --- STYLE GITHUB DARK PRO ---
 st.markdown("""
     <style>
-    .stApp { background-color: #050505; color: #ffffff; }
-    .ticker-card { background: #0d1117; padding: 20px; border-radius: 15px; border: 1px solid #30363d; margin-bottom: 20px; transition: 0.3s; }
-    .buy-signal { border: 2px solid #00ff88 !important; box-shadow: 0 0 20px rgba(0, 255, 136, 0.2); }
-    .top-rank-card { background: #161b22; padding: 10px; border-radius: 8px; border: 1px solid #30363d; text-align: center; }
-    .price-tag { font-size: 1.4rem; font-weight: bold; color: #58a6ff; }
-    .verdict-badge { padding: 4px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; text-transform: uppercase; }
+    .stApp { background-color: #0d1117; color: #c9d1d9; }
+    .ticker-card { background: #161b22; padding: 20px; border-radius: 12px; border: 1px solid #30363d; margin-bottom: 20px; }
+    .buy-signal { border: 2px solid #238636 !important; box-shadow: 0 0 15px rgba(35, 134, 54, 0.3); }
+    .top-rank-card { background: #0d1117; padding: 12px; border-radius: 10px; border: 1px solid #30363d; text-align: center; min-width: 150px; }
+    .stat-label { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; }
+    .stat-value { font-family: 'Courier New', monospace; font-weight: bold; color: #58a6ff; }
+    .verdict-kup { color: #39d353; font-weight: bold; }
+    .verdict-sprz { color: #f85149; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. SILNIK ANALITYCZNY ---
+# --- SILNIK ANALITYCZNY ---
 def get_analysis(symbol):
     try:
         d15 = yf.download(symbol, period="5d", interval="15m", progress=False)
@@ -41,90 +38,104 @@ def get_analysis(symbol):
         for df in [d15, d1d]:
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         
-        close = d15['Close']
-        price = float(close.iloc[-1])
+        price = float(d15['Close'].iloc[-1])
         
-        # Wskaźniki
-        sma20 = close.rolling(20).mean()
-        std20 = close.rolling(20).std()
-        upper_bb, lower_bb = sma20 + (std20 * 2), sma20 - (std20 * 2)
+        # Wskaźniki Techniczne
+        sma200 = d1d['Close'].rolling(200).mean().iloc[-1]
+        atr = (d1d['High'] - d1d['Low']).rolling(14).mean().iloc[-1]
         
         # RSI
-        delta = close.diff()
+        delta = d15['Close'].diff()
         gain = delta.where(delta > 0, 0).rolling(14).mean()
         loss = delta.where(delta < 0, 0).abs().rolling(14).mean()
         rsi = 100 - (100 / (1 + (gain / (loss + 1e-9)))).iloc[-1]
         
-        # Szybka Rekomendacja (Logic)
-        rec = "CZEKAJ"
-        rec_color = "#8b949e"
-        if rsi < 32 or price < lower_bb.iloc[-1]: 
-            rec = "KUPUJ"
-            rec_color = "#238636"
-        elif rsi > 68 or price > upper_bb.iloc[-1]: 
-            rec = "SPRZEDAJ"
-            rec_color = "#da3633"
+        # Poziomy: Pivot, TP, SL
+        pivot = (d1d['High'].iloc[-2] + d1d['Low'].iloc[-2] + d1d['Close'].iloc[-2]) / 3
+        tp = price + (atr * 1.5)
+        sl = price - (atr * 1.2)
+        
+        # Logika Rekomendacji
+        if rsi < 32: rec, color = "KUPUJ", "#238636"
+        elif rsi > 68: rec, color = "SPRZEDAJ", "#da3633"
+        else: rec, color = "CZEKAJ", "#8b949e"
 
         return {
-            "symbol": symbol, "price": price, "rsi": rsi, "rec": rec, "rec_color": rec_color,
-            "df": d15, "lbb": lower_bb, "ubb": upper_bb, "vol_spike": d15['Volume'].iloc[-1] > d15['Volume'].rolling(20).mean().iloc[-1] * 2
+            "symbol": symbol, "price": price, "rsi": rsi, "rec": rec, "color": color,
+            "pivot": pivot, "tp": tp, "sl": sl, "df": d15, "trend": "UP" if price > sma200 else "DOWN"
         }
     except: return None
 
-# --- 4. INTERFEJS ---
+# --- UI ---
 with st.sidebar:
-    st.title("⚡ KOBMAJN v10")
+    st.title("⚙️ KOMB_v11")
     api_key = st.text_input("OpenAI Key", type="password")
-    tickers_raw = st.text_area("Lista (po przecinku)", value=load_tickers())
-    if st.button("Zapisz listę"): save_tickers(tickers_raw)
-    refresh = st.select_slider("Odświeżanie", options=[30, 60, 300], value=60)
+    tickers_input = st.text_area("Lista symboli", value=load_tickers())
+    if st.button("Zapisz"): 
+        with open(DB_FILE, "w") as f: f.write(tickers_input)
+    refresh = st.select_slider("Odśwież (s)", options=[30, 60, 300], value=60)
 
-st_autorefresh(interval=refresh * 1000, key="auto")
-tickers = [t.strip().upper() for t in tickers_raw.split(",") if t.strip()]
+st_autorefresh(interval=refresh * 1000, key="refresh")
+tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
 if api_key:
     client = OpenAI(api_key=api_key)
     data_list = [get_analysis(t) for t in tickers if get_analysis(t)]
 
-    # --- TOP 10 RANKING ---
-    st.subheader("🏆 TOP 10: OKAZJE I MONITORING")
-    cols = st.columns(5)
+    # --- TOP 10 DASHBOARD ---
+    st.subheader("📊 RANKING SYGNAŁÓW")
+    top_cols = st.columns(5)
     sorted_top = sorted(data_list, key=lambda x: x['rsi'])[:10]
     
     for i, d in enumerate(sorted_top):
-        with cols[i % 5]:
+        with top_cols[i % 5]:
             st.markdown(f"""
                 <div class="top-rank-card">
-                    <div style="font-weight:bold;">{d['symbol']}</div>
-                    <div class="price-tag">{d['price']:.2f}</div>
-                    <div style="font-size:0.8rem; color:#8b949e;">RSI: {d['rsi']:.1f}</div>
-                    <div class="verdict-badge" style="background:{d['rec_color']};">{d['rec']}</div>
+                    <b style="font-size:1.1rem;">{d['symbol']}</b><br>
+                    <span class="price-tag" style="color:{d['color']}">{d['rec']}</span><br>
+                    <span class="stat-label">Cena:</span> <span class="stat-value">{d['price']:.2f}</span><br>
+                    <span class="stat-label">Pivot:</span> <span class="stat-value" style="color:white">{d['pivot']:.2f}</span><br>
+                    <span class="stat-label">RSI:</span> <span style="color:#58a6ff">{d['rsi']:.1f}</span>
                 </div>
             """, unsafe_allow_html=True)
-            st.write("")
 
-    # --- SZCZEGÓŁY ---
+    # --- KARTY ANALITYCZNE ---
     for d in data_list:
-        is_buy = d['rec'] == "KUPUJ"
-        st.markdown(f'<div class="ticker-card {"buy-signal" if is_buy else ""}">', unsafe_allow_html=True)
+        st.markdown(f'<div class="ticker-card {"buy-signal" if d["rec"]=="KUPUJ" else ""}">', unsafe_allow_html=True)
         c1, c2 = st.columns([1, 2])
         
         with c1:
-            st.markdown(f"## {d['symbol']} <span style='font-size:1rem; color:{d['rec_color']}'>{d['rec']}</span>", unsafe_allow_html=True)
-            st.metric("Cena", f"{d['price']:.4f}", f"{d['rsi']:.1f} RSI")
+            st.markdown(f"### {d['symbol']}")
+            st.markdown(f"**STATUS: <span style='color:{d['color']}'>{d['rec']}</span>**", unsafe_allow_html=True)
             
-            if st.button(f"🧠 ANALIZA AI: {d['symbol']}", key=f"btn_{d['symbol']}"):
-                prompt = f"Analiza {d['symbol']}. Cena: {d['price']}, RSI: {d['rsi']:.2f}, Akcja techniczna: {d['rec']}. Czy to dobry moment na wejście? Podaj ryzyko w skali 1-10."
-                response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": prompt}])
-                st.session_state[f"ai_{d['symbol']}"] = response.choices[0].message.content
+            col_a, col_b = st.columns(2)
+            col_a.metric("PIVOT", f"{d['pivot']:.2f}")
+            col_a.metric("TP (CEL)", f"{d['tp']:.2f}", delta=f"{(d['tp']-d['price'])/d['price']*100:.1f}%")
+            col_b.metric("RSI", f"{d['rsi']:.1f}")
+            col_b.metric("SL (STOP)", f"{d['sl']:.2f}", delta=f"{(d['sl']-d['price'])/d['price']*100:.1f}%", delta_color="inverse")
+
+            if st.button(f"🧠 EKSPERTYZA AI: {d['symbol']}", key=f"ai_{d['symbol']}"):
+                prompt = (f"Jesteś agresywnym analitykiem giełdowym. Symbol: {d['symbol']}. "
+                          f"Cena: {d['price']}, RSI: {d['rsi']:.1f}, Pivot: {d['pivot']:.2f}, TP: {d['tp']:.2f}, SL: {d['sl']:.2f}. "
+                          f"Trend długoterminowy: {d['trend']}. "
+                          f"WYMÓG: Podaj krótki, konkretny werdykt. Dlaczego KUPUJ/SPRZEDAJ? "
+                          f"Jakie jest ryzyko w skali 1-10? Nie owijaj w bawełnę.")
+                
+                resp = client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": prompt}])
+                st.session_state[f"msg_{d['symbol']}"] = resp.choices[0].message.content
             
-            if f"ai_{d['symbol']}" in st.session_state:
-                st.info(st.session_state[f"ai_{d['symbol']}"])
+            if f"msg_{d['symbol']}" in st.session_state:
+                st.info(st.session_state[f"msg_{d['symbol']}"])
 
         with c2:
-            fig = go.Figure(data=[go.Candlestick(x=d['df'].index[-50:], open=d['df']['Open'][-50:], high=d['df']['High'][-50:], low=d['df']['Low'][-50:], close=d['df']['Close'][-50:])])
-            fig.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
+            fig = go.Figure(data=[go.Candlestick(x=d['df'].index[-60:], open=d['df']['Open'][-60:], high=d['df']['High'][-60:], low=d['df']['Low'][-60:], close=d['df']['Close'][-60:])])
+            # Linie poziomów
+            fig.add_hline(y=d['pivot'], line_dash="dot", line_color="white", annotation_text="PIVOT")
+            fig.add_hline(y=d['tp'], line_dash="dash", line_color="#00ff88", annotation_text="TP")
+            fig.add_hline(y=d['sl'], line_dash="dash", line_color="#ff4b4b", annotation_text="SL")
+            
+            fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
         st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.warning("Podaj API Key, aby uruchomić silnik AI.")
+    st.warning("Podaj OpenAI API Key, aby aktywować Superkombajn.")
