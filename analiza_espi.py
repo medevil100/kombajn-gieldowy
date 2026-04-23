@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 # --- 1. KONFIGURACJA ---
 DB_FILE = "tickers_db.txt"
-st.set_page_config(page_title="AI ALPHA ELITE v15.5", page_icon="💎", layout="wide")
+st.set_page_config(page_title="AI ALPHA GOLDEN v16.0", page_icon="🍯", layout="wide")
 
 def load_tickers():
     if os.path.exists(DB_FILE):
@@ -23,14 +23,17 @@ st.markdown("""
     <style>
     .stApp { background-color: #0d1117; color: #c9d1d9; }
     .ticker-card { background: #161b22; padding: 20px; border-radius: 12px; border: 1px solid #30363d; margin-bottom: 25px; }
-    .analysis-box { background: #070a0e; padding: 15px; border-left: 5px solid #ff4b4b; border-radius: 5px; margin: 10px 0; font-family: 'Courier New', monospace; }
-    .metric-table { width: 100%; margin-top: 10px; border-spacing: 0 5px; border-collapse: separate; }
-    .metric-table td { padding: 8px; background: #21262d; font-size: 0.85rem; border-radius: 4px; }
+    .sl-alert { border: 2px solid #ff4b4b !important; background: #2d1616 !important; }
+    .verdict-badge { padding: 4px 12px; border-radius: 20px; font-weight: bold; font-size: 0.9rem; text-transform: uppercase; }
+    .v-buy { background: #238636; color: white; }
+    .v-sell { background: #da3633; color: white; }
+    .v-wait { background: #8b949e; color: white; }
+    .analysis-box { background: #070a0e; padding: 15px; border-left: 5px solid #f1c40f; border-radius: 5px; margin: 10px 0; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. SILNIK ANALITYCZNY ---
-def get_elite_data(symbol):
+# --- 3. SILNIK DANYCH ---
+def get_golden_data(symbol):
     try:
         t_obj = yf.Ticker(symbol)
         inf = t_obj.info
@@ -42,39 +45,38 @@ def get_elite_data(symbol):
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
 
         price = float(d15['Close'].iloc[-1])
-        sma20 = d1d['Close'].rolling(20).mean().iloc[-1]
         sma200 = d1d['Close'].rolling(200).mean().iloc[-1]
-        peak_52w = d1d['High'].max()
-        bottom_52w = d1d['Low'].min()
         
-        # PIVOT POINT (Standard)
-        high_p = d1d['High'].iloc[-2]
-        low_p = d1d['Low'].iloc[-2]
-        close_p = d1d['Close'].iloc[-2]
-        pivot = (high_p + low_p + close_p) / 3
+        # PIVOT
+        pivot = (d1d['High'].iloc[-2] + d1d['Low'].iloc[-2] + d1d['Close'].iloc[-2]) / 3
         
-        bid = inf.get('bid', 0.0) or 0.0
-        ask = inf.get('ask', 0.0) or 0.0
-        spread_pct = ((ask - bid) / bid * 100) if bid > 0 else 0.0
-        
+        # RSI
         delta = d15['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (delta.where(delta < 0, 0).abs()).rolling(14).mean()
         rsi = 100 - (100 / (1 + (gain / (loss + 1e-9)))).iloc[-1]
         
+        # SZYBKI WERDYKT (Kropla miodu)
+        if rsi < 30: verdict, v_class = "KUP", "v-buy"
+        elif rsi > 70: verdict, v_class = "SPRZEDAJ", "v-sell"
+        else: verdict, v_class = "CZEKAJ", "v-wait"
+
         atr = (d1d['High'] - d1d['Low']).rolling(14).mean().iloc[-1]
+        bid = inf.get('bid', 0.0) or 0.0
+        ask = inf.get('ask', 0.0) or 0.0
 
         return {
-            "symbol": symbol, "price": price, "rsi": rsi, "sma20": sma20, "sma200": sma200,
-            "peak": peak_52w, "bottom": bottom_52w, "spread_pct": spread_pct, "pivot": pivot,
-            "bid": bid, "ask": ask, "tp": price + (atr * 2), "sl": price - (atr * 1.5),
-            "df": d15, "change": ((price - close_p) / close_p * 100)
+            "symbol": symbol, "price": price, "rsi": rsi, "sma200": sma200, "pivot": pivot,
+            "verdict": verdict, "v_class": v_class, "bid": bid, "ask": ask,
+            "spread_pct": ((ask-bid)/bid*100 if bid>0 else 0),
+            "tp": price + (atr * 2), "sl": price - (atr * 1.5),
+            "df": d15, "change": ((price - d1d['Close'].iloc[-2]) / d1d['Close'].iloc[-2] * 100)
         }
     except: return None
 
-# --- 4. SIDEBAR ---
+# --- 4. UI SIDEBAR ---
 with st.sidebar:
-    st.title("💎 v15.5 ELITE")
+    st.title("🍯 v16.0 GOLDEN")
     api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
     tickers_input = st.text_area("Symbole", value=load_tickers())
     if st.button("Zapisz"):
@@ -83,60 +85,57 @@ with st.sidebar:
 
 st_autorefresh(interval=refresh * 1000, key="fsh")
 
-# --- 5. LOGIKA GŁÓWNA ---
+# --- 5. LOGIKA ---
 tickers_list = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 with ThreadPoolExecutor(max_workers=10) as executor:
-    data_list = [r for r in list(executor.map(get_elite_data, tickers_list)) if r]
+    data_list = [r for r in list(executor.map(get_golden_data, tickers_list)) if r]
 
 if data_list:
-    # --- TOP 10 DASHBOARD ---
-    st.subheader("🔥 TOP 10 OPPORTUNITIES")
-    sorted_top = sorted(data_list, key=lambda x: abs(50 - x['rsi']), reverse=True)[:10]
-    top_cols = st.columns(min(len(sorted_top), 5))
-    for i, d in enumerate(sorted_top):
-        with top_cols[i % 5]:
-            color = "#00ff88" if d['change'] >= 0 else "#ff4b4b"
+    # --- TOP 10 ---
+    st.subheader("🍯 SYGNAŁY DNIA (TOP 10)")
+    t_cols = st.columns(min(len(data_list), 5))
+    for i, d in enumerate(data_list[:10]):
+        with t_cols[i % 5]:
             st.markdown(f"""<div style="background:#0d1117; padding:10px; border-radius:10px; border:1px solid #30363d; text-align:center;">
-                <b>{d['symbol']}</b><br><span style="color:{color}; font-size:1.1rem;">{d['price']:.2f}</span><br>
-                <small>RSI: {d['rsi']:.1f}</small></div>""", unsafe_allow_html=True)
+                <small>{d['symbol']}</small><br>
+                <span class="verdict-badge {d['v_class']}">{d['verdict']}</span><br>
+                <b>{d['price']:.2f}</b>
+            </div>""", unsafe_allow_html=True)
 
-    # --- LISTA SZCZEGÓŁOWA ---
+    # --- SZCZEGÓŁY ---
     for d in data_list:
-        st.markdown(f'<div class="ticker-card">', unsafe_allow_html=True)
-        c1, c2 = st.columns([1, 2])
+        # Alert jeśli cena < SL
+        card_style = "sl-alert" if d['price'] <= d['sl'] else ""
+        st.markdown(f'<div class="ticker-card {card_style}">', unsafe_allow_html=True)
         
+        c1, c2 = st.columns([1, 2])
         with c1:
-            st.subheader(f"📊 {d['symbol']}")
-            st.metric("AKTUALNA CENA", f"{d['price']:.2f}", f"{d['change']:.2f}%")
+            st.markdown(f"### {d['symbol']} <span class="f'verdict-badge {d["v_class"]}'>{d['verdict']}</span>", unsafe_allow_html=True)
+            st.metric("Cena", f"{d['price']:.2f}", f"{d['change']:.2f}%")
             
-            st.markdown(f"""<table class="metric-table">
-                <tr><td>SMA200 (Trend)</td><td style="text-align:right;">{d['sma200']:.2f}</td></tr>
-                <tr><td>PIVOT POINT</td><td style="text-align:right; color:orange;">{d['pivot']:.2f}</td></tr>
-                <tr><td>RSI (15m)</td><td style="text-align:right;">{d['rsi']:.1f}</td></tr>
-                <tr><td>SPREAD %</td><td style="text-align:right;">{d['spread_pct']:.3f}%</td></tr>
-                <tr><td style="color:#00ff88;">TARGET (TP)</td><td style="text-align:right;">{d['tp']:.2f}</td></tr>
-                <tr><td style="color:#ff4b4b;">STOP LOSS (SL)</td><td style="text-align:right;">{d['sl']:.2f}</td></tr>
+            st.markdown(f"""<table style="width:100%; font-size:0.85rem;">
+                <tr><td>Pivot (Orange)</td><td style="text-align:right;">{d['pivot']:.2f}</td></tr>
+                <tr><td>SMA200 (Red)</td><td style="text-align:right;">{d['sma200']:.2f}</td></tr>
+                <tr><td>Spread / RSI</td><td style="text-align:right;">{d['spread_pct']:.3f}% / {d['rsi']:.1f}</td></tr>
+                <tr style="color:#00ff88;"><td><b>TARGET (TP)</b></td><td style="text-align:right;"><b>{d['tp']:.2f}</b></td></tr>
+                <tr style="color:#ff4b4b;"><td><b>STOP LOSS (SL)</b></td><td style="text-align:right;"><b>{d['sl']:.2f}</b></td></tr>
             </table>""", unsafe_allow_html=True)
 
-            if api_key and st.button(f"🧠 WYGENERUJ WERDYKT: {d['symbol']}", key=f"ai_{d['symbol']}"):
+            if api_key and st.button(f"🧠 ANALIZA EXPERT: {d['symbol']}", key=f"ai_{d['symbol']}"):
                 client = OpenAI(api_key=api_key)
-                prompt = (f"Jesteś bezwzględnym algorytmem handlowym. Asset: {d['symbol']}. Dane: Cena {d['price']}, SMA200 {d['sma200']:.2f}, "
-                          f"Pivot {d['pivot']:.2f}, 52w Peak {d['peak']:.2f}, 52w Bottom {d['bottom']:.2f}, RSI {d['rsi']:.1f}. "
-                          f"ZAKAZ lania wody. WYMAGANY konkret: 1. WERDYKT (KUP/SPRZEDAJ/CZEKAJ). 2. CENA WEJŚCIA. 3. UZASADNIENIE 1 ZDANIEM. "
-                          f"Jeśli trend jest spadkowy i brak sygnału - napisz SPRZEDAJ lub CZEKAJ, nie każ obserwować.")
+                prompt = (f"Werdykt dla {d['symbol']}. Cena {d['price']}, RSI {d['rsi']:.1f}, Pivot {d['pivot']:.2f}, Trend {d['sma200']:.2f}. "
+                          f"Bądź agresywny. Podaj: 1. WERDYKT, 2. CENA WEJŚCIA, 3. POTENCJAŁ ZYSKU %. Nie pisz o 'obserwacji'.")
                 resp = client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": prompt}])
-                st.session_state[f"res_{d['symbol']}"] = resp.choices[0].message.content
+                st.session_state[f"res_{d['symbol']}"] = resp.choices.message.content
             
             if f"res_{d['symbol']}" in st.session_state:
-                st.markdown(f'<div class="analysis-box"><b>RAPORT AI:</b><br>{st.session_state[f"res_{d['symbol']}"]}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="analysis-box">{st.session_state[f"res_{d['symbol']}"]}</div>', unsafe_allow_html=True)
 
         with c2:
             fig = go.Figure()
-            fig.add_trace(go.Candlestick(x=d['df'].index[-60:], open=d['df']['Open'][-60:], high=d['df']['High'][-60:], low=d['df']['Low'][-60:], close=d['df']['Close'][-60:], name="Cena"))
+            fig.add_trace(go.Candlestick(x=d['df'].index[-60:], open=d['df']['Open'][-60:], high=d['df']['High'][-60:], low=d['df']['Low'][-60:], close=d['df']['Close'][-60:]))
             fig.add_hline(y=d['pivot'], line_color="orange", line_dash="dot", annotation_text="PIVOT")
             fig.add_hline(y=d['sma200'], line_color="red", line_dash="dash", annotation_text="SMA200")
-            fig.update_layout(template="plotly_dark", height=450, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
+            fig.update_layout(template="plotly_dark", height=380, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
-
-st.caption("AI ALPHA ELITE v15.5 | Pivot & SMA200 Active | Zero-Vague Analysis Mode")
