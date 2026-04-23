@@ -8,7 +8,7 @@ import os
 
 # --- 1. KONFIGURACJA ---
 DB_FILE = "tickers_db.txt"
-st.set_page_config(page_title="AI ALPHA SUPERKOMBAJN v12", page_icon="📈", layout="wide")
+st.set_page_config(page_title="AI ALPHA SUPERKOMBAJN v12.1", page_icon="📈", layout="wide")
 
 def load_tickers():
     if os.path.exists(DB_FILE):
@@ -69,11 +69,21 @@ def get_analysis(symbol):
 
 # --- 4. UI SIDEBAR ---
 with st.sidebar:
-    st.title("⚙️ KOMB_v12")
-    api_key = st.text_input("OpenAI Key", type="password")
+    st.title("⚙️ KOMB_v12.1")
+    
+    # Obsługa klucza: najpierw sprawdza Secrets, potem pole tekstowe
+    if "OPENAI_API_KEY" in st.secrets:
+        api_key = st.secrets["OPENAI_API_KEY"]
+        st.success("✅ Klucz aktywny (Secrets)")
+    else:
+        api_key = st.text_input("OpenAI Key", type="password")
+        if not api_key:
+            st.warning("Dodaj klucz w Secrets lub wpisz go tutaj.")
+
     tickers_input = st.text_area("Symbole (przecinek)", value=load_tickers())
     if st.button("Zapisz listę"):
         with open(DB_FILE, "w") as f: f.write(tickers_input)
+    
     refresh = st.select_slider("Odśwież (s)", options=[30, 60, 300], value=60)
 
 st_autorefresh(interval=refresh * 1000, key="fsh")
@@ -83,7 +93,6 @@ if api_key:
     client = OpenAI(api_key=api_key)
     tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
     
-    # Pobieranie danych
     data_list = []
     for t in tickers:
         res = get_analysis(t)
@@ -103,7 +112,7 @@ if api_key:
                         <b>{d['symbol']}</b><br>
                         <span style="color:{c_col}; font-weight:bold;">{d['price']:.2f}</span><br>
                         <span style="font-size:0.8rem; color:{d['trend_col']};">{d['trend']}</span><br>
-                        <div style="background:{d['rec_col']}; font-size:0.7rem; border-radius:3px; margin:5px 0;">{d['rec']}</div>
+                        <div style="background:{d['rec_col']}; font-size:0.7rem; border-radius:3px; margin:5px 0; color:white;">{d['rec']}</div>
                         <span class="stat-label">RSI: {d['rsi']:.1f} | P: {d['pivot']:.1f}</span>
                     </div>
                 """, unsafe_allow_html=True)
@@ -133,4 +142,4 @@ if api_key:
                 st.plotly_chart(fig, use_container_width=True)
             st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.info("Wprowadź OpenAI API Key w pasku bocznym.")
+    st.info("Wprowadź OpenAI API Key w pasku bocznym lub dodaj do Secrets.")
