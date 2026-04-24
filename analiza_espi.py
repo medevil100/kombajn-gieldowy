@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 
 # --- 1. KONFIGURACJA ---
-st.set_page_config(page_title="AI ALPHA v14.2", layout="wide")
+st.set_page_config(page_title="AI ALPHA v14.5 - STABILNA", layout="wide")
 
 # --- 2. STYLE CSS ---
 st.markdown("""
@@ -18,22 +18,22 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. SILNIK ANALIZY ---
-def get_analysis(symbol):
+# --- 3. SILNIK Z FILTREM (KLUCZOWY!) ---
+def get_market_data(symbol):
     try:
-        # Pobieranie danych: 1h (wykres) i 1d (Pivot/Trend)
+        # Pobieranie danych 1h i 1d
         h1 = yf.download(symbol, period="10d", interval="1h", progress=False)
         d1 = yf.download(symbol, period="250d", interval="1d", progress=False)
         
         if h1.empty or d1.empty: return None
         
-        # POPRAWKA MULTIINDEX (Naprawia czarny ekran)
+        # --- FILTR MULTIINDEX (Naprawia czarny ekran) ---
         for df in [h1, d1]:
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
         
         price = float(h1['Close'].iloc[-1])
-        # Symulacja Bid/Ask (spread 0.02%)
+        # Symulacja Bid/Ask
         bid, ask = price * 0.9999, price * 1.0001
         
         # RSI 1h
@@ -47,7 +47,7 @@ def get_analysis(symbol):
         pp = (hp + lp + cp) / 3
         r1, s1 = (2 * pp) - lp, (2 * pp) - hp
         
-        # Trend (SMA 200)
+        # Trend SMA 200
         sma200 = d1['Close'].rolling(200).mean().iloc[-1]
         trend = "HOSSA 🚀" if price > sma200 else "BESSA 📉"
         
@@ -62,18 +62,18 @@ def get_analysis(symbol):
         }
     except: return None
 
-# --- 4. UI SIDEBAR ---
+# --- 4. PANEL BOCZNY ---
 with st.sidebar:
-    st.title("🚀 KOMB_v14.2")
+    st.title("🚀 SCANNER v14.5")
     api_key = st.text_input("OpenAI Key", type="password") or st.secrets.get("OPENAI_API_KEY")
-    ticker_input = st.text_area("Symbole", "LBW.WA, BCS.WA, PLRX, BTC-USD, NVDA")
+    input_tickers = st.text_area("Symbole", "LBW.WA, BCS.WA, PLRX, BTC-USD, NVDA")
     refresh = st.select_slider("Odśwież (s)", options=, value=60)
 
 st_autorefresh(interval=refresh * 1000, key="auto_refresh")
 
 # --- 5. LOGIKA GŁÓWNA ---
-tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
-results = [get_analysis(t) for t in tickers if get_analysis(t)]
+tickers = [t.strip().upper() for t in input_tickers.split(",") if t.strip()]
+results = [get_market_data(t) for t in tickers if get_market_data(t)]
 
 if results:
     # --- TOP 10 RANKING ---
@@ -97,7 +97,7 @@ if results:
     for d in results:
         with st.container():
             st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
-            c1, c2, c3 = st.columns([1, 2, 1])
+            c1, c2, c3 = st.columns()
             with c1:
                 st.subheader(d['symbol'])
                 st.markdown(f"<div class='bid-ask'>BID: {d['bid']:.4f}<br>ASK: {d['ask']:.4f}</div>", unsafe_allow_html=True)
@@ -115,9 +115,9 @@ if results:
                     client = OpenAI(api_key=api_key)
                     resp = client.chat.completions.create(
                         model="gpt-4o-mini", 
-                        messages=[{"role":"user","content":f"Oceń {d['symbol']}: Cena {d['price']}, RSI {d['rsi']:.1f}, Pivot {d['pp']:.2f}. Podaj werdykt."}]
+                        messages=[{"role":"user","content":f"Werdykt dla {d['symbol']}: Cena {d['price']}, RSI {d['rsi']:.1f}, Pivot {d['pp']:.2f}. Krótko!"}]
                     )
-                    st.info(resp.choices[0].message.content) # Poprawiony błąd OpenAI
+                    st.info(resp.choices[0].message.content)
             st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.info("Wprowadź symbole i klucz API, aby rozpocząć.")
+    st.info("Podaj symbole i klucz API w panelu bocznym.")
