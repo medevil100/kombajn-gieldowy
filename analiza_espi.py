@@ -7,7 +7,7 @@ from streamlit_autorefresh import st_autorefresh
 from concurrent.futures import ThreadPoolExecutor
 
 # --- 1. KONFIGURACJA UI ---
-st.set_page_config(page_title="AI ALPHA GOLDEN v17.5", layout="wide")
+st.set_page_config(page_title="AI ALPHA GOLDEN v17.5 KOMBAJN", layout="wide")
 
 st.markdown("""
     <style>
@@ -23,17 +23,17 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. SILNIK ANALITYCZNY ---
+# --- 2. SILNIK ANALITYCZNY (TOTALNY) ---
 def get_full_analysis(symbol):
     try:
         t = yf.Ticker(symbol)
         d_long = t.history(period="1y", interval="1d")
-        d_10m = t.history(period="2d", interval="15m") 
-        if d_long.empty or d_10m.empty: return None
+        d_short = t.history(period="5d", interval="15m") 
+        if d_long.empty or d_short.empty: return None
 
-        price = d_10m['Close'].iloc[-1]
+        price = d_short['Close'].iloc[-1]
         
-        # PIVOTY
+        # PIVOTY (z wczorajszego zamknięcia)
         yest = d_long.iloc[-2]
         h, l, c = yest['High'], yest['Low'], yest['Close']
         p = (h + l + c) / 3
@@ -50,8 +50,8 @@ def get_full_analysis(symbol):
         loss = (delta.where(delta < 0, 0).abs()).rolling(14).mean()
         rsi = 100 - (100 / (1 + (gain / (loss + 1e-9)))).iloc[-1]
 
-        # ANALIZA 10 ŚWIEC
-        last_10 = d_10m.tail(11).head(10)
+        # ANALIZA 10 OSTATNICH ŚWIEC
+        last_10 = d_short.tail(11).head(10)
         bulls = len(last_10[last_10['Close'] > last_10['Open']])
         bias = "BYCZY" if bulls > 5 else "NIEDŹWIEDZI"
         
@@ -64,18 +64,17 @@ def get_full_analysis(symbol):
             "symbol": symbol, "price": price, "bid": bid, "ask": ask, "rsi": rsi,
             "p": p, "r1": r1, "s1": s1, "r2": r2, "s2": s2, "r3": r3, "s3": s3,
             "sma50": sma50, "sma200": sma200, "bulls": bulls, "bias": bias,
-            "change": ((price - c) / c) * 100, "df": d_10m.tail(30)
+            "change": ((price - c) / c) * 100, "df": d_short.tail(30)
         }
     except: return None
 
 # --- 3. SIDEBAR ---
 with st.sidebar:
     st.title("🍯 v17.5 KOMBAJN")
-    # Pobieranie klucza z secrets
-    api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key (jeśli brak w secrets)", type="password")
+    api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
     t_input = st.text_area("Lista Symboli", "PKO.WA, ALE.WA, CDR.WA, NVDA, TSLA, BTC-USD, ETH-USD, AAPL, MSFT, META", height=150)
     refresh = st.slider("Odśwież (s)", 30, 300, 60)
-st_autorefresh(interval=refresh * 1000, key="sync_kombajn")
+st_autorefresh(interval=refresh * 1000, key="sync_total")
 
 # --- 4. RENDEROWANIE ---
 symbols = [s.strip().upper() for s in t_input.split(",") if s.strip()]
@@ -83,14 +82,15 @@ with ThreadPoolExecutor(max_workers=10) as executor:
     results = [r for r in list(executor.map(get_full_analysis, symbols)) if r]
 
 if results:
-    # --- GWARANTOWANE TOP 10 (2 RZĘDY PO 5) ---
-    st.subheader("📊 SZYBKI PODGLĄD SYGNAŁÓW (TOP 10)")
-    for row in [0, 5]:
+    # --- TOP 10 KAFELKI (2 RZĘDY PO 5) ---
+    st.subheader("📊 SZYBKI PODGLĄD (TOP 10)")
+    top_10 = results[:10]
+    for row_idx in [0, 5]:
         cols = st.columns(5)
         for i in range(5):
-            idx = row + i
-            if idx < len(results):
-                d = results[idx]
+            idx = row_idx + i
+            if idx < len(top_10):
+                d = top_10[idx]
                 with cols[i]:
                     st.markdown(f"""
                         <div class="top-tile">
@@ -123,17 +123,15 @@ if results:
         with c2:
             st.markdown("**STRATEGIA PIVOT**")
             st.markdown(f"""
-                <div class="metric-row"><span>Resistance 2</span><b>{d['r2']:.2f}</b></div>
-                <div class="metric-row"><span>Resistance 1</span><b>{d['r1']:.2f}</b></div>
+                <div class="metric-row"><span>Resist 2 / 1</span><b>{d['r2']:.2f} / {d['r1']:.2f}</b></div>
                 <div class="metric-row"><span>PIVOT POINT</span><b class="pivot-val">{d['p']:.2f}</b></div>
-                <div class="metric-row"><span>Support 1</span><b>{d['s1']:.2f}</b></div>
-                <div class="metric-row"><span>Support 2</span><b>{d['s2']:.2f}</b></div>
+                <div class="metric-row"><span>Support 1 / 2</span><b>{d['s1']:.2f} / {d['s2']:.2f}</b></div>
             """, unsafe_allow_html=True)
             if api_key and st.button(f"🧠 DECYZJA AI", key=f"ai_{d['symbol']}"):
                 client = OpenAI(api_key=api_key)
-                prompt = f"Analiza {d['symbol']}: Cena {d['price']}, RSI {d['rsi']:.1f}, Pivot {d['p']:.2f}, Bias: {d['bias']}. Podaj: 1. DECYZJA, 2. TP/SL, 3. RYZYKO."
+                prompt = f"Analiza {d['symbol']}: Cena {d['price']}, RSI {d['rsi']:.1f}, Pivot {d['p']:.2f}, Bias: {d['bias']}. Podaj tylko: 1. DECYZJA, 2. TP/SL, 3. RYZYKO."
                 res = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": "Tylko komendy handlowe. Zero lania wody."}, {"role": "user", "content": prompt}])
-                st.info(res.choices.message[0].content if hasattr(res.choices[0], 'message') else res.choices[0].message.content)
+                st.info(res.choices[0].message.content) # NAPRAWIONY BŁĄD OpenAI
 
         with c3:
             fig = go.Figure(data=[go.Candlestick(x=d['df'].index, open=d['df']['Open'], high=d['df']['High'], low=d['df']['Low'], close=d['df']['Close'])])
@@ -141,3 +139,5 @@ if results:
             fig.update_layout(height=300, margin=dict(l=0,r=0,b=0,t=0), template="plotly_dark", xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
+else:
+    st.error("Wpisz symbole w sidebarze, aby pobrać dane.")
