@@ -16,8 +16,8 @@ def load_tickers():
         except: return "PKO.WA, BTC-USD, NVDA, TSLA"
     return "PKO.WA, BTC-USD, NVDA, TSLA"
 
-# --- 2. KONFIGURACJA I KOLORY ---
-st.set_page_config(page_title="AI ALPHA KOMBAJN v23.0", layout="wide")
+# --- 2. KONFIGURACJA I STYLE ---
+st.set_page_config(page_title="AI ALPHA KOMBAJN v23.1", layout="wide")
 
 st.markdown("""
     <style>
@@ -30,13 +30,14 @@ st.markdown("""
     .top-tile {
         background: #111420; padding: 12px; border-radius: 10px;
         border-bottom: 3px solid #00e5ff; text-align: center;
-        min-height: 160px; margin-bottom: 10px;
+        min-height: 180px; margin-bottom: 10px;
     }
     .metric-row { display: flex; justify-content: space-between; border-bottom: 1px solid #21262d; padding: 8px 0; font-size: 0.9rem; }
     .signal-buy { color: #00ff88; font-weight: bold; text-transform: uppercase; }
     .signal-sell { color: #ff4b4b; font-weight: bold; text-transform: uppercase; }
     .signal-hold { color: #f1c40f; font-weight: bold; text-transform: uppercase; }
-    .bid-ask { font-family: monospace; color: #00e5ff; font-weight: bold; font-size: 0.85rem; }
+    .bid-ask { font-family: 'Courier New', monospace; color: #00e5ff; font-weight: bold; font-size: 0.85rem; letter-spacing: 1px; }
+    .bid-ask-box { background: #070a0e; padding: 5px; border-radius: 5px; border: 1px solid #21262d; display: inline-block; margin-top: 5px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -51,9 +52,12 @@ def get_analysis(symbol):
         if isinstance(h1.columns, pd.MultiIndex): h1.columns = h1.columns.get_level_values(0)
         
         price = h1['Close'].iloc[-1]
-        bid, ask = price * 0.9999, price * 1.0001
         
-        # Wskaźniki
+        # Pobieranie Bid/Ask z Ticker.info (z symulacją fallbacku dla brakujących danych)
+        info = t.info
+        bid = info.get('bid') or price * 0.9998
+        ask = info.get('ask') or price * 1.0002
+        
         sma50 = d1['Close'].rolling(50).mean().iloc[-1]
         sma200 = d1['Close'].rolling(200).mean().iloc[-1]
         
@@ -64,7 +68,6 @@ def get_analysis(symbol):
         delta = h1['Close'].diff()
         rsi = 100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / delta.where(delta < 0, 0).abs().rolling(14).mean() + 1e-9))).iloc[-1]
         
-        # --- LOGIKA KUP / TRZYMAJ / SPRZEDAJ ---
         if rsi < 32:
             verdict, v_class = "KUPUJ 🔥", "signal-buy"
         elif rsi > 68:
@@ -93,14 +96,14 @@ with st.sidebar:
         st.success("Lista została zapisana!")
     refresh = st.select_slider("Odświeżanie (s)", options=[30, 60, 300], value=60)
 
-st_autorefresh(interval=refresh * 1000, key="v23_sync")
+st_autorefresh(interval=refresh * 1000, key="v231_sync")
 
 # --- 5. WYŚWIETLANIE ---
 tickers = [x.strip().upper() for x in t_input.split(",") if x.strip()]
 all_data = [get_analysis(t) for t in tickers if get_analysis(t)]
 
 if all_data:
-    st.subheader("🏆 RANKING I REKOMENDACJE (TOP 10)")
+    st.subheader("🏆 RANKING OKAZJI I SPREADY (TOP 10)")
     top_cols = st.columns(5)
     sorted_top = sorted(all_data, key=lambda x: x['rsi'])[:10]
     
@@ -110,8 +113,11 @@ if all_data:
                 <div class="top-tile">
                     <b style="color:#00e5ff;">{d['symbol']}</b><br>
                     <span style="font-size:1.1rem; font-weight:bold;">{d['price']:.2f}</span><br>
-                    <div class="bid-ask">B: {d['bid']:.2f} | A: {d['ask']:.2f}</div>
-                    <div class="{d['v_class']}" style="margin-top:10px; border:1px solid; border-radius:5px; padding:2px;">{d['verdict']}</div>
+                    <div class="bid-ask-box">
+                        <span class="bid-ask" style="color:#ff4b4b;">B: {d['bid']:.2f}</span><br>
+                        <span class="bid-ask" style="color:#00ff88;">A: {d['ask']:.2f}</span>
+                    </div>
+                    <div class="{d['v_class']}" style="margin-top:10px; font-size:0.8rem;">{d['verdict']}</div>
                     <small style="color:#888;">RSI: {d['rsi']:.1f}</small>
                 </div>
             """, unsafe_allow_html=True)
@@ -127,7 +133,15 @@ if all_data:
                 st.markdown(f"### {data['symbol']} <span class='{data['v_class']}' style='font-size:0.9rem;'>[{data['verdict']}]</span>", unsafe_allow_html=True)
                 ch_col = "#00ff88" if data['change'] >= 0 else "#ff4b4b"
                 st.markdown(f"<h2 style='color:{ch_col}; margin-bottom:0;'>{data['price']:.2f} <small style='font-size:0.9rem;'>({data['change']:.2f}%)</small></h2>", unsafe_allow_html=True)
-                st.markdown(f"<div class='bid-ask'>BID: {data['bid']:.4f} | ASK: {data['ask']:.4f}</div>", unsafe_allow_html=True)
+                
+                # Precyzyjny Bid/Ask w karcie głównej
+                st.markdown(f"""
+                    <div class="bid-ask-box" style="width:100%; text-align:center; padding:10px;">
+                        <span class="bid-ask" style="color:#ff4b4b; font-size:1rem;">BID: {data['bid']:.4f}</span>
+                        <span style="color:#333; margin: 0 10px;">|</span>
+                        <span class="bid-ask" style="color:#00ff88; font-size:1rem;">ASK: {data['ask']:.4f}</span>
+                    </div>
+                """, unsafe_allow_html=True)
                 
                 st.markdown(f"""
                     <div style="margin-top:15px;">
@@ -146,14 +160,14 @@ if all_data:
 
             with c3:
                 st.markdown("🔍 **STATUS TRENDU**")
-                st.write(f"Trend (SMA200): {'Wzrost 🚀' if data['price'] > data['sma200'] else 'Spadek 📉'}")
-                st.write(f"Trend (SMA50): {'Wzrost 🚀' if data['price'] > data['sma50'] else 'Spadek 📉'}")
+                st.write(f"SMA200: {'Wzrost 🚀' if data['price'] > data['sma200'] else 'Spadek 📉'}")
+                st.write(f"SMA50: {'Wzrost 🚀' if data['price'] > data['sma50'] else 'Spadek 📉'}")
                 
                 if api_key and st.button(f"🧠 AI WERDYKT {data['symbol']}", key=f"ai_{data['symbol']}"):
                     client = OpenAI(api_key=api_key)
                     resp = client.chat.completions.create(
                         model="gpt-4o-mini",
-                        messages=[{"role": "user", "content": f"Oceń {data['symbol']}. Cena: {data['price']}, Werdykt: {data['verdict']}, RSI: {data['rsi']:.1f}. Podaj 1 konkretny powód dlaczego tak."}]
+                        messages=[{"role": "user", "content": f"Analiza {data['symbol']}: Cena {data['price']}, RSI {data['rsi']:.1f}, Werdykt {data['verdict']}. Podaj krótki argument."}]
                     )
                     st.info(resp.choices[0].message.content)
             st.markdown('</div>', unsafe_allow_html=True)
