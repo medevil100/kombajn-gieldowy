@@ -14,10 +14,10 @@ def load_tickers():
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "r") as f: return f.read()
-        except: return "PKO.WA, STX.WA, NVDA, TSLA, BTC-USD"
-    return "PKO.WA, STX.WA, NVDA, TSLA, BTC-USD"
+        except: return "PKO.WA, NVDA, TSLA, BTC-USD"
+    return "PKO.WA, NVDA, TSLA, BTC-USD"
 
-st.set_page_config(page_title="AI ALPHA UNIVERSAL FINAL", page_icon="🚜", layout="wide")
+st.set_page_config(page_title="AI ALPHA v24.0 ULTIMATE", page_icon="🚜", layout="wide")
 
 # --- 2. STYLE WIZUALNE ---
 st.markdown("""
@@ -32,10 +32,9 @@ st.markdown("""
         text-align: center; min-height: 160px;
     }
     .metric-row { display: flex; justify-content: space-between; border-bottom: 1px solid #21262d; padding: 6px 0; font-size: 0.9rem; }
-    .bid-ask { font-family: monospace; font-weight: bold; color: #58a6ff; font-size: 0.85rem; }
-    .sig-buy { color: #00ff88; font-weight: bold; }
-    .sig-sell { color: #ff4b4b; font-weight: bold; }
-    .sig-hold { color: #f1c40f; font-weight: bold; }
+    .v-power { color: #f1c40f; font-weight: bold; font-size: 0.8rem; }
+    .sig-buy { color: #00ff88; font-weight: bold; border-left: 5px solid #00ff88; padding-left: 10px; }
+    .sig-sell { color: #ff4b4b; font-weight: bold; border-left: 5px solid #ff4b4b; padding-left: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -43,45 +42,39 @@ st.markdown("""
 def get_analysis(symbol):
     try:
         t = yf.Ticker(symbol)
-        # Pobieranie danych 1h i 1d
         h1 = t.history(period="10d", interval="1h")
         d1 = t.history(period="300d", interval="1d")
         
         if h1.empty or d1.empty: return None
-        
-        # FIX: Prostowanie MultiIndex
         if isinstance(h1.columns, pd.MultiIndex): h1.columns = h1.columns.get_level_values(0)
-        if isinstance(d1.columns, pd.MultiIndex): d1.columns = d1.columns.get_level_values(0)
         
         price = h1['Close'].iloc[-1]
         
-        # Bid / Ask (Fallback)
-        info = t.info
-        bid = info.get('bid') or price * 0.9998
-        ask = info.get('ask') or price * 1.0002
+        # Wolumen (V-Power) - sprawdzamy czy wolumen z ostatniej godziny jest powyżej średniej
+        avg_vol = h1['Volume'].tail(20).mean()
+        curr_vol = h1['Volume'].iloc[-1]
+        vol_power = "WYSOKI 🔥" if curr_vol > avg_vol * 1.5 else "NORMALNY"
         
-        # Średnie kroczące
+        # Wskaźniki
         sma50 = d1['Close'].rolling(50).mean().iloc[-1]
         sma100 = d1['Close'].rolling(100).mean().iloc[-1]
         sma200 = d1['Close'].rolling(200).mean().iloc[-1]
         
-        # Pivot i ATR
         hp, lp, cp = d1['High'].iloc[-2], d1['Low'].iloc[-2], d1['Close'].iloc[-2]
         pp = (hp + lp + cp) / 3
         atr = (d1['High'] - d1['Low']).rolling(14).mean().iloc[-1]
         
-        # RSI 1h
         delta = h1['Close'].diff()
         rsi = 100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / delta.where(delta < 0, 0).abs().rolling(14).mean() + 1e-9))).iloc[-1]
         
-        # Logika Werdyktu
+        # Rozbudowana logika sygnałów
         if rsi < 32 and price > sma200: verdict, v_class = "KUPUJ 🔥", "sig-buy"
         elif rsi > 68: verdict, v_class = "SPRZEDAJ ⚠️", "sig-sell"
         elif price > sma50: verdict, v_class = "TRZYMAJ 👍", "sig-hold"
         else: verdict, v_class = "CZEKAJ ⏳", ""
 
         return {
-            "symbol": symbol, "price": price, "bid": bid, "ask": ask, "rsi": rsi, 
+            "symbol": symbol, "price": price, "rsi": rsi, "vol": vol_power,
             "pp": pp, "sma50": sma50, "sma100": sma100, "sma200": sma200,
             "verdict": verdict, "v_class": v_class, "tp": price + (atr * 1.6), "sl": price - (atr * 1.2),
             "df": h1, "change": ((price - cp) / cp * 100)
@@ -90,18 +83,17 @@ def get_analysis(symbol):
 
 # --- 4. PANEL BOCZNY ---
 with st.sidebar:
-    st.title("🚜 UNIVERSAL FINAL")
+    st.title("🚜 ULTIMATE v24.0")
     api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
-    t_input = st.text_area("Twoja Lista Spółek:", value=load_tickers(), height=150)
+    t_input = st.text_area("Lista Spółek:", value=load_tickers(), height=150)
     
-    if st.button("💾 ZAPISZ LISTĘ NA STAŁE"):
+    if st.button("💾 ZAPISZ LISTĘ"):
         with open(DB_FILE, "w") as f: f.write(t_input)
-        st.success("Lista zapisana!")
+        st.success("Baza zaktualizowana!")
     
-    # POPRAWIONY SUWAK (Naprawia SyntaxError)
-    refresh = st.select_slider("Odświeżanie (s)", options=[30, 60, 120, 300], value=60)
+    refresh = st.select_slider("Prędkość odświeżania (s)", options=[30, 60, 120, 300], value=60)
 
-st_autorefresh(interval=refresh * 1000, key="v239_sync")
+st_autorefresh(interval=refresh * 1000, key="v24_sync")
 
 # --- 5. LOGIKA GŁÓWNA ---
 tickers = [x.strip().upper() for x in t_input.split(",") if x.strip()]
@@ -110,7 +102,7 @@ with ThreadPoolExecutor(max_workers=10) as executor:
 
 if all_data:
     # --- TOP 10 RANKING ---
-    st.subheader("🏆 TOP SYGNAŁY (RSI 1H)")
+    st.subheader("🏆 SKANER OKAZJI (Najniższe RSI)")
     sorted_top = sorted(all_data, key=lambda x: x['rsi'])[:10]
     top_cols = st.columns(5)
     for i, d in enumerate(sorted_top):
@@ -118,10 +110,10 @@ if all_data:
             st.markdown(f"""
                 <div class="top-tile">
                     <b>{d['symbol']}</b><br>
-                    <span style="font-size:1.1rem; color:#00ff88;">{d['price']:.4f}</span><br>
-                    <span class="bid-ask">B:{d['bid']:.2f} | A:{d['ask']:.2f}</span><br>
-                    <div class="{d['v_class']}" style="margin-top:5px; font-size:0.8rem; border:1px solid; border-radius:4px; padding:2px;">{d['verdict']}</div>
-                    <small style="color:#888;">RSI: {d['rsi']:.1f}</small>
+                    <span style="font-size:1.2rem;">{d['price']:.2f}</span><br>
+                    <div class="{d['v_class']}">{d['verdict']}</div>
+                    <span class="v-power">VOL: {d['vol']}</span><br>
+                    <small>RSI: {d['rsi']:.1f}</small>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -130,19 +122,18 @@ if all_data:
     # --- LISTA SZCZEGÓŁOWA ---
     for d in all_data:
         with st.container():
-            st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
+            st.markdown(f'<div class="ticker-card">', unsafe_allow_html=True)
             c1, c2, c3 = st.columns([1.3, 2, 1.2])
             
             with c1:
-                st.subheader(f"{d['symbol']} {d['verdict']}")
-                st.markdown(f"## {d['price']:.4f} <small style='font-size:1rem; color:#00ff88;'>({d['change']:.2f}%)</small>", unsafe_allow_html=True)
-                st.markdown(f"<div class='bid-ask'>BID: {d['bid']:.4f} | ASK: {d['ask']:.4f}</div>", unsafe_allow_html=True)
+                st.markdown(f"<h3 class='{d['v_class']}'>{d['symbol']} {d['verdict']}</h3>", unsafe_allow_html=True)
+                st.metric("CENA", f"{d['price']:.4f}", f"{d['change']:.2f}%")
                 st.markdown(f"""
                     <div style="margin-top:15px;">
-                        <div class="metric-row"><span>RSI 1h</span><b class="{d['v_class']}">{d['rsi']:.1f}</b></div>
+                        <div class="metric-row"><span>RSI 1h</span><b>{d['rsi']:.1f}</b></div>
                         <div class="metric-row"><span>Pivot Point</span><b style="color:#f1c40f;">{d['pp']:.4f}</b></div>
-                        <div class="metric-row"><span>SMA 50 / 100</span><b>{d['sma50']:.2f} / {d['sma100']:.2f}</b></div>
-                        <div class="metric-row"><span>SMA 200</span><b>{d['sma200']:.2f}</b></div>
+                        <div class="metric-row"><span>V-Power</span><b class="v-power">{d['vol']}</b></div>
+                        <div class="metric-row"><span>SMA 50 / 200</span><b>{d['sma50']:.1f} / {d['sma200']:.1f}</b></div>
                     </div>
                 """, unsafe_allow_html=True)
 
@@ -153,15 +144,15 @@ if all_data:
                 st.plotly_chart(fig, use_container_width=True, key=f"ch_{d['symbol']}")
 
             with c3:
-                st.markdown("🎯 **TARGETS**")
-                st.write(f"🟢 TP: {d['tp']:.4f}")
-                st.write(f"🔴 SL: {d['sl']:.4f}")
-                if api_key and st.button(f"🧠 ANALIZA PRO", key=f"ai_{d['symbol']}"):
+                st.write(f"🟢 TP: **{d['tp']:.4f}**")
+                st.write(f"🔴 SL: **{d['sl']:.4f}**")
+                if api_key and st.button(f"🧠 ANALIZA AI PRO", key=f"ai_{d['symbol']}"):
                     client = OpenAI(api_key=api_key)
-                    p = f"Analiza techniczna {d['symbol']}: Cena {d['price']}, RSI {d['rsi']:.1f}, Pivot {d['pp']:.2f}. Podaj krótki werdykt."
-                    response = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": p}])
-                    # FIX: Poprawiony dostęp do zawartości
-                    st.info(response.choices[0].message.content)
+                    prompt = (f"Jako Senior Trader przeanalizuj {d['symbol']}. Cena: {d['price']}, RSI: {d['rsi']:.1f}, "
+                             f"Wolumen: {d['vol']}, SMA50/200: {d['sma50']:.1f}/{d['sma200']:.1f}. "
+                             f"Podaj konkretną strategię bez lania wody.")
+                    response = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
+                    st.success(response.choices[0].message.content)
             st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.info("Brak danych. Sprawdź listę symboli i upewnij się, że są oddzielone przecinkiem.")
+    st.info("Dodaj symbole i OpenAI Key.")
