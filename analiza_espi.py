@@ -14,11 +14,13 @@ def save_tickers(text):
 
 def load_tickers():
     if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r") as f: return f.read()
+        try:
+            with open(DB_FILE, "r") as f: return f.read()
+        except: return "PKO.WA, BTC-USD, NVDA, IOVA, HUMA"
     return "PKO.WA, BTC-USD, NVDA, IOVA, HUMA"
 
 # --- 2. KONFIGURACJA ---
-st.set_page_config(page_title="AI Alpha Kombajn v19.1", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="AI Alpha Kombajn v19.2", page_icon="🧠", layout="wide")
 
 st.markdown("""
     <style>
@@ -35,30 +37,25 @@ st.markdown("""
 # --- 3. LOGIKA DANYCH ---
 def get_data(symbol):
     try:
-        # Pobieramy dane: 15m do wykresu, 1h do trendu średniego, 1d do długiego i pivotów
         d15 = yf.download(symbol, period="5d", interval="15m", progress=False)
         d1h = yf.download(symbol, period="15d", interval="1h", progress=False)
         d1d = yf.download(symbol, period="250d", interval="1d", progress=False)
         
         if d15.empty or d1d.empty: return None
 
-        # FIX DLA MULTIINDEX (Naprawia czarny ekran)
         for df in [d15, d1h, d1d]:
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
         
         price = float(d15['Close'].iloc[-1])
-        # Symulacja Bid/Ask (spread 0.02%)
         bid, ask = price * 0.9999, price * 1.0001
         
         sma_h = d1h['Close'].rolling(50).mean().iloc[-1]
         sma_d = d1d['Close'].rolling(100).mean().iloc[-1]
         
-        # RSI 15m
         delta = d15['Close'].diff()
         rsi = 100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / delta.where(delta < 0, 0).abs().rolling(14).mean() + 1e-9))).iloc[-1]
         
-        # Pivot i ATR
         prev = d1d.iloc[-2]
         pivot = (prev['High'] + prev['Low'] + prev['Close']) / 3
         atr = (d1d['High'] - d1d['Low']).rolling(14).mean().iloc[-1]
@@ -69,8 +66,7 @@ def get_data(symbol):
             "t_mid": "UP 📈" if price > sma_h else "DOWN 📉",
             "t_long": "BULL 🐂" if price > sma_d else "BEAR 🐻", "df": d15
         }
-    except:
-        return None
+    except: return None
 
 # --- 4. PANEL BOCZNY ---
 with st.sidebar:
@@ -90,15 +86,9 @@ st_autorefresh(interval=refresh_val * 1000, key="fscounter")
 # --- 5. WYŚWIETLANIE ---
 if api_key:
     client = OpenAI(api_key=api_key)
-    
-    # Pobieranie danych dla wszystkich
-    all_data = []
-    for t in tickers:
-        d = get_data(t)
-        if d: all_data.append(d)
+    all_data = [get_data(t) for t in tickers if get_data(t)]
     
     if all_data:
-        # --- TOP 10 RANKING ---
         st.subheader("🔥 TOP SYGNAŁY (RSI)")
         sorted_top = sorted(all_data, key=lambda x: x['rsi'])[:10]
         top_cols = st.columns(5)
@@ -113,7 +103,6 @@ if api_key:
         
         st.divider()
 
-        # --- LISTA SZCZEGÓŁOWA ---
         for data in all_data:
             st.markdown(f'<div class="ticker-card {"buy-signal" if data["rsi"] < 35 else ""}">', unsafe_allow_html=True)
             c1, c2 = st.columns([1.5, 2.5])
@@ -133,8 +122,8 @@ if api_key:
                 """, unsafe_allow_html=True)
 
                 if st.button(f"🧠 ANALIZA AI {data['symbol']}", key=f"ai_{data['symbol']}"):
-                    p = f"Werdykt dla {data['symbol']}: Cena {data['price']}, RSI {data['rsi']:.1f}, Trend D1 {data['t_long']}. Daj ocenę 1-10 i decyzję."
-                    # POPRAWKA BŁĘDU CHOICES:
+                    p = f"Krótki werdykt dla {data['symbol']}: Cena {data['price']}, RSI {data['rsi']:.1f}, Trend D1 {data['t_long']}. Podaj ocenę 1-10 i decyzję."
+                    # NAPRAWIONO: Dodano [0] przed .message
                     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": p}])
                     st.session_state[f"val_{data['symbol']}"] = res.choices[0].message.content
 
@@ -149,4 +138,4 @@ if api_key:
             
             st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.info("Wprowadź API Key OpenAI, aby aktywować kombajn.")
+    st.info("Wprowadź API Key OpenAI.")
