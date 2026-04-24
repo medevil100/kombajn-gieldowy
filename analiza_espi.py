@@ -65,6 +65,7 @@ def get_data(symbol):
         }
     except: return None
 
+# --- SIDEBAR ---
 with st.sidebar:
     st.title("🍯 ALPHA GOLDEN")
     api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
@@ -74,28 +75,30 @@ with st.sidebar:
     refresh_val = st.select_slider("Odśwież (s)", options=[30, 60, 300], value=60)
 st_autorefresh(interval=refresh_val * 1000, key="fsh")
 
+# --- DATA FETCHING ---
 t_list = [x.strip().upper() for x in t_input.split(",") if x.strip()]
 with ThreadPoolExecutor(max_workers=10) as executor:
     data_list = [r for r in list(executor.map(get_data, t_list)) if r]
 
 if data_list:
-    # --- SEKCJA TOP 10 (Dwa rzędy po 5) ---
+    # --- TOP 10 SYGNAŁÓW (Naprawione wyświetlanie) ---
     st.subheader("🔥 TOP 10 SYGNAŁÓW RSI")
     sorted_data = sorted(data_list, key=lambda x: abs(50 - x['rsi']), reverse=True)[:10]
     
-    for row in range(2): # Tworzy 2 rzędy
+    # Renderowanie 2 rzędów po 5 kolumn
+    for r_idx in [0, 5]:
         cols = st.columns(5)
-        for i in range(5):
-            idx = row * 5 + i
-            if idx < len(sorted_data):
-                d = sorted_data[idx]
-                with cols[i]:
+        for c_idx in range(5):
+            curr_idx = r_idx + c_idx
+            if curr_idx < len(sorted_data):
+                d = sorted_data[curr_idx]
+                with cols[c_idx]:
                     st.markdown(f'<div class="top-tile"><small>{d["symbol"]}</small><br><b>{d["price"]:.2f}</b><br><span class="verdict-badge {d["v_class"]}">{d["verdict"]}</span></div>', unsafe_allow_html=True)
 
-    # --- KARTY SZCZEGÓŁOWE ---
+    # --- KARTY ANALIZY ---
     for d in data_list:
         st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
-        c1, c2 = st.columns([1, 2])
+        c1, c2 = st.columns([1, 2]) # Proporcje 1:2 dla lepszego widoku wykresu
         with c1:
             st.markdown(f"### {d['symbol']} <span class='verdict-badge {d['v_class']}'>{d['verdict']}</span>", unsafe_allow_html=True)
             st.metric("CENA", f"{d['price']:.2f}", f"{d['change']:.2f}%")
@@ -104,7 +107,7 @@ if data_list:
                 <div class="metric-row"><span>Świeca</span><span class="candle-signal">{d['candle']}</span></div>
                 <div class="metric-row"><span>Trend</span><b>{d['trend']}</b></div>
             """, unsafe_allow_html=True)
-            if api_key and st.button(f"🚀 DECYZJA AI: {d['symbol']}", key=f"btn_{d['symbol']}"):
+            if api_key and st.button(f"🚀 DECYZJA AI", key=f"btn_{d['symbol']}"):
                 client = OpenAI(api_key=api_key)
                 prompt = f"Ticker: {d['symbol']}, Cena: {d['price']}, RSI: {d['rsi']:.1f}, Candle: {d['candle']}. Podaj: 1. DECYZJA, 2. TP/SL, 3. POWÓD (max 1 zdanie)."
                 res = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": "Suche fakty."}, {"role": "user", "content": prompt}])
@@ -115,4 +118,4 @@ if data_list:
             st.plotly_chart(fig, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.error("Brak danych. Sprawdź listę symboli.")
+    st.error("Błąd pobierania danych. Sprawdź listę symboli lub połączenie.")
