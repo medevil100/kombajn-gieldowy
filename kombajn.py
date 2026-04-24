@@ -14,10 +14,10 @@ def load_tickers():
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "r") as f: return f.read()
-        except: return "PKO.WA, STX.WA, NVDA, TSLA, BTC-USD, ADTX"
-    return "PKO.WA, STX.WA, NVDA, TSLA, BTC-USD, ADTX"
+        except: return "PKO.WA, STX.WA, NVDA, TSLA, BTC-USD"
+    return "PKO.WA, STX.WA, NVDA, TSLA, BTC-USD"
 
-st.set_page_config(page_title="AI ALPHA UNIVERSAL PRO", page_icon="🚜", layout="wide")
+st.set_page_config(page_title="AI ALPHA UNIVERSAL FINAL", page_icon="🚜", layout="wide")
 
 # --- 2. STYLE WIZUALNE ---
 st.markdown("""
@@ -43,21 +43,24 @@ st.markdown("""
 def get_analysis(symbol):
     try:
         t = yf.Ticker(symbol)
-        # Pobieramy dane 1h (wykres) i 1d (trendy)
+        # Pobieranie danych 1h i 1d
         h1 = t.history(period="10d", interval="1h")
         d1 = t.history(period="300d", interval="1d")
         
         if h1.empty or d1.empty: return None
+        
+        # FIX: Prostowanie MultiIndex
         if isinstance(h1.columns, pd.MultiIndex): h1.columns = h1.columns.get_level_values(0)
+        if isinstance(d1.columns, pd.MultiIndex): d1.columns = d1.columns.get_level_values(0)
         
         price = h1['Close'].iloc[-1]
         
-        # Bid / Ask (Fallback jeśli brak w info)
+        # Bid / Ask (Fallback)
         info = t.info
         bid = info.get('bid') or price * 0.9998
         ask = info.get('ask') or price * 1.0002
         
-        # Wskaźniki SMA
+        # Średnie kroczące
         sma50 = d1['Close'].rolling(50).mean().iloc[-1]
         sma100 = d1['Close'].rolling(100).mean().iloc[-1]
         sma200 = d1['Close'].rolling(200).mean().iloc[-1]
@@ -72,7 +75,7 @@ def get_analysis(symbol):
         rsi = 100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / delta.where(delta < 0, 0).abs().rolling(14).mean() + 1e-9))).iloc[-1]
         
         # Logika Werdyktu
-        if rsi < 32 and price > sma200: verdict, v_class = "KUP 🔥", "sig-buy"
+        if rsi < 32 and price > sma200: verdict, v_class = "KUPUJ 🔥", "sig-buy"
         elif rsi > 68: verdict, v_class = "SPRZEDAJ ⚠️", "sig-sell"
         elif price > sma50: verdict, v_class = "TRZYMAJ 👍", "sig-hold"
         else: verdict, v_class = "CZEKAJ ⏳", ""
@@ -87,15 +90,18 @@ def get_analysis(symbol):
 
 # --- 4. PANEL BOCZNY ---
 with st.sidebar:
-    st.title("🚜 UNIVERSAL MACHINE")
+    st.title("🚜 UNIVERSAL FINAL")
     api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
-    t_input = st.text_area("Symbole (np. NVDA, PKO.WA, BTC-USD):", value=load_tickers(), height=150)
+    t_input = st.text_area("Twoja Lista Spółek:", value=load_tickers(), height=150)
+    
     if st.button("💾 ZAPISZ LISTĘ NA STAŁE"):
         with open(DB_FILE, "w") as f: f.write(t_input)
-        st.success("Lista zapisana w pliku .txt")
-    refresh = st.select_slider("Prędkość odświeżania (s)", options=, value=60)
+        st.success("Lista zapisana!")
+    
+    # POPRAWIONY SUWAK (Naprawia SyntaxError)
+    refresh = st.select_slider("Odświeżanie (s)", options=[30, 60, 120, 300], value=60)
 
-st_autorefresh(interval=refresh * 1000, key="universal_sync")
+st_autorefresh(interval=refresh * 1000, key="v239_sync")
 
 # --- 5. LOGIKA GŁÓWNA ---
 tickers = [x.strip().upper() for x in t_input.split(",") if x.strip()]
@@ -103,8 +109,8 @@ with ThreadPoolExecutor(max_workers=10) as executor:
     all_data = [d for d in list(executor.map(get_analysis, tickers)) if d is not None]
 
 if all_data:
-    # --- RANKING TOP 10 ---
-    st.subheader(f"🏆 TOP OKAZJE (Wyprzedane RSI)")
+    # --- TOP 10 RANKING ---
+    st.subheader("🏆 TOP SYGNAŁY (RSI 1H)")
     sorted_top = sorted(all_data, key=lambda x: x['rsi'])[:10]
     top_cols = st.columns(5)
     for i, d in enumerate(sorted_top):
@@ -114,14 +120,14 @@ if all_data:
                     <b>{d['symbol']}</b><br>
                     <span style="font-size:1.1rem; color:#00ff88;">{d['price']:.4f}</span><br>
                     <span class="bid-ask">B:{d['bid']:.2f} | A:{d['ask']:.2f}</span><br>
-                    <div class="{d['v_class']}" style="margin-top:5px; font-size:0.8rem;">{d['verdict']}</div>
-                    <small style="color:#888;">RSI: {d['rsi']:.1f} | P:{d['pp']:.2f}</small>
+                    <div class="{d['v_class']}" style="margin-top:5px; font-size:0.8rem; border:1px solid; border-radius:4px; padding:2px;">{d['verdict']}</div>
+                    <small style="color:#888;">RSI: {d['rsi']:.1f}</small>
                 </div>
             """, unsafe_allow_html=True)
 
     st.divider()
 
-    # --- KARTY SZCZEGÓŁOWE ---
+    # --- LISTA SZCZEGÓŁOWA ---
     for d in all_data:
         with st.container():
             st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
@@ -143,7 +149,7 @@ if all_data:
             with c2:
                 fig = go.Figure(data=[go.Candlestick(x=d['df'].index[-40:], open=d['df']['Open'][-40:], high=d['df']['High'][-40:], low=d['df']['Low'][-40:], close=d['df']['Close'][-40:])])
                 fig.add_hline(y=d['pp'], line_dash="dot", line_color="orange")
-                fig.update_layout(template="plotly_dark", height=280, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
+                fig.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
                 st.plotly_chart(fig, use_container_width=True, key=f"ch_{d['symbol']}")
 
             with c3:
@@ -152,11 +158,10 @@ if all_data:
                 st.write(f"🔴 SL: {d['sl']:.4f}")
                 if api_key and st.button(f"🧠 ANALIZA PRO", key=f"ai_{d['symbol']}"):
                     client = OpenAI(api_key=api_key)
-                    prompt = (f"Analiza techniczna {d['symbol']}: Cena {d['price']}, RSI {d['rsi']:.1f}, "
-                             f"SMA50 {d['sma50']:.2f}, SMA200 {d['sma200']:.2f}. "
-                             f"Podaj krótki, techniczny werdykt bez ostrzeżeń.")
-                    resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-                    st.info(resp.choices[message.content])
+                    p = f"Analiza techniczna {d['symbol']}: Cena {d['price']}, RSI {d['rsi']:.1f}, Pivot {d['pp']:.2f}. Podaj krótki werdykt."
+                    response = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": p}])
+                    # FIX: Poprawiony dostęp do zawartości
+                    st.info(response.choices[0].message.content)
             st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.info("Oczekiwanie na dane rynkowe...")
+    st.info("Brak danych. Sprawdź listę symboli i upewnij się, że są oddzielone przecinkiem.")
