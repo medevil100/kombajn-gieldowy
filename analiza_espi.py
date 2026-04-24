@@ -6,89 +6,139 @@ import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 import os
 
-# --- 1. PAMIĘĆ ---
-DB_FILE = "moje_spolki.txt"
+# --- 1. KONFIGURACJA I PAMIĘĆ ---
+DB_FILE = "tickers_db.txt"
+st.set_page_config(page_title="AI ALPHA KOMBAJN v2026", page_icon="🚜", layout="wide")
+
 def load_tickers():
     if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r") as f: return f.read()
-    return "PKO.WA, BTC-USD, NVDA"
+        try:
+            with open(DB_FILE, "r") as f: return f.read()
+        except: return "PKO.WA, BTC-USD, NVDA, TSLA"
+    return "PKO.WA, BTC-USD, NVDA, TSLA"
 
-# --- 2. SETUP ---
-st.set_page_config(page_title="AI Alpha Kombajn v20", page_icon="🧠", layout="wide")
-st.markdown("<style>.stApp { background-color: #020202; color: #ffffff; }</style>", unsafe_allow_html=True)
+# --- 2. STYLE WIZUALNE ---
+st.markdown("""
+    <style>
+    .stApp { background-color: #0d1117; color: #c9d1d9; }
+    .ticker-card { background: #161b22; padding: 20px; border-radius: 12px; border: 1px solid #30363d; margin-bottom: 20px; }
+    .top-rank-card { background: #1c2128; padding: 12px; border-radius: 10px; border: 1px solid #444c56; text-align: center; }
+    .metric-row { display: flex; justify-content: space-between; border-bottom: 1px solid #21262d; padding: 6px 0; font-size: 0.95rem; }
+    .bid-ask { font-family: monospace; color: #58a6ff; font-weight: bold; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# --- 3. SILNIK DANYCH ---
-def get_data(symbol):
+# --- 3. SILNIK ANALIZY ---
+def get_market_data(symbol):
     try:
-        # Pobieramy dane z filtrem MultiIndex (naprawa czarnego ekranu)
-        d15 = yf.download(symbol, period="5d", interval="15m", progress=False)
-        d1d = yf.download(symbol, period="250d", interval="1d", progress=False)
-        if d15.empty or d1d.empty: return None
+        # Pobieranie danych: 1h (interwał świec) oraz 1d (wskaźniki i Pivot)
+        h1 = yf.download(symbol, period="10d", interval="1h", progress=False)
+        d1 = yf.download(symbol, period="250d", interval="1d", progress=False)
         
-        for df in [d15, d1d]:
-            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        if h1.empty or d1.empty: return None
+
+        # FIX: Prostowanie danych z Yahoo Finance (zapobiega błędowi wykresów)
+        for df in [h1, d1]:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
         
-        price = float(d15['Close'].iloc[-1])
+        price = float(h1['Close'].iloc[-1])
+        # Symulacja Bid/Ask (spread 0.02%)
         bid, ask = price * 0.9999, price * 1.0001
         
-        # Wskaźniki
-        delta = d15['Close'].diff()
-        rsi = 100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / delta.where(delta < 0, 0).abs().rolling(14).mean() + 1e-9))).iloc[-1]
+        # Trendy
+        sma200 = d1['Close'].rolling(200).mean().iloc[-1]
+        sma50 = d1['Close'].rolling(50).mean().iloc[-1]
+        trend_long = "WZROST 🚀" if price > sma200 else "SPADEK 📉"
         
-        prev = d1d.iloc[-2]
-        pivot = (prev['High'] + prev['Low'] + prev['Close']) / 3
-        atr = (d1d['High'] - d1d['Low']).rolling(14).mean().iloc[-1]
+        # Pivot Points (z wczoraj)
+        hp, lp, cp = d1['High'].iloc[-2], d1['Low'].iloc[-2], d1['Close'].iloc[-2]
+        pp = (hp + lp + cp) / 3
         
+        # RSI 1h
+        delta = h1['Close'].diff()
+        gain = delta.where(delta > 0, 0).rolling(14).mean()
+        loss = delta.where(delta < 0, 0).abs().rolling(14).mean()
+        rsi = 100 - (100 / (1 + (gain / (loss + 1e-9)))).iloc[-1]
+        
+        # ATR dla TP/SL
+        atr = (d1['High'] - d1['Low']).rolling(14).mean().iloc[-1]
+        tp, sl = price + (atr * 1.5), price - (atr * 1.2)
+
         return {
-            "symbol": symbol, "price": price, "bid": bid, "ask": ask, "rsi": rsi, 
-            "pivot": pivot, "tp": price + (atr * 1.5), "sl": price - (atr * 1.0), "df": d15
+            "symbol": symbol, "price": price, "bid": bid, "ask": ask, 
+            "rsi": rsi, "pp": pp, "tp": tp, "sl": sl, "trend": trend_long,
+            "df": h1, "change": ((price - cp) / cp * 100)
         }
     except: return None
 
-# --- 4. UI ---
+# --- 4. PANEL BOCZNY ---
 with st.sidebar:
-    st.header("⚙️ USTAWIENIA")
+    st.title("🚜 SCANNER v2026")
     api_key = st.text_input("OpenAI Key", type="password") or st.secrets.get("OPENAI_API_KEY")
-    t_input = st.text_area("Lista Spółek", value=load_tickers())
-    if st.button("ZAPISZ"):
-        with open(DB_FILE, "w") as f: f.write(t_input)
-    refresh = st.select_slider("Refresh (s)", options=[30, 60, 300], value=60)
-
-st_autorefresh(interval=refresh * 1000, key="fsc")
-
-# --- 5. WYŚWIETLANIE ---
-if api_key:
-    client = OpenAI(api_key=api_key)
-    tickers = [x.strip().upper() for x in t_input.split(",") if x.strip()]
+    input_tickers = st.text_area("Lista Symboli", value=load_tickers(), height=200)
+    if st.button("Zapisz listę"):
+        with open(DB_FILE, "w") as f: f.write(input_tickers)
+        st.success("Zapisano!")
     
-    for t in tickers:
-        data = get_data(t)
-        if not data: continue
-        
-        st.markdown(f"### {t} | RSI: {data['rsi']:.1f}")
-        c1, c2 = st.columns([1.5, 2.5])
-        
-        with c1:
-            st.metric("CENA", f"{data['price']:.4f}")
-            st.write(f"**B/A:** {data['bid']:.4f} / {data['ask']:.4f}")
-            st.write(f"**TP:** {data['tp']:.4f} | **SL:** {data['sl']:.4f}")
+    refresh = st.select_slider("Odświeżanie (s)", options=, value=60)
+
+st_autorefresh(interval=refresh * 1000, key="refresh_main")
+
+# --- 5. LOGIKA GŁÓWNA ---
+tickers = [t.strip().upper() for t in input_tickers.split(",") if t.strip()]
+results = [get_market_data(t) for t in tickers if get_market_data(t)]
+
+if results:
+    # --- TOP 10 RANKING ---
+    st.subheader("🔥 TOP SYGNAŁY (RSI 1H)")
+    sorted_top = sorted(results, key=lambda x: x['rsi'])[:10]
+    top_cols = st.columns(5)
+    for i, d in enumerate(sorted_top):
+        with top_cols[i % 5]:
+            st.markdown(f"""
+                <div class="top-rank-card">
+                    <b>{d['symbol']}</b><br>{d['price']:.2f}<br>
+                    <small>RSI: {d['rsi']:.1f}</small>
+                </div>
+            """, unsafe_allow_html=True)
+
+    st.divider()
+
+    # --- LISTA SZCZEGÓŁOWA ---
+    for d in results:
+        with st.container():
+            st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
+            c1, c2, c3 = st.columns([1.2, 2.5, 1.2])
             
-            if st.button(f"🧠 ANALIZA AI {t}", key=f"ai_{t}"):
-                # NAPRAWIONE WYWOŁANIE:
-                res = client.chat.completions.create(
-                    model="gpt-4o-mini", 
-                    messages=[{"role": "user", "content": f"Analiza {t}, cena {data['price']}, rsi {data['rsi']:.1f}. Werdykt?"}]
-                )
-                # KLUCZOWA POPRAWKA - DODANO [0]
-                st.session_state[f"v_{t}"] = res.choices[0].message.content
+            with c1:
+                st.subheader(d['symbol'])
+                st.metric("CENA", f"{d['price']:.2f}", f"{d['change']:.2f}%")
+                st.markdown(f"<div class='bid-ask'>BID: {d['bid']:.4f}<br>ASK: {d['ask']:.4f}</div>", unsafe_allow_html=True)
+                st.markdown(f"""
+                    <div class="metric-row"><span>Trend Długi</span><b>{d['trend']}</b></div>
+                    <div class="metric-row"><span>Pivot Point</span><b>{d['pp']:.2f}</b></div>
+                    <div class="metric-row"><span>Target TP</span><b style="color:#00ff88;">{d['tp']:.2f}</b></div>
+                    <div class="metric-row"><span>Stop SL</span><b style="color:#ff4b4b;">{d['sl']:.2f}</b></div>
+                """, unsafe_allow_html=True)
 
-            if f"v_{t}" in st.session_state:
-                st.info(st.session_state[f"v_{t}"])
+            with c2:
+                # Wykres świecowy 1h
+                fig = go.Figure(data=[go.Candlestick(x=d['df'].index[-50:], open=d['df']['Open'][-50:], high=d['df']['High'][-50:], low=d['df']['Low'][-50:], close=d['df']['Close'][-50:])])
+                fig.add_hline(y=d['pp'], line_dash="dash", line_color="orange")
+                fig.update_layout(template="plotly_dark", height=350, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
+                st.plotly_chart(fig, use_container_width=True, key=f"chart_{d['symbol']}")
 
-        with c2:
-            fig = go.Figure(data=[go.Candlestick(x=data['df'].index[-50:], open=data['df']['Open'][-50:], high=data['df']['High'][-50:], low=data['df']['Low'][-50:], close=data['df']['Close'][-50:])])
-            fig.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig, use_container_width=True, key=f"ch_{t}")
-        st.divider()
+            with c3:
+                st.write("🤖 **STRATEGIA AI**")
+                if api_key and st.button(f"Skanuj {d['symbol']}", key=f"ai_{d['symbol']}"):
+                    client = OpenAI(api_key=api_key)
+                    # POPRAWIONA LOGIKA ODPOWIEDZI
+                    response = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[{"role": "user", "content": f"Werdykt dla {d['symbol']}, cena {d['price']}, RSI {d['rsi']:.1f}. Krótko!"}]
+                    )
+                    st.info(response.choices[0].message.content)
+            st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.info("Wprowadź API Key OpenAI.")
+    st.info("Podaj symbole w panelu bocznym i klucz API.")
