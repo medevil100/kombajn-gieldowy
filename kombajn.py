@@ -7,100 +7,104 @@ from streamlit_autorefresh import st_autorefresh
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-# --- 1. PAMIĘĆ LISTY ---
+# --- 1. KONFIGURACJA I PAMIĘĆ ---
 DB_FILE = "moje_spolki.txt"
 
 def load_tickers():
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "r") as f: return f.read()
-        except: return "AAPL, TSLA, NVDA, MSFT, AMZN, GOOGL, META, NFLX, AMD, BABA"
-    return "AAPL, TSLA, NVDA, MSFT, AMZN, GOOGL, META, NFLX, AMD, BABA"
+        except: return "PKO.WA, STX.WA, NVDA, TSLA, BTC-USD, ADTX"
+    return "PKO.WA, STX.WA, NVDA, TSLA, BTC-USD, ADTX"
 
-# --- 2. KONFIGURACJA ---
-st.set_page_config(page_title="AI USA STABLE KOMBAJN", layout="wide")
+st.set_page_config(page_title="AI ALPHA UNIVERSAL PRO", page_icon="🚜", layout="wide")
 
+# --- 2. STYLE WIZUALNE ---
 st.markdown("""
     <style>
     .stApp { background-color: #050505; color: #e0e0e0; }
-    .ticker-card { background: linear-gradient(145deg, #0f111a, #1a1c2b); padding: 20px; border-radius: 12px; border: 1px solid #30363d; margin-bottom: 25px; }
-    .top-tile { background: #111420; padding: 10px; border-radius: 8px; border-bottom: 3px solid #00e5ff; text-align: center; min-height: 150px; }
-    .metric-row { display: flex; justify-content: space-between; border-bottom: 1px solid #21262d; padding: 6px 0; font-size: 0.85rem; }
-    .signal-buy { color: #00ff88; font-weight: bold; }
-    .signal-sell { color: #ff4b4b; font-weight: bold; }
-    .bid-ask { font-family: monospace; font-weight: bold; font-size: 0.8rem; }
+    .ticker-card { 
+        background: linear-gradient(145deg, #0f111a, #1a1c2b); 
+        padding: 25px; border-radius: 15px; border: 1px solid #30363d; margin-bottom: 25px;
+    }
+    .top-tile {
+        background: #111420; padding: 12px; border-radius: 10px; border-bottom: 3px solid #00ff88; 
+        text-align: center; min-height: 160px;
+    }
+    .metric-row { display: flex; justify-content: space-between; border-bottom: 1px solid #21262d; padding: 6px 0; font-size: 0.9rem; }
+    .bid-ask { font-family: monospace; font-weight: bold; color: #58a6ff; font-size: 0.85rem; }
+    .sig-buy { color: #00ff88; font-weight: bold; }
+    .sig-sell { color: #ff4b4b; font-weight: bold; }
+    .sig-hold { color: #f1c40f; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. SILNIK ANALIZY (Zoptymalizowany pod USA) ---
+# --- 3. SILNIK ANALIZY ---
 def get_analysis(symbol):
     try:
         t = yf.Ticker(symbol)
-        # Pobieramy dane zbiorczo (szybsze niż osobne wywołania)
+        # Pobieramy dane 1h (wykres) i 1d (trendy)
         h1 = t.history(period="10d", interval="1h")
-        if h1.empty: 
-            return None
+        d1 = t.history(period="300d", interval="1d")
         
-        # Pobieramy dane dzienne dla trendów i pivotów
-        d1 = t.history(period="250d", interval="1d")
-        if d1.empty: 
-            return None
-
+        if h1.empty or d1.empty: return None
         if isinstance(h1.columns, pd.MultiIndex): h1.columns = h1.columns.get_level_values(0)
         
         price = h1['Close'].iloc[-1]
         
-        # Stabilne Bid/Ask dla USA
+        # Bid / Ask (Fallback jeśli brak w info)
         info = t.info
-        bid = info.get('bid') or info.get('regularMarketPreviousClose') * 0.9999
-        ask = info.get('ask') or info.get('regularMarketPreviousClose') * 1.0001
+        bid = info.get('bid') or price * 0.9998
+        ask = info.get('ask') or price * 1.0002
         
+        # Wskaźniki SMA
         sma50 = d1['Close'].rolling(50).mean().iloc[-1]
+        sma100 = d1['Close'].rolling(100).mean().iloc[-1]
+        sma200 = d1['Close'].rolling(200).mean().iloc[-1]
+        
+        # Pivot i ATR
         hp, lp, cp = d1['High'].iloc[-2], d1['Low'].iloc[-2], d1['Close'].iloc[-2]
         pp = (hp + lp + cp) / 3
         atr = (d1['High'] - d1['Low']).rolling(14).mean().iloc[-1]
         
+        # RSI 1h
         delta = h1['Close'].diff()
         rsi = 100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / delta.where(delta < 0, 0).abs().rolling(14).mean() + 1e-9))).iloc[-1]
         
-        if rsi < 33: verdict, v_class = "KUPUJ 🔥", "signal-buy"
-        elif rsi > 67: verdict, v_class = "SPRZEDAJ ⚠️", "signal-sell"
-        else: verdict, v_class = "CZEKAJ", ""
+        # Logika Werdyktu
+        if rsi < 32 and price > sma200: verdict, v_class = "KUP 🔥", "sig-buy"
+        elif rsi > 68: verdict, v_class = "SPRZEDAJ ⚠️", "sig-sell"
+        elif price > sma50: verdict, v_class = "TRZYMAJ 👍", "sig-hold"
+        else: verdict, v_class = "CZEKAJ ⏳", ""
 
         return {
             "symbol": symbol, "price": price, "bid": bid, "ask": ask, "rsi": rsi, 
-            "verdict": verdict, "v_class": v_class, "pp": pp, "sma50": sma50,
-            "tp": price + (atr * 1.5), "sl": price - (atr * 1.2),
+            "pp": pp, "sma50": sma50, "sma100": sma100, "sma200": sma200,
+            "verdict": verdict, "v_class": v_class, "tp": price + (atr * 1.6), "sl": price - (atr * 1.2),
             "df": h1, "change": ((price - cp) / cp * 100)
         }
-    except Exception:
-        return None
+    except: return None
 
 # --- 4. PANEL BOCZNY ---
 with st.sidebar:
-    st.title("🚜 KOMBAJN USA PRO")
+    st.title("🚜 UNIVERSAL MACHINE")
     api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
-    t_input = st.text_area("Symbole USA (po przecinku):", value=load_tickers(), height=150)
-    if st.button("💾 ZAPISZ LISTĘ"):
+    t_input = st.text_area("Symbole (np. NVDA, PKO.WA, BTC-USD):", value=load_tickers(), height=150)
+    if st.button("💾 ZAPISZ LISTĘ NA STAŁE"):
         with open(DB_FILE, "w") as f: f.write(t_input)
-        st.success("Lista zapisana!")
-    refresh = st.select_slider("Odświeżanie (s)", options=[30, 60, 120, 300], value=60)
+        st.success("Lista zapisana w pliku .txt")
+    refresh = st.select_slider("Prędkość odświeżania (s)", options=, value=60)
 
-st_autorefresh(interval=refresh * 1000, key="usa_sync")
+st_autorefresh(interval=refresh * 1000, key="universal_sync")
 
-# --- 5. LOGIKA GŁÓWNA (Wielowątkowość) ---
+# --- 5. LOGIKA GŁÓWNA ---
 tickers = [x.strip().upper() for x in t_input.split(",") if x.strip()]
-
-# Pobieranie danych równolegle (ThreadPoolExecutor) - to klucz do stabilności
 with ThreadPoolExecutor(max_workers=10) as executor:
-    all_data_raw = list(executor.map(get_analysis, tickers))
-
-all_data = [d for d in all_data_raw if d is not None]
+    all_data = [d for d in list(executor.map(get_analysis, tickers)) if d is not None]
 
 if all_data:
-    st.subheader(f"📊 MONITORING RYNKU ({len(all_data)} spółek aktywnych)")
-    
-    # TOP 10 Ranking
+    # --- RANKING TOP 10 ---
+    st.subheader(f"🏆 TOP OKAZJE (Wyprzedane RSI)")
     sorted_top = sorted(all_data, key=lambda x: x['rsi'])[:10]
     top_cols = st.columns(5)
     for i, d in enumerate(sorted_top):
@@ -108,41 +112,51 @@ if all_data:
             st.markdown(f"""
                 <div class="top-tile">
                     <b>{d['symbol']}</b><br>
-                    <span style="font-size:1.1rem; color:#00ff88;">{d['price']:.2f}</span><br>
-                    <span class="bid-ask" style="color:#ff4b4b;">B: {d['bid']:.2f}</span> | 
-                    <span class="bid-ask" style="color:#00ff88;">A: {d['ask']:.2f}</span><br>
-                    <div class="{d['v_class']}" style="font-size:0.75rem; margin-top:5px;">{d['verdict']}</div>
-                    <small style="color:#888;">RSI: {d['rsi']:.1f}</small>
+                    <span style="font-size:1.1rem; color:#00ff88;">{d['price']:.4f}</span><br>
+                    <span class="bid-ask">B:{d['bid']:.2f} | A:{d['ask']:.2f}</span><br>
+                    <div class="{d['v_class']}" style="margin-top:5px; font-size:0.8rem;">{d['verdict']}</div>
+                    <small style="color:#888;">RSI: {d['rsi']:.1f} | P:{d['pp']:.2f}</small>
                 </div>
             """, unsafe_allow_html=True)
 
     st.divider()
 
-    # Detale
-    for data in all_data:
+    # --- KARTY SZCZEGÓŁOWE ---
+    for d in all_data:
         with st.container():
             st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
-            c1, c2, c3 = st.columns([1.2, 2, 1])
+            c1, c2, c3 = st.columns([1.3, 2, 1.2])
+            
             with c1:
-                st.subheader(data['symbol'])
-                st.markdown(f"## {data['price']:.2f}")
-                st.markdown(f"<span class='bid-ask'>BID: {data['bid']:.4f} | ASK: {data['ask']:.4f}</span>", unsafe_allow_html=True)
+                st.subheader(f"{d['symbol']} {d['verdict']}")
+                st.markdown(f"## {d['price']:.4f} <small style='font-size:1rem; color:#00ff88;'>({d['change']:.2f}%)</small>", unsafe_allow_html=True)
+                st.markdown(f"<div class='bid-ask'>BID: {d['bid']:.4f} | ASK: {d['ask']:.4f}</div>", unsafe_allow_html=True)
                 st.markdown(f"""
-                    <div class="metric-row"><span>RSI (1h):</span><b class="{data['v_class']}">{data['rsi']:.1f}</b></div>
-                    <div class="metric-row"><span>Pivot:</span><b>{data['pp']:.2f}</b></div>
-                    <div class="metric-row"><span>Trend SMA50:</span><b>{'UP' if data['price']>data['sma50'] else 'DOWN'}</b></div>
+                    <div style="margin-top:15px;">
+                        <div class="metric-row"><span>RSI 1h</span><b class="{d['v_class']}">{d['rsi']:.1f}</b></div>
+                        <div class="metric-row"><span>Pivot Point</span><b style="color:#f1c40f;">{d['pp']:.4f}</b></div>
+                        <div class="metric-row"><span>SMA 50 / 100</span><b>{d['sma50']:.2f} / {d['sma100']:.2f}</b></div>
+                        <div class="metric-row"><span>SMA 200</span><b>{d['sma200']:.2f}</b></div>
+                    </div>
                 """, unsafe_allow_html=True)
+
             with c2:
-                fig = go.Figure(data=[go.Candlestick(x=data['df'].index[-40:], open=data['df']['Open'][-40:], high=data['df']['High'][-40:], low=data['df']['Low'][-40:], close=data['df']['Close'][-40:])])
-                fig.update_layout(template="plotly_dark", height=250, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
-                st.plotly_chart(fig, use_container_width=True, key=f"ch_{data['symbol']}")
+                fig = go.Figure(data=[go.Candlestick(x=d['df'].index[-40:], open=d['df']['Open'][-40:], high=d['df']['High'][-40:], low=d['df']['Low'][-40:], close=d['df']['Close'][-40:])])
+                fig.add_hline(y=d['pp'], line_dash="dot", line_color="orange")
+                fig.update_layout(template="plotly_dark", height=280, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
+                st.plotly_chart(fig, use_container_width=True, key=f"ch_{d['symbol']}")
+
             with c3:
-                st.write(f"**TP:** {data['tp']:.2f}")
-                st.write(f"**SL:** {data['sl']:.2f}")
-                if api_key and st.button(f"🧠 AI", key=f"ai_{data['symbol']}"):
+                st.markdown("🎯 **TARGETS**")
+                st.write(f"🟢 TP: {d['tp']:.4f}")
+                st.write(f"🔴 SL: {d['sl']:.4f}")
+                if api_key and st.button(f"🧠 ANALIZA PRO", key=f"ai_{d['symbol']}"):
                     client = OpenAI(api_key=api_key)
-                    resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user", "content":f"Oceń {data['symbol']} przy cenie {data['price']}"}])
-                    st.info(resp.choices[0].message.content)
+                    prompt = (f"Analiza techniczna {d['symbol']}: Cena {d['price']}, RSI {d['rsi']:.1f}, "
+                             f"SMA50 {d['sma50']:.2f}, SMA200 {d['sma200']:.2f}. "
+                             f"Podaj krótki, techniczny werdykt bez ostrzeżeń.")
+                    resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
+                    st.info(resp.choices[message.content])
             st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.warning("Oczekiwanie na dane z USA... Jeśli nic się nie pojawia, sprawdź czy symbole są poprawne.")
+    st.info("Oczekiwanie na dane rynkowe...")
