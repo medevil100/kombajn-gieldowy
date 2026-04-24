@@ -24,7 +24,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # --- 2. SILNIK ANALITYCZNY ---
-def get_total_data(symbol):
+def get_kombajn_data(symbol):
     try:
         t = yf.Ticker(symbol)
         d_long = t.history(period="1y", interval="1d")
@@ -48,11 +48,11 @@ def get_total_data(symbol):
         loss = (delta.where(delta < 0, 0).abs()).rolling(14).mean()
         rsi = 100 - (100 / (1 + (gain / (loss + 1e-9)))).iloc[-1]
 
-        # ANALIZA 10 ŚWIEC
+        # ANALIZA 10 ŚWIEC (INTERWAŁ 15M)
         last_10 = d_short.tail(11).head(10)
         bulls = len(last_10[last_10['Close'] > last_10['Open']])
         
-        # BID/ASK
+        # BID/ASK FALLBACK
         info = t.info
         bid = info.get('bid') or price * 0.999
         ask = info.get('ask') or price * 1.001
@@ -70,27 +70,36 @@ with st.sidebar:
     api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
     t_input = st.text_area("Lista Symboli", "PKO.WA, ALE.WA, CDR.WA, NVDA, TSLA, BTC-USD, ETH-USD, AAPL, MSFT, META", height=150)
     refresh = st.slider("Odśwież (s)", 30, 300, 60)
-st_autorefresh(interval=refresh * 1000, key="sync_final")
+st_autorefresh(interval=refresh * 1000, key="sync_final_v2")
 
 # --- 4. RENDEROWANIE ---
 symbols = [s.strip().upper() for s in t_input.split(",") if s.strip()]
 with ThreadPoolExecutor(max_workers=10) as executor:
-    results = [r for r in list(executor.map(get_total_data, symbols)) if r]
+    results = [r for r in list(executor.map(get_kombajn_data, symbols)) if r]
 
 if results:
-    # --- TOP 10 KAFELKI (GWARANTOWANE 2 RZĘDY) ---
-    st.subheader("📊 SZYBKI PODGLĄD (TOP 10)")
+    st.subheader("📊 TOP 10 SYGNAŁÓW (2 RZĘDY PO 5)")
     top_10 = results[:10]
-    for row in [0, 5]:
+    
+    # GWARANTOWANE 10 KAFELKÓW (2 RZĘDY)
+    for row_idx in [0, 5]:
         cols = st.columns(5)
         for i in range(5):
-            idx = row + i
+            idx = row_idx + i
             if idx < len(top_10):
                 d = top_10[idx]
                 with cols[i]:
-                    st.markdown(f"""<div class="top-tile"><small>{d['symbol']}</small><br><b>{d['price']:.2f}</b><br><span class="bid-val">B:{d['bid']:.2f}</span> | <span class="ask-val">A:{d['ask']:.2f}</span><br><small>RSI: {d['rsi']:.1f}</small><br><span class="pivot-val">P: {d['p']:.2f}</span></div>""", unsafe_allow_html=True)
+                    st.markdown(f"""
+                        <div class="top-tile">
+                            <small>{d['symbol']}</small><br>
+                            <b style="font-size:1.1rem;">{d['price']:.2f}</b><br>
+                            <span class="bid-val">B:{d['bid']:.2f}</span> | <span class="ask-val">A:{d['ask']:.2f}</span><br>
+                            <small>RSI: {d['rsi']:.1f}</small><br>
+                            <span class="pivot-val">P: {d['p']:.2f}</span>
+                        </div>
+                    """, unsafe_allow_html=True)
 
-    # --- KARTY ANALIZY ---
+    # SZCZEGÓŁOWE KARTY ANALIZY
     for d in results:
         st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
         c1, c2, c3 = st.columns([1, 1, 1.5])
@@ -101,7 +110,10 @@ if results:
                 <div class="metric-row"><span>BID / ASK</span><b><span class="bid-val">{d['bid']:.2f}</span> / <span class="ask-val">{d['ask']:.2f}</span></b></div>
                 <div class="metric-row"><span>SMA 50 / 200</span><b>{d['sma50']:.1f} / {d['sma200']:.1f}</b></div>
                 <div class="metric-row"><span>10ś (Wzrosty)</span><b>{d['bulls']}/10</b></div>
-                <div style="margin-top:20px;"><span class="tp-target">TP: {d['price']*1.05:.2f}</span> <span class="sl-stop">SL: {d['price']*0.97:.2f}</span></div>
+                <div style="margin-top:20px;">
+                    <span class="tp-target">TP: {d['price']*1.05:.2f}</span>
+                    <span class="sl-stop">SL: {d['price']*0.97:.2f}</span>
+                </div>
             """, unsafe_allow_html=True)
         with c2:
             st.markdown("**STRATEGIA PIVOT**")
@@ -111,13 +123,22 @@ if results:
                 <div class="metric-row"><span>Support 1</span><b>{d['s1']:.2f}</b></div>
             """, unsafe_allow_html=True)
             if api_key and st.button(f"🚀 AI DECYZJA", key=f"ai_{d['symbol']}"):
-                client = OpenAI(api_key=api_key)
-                res = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": "Tylko komendy: DECYZJA, TP, SL, RYZYKO."}, {"role": "user", "content": f"Analizuj {d['symbol']}, RSI {d['rsi']:.1f}"}])
-                # POPRAWKA BŁĘDU: Dodano [0] przed .message
-                st.info(res.choices[0].message.content)
+                try:
+                    client = OpenAI(api_key=api_key)
+                    res = client.chat.completions.create(
+                        model="gpt-4o", 
+                        messages=[{"role": "system", "content": "Tylko komendy: DECYZJA, TP, SL, RYZYKO. Zero lania wody."}, 
+                                  {"role": "user", "content": f"Analizuj {d['symbol']}, RSI {d['rsi']:.1f}, Pivot {d['p']:.2f}"}]
+                    )
+                    # TU BYŁ BŁĄD - TERAZ JEST POPRAWIONE: choices[0]
+                    st.success(res.choices[0].message.content)
+                except Exception as e:
+                    st.error(f"Błąd AI: {e}")
         with c3:
             fig = go.Figure(data=[go.Candlestick(x=d['df'].index, open=d['df']['Open'], high=d['df']['High'], low=d['df']['Low'], close=d['df']['Close'])])
             fig.add_hline(y=d['p'], line_dash="dash", line_color="yellow")
             fig.update_layout(height=280, margin=dict(l=0,r=0,b=0,t=0), template="plotly_dark", xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
+else:
+    st.error("Wpisz symbole w sidebarze.")
