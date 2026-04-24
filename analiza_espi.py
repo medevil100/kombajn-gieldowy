@@ -31,12 +31,12 @@ def load_tickers():
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "r") as f: return f.read()
-        except: return "PKO.WA, ALE.WA, NVDA, TSLA, BTC-USD"
-    return "PKO.WA, ALE.WA, NVDA, TSLA, BTC-USD"
+        except: return "BTC-USD, ETH-USD, NVDA, TSLA, PKO.WA"
+    return "BTC-USD, ETH-USD, NVDA, TSLA, PKO.WA"
 
 # --- 2. ANALIZA TECHNICZNA ---
 def analyze_candles(df):
-    if len(df) < 3: return "Brak wyraźnej formacji"
+    if len(df) < 3: return "Brak"
     last, prev = df.iloc[-1], df.iloc[-2]
     body = abs(last['Close'] - last['Open'])
     upper_wick = last['High'] - max(last['Open'], last['Close'])
@@ -49,26 +49,26 @@ def analyze_candles(df):
 
 def get_data(symbol):
     try:
-        ticker = yf.Ticker(symbol)
-        d_long = ticker.history(period="2y", interval="1d")
-        d15 = ticker.history(period="5d", interval="15m")
+        t = yf.Ticker(symbol)
+        d_long = t.history(period="1y", interval="1d")
+        d15 = t.history(period="5d", interval="15m")
         if d15.empty or d_long.empty: return None
+        
         price = d15['Close'].iloc[-1]
         sma200 = d_long['Close'].rolling(200).mean().iloc[-1]
-        sma50 = d_long['Close'].rolling(50).mean().iloc[-1]
         delta = d_long['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (delta.where(delta < 0, 0).abs()).rolling(14).mean()
         rsi = 100 - (100 / (1 + (gain / (loss + 1e-9)))).iloc[-1]
         atr = (d_long['High'] - d_long['Low']).rolling(14).mean().iloc[-1]
         
-        v_class = "v-buy" if rsi < 32 else "v-sell" if rsi > 68 else "v-wait"
-        verdict = "KUP" if rsi < 32 else "SPRZEDAJ" if rsi > 68 else "CZEKAJ"
-        
         return {
             "symbol": symbol, "price": price, "rsi": rsi, "candle": analyze_candles(d15),
-            "verdict": verdict, "v_class": v_class, "trend_long": "WZROST" if price > sma200 else "SPADEK",
-            "tp": price + (atr * 2), "sl": price - (atr * 1.5), "df": d15, "change": ((price - d_long['Close'].iloc[-2])/d_long['Close'].iloc[-2])*100
+            "verdict": "KUP" if rsi < 32 else "SPRZEDAJ" if rsi > 68 else "CZEKAJ",
+            "v_class": "v-buy" if rsi < 32 else "v-sell" if rsi > 68 else "v-wait",
+            "trend": "WZROST" if price > sma200 else "SPADEK",
+            "tp": price + (atr * 2), "sl": price - (atr * 1.5), "df": d15,
+            "change": ((price - d_long['Close'].iloc[-2])/d_long['Close'].iloc[-2])*100
         }
     except: return None
 
@@ -76,21 +76,23 @@ def get_data(symbol):
 with st.sidebar:
     st.title("🍯 ALPHA GOLDEN")
     api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
-    t_input = st.text_area("Lista Symboli", value=load_tickers(), height=150)
+    t_input = st.text_area("Symbole", value=load_tickers(), height=150)
     if st.button("💾 ZAPISZ"):
         with open(DB_FILE, "w") as f: f.write(t_input)
-    refresh = st.select_slider("Odśwież (s)", options=[30, 60, 300], value=60)
-st_autorefresh(interval=refresh * 1000, key="fsh")
+    refresh_val = st.select_slider("Odśwież (s)", options=[30, 60, 300], value=60)
 
-# --- 4. WYŚWIETLANIE ---
-t_list = [t.strip().upper() for t in t_input.split(",") if t.strip()]
+st_autorefresh(interval=refresh_val * 1000, key="fsh")
+
+# --- 4. GŁÓWNY PANEL ---
+t_list = [x.strip().upper() for x in t_input.split(",") if x.strip()]
 with ThreadPoolExecutor(max_workers=10) as executor:
     data_list = [r for r in list(executor.map(get_data, t_list)) if r]
 
 if data_list:
-    st.subheader("🔥 TOP 10 SYGNAŁÓW (EKSTREMALNE RSI)")
+    st.subheader("🔥 TOP 10 SYGNAŁÓW RSI")
     top_cols = st.columns(5)
-    for i, d in enumerate(sorted(data_list, key=lambda x: abs(50 - x['rsi']), reverse=True)[:10]):
+    sorted_data = sorted(data_list, key=lambda x: abs(50 - x['rsi']), reverse=True)
+    for i, d in enumerate(sorted_data[:10]):
         with top_cols[i % 5]:
             st.markdown(f'<div class="top-tile"><small>{d["symbol"]}</small><br><b>{d["price"]:.2f}</b><br><span class="verdict-badge {d["v_class"]}">{d["verdict"]}</span></div><br>', unsafe_allow_html=True)
 
@@ -103,15 +105,21 @@ if data_list:
             st.markdown(f"""
                 <div class="metric-row"><span>RSI (14d)</span><b>{d['rsi']:.1f}</b></div>
                 <div class="metric-row"><span>Świeca</span><span class="candle-signal">{d['candle']}</span></div>
-                <div class="metric-row"><span>Trend</span><b>{d['trend_long']}</b></div>
+                <div class="metric-row"><span>Trend Długi</span><b>{d['trend']}</b></div>
             """, unsafe_allow_html=True)
-            if api_key and st.button(f"🚀 DECYZJA AI: {d['symbol']}", key=f"ai_{d['symbol']}"):
+            
+            if api_key and st.button(f"🚀 DECYZJA AI: {d['symbol']}", key=f"btn_{d['symbol']}"):
                 client = OpenAI(api_key=api_key)
-                prompt = f"Ticker: {d['symbol']}. Cena: {d['price']}. RSI: {d['rsi']:.1f}. Trend: {d['trend_long']}. Swiece: {d['candle']}. Nie lej wody. Odpowiedz: 1. DECYZJA, 2. WEJSCIE/TP/SL, 3. POWOD."
-                res = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": "Suche fakty."}, {"role": "user", "content": prompt}])
-                st.info(res.choices[0].message.content) # Poprawione wybieranie treści
+                prompt = f"Ticker: {d['symbol']}, Cena: {d['price']}, RSI: {d['rsi']:.1f}, Candle: {d['candle']}. Podaj: 1. DECYZJA, 2. TP/SL, 3. POWÓD (max 1 zdanie)."
+                res = client.chat.completions.create(
+                    model="gpt-4o", 
+                    messages=[{"role": "system", "content": "Jesteś suchym traderem. Tylko konkretne liczby i decyzje."}, {"role": "user", "content": prompt}]
+                )
+                st.info(res.choices[0].message.content)
         with c2:
             fig = go.Figure(data=[go.Candlestick(x=d['df'].index, open=d['df']['Open'], high=d['df']['High'], low=d['df']['Low'], close=d['df']['Close'])])
             fig.update_layout(height=250, margin=dict(l=0,r=0,b=0,t=0), template="plotly_dark", xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
+else:
+    st.error("Brak danych. Sprawdź symbole lub połączenie z internetem.")
