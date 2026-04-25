@@ -17,7 +17,7 @@ def load_tickers():
         except: return "NVDA, TSLA, BTC-USD, PKO.WA"
     return "NVDA, TSLA, BTC-USD, PKO.WA"
 
-st.set_page_config(page_title="AI ALPHA GOLDEN v26", page_icon="🚜", layout="wide")
+st.set_page_config(page_title="AI ALPHA GOLDEN v27", page_icon="🚜", layout="wide")
 
 # --- 2. STYLE WIZUALNE ---
 st.markdown("""
@@ -29,12 +29,14 @@ st.markdown("""
     }
     .top-tile {
         background: #111420; padding: 12px; border-radius: 10px; border-bottom: 3px solid #00ff88; 
-        text-align: center; min-height: 180px;
+        text-align: center; min-height: 200px;
     }
     .metric-row { display: flex; justify-content: space-between; border-bottom: 1px solid #21262d; padding: 6px 0; font-size: 0.9rem; }
-    .bid-ask-mini { font-family: monospace; font-size: 0.75rem; color: #58a6ff; }
+    .bid-box { color: #ff4b4b; font-weight: bold; font-family: monospace; }
+    .ask-box { color: #00ff88; font-weight: bold; font-family: monospace; }
     .sig-buy { color: #00ff88; font-weight: bold; }
     .sig-sell { color: #ff4b4b; font-weight: bold; }
+    .volume-alert { color: #f1e05a; font-weight: bold; font-size: 0.8rem; border: 1px solid #f1e05a; padding: 2px 5px; border-radius: 4px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -44,32 +46,33 @@ def get_analysis(symbol):
         symbol = symbol.strip().upper()
         t = yf.Ticker(symbol)
         
-        # Pobieranie danych 1h i 1d (szerszy zakres dla szczytów/dołków)
+        # Pobieranie danych
         h1 = t.history(period="10d", interval="1h")
-        d1 = t.history(period="1y", interval="1d") # 1 rok dla ekstremów
+        d1 = t.history(period="1y", interval="1d")
         
         if h1.empty or d1.empty: return None
         if isinstance(h1.columns, pd.MultiIndex): h1.columns = h1.columns.get_level_values(0)
-        if isinstance(d1.columns, pd.MultiIndex): d1.columns = d1.columns.get_level_values(0)
         
         price = h1['Close'].iloc[-1]
         
-        # Bid/Ask
+        # Bid/Ask i Spread
         try:
             bid = t.info.get('bid') or price * 0.9998
             ask = t.info.get('ask') or price * 1.0002
         except:
             bid, ask = price * 0.9998, price * 1.0002
+        spread = ask - bid
         
-        # Wskaźniki i Ekstrema (Górki i Dołki)
-        sma50 = d1['Close'].rolling(50).mean().iloc[-1]
+        # Wolumen i Wielcy Gracze (Skok > 200% średniej z 20h)
+        avg_vol = h1['Volume'].rolling(20).mean().iloc[-1]
+        curr_vol = h1['Volume'].iloc[-1]
+        vol_ratio = curr_vol / avg_vol if avg_vol > 0 else 0
+        big_players = vol_ratio > 2.0
+        
+        # Wskaźniki
         sma200 = d1['Close'].rolling(200).mean().iloc[-1]
         yearly_high = d1['High'].max()
         yearly_low = d1['Low'].min()
-        
-        hp, lp, cp = d1['High'].iloc[-2], d1['Low'].iloc[-2], d1['Close'].iloc[-2]
-        pp = (hp + lp + cp) / 3
-        atr = (d1['High'] - d1['Low']).rolling(14).mean().iloc[-1]
         
         # RSI 1h
         delta = h1['Close'].diff()
@@ -83,25 +86,24 @@ def get_analysis(symbol):
         else: verd, vcl = "CZEKAJ ⏳", ""
 
         return {
-            "symbol": symbol, "price": price, "bid": bid, "ask": ask, "rsi": rsi, 
-            "pp": pp, "sma50": sma50, "sma200": sma200, "verdict": verd, "vcl": vcl,
-            "y_high": yearly_high, "y_low": yearly_low,
-            "tp": price + (atr * 1.8), "sl": price - (atr * 1.3),
-            "df": h1, "change": ((price - cp) / cp * 100)
+            "symbol": symbol, "price": price, "bid": bid, "ask": ask, "spread": spread,
+            "rsi": rsi, "sma200": sma200, "verdict": verd, "vcl": vcl,
+            "y_high": yearly_high, "y_low": yearly_low, "vol_ratio": vol_ratio,
+            "big_players": big_players, "df": h1, "change": ((price - d1['Close'].iloc[-2]) / d1['Close'].iloc[-2] * 100)
         }
     except: return None
 
 # --- 4. PANEL BOCZNY ---
 with st.sidebar:
-    st.title("🚜 GOLDEN v26")
+    st.title("🚜 GOLDEN v27")
     api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
     t_input = st.text_area("Lista Symboli:", value=load_tickers(), height=150)
     if st.button("💾 ZAPISZ LISTĘ"):
         with open(DB_FILE, "w") as f: f.write(t_input)
         st.success("Lista zapisana!")
-    refresh = st.select_slider("Refresh (s)", options=[30, 60, 300], value=60)
+    refresh = st.select_slider("Odświeżanie (s)", options=[30, 60, 300], value=60)
 
-st_autorefresh(interval=refresh * 1000, key="v26_fsh")
+st_autorefresh(interval=refresh * 1000, key="v27_fsh")
 
 # --- 5. LOGIKA GŁÓWNA ---
 tickers = [x.strip().upper() for x in t_input.split(",") if x.strip()]
@@ -109,19 +111,21 @@ with ThreadPoolExecutor(max_workers=8) as executor:
     all_data = [d for d in list(executor.map(get_analysis, tickers)) if d is not None]
 
 if all_data:
-    # --- TOP 10 RANKING Z BID/ASK ---
-    st.subheader("🏆 TOP SYGNAŁY (Bid/Ask w rankingu)")
+    # --- RANKING TOP ---
+    st.subheader("🏆 SYGNAŁY I WOLUMEN")
     sorted_top = sorted(all_data, key=lambda x: x['rsi'])[:10]
     top_cols = st.columns(5)
     for i, d in enumerate(sorted_top):
         with top_cols[i % 5]:
+            vol_alert = "🚀 VOL!" if d['big_players'] else ""
             st.markdown(f"""
                 <div class="top-tile">
-                    <b>{d['symbol']}</b><br>
-                    <span style="font-size:1.1rem; color:#00ff88;">{d['price']:.2f}</span><br>
-                    <div class="bid-ask-mini">B: {d['bid']:.2f} | A: {d['ask']:.2f}</div>
-                    <div class="{d['vcl']}" style="margin-top:5px;">{d['verdict']}</div>
-                    <small>RSI: {d['rsi']:.1f}</small>
+                    <b style="font-size:1.2rem;">{d['symbol']}</b> <span class="volume-alert">{vol_alert}</span><br>
+                    <span style="color:#58a6ff; font-size:1.1rem;">{d['price']:.2f}</span><br>
+                    <span class="bid-box">B: {d['bid']:.2f}</span><br>
+                    <span class="ask-box">A: {d['ask']:.2f}</span>
+                    <div class="{d['vcl']}" style="margin-top:8px; font-size:1.1rem;">{d['verdict']}</div>
+                    <small>RSI: {d['rsi']:.1f} | Spread: {d['spread']:.2f}</small>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -135,7 +139,7 @@ if all_data:
             
             with c1:
                 st.markdown(f"<h3 class='{d['vcl']}'>{d['symbol']} {d['verdict']}</h3>", unsafe_allow_html=True)
-                st.metric("CENA", f"{d['price']:.4f}", f"{d['change']:.2f}%")
+                st.metric("AKTUALNA CENA", f"{d['price']:.4f}", f"{d['change']:.2f}%")
                 st.markdown(f"""
                     <div style="margin-top:15px;">
                         <div class="metric-row"><span>RSI (1h)</span><b>{d['rsi']:.1f}</b></div>
@@ -147,26 +151,45 @@ if all_data:
 
             with c2:
                 fig = go.Figure(data=[go.Candlestick(x=d['df'].index[-50:], open=d['df']['Open'][-50:], high=d['df']['High'][-50:], low=d['df']['Low'][-50:], close=d['df']['Close'][-50:])])
-                # Linie szczytów i dołków na wykresie
-                fig.add_hline(y=d['y_high'], line_dash="dash", line_color="#00ff88", annotation_text="High")
-                fig.add_hline(y=d['y_low'], line_dash="dash", line_color="#ff4b4b", annotation_text="Low")
                 fig.update_layout(template="plotly_dark", height=320, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
                 st.plotly_chart(fig, use_container_width=True, key=f"ch_{d['symbol']}")
 
             with c3:
-                st.write(f"BID: **{d['bid']:.4f}**")
-                st.write(f"ASK: **{d['ask']:.4f}**")
-                st.write(f"Pivot: **{d['pp']:.2f}**")
+                # Panel Handlowy (Bid/Ask/Spread/Volume)
+                st.markdown(f"""
+                    <div style="background: #161b22; padding: 12px; border-radius: 10px; border: 1px solid #30363d;">
+                        <div style="color:#ff4b4b; font-size: 0.85rem; margin-bottom:2px;">BID (SPRZEDAJESZ)</div>
+                        <div style="font-size: 1.4rem; font-weight: bold; color:#ff4b4b; font-family: monospace;">{d['bid']:.4f}</div>
+                        
+                        <div style="color:#00ff88; font-size: 0.85rem; margin-top: 10px; margin-bottom:2px;">ASK (KUPUJESZ)</div>
+                        <div style="font-size: 1.4rem; font-weight: bold; color:#00ff88; font-family: monospace;">{d['ask']:.4f}</div>
+                        
+                        <div style="border-top: 1px solid #30363d; margin-top: 10px; padding-top: 8px;">
+                            <span style="color:#8b949e;">Spread:</span> <b style="color:#58a6ff;">{d['spread']:.4f}</b>
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
+
+                # Wskaźnik Wolumenu
+                vol_color = "#f1e05a" if d['big_players'] else "#8b949e"
+                st.markdown(f"""
+                    <div style="margin-top: 15px; padding: 10px; border: 1px solid {vol_color}; border-radius: 10px; background: rgba(241, 224, 90, 0.05);">
+                        <span style="font-size: 0.8rem; color: #8b949e;">MOC WOLUMENU (1h):</span><br>
+                        <b style="color:{vol_color}; font-size: 1.2rem;">x {d['vol_ratio']:.2f}</b>
+                        {"<br><span class='volume-alert'>⚠️ WYKRYTO DUŻEGO GRACZA</span>" if d['big_players'] else ""}
+                    </div>
+                """, unsafe_allow_html=True)
                 
-                if api_key and st.button(f"🧠 AI STRATEGIA", key=f"ai_{d['symbol']}"):
+                if api_key and st.button(f"🧠 ANALIZA AI", key=f"ai_{d['symbol']}"):
                     client = OpenAI(api_key=api_key)
-                    # Wysłanie kompletnych danych historycznych do AI
-                    prompt = (f"Przeanalizuj {d['symbol']}. Dane: Cena {d['price']}, Bid {d['bid']}, Ask {d['ask']}. "
-                             f"RSI {d['rsi']:.1f}, SMA50 {d['sma50']:.2f}, SMA200 {d['sma200']:.2f}. "
+                    prompt = (f"Jesteś ekspertem tradingowym. Przeanalizuj {d['symbol']}: "
+                             f"Cena {d['price']}, Bid {d['bid']}, Ask {d['ask']}, Spread {d['spread']:.4f}. "
+                             f"RSI {d['rsi']:.1f}, Skok wolumenu: x{d['vol_ratio']:.2f}. "
                              f"Szczyt 12m: {d['y_high']}, Dołek 12m: {d['y_low']}. "
-                             f"Podaj konkretny werdykt i plan wejścia/wyjścia.")
+                             f"Czy wchodzić? Podaj krótką strategię i poziomy TP/SL.")
                     resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-                    st.success(resp.choices[0].message.content)
+                    st.info(resp.choices[0].message.content)
             st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.info("Dodaj symbole i OpenAI Key w panelu bocznym.")
+    st.warning("Brak danych. Wpisz poprawne symbole (np. BTC-USD, AAPL, PKO.WA) w panelu bocznym.")
+
