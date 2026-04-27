@@ -177,7 +177,39 @@ if data_ready:
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
-                if st.button(f"🤖 STRATEGIA AI: {d['s']}", key=f"ai_{d['s']}"):
+                               # --- POPRAWIONY PRZYCISK AI (FIX ATTRIBUTEERROR & TP/SL) ---
+                if st.button(f"🤖 ANALIZA AI: {d['s']}", key=f"btn_{d['s']}"):
+                    if AI_KEY:
+                        try:
+                            with st.spinner(f"Generowanie strategii dla {d['s']}..."):
+                                client = OpenAI(api_key=AI_KEY)
+                                # Wymuszamy na AI użycie naszych wyliczonych poziomów TP i SL
+                                prompt = (
+                                    f"Jesteś ekspertem giełdowym. Przeanalizuj {d['s']}. "
+                                    f"DANE: Cena {d['p']}, RSI {d['rsi']:.0f}, MACD {d['macd']:.2f}. "
+                                    f"MOJE WYLICZENIA: Sugerowany Stop Loss: {d['sl']:.2f}, Sugerowany Take Profit: {d['tp']:.2f}. "
+                                    f"ZADANIE: Napisz w 3 krótkich punktach: "
+                                    f"1. Czy cena {d['p']} to dobry moment na wejście? "
+                                    f"2. Potwierdź lub skoryguj moje poziomy SL ({d['sl']:.2f}) i TP ({d['tp']:.2f}). "
+                                    f"3. Jaki jest główny cel tej transakcji (Short/Long term)?"
+                                )
+                                
+                                resp = client.chat.completions.create(
+                                    model="gpt-4o-mini",
+                                    messages=[{"role": "user", "content": prompt}]
+                                )
+                                
+                                # POPRAWNY DOSTĘP DO TREŚCI (OpenAI v1.x)
+                                ai_result = resp.choices[0].message.content
+                                
+                                st.markdown(f"### 🎯 Strategia AI dla {d['s']}")
+                                st.info(ai_result)
+                                st.write(f"**Techniczne Progi:** SL: `{d['sl']:.2f}` | TP: `{d['tp']:.2f}`")
+                        except Exception as e:
+                            st.error(f"Błąd AI: {str(e)}")
+                    else:
+                        st.warning("Brak klucza OpenAI w skrytce (Secrets)!")
+
                     if AI_KEY:
                         client = OpenAI(api_key=AI_KEY)
                         resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": f"Przeanalizuj {d['s']}. Cena {d['p']}, RSI {d['rsi']:.0f}, MACD {d['macd']:.2f}. Podaj 3 punkty strategii (SL, TP, Risk)."}])
