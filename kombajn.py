@@ -1,25 +1,21 @@
+Zapisz po prostu ten plik jako **`kombaj.py`** — kod masz tu w całości:
+
+```python
 # ======================================================================
-#  AI ALPHA MONSTER PRO v74 — FULL BUILD (CZĘŚĆ 1/4)
-#  Autor: Asam + Copilot
-#  Funkcje w tej części:
-#   - konfiguracja
-#   - CSS neon-dark (poprawiony)
-#   - odświeżanie 1–10 minut
-#   - system portfolio (BUY/SELL/HOLD, średnia cena, multi-transakcje)
-#   - utils
+#  AI ALPHA MONSTER PRO v74 — FULL SINGLE-FILE BUILD (kombaj.py)
 # ======================================================================
 
 import streamlit as st
+from openai import OpenAI
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import plotly.graph_objects as go
+from streamlit_autorefresh import st_autorefresh
+import requests
 import json
 import os
-import time
 from datetime import datetime
-from openai import OpenAI
-import requests
 
 # ======================================================================
 # 1. KONFIGURACJA
@@ -31,7 +27,6 @@ st.set_page_config(
     layout="wide",
 )
 
-# Sesja HTTP (mniej banów z Yahoo)
 session = requests.Session()
 session.headers.update({
     "User-Agent": (
@@ -44,129 +39,181 @@ session.headers.update({
 AI_KEY = st.secrets.get("OPENAI_API_KEY", "")
 client = OpenAI(api_key=AI_KEY) if AI_KEY else None
 
-# ======================================================================
-# 2. USTAWIENIA ODŚWIEŻANIA (1–10 minut)
-# ======================================================================
-
-st.sidebar.subheader("⏱ Odświeżanie danych")
-refresh_minutes = st.sidebar.slider("Co ile minut odświeżać?", 1, 10, 3)
-refresh_ms = refresh_minutes * 60 * 1000
-
-st_autorefresh = st.sidebar.checkbox("Auto-refresh", value=True)
-
-if st_autorefresh:
-    st.experimental_rerun()
-
-# ======================================================================
-# 3. CSS — TWÓJ STYL NEON DARK (POPRAWIONY)
-# ======================================================================
-
-st.markdown("""
-<style>
-.stApp {
-    background-color: #010101;
-    color: #e0e0e0;
-    font-family: 'Inter', sans-serif;
-}
-.top-mini-tile {
-    padding: 15px;
-    border-radius: 12px;
-    text-align: center;
-    background: linear-gradient(145deg, #0d1117, #050505);
-    border: 1px solid #30363d;
-    margin-bottom: 15px;
-    transition: 0.3s ease;
-}
-.tile-buy {
-    border: 2px solid #00ff88 !important;
-    box-shadow: 0 0 15px rgba(0,255,136,0.3);
-}
-.tile-sell {
-    border: 2px solid #ff4b4b !important;
-    box-shadow: 0 0 15px rgba(255,75,75,0.3);
-}
-.tile-neutral {
-    border: 2px solid #8b949e !important;
-    box-shadow: 0 0 15px rgba(139,148,158,0.3);
-}
-.main-card {
-    background: linear-gradient(145deg, #0d1117, #020202);
-    padding: 35px;
-    border-radius: 25px;
-    border: 1px solid #30363d;
-    text-align: center;
-    min-height: 1100px;
-    width: 100%;
-    transition: 0.3s ease-in-out;
-    margin-bottom: 40px;
-    display: flex;
-    flex-direction: column;
-    justify-content: flex-start;
-}
-.main-card:hover {
-    border-color: #58a6ff;
-    box-shadow: 0 0 30px rgba(88, 166, 255, 0.15);
-}
-.ai-box {
-    padding: 20px;
-    border-radius: 15px;
-    margin-top: 25px;
-    background: rgba(0, 255, 136, 0.05);
-    border: 1px solid #00ff88;
-    color: #00ff88;
-    line-height: 1.6;
-    text-align: left;
-}
-.news-link {
-    color: #58a6ff;
-    text-decoration: none;
-    font-size: 0.85rem;
-    display: block;
-    margin-bottom: 12px;
-}
-.block-container {
-    max-width: 98% !important;
-    padding-top: 1.5rem !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# ======================================================================
-# 4. PORTFEL — BUY/SELL/HOLD, ŚREDNIA CENA, MULTI-TRANSAKCJE
-# ======================================================================
-
+TICKERS_FILE = "moje_spolki.txt"
 PORTFOLIO_FILE = "portfolio.json"
+
+if "risk_cap" not in st.session_state:
+    st.session_state.risk_cap = 10000.0
+if "risk_pct" not in st.session_state:
+    st.session_state.risk_pct = 1.0
+
+# ======================================================================
+# 2. CSS
+# ======================================================================
+
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background-color: #010101;
+        color: #e0e0e0;
+        font-family: 'Inter', sans-serif;
+    }
+    .top-mini-tile {
+        padding: 15px;
+        border-radius: 12px;
+        text-align: center;
+        background: linear-gradient(145deg, #0d1117, #050505);
+        border: 1px solid #30363d;
+        margin-bottom: 15px;
+        transition: 0.3s ease;
+    }
+    .tile-buy {
+        border: 2px solid #00ff88 !important;
+        box-shadow: 0 0 15px rgba(0,255,136,0.3);
+    }
+    .tile-sell {
+        border: 2px solid #ff4b4b !important;
+        box-shadow: 0 0 15px rgba(255,75,75,0.3);
+    }
+    .tile-neutral {
+        border: 2px solid #8b949e !important;
+        box-shadow: 0 0 15px rgba(139,148,158,0.3);
+    }
+    .main-card {
+        background: linear-gradient(145deg, #0d1117, #020202);
+        padding: 35px;
+        border-radius: 25px;
+        border: 1px solid #30363d;
+        text-align: center;
+        min-height: 1100px;
+        width: 100%;
+        transition: 0.3s ease-in-out;
+        margin-bottom: 40px;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-start;
+    }
+    .main-card:hover {
+        border-color: #58a6ff;
+        box-shadow: 0 0 30px rgba(88, 166, 255, 0.15);
+    }
+    .pos-calc-box {
+        background: rgba(88, 166, 255, 0.08);
+        border-radius: 15px;
+        padding: 25px;
+        margin: 25px 0;
+        border: 1px solid #58a6ff;
+        color: #58a6ff;
+    }
+    .pos-val {
+        font-size: 2.2rem;
+        display: block;
+        margin-bottom: 5px;
+        font-weight: 900;
+        text-shadow: 0 0 10px #58a6ff;
+    }
+    .pos-label {
+        font-size: 0.85rem;
+        color: #8b949e;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+    }
+    .tech-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 15px;
+        background: rgba(255,255,255,0.02);
+        padding: 20px;
+        border-radius: 20px;
+        text-align: left;
+    }
+    .tech-row {
+        border-bottom: 1px solid #21262d;
+        padding: 10px 0;
+        font-size: 0.95rem;
+        display: flex;
+        justify-content: space-between;
+    }
+    .t-lab { color: #8b949e; }
+    .t-val { color: #ffffff; font-weight: bold; }
+    .ai-strategy-box {
+        padding: 20px;
+        border-radius: 15px;
+        margin-top: 25px;
+        font-size: 1rem;
+        background: rgba(0, 255, 136, 0.05);
+        border: 1px solid #00ff88;
+        line-height: 1.6;
+        text-align: left;
+        color: #00ff88;
+    }
+    .news-link {
+        color: #58a6ff;
+        text-decoration: none;
+        font-size: 0.85rem;
+        display: block;
+        margin-bottom: 12px;
+        text-align: left;
+    }
+    .block-container {
+        max-width: 98% !important;
+        padding-top: 1.5rem !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ======================================================================
+# 3. UTILS + PLIK TICKERÓW
+# ======================================================================
+
+def load_tickers():
+    if os.path.exists(TICKERS_FILE):
+        try:
+            with open(TICKERS_FILE, "r") as f:
+                c = f.read().strip()
+                return c
+        except Exception:
+            pass
+    return ""
+
+def save_tickers(text):
+    with open(TICKERS_FILE, "w") as f:
+        f.write(text)
+
+def format_pln(v):
+    return f"{v:,.2f} zł".replace(",", " ").replace(".", ",")
+
+# ======================================================================
+# 4. PORTFEL
+# ======================================================================
 
 def load_portfolio():
     if not os.path.exists(PORTFOLIO_FILE):
-        return {"positions": [], "history": []}
+        return {"positions": [], "history": [], "value_history": []}
     try:
         with open(PORTFOLIO_FILE, "r") as f:
             return json.load(f)
-    except:
-        return {"positions": [], "history": []}
+    except Exception:
+        return {"positions": [], "history": [], "value_history": []}
 
 def save_portfolio(p):
     with open(PORTFOLIO_FILE, "w") as f:
         json.dump(p, f, indent=4)
 
 def add_transaction(portfolio, symbol, qty, price):
-    """Dodaje transakcję BUY lub SELL."""
     symbol = symbol.upper()
     qty = float(qty)
     price = float(price)
-
-    # zapis do historii
     portfolio["history"].append({
         "symbol": symbol,
         "qty": qty,
         "price": price,
         "timestamp": datetime.utcnow().isoformat()
     })
-
-    # aktualizacja pozycji
     pos = next((x for x in portfolio["positions"] if x["symbol"] == symbol), None)
-
     if pos is None:
         portfolio["positions"].append({
             "symbol": symbol,
@@ -183,25 +230,70 @@ def add_transaction(portfolio, symbol, qty, price):
             pos["qty"] = new_qty
         else:
             pos["qty"] = new_qty
-
     return portfolio
 
-portfolio = load_portfolio()
+def compute_portfolio_value(portfolio, prices, prices_yesterday=None):
+    total = 0.0
+    total_pl = 0.0
+    daily_pl = 0.0
+    details = []
+    for pos in portfolio["positions"]:
+        sym = pos["symbol"]
+        qty = pos["qty"]
+        avg = pos["avg_price"]
+        if qty == 0:
+            continue
+        price = prices.get(sym)
+        if price is None:
+            continue
+        value = qty * price
+        pl = (price - avg) * qty
+        total += value
+        total_pl += pl
+        if prices_yesterday is not None and sym in prices_yesterday:
+            daily_pl += (price - prices_yesterday[sym]) * qty
+        details.append({
+            "symbol": sym,
+            "qty": qty,
+            "avg_price": avg,
+            "price": price,
+            "value": value,
+            "pl": pl,
+        })
+    return total, total_pl, daily_pl, details
+
+def update_portfolio_history(portfolio, total_value):
+    portfolio["value_history"].append({
+        "timestamp": datetime.utcnow().isoformat(),
+        "value": total_value
+    })
+    save_portfolio(portfolio)
+
+def portfolio_chart(portfolio):
+    if not portfolio["value_history"]:
+        return None
+    df = pd.DataFrame(portfolio["value_history"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.sort_values("timestamp")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df["timestamp"],
+        y=df["value"],
+        mode="lines",
+        line=dict(color="#58a6ff", width=3),
+        name="Wartość portfela"
+    ))
+    fig.update_layout(
+        template="plotly_dark",
+        height=300,
+        margin=dict(l=0, r=0, t=0, b=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
 
 # ======================================================================
-# 5. UTILS
-# ======================================================================
-
-def format_pln(v):
-    return f"{v:,.2f} zł".replace(",", " ").replace(".", ",")
-
-def safe_float(v, default=0.0):
-    try:
-        return float(v)
-    except:
-        return default
-# ======================================================================
-# 6. ANALITYKA TECHNICZNA — RSI, MACD, EMA, ATR, PIVOTY, SCORING
+# 5. ANALITYKA TECHNICZNA
 # ======================================================================
 
 def compute_rsi(series, period=14):
@@ -230,112 +322,88 @@ def compute_atr(df, period=14):
     ], axis=1).max(axis=1)
     return tr.rolling(period).mean()
 
-# ======================================================================
-# 7. PIVOTY — KLASYCZNE, CAMARILLA, FIBONACCI
-# ======================================================================
-
-def pivots_classic(prev_high, prev_low, prev_close):
-    p = (prev_high + prev_low + prev_close) / 3
-    r1 = 2*p - prev_low
-    s1 = 2*p - prev_high
-    r2 = p + (prev_high - prev_low)
-    s2 = p - (prev_high - prev_low)
-    r3 = prev_high + 2*(p - prev_low)
-    s3 = prev_low - 2*(prev_high - p)
+def pivots_classic(h, l, c):
+    p = (h + l + c) / 3
+    r1 = 2*p - l
+    s1 = 2*p - h
+    r2 = p + (h - l)
+    s2 = p - (h - l)
+    r3 = h + 2*(p - l)
+    s3 = l - 2*(h - p)
     return p, r1, s1, r2, s2, r3, s3
 
-def pivots_camarilla(prev_high, prev_low, prev_close):
-    rng = prev_high - prev_low
-    r1 = prev_close + rng * 1.1/12
-    r2 = prev_close + rng * 1.1/6
-    r3 = prev_close + rng * 1.1/4
-    r4 = prev_close + rng * 1.1/2
-    s1 = prev_close - rng * 1.1/12
-    s2 = prev_close - rng * 1.1/6
-    s3 = prev_close - rng * 1.1/4
-    s4 = prev_close - rng * 1.1/2
+def pivots_camarilla(h, l, c):
+    r = h - l
+    r1 = c + r * 1.1/12
+    r2 = c + r * 1.1/6
+    r3 = c + r * 1.1/4
+    r4 = c + r * 1.1/2
+    s1 = c - r * 1.1/12
+    s2 = c - r * 1.1/6
+    s3 = c - r * 1.1/4
+    s4 = c - r * 1.1/2
     return r1, r2, r3, r4, s1, s2, s3, s4
 
-def pivots_fibonacci(prev_high, prev_low, prev_close):
-    p = (prev_high + prev_low + prev_close) / 3
-    rng = prev_high - prev_low
-    r1 = p + 0.382 * rng
-    r2 = p + 0.618 * rng
-    r3 = p + 1.000 * rng
-    s1 = p - 0.382 * rng
-    s2 = p - 0.618 * rng
-    s3 = p - 1.000 * rng
+def pivots_fibonacci(h, l, c):
+    p = (h + l + c) / 3
+    r = h - l
+    r1 = p + 0.382 * r
+    r2 = p + 0.618 * r
+    r3 = p + 1.000 * r
+    s1 = p - 0.382 * r
+    s2 = p - 0.618 * r
+    s3 = p - 1.000 * r
     return p, r1, r2, r3, s1, s2, s3
-
-# ======================================================================
-# 8. SCORING 0–100
-# ======================================================================
 
 def compute_score(rsi, macd, ema20, ema50, price, atr):
     score = 50
-
-    # RSI
     if rsi < 30:
         score += 15
     elif rsi > 70:
         score -= 15
-
-    # MACD
     if macd > 0:
         score += 10
     else:
         score -= 10
-
-    # EMA cross
     if ema20 > ema50:
         score += 10
     else:
         score -= 10
-
-    # ATR (zmienność)
     if atr > price * 0.05:
         score -= 5
     else:
         score += 5
-
     return max(0, min(100, score))
-
-# ======================================================================
-# 9. GŁÓWNA FUNKCJA ANALITYCZNA DLA TICKERA
-# ======================================================================
 
 def analyze_symbol(symbol):
     try:
         t = yf.Ticker(symbol, session=session)
         df = t.history(period="1y", interval="1d", auto_adjust=False)
-
         if df.empty or len(df) < 50:
             return None
-
         df["Close"] = df["Close"].replace(0, np.nan).ffill()
-
         price = df["Close"].iloc[-1]
         prev = df.iloc[-2]
-
-        # Techniczne
         rsi = compute_rsi(df["Close"]).iloc[-1]
         macd = compute_macd(df["Close"]).iloc[-1]
         ema20 = compute_ema(df["Close"], 20).iloc[-1]
         ema50 = compute_ema(df["Close"], 50).iloc[-1]
         atr = compute_atr(df).iloc[-1]
-
-        # Pivoty
         p_classic = pivots_classic(prev["High"], prev["Low"], prev["Close"])
         p_camarilla = pivots_camarilla(prev["High"], prev["Low"], prev["Close"])
         p_fibo = pivots_fibonacci(prev["High"], prev["Low"], prev["Close"])
-
-        # TP/SL dynamiczne
         sl = price - atr * 1.5
         tp = price + atr * 3.0
-
-        # Scoring
         score = compute_score(rsi, macd, ema20, ema50, price, atr)
-
+        news = []
+        try:
+            for n in t.news[:3]:
+                news.append({
+                    "title": str(n.get("title", ""))[:65],
+                    "link": n.get("link", ""),
+                })
+        except Exception:
+            pass
         return {
             "symbol": symbol,
             "price": float(price),
@@ -350,129 +418,27 @@ def analyze_symbol(symbol):
             "p_classic": p_classic,
             "p_camarilla": p_camarilla,
             "p_fibo": p_fibo,
-            "df": df.tail(120)
+            "df": df.tail(80),
+            "news": news,
         }
-
     except Exception:
         return None
-# ======================================================================
-# 10. PORTFEL PRO — WARTOŚĆ, P/L, TOP-10, WYKRES PORTFELA
-# ======================================================================
-
-def compute_portfolio_value(portfolio, prices):
-    """Oblicza aktualną wartość portfela na podstawie cen rynkowych."""
-    total = 0
-    details = []
-
-    for pos in portfolio["positions"]:
-        sym = pos["symbol"]
-        qty = pos["qty"]
-        avg = pos["avg_price"]
-
-        if qty == 0:
-            continue
-
-        price = prices.get(sym, None)
-        if price is None:
-            continue
-
-        value = qty * price
-        pl = (price - avg) * qty
-
-        details.append({
-            "symbol": sym,
-            "qty": qty,
-            "avg_price": avg,
-            "price": price,
-            "value": value,
-            "pl": pl
-        })
-
-        total += value
-
-    return total, details
-
-
-def compute_daily_pl(portfolio, prices_today, prices_yesterday):
-    """P/L dzienny."""
-    total = 0
-    for pos in portfolio["positions"]:
-        sym = pos["symbol"]
-        qty = pos["qty"]
-
-        if qty == 0:
-            continue
-
-        p_today = prices_today.get(sym, None)
-        p_yest = prices_yesterday.get(sym, None)
-
-        if p_today is None or p_yest is None:
-            continue
-
-        total += (p_today - p_yest) * qty
-
-    return total
-
-
-def portfolio_chart(history):
-    """Wykres wartości portfela w czasie."""
-    if len(history) < 2:
-        return None
-
-    df = pd.DataFrame(history)
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.sort_values("timestamp")
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df["timestamp"],
-        y=df["value"],
-        mode="lines",
-        line=dict(color="#58a6ff", width=3),
-        name="Wartość portfela"
-    ))
-
-    fig.update_layout(
-        template="plotly_dark",
-        height=350,
-        margin=dict(l=0, r=0, t=0, b=0),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-    )
-    return fig
-
-
-def update_portfolio_history(portfolio, total_value):
-    """Zapisuje wartość portfela do historii."""
-    if "value_history" not in portfolio:
-        portfolio["value_history"] = []
-
-    portfolio["value_history"].append({
-        "timestamp": datetime.utcnow().isoformat(),
-        "value": total_value
-    })
-
-    save_portfolio(portfolio)
-
 
 # ======================================================================
-# 11. AI SUMMARY PORTFELA
+# 6. AI SUMMARY PORTFELA
 # ======================================================================
 
 def ai_summary_portfolio(details):
     if not client:
         return "Brak klucza API."
-
     if not details:
         return "Portfel jest pusty."
-
     text = "Podsumuj portfel inwestora. Dane:\n"
     for d in details:
         text += (
             f"- {d['symbol']}: qty={d['qty']}, avg={d['avg_price']:.4f}, "
             f"price={d['price']:.4f}, value={d['value']:.2f}, pl={d['pl']:.2f}\n"
         )
-
     prompt = (
         "Jesteś analitykiem finansowym. Oceń portfel inwestora, "
         "zwróć uwagę na ryzyko, dywersyfikację, ekspozycję, "
@@ -480,28 +446,25 @@ def ai_summary_portfolio(details):
         "Podaj rekomendacje i ocenę portfela w skali 0–100.\n\n"
         + text
     )
-
     try:
         r = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
         )
         return r.choices[0].message.content
-    except:
+    except Exception:
         return "Błąd AI."
-```python
+
 # ======================================================================
-# 12. UI GŁÓWNY – TICKERY, AUTO-REFRESH, PORTFEL, KAFELKI
+# 7. UI GŁÓWNY – TICKERY, AUTO-REFRESH, PORTFEL, KAFELKI
 # ======================================================================
 
 st.sidebar.title("🚜 MONSTER v74 PRO")
 
-# Auto-refresh 1–10 minut
 refresh_minutes = st.sidebar.slider("Auto-refresh (minuty)", 1, 10, 3)
 if st.sidebar.checkbox("Włącz auto-refresh", value=True):
     st_autorefresh(interval=refresh_minutes * 60 * 1000, key="auto_refresh_v74")
 
-# Ryzyko
 st.session_state.risk_cap = st.sidebar.number_input(
     "Kapitał PLN:", value=st.session_state.risk_cap
 )
@@ -509,7 +472,6 @@ st.session_state.risk_pct = st.sidebar.slider(
     "Ryzyko % na pozycję:", 0.1, 5.0, st.session_state.risk_pct
 )
 
-# Tickery – bez żadnych firm na sztywno
 tickers_text = st.sidebar.text_area(
     "Lista symboli (CSV):",
     load_tickers(),
@@ -520,10 +482,6 @@ tickers_text = st.sidebar.text_area(
 if st.sidebar.button("💾 Zapisz listę"):
     save_tickers(tickers_text)
     st.experimental_rerun()
-
-# ======================================================================
-# 13. GŁÓWNE OBLICZENIA
-# ======================================================================
 
 st.title("AI ALPHA MONSTER PRO v74")
 
@@ -549,7 +507,7 @@ if total_value > 0:
     update_portfolio_history(portfolio, total_value)
 
 # ======================================================================
-# 14. TOP 10 SYGNAŁÓW (SCORING)
+# 8. TOP 10 SYGNAŁÓW (SCORING)
 # ======================================================================
 
 if results:
@@ -580,7 +538,7 @@ if results:
 st.divider()
 
 # ======================================================================
-# 15. PORTFEL – KAFELKI + WYKRES
+# 9. PORTFEL – KAFELKI + WYKRES
 # ======================================================================
 
 st.subheader("📊 Portfel (PLN)")
@@ -607,7 +565,6 @@ if port_details:
     if st.checkbox("Pokaż pełny portfel"):
         st.dataframe(df_port_sorted)
 
-# AI summary portfela
 if st.checkbox("🤖 AI podsumowanie portfela"):
     with st.spinner("AI analizuje portfel..."):
         summary = ai_summary_portfolio(port_details)
@@ -616,7 +573,7 @@ if st.checkbox("🤖 AI podsumowanie portfela"):
 st.divider()
 
 # ======================================================================
-# 16. KAFELKI DLA KAŻDEGO TICKERA
+# 10. KAFELKI DLA KAŻDEGO TICKERA
 # ======================================================================
 
 if results:
@@ -707,7 +664,7 @@ if results:
             st.markdown("</div>", unsafe_allow_html=True)
 
 # ======================================================================
-# 17. STOPKA
+# 11. STOPKA
 # ======================================================================
 
 st.markdown(
@@ -715,3 +672,4 @@ st.markdown(
     "Auto-refresh: 1–10 min</small></center>",
     unsafe_allow_html=True,
 )
+```
