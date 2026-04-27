@@ -443,28 +443,8 @@ if results:
                     config={"displayModeBar": False},
                 )
 
-                if client and st.button(
-                    f"🤖 STRATEGIA AI {r['symbol']}",
-                    key=f"ai_{r['symbol']}_{idx}",
-                ):
-                    prompt = (
-                        f"Analiza {r['symbol']}: "
-                        f"cena {r['price']:.6f}, RSI {r['rsi']:.1f}, "
-                        f"MACD {r['macd']:.4f}, Pivot {r['pivot']:.4f}, "
-                        f"ATR {r['atr']:.4f}, SL {r['sl']:.6f}, TP {r['tp']:.6f}. "
-                        "Podaj konkretny plan wejścia, wyjścia, zarządzania pozycją i ryzykiem "
-                        "dla krótkoterminowego trade'u."
-                    )
-                ai_res = client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[{"role": "user", "content": prompt}],
-                    )
-                st.markdown(
-                        f"<div class='ai-strategy-box'>{ai_res.choices[0].message.content}</div>",
-                        unsafe_allow_html=True,
-                    )
-
-                    # Używamy ai_resp, aby nie nadpisać danych spółki w 'res'
+                                # Sekcja AI
+                              if client:
                     ai_resp = client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[{"role": "user", "content": prompt}],
@@ -478,6 +458,35 @@ if results:
                     "<div style='text-align:left; margin-top:20px;'>"
                     "<span class='t-lab'>OSTATNIE NEWSY:</span></div>",
                     unsafe_allow_html=True,
+                )
+                
+                for n in res["news"]:
+                    if n.get("link"):
+                        st.markdown(
+                            f"<a class='news-link' href='{n['link']}' target='_blank'>● {n['title']}</a>",
+                            unsafe_allow_html=True,
+                        )
+
+                st.markdown("</div>", unsafe_allow_html=True)
+
+# Stopka musi być maksymalnie po lewej stronie (zero spacji przed st.markdown)
+st.markdown(
+    "<center><br><small style='color:#333;'>AI ALPHA MONSTER PRO v71 ULTRA © 2026 | "
+    "Auto-refresh: 60s</small></center>",
+    unsafe_allow_html=True,
+)
+ 
+                        )
+
+                st.markdown("</div>", unsafe_allow_html=True)
+
+# Stopka - musi być dosunięta do lewej krawędzi (zero spacji!)
+st.markdown(
+    "<center><br><small style='color:#333;'>AI ALPHA MONSTER PRO v71 ULTRA © 2026 | "
+    "Auto-refresh: 60s</small></center>",
+    unsafe_allow_html=True,
+)
+
                 )
                 
                 for n in res["news"]:
