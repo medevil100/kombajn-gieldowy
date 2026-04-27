@@ -1,6 +1,4 @@
-Zapisz po prostu ten plik jako **`kombaj.py`** — kod masz tu w całości:
-
-```python
+python
 # ======================================================================
 #  AI ALPHA MONSTER PRO v74 — FULL SINGLE-FILE BUILD (kombaj.py)
 # ======================================================================
