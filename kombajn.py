@@ -1,8 +1,3 @@
-python
-# ======================================================================
-#  AI ALPHA MONSTER PRO v74 — FULL SINGLE-FILE BUILD (kombaj.py)
-# ======================================================================
-
 import streamlit as st
 from openai import OpenAI
 import yfinance as yf
