@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 # ==============================================================================
 # 1. KONFIGURACJA ŚRODOWISKA
 # ==============================================================================
-st.set_page_config(page_title="AI ALPHA MONSTER v75 ULTRA", page_icon="🚜", layout="wide")
+st.set_page_config(page_title="AI ALPHA MONSTER v76", page_icon="🚜", layout="wide")
 DB_FILE = "moje_spolki.txt"
 
 AI_KEY = st.secrets.get("OPENAI_API_KEY", "")
@@ -24,129 +24,110 @@ def load_tickers():
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "r") as f:
-                content = f.read().strip()
-                return content if content else "NVDA, TSLA, BTC-USD, AAPL"
+                return f.read().strip()
         except: pass
-    return "NVDA, TSLA, BTC-USD, AAPL"
+    return "ADTX, ACRS, ALZN, ANIX, ATHE, AURA, APM, BBI, BCTX, BDRX, BNOX, BOLT, BTTX, CMMB, CRVS, DRMA, ENLV, EVOK, GHSI, HILS, IMUX, IMNN, INAB, INFI, KTRA, MBIO, MNOV, MREO, NRSN, ONCS, PALI, PBYI, PGEN, RGLS, SABS, SLS, SLNO, TCON, TTOO, VINC, VIRI, XLO, PLRX, IOVA, HUMA, GOSS, FATE, LV"
 
 # ==============================================================================
-# 2. STABILNE STYLE CSS (NEON ULTRA WIDE)
+# 2. STABILNE STYLE CSS
 # ==============================================================================
 st.markdown("""
     <style>
-    .stApp { background-color: #010101; color: #e0e0e0; }
+    .stApp { background-color: #050505; color: #e0e0e0; }
     .neon-card { 
-        background: linear-gradient(145deg, #0d1117, #020202); 
-        padding: 35px; border-radius: 20px; border: 1px solid #30363d; 
-        margin-bottom: 25px; min-height: 800px; width: 100%;
+        background: #0d1117; padding: 25px; border-radius: 15px; 
+        border: 1px solid #30363d; margin-bottom: 20px; min-height: 850px;
     }
-    .buy { border: 2px solid #00ff88 !important; box-shadow: 0 0 15px rgba(0,255,136,0.2); }
-    .sell { border: 2px solid #ff4b4b !important; box-shadow: 0 0 15px rgba(255,75,75,0.2); }
-    .neon-label { font-size: 0.8rem; color: #8b949e; text-transform: uppercase; display: block; }
-    .neon-value { font-size: 1.1rem; font-weight: bold; color: #ffffff; margin-bottom: 10px; display: block; }
-    .metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 15px 0; }
+    .buy { border-left: 5px solid #00ff88; }
+    .sell { border-left: 5px solid #ff4b4b; }
+    .neon-label { font-size: 0.8rem; color: #8b949e; text-transform: uppercase; }
+    .neon-value { font-size: 1.1rem; font-weight: bold; color: #ffffff; margin-bottom: 8px; display: block; }
     </style>
     """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 3. SILNIK ANALITYCZNY (ZABEZPIECZONY)
+# 3. SILNIK ANALITYCZNY (PANCERNY)
 # ==============================================================================
-def fetch_monster_analysis(symbol):
+def fetch_analysis(symbol):
     try:
         s = symbol.strip().upper()
         t = yf.Ticker(s)
-        df = t.history(period="2y", interval="1d", auto_adjust=True)
-        if df.empty or len(df) < 150: return None
+        df = t.history(period="1y", auto_adjust=True)
+        if df.empty or len(df) < 50: return None
         
-        close = df['Close']
+        c = df['Close']
+        curr = c.iloc[-1]
+        
         # Wskaźniki
-        sma50 = close.rolling(50).mean().iloc[-1]
-        sma200 = close.rolling(200).mean().iloc[-1]
-        rsi = 100 - (100 / (1 + (close.diff().where(close.diff() > 0, 0).rolling(14).mean() / 
-               close.diff().where(close.diff() < 0, 0).abs().rolling(14).mean()))).iloc[-1]
+        sma50 = c.rolling(50).mean().iloc[-1]
+        sma200 = c.rolling(200).mean().iloc[-1]
+        rsi = 100 - (100 / (1 + (c.diff().where(c.diff() > 0, 0).rolling(14).mean() / 
+                                 c.diff().where(c.diff() < 0, 0).abs().rolling(14).mean()))).iloc[-1]
         
-        prev = df.iloc[-2]
-        pp = (prev['High'] + prev['Low'] + prev['Close']) / 3
+        h52, l52 = df['High'].max(), df['Low'].min()
         atr = (df['High']-df['Low']).rolling(14).mean().iloc[-1]
-        
         sh = int((st.session_state.risk_cap * (st.session_state.risk_pct / 100)) / (atr * 1.5)) if atr > 0 else 0
-        v_text, v_class = ("KUP 🔥", "buy") if rsi < 35 else ("SPRZEDAJ ⚠️", "sell") if rsi > 65 else ("TRZYMAJ ⏳", "hold")
         
-        # Bezpieczne newsy
-        news = []
-        try:
-            for n in t.news[:3]:
-                title = n.get('title')
-                if title: news.append({"t": str(title)[:55], "l": n.get('link', '#')})
-        except: pass
+        v_text, v_class = ("KUP 🔥", "buy") if rsi < 35 else ("SPRZEDAJ ⚠️", "sell") if rsi > 65 else ("TRZYMAJ ⏳", "hold")
 
         return {
-            "s": s, "p": close.iloc[-1], "rsi": rsi, "pp": pp, "sh": sh,
-            "sl": close.iloc[-1] - (atr * 1.5), "tp": close.iloc[-1] + (atr * 3), 
-            "s50": sma50, "s200": sma200, "df": df.tail(60), "v": v_text, "vc": v_class, "news": news
+            "s": s, "p": curr, "rsi": rsi, "h52": h52, "l52": l52, "sh": sh,
+            "sl": curr - (atr * 1.5), "tp": curr + (atr * 3), "s50": sma50, "s200": sma200, 
+            "df": df.tail(40), "v": v_text, "vc": v_class
         }
     except: return None
 
-def get_ai_strategy(r):
-    if not client: return "Brak klucza OpenAI."
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o", 
-            messages=[{"role": "user", "content": f"Analiza {r['s']}: Cena {r['p']:.2f}, RSI {r['rsi']:.1f}. Podaj SL, TP i strategię 3 pkt. Konkret."}],
-            max_tokens=500
-        )
-        return resp.choices.message.content
-    except: return "Błąd AI."
-
 # ==============================================================================
-# 4. INTERFEJS GŁÓWNY (SYSTEM ZAKŁADEK)
+# 4. UI GŁÓWNE
 # ==============================================================================
 with st.sidebar:
-    st.title("🚜 MONSTER v75 ULTRA")
-    t_in = st.text_area("Symbole (CSV):", load_tickers(), height=250)
+    st.title("🚜 KONTROLA v76")
+    t_in = st.text_area("Symbole (CSV):", load_tickers(), height=300)
     st.session_state.risk_cap = st.number_input("Kapitał (PLN):", value=st.session_state.risk_cap)
-    st.session_state.risk_pct = st.slider("Ryzyko %:", 0.1, 5.0, st.session_state.risk_pct)
+    st.session_state.risk_pct = st.sidebar.slider("Ryzyko %:", 0.1, 5.0, st.session_state.risk_pct)
     if st.button("💾 ZAPISZ I ANALIZUJ"):
         with open(DB_FILE, "w") as f: f.write(t_in)
         st.rerun()
 
 symbols = [s.strip().upper() for s in t_in.split(",") if s.strip()]
 
-# Podział na grupy po 6 spółek za pomocą TABS (rozwiązuje błąd removeChild i Paginacji)
-num_groups = (len(symbols) // 6) + (1 if len(symbols) % 6 > 0 else 0)
-tabs = st.tabs([f"Grupa {i+1}" for i in range(num_groups)]) if symbols else []
+# Równoległe pobieranie (max 10 wątków by nie blokować API)
+with ThreadPoolExecutor(max_workers=10) as exe:
+    raw_results = list(exe.map(fetch_analysis, symbols))
+results = [r for r in raw_results if r]
 
-for i, tab in enumerate(tabs):
-    with tab:
-        batch = symbols[i*6 : (i+1)*6]
-        with ThreadPoolExecutor(max_workers=6) as exe:
-            results = [r for r in list(exe.map(fetch_monster_analysis, batch)) if r]
+st.subheader(f"🚜 Kombajn: {len(results)} aktywnych spółek")
+
+# Renderowanie w stabilnym gridzie (3 kolumny)
+cols = st.columns(3)
+for idx, r in enumerate(results):
+    with cols[idx % 3]:
+        st.markdown(f"""
+        <div class="neon-card {r['vc']}">
+            <h3 style="margin:0;">{r['s']} | {r['v']}</h3>
+            <h2 style="color:#58a6ff; margin:10px 0;">{r['p']:.2f} USD</h2>
+            <hr style="border-color:#21262d;">
+            <span class="neon-label">RSI</span><span class="neon-value">{r['rsi']:.1f}</span>
+            <span class="neon-label">SMA 50 / 200</span><span class="neon-value">{r['s50']:.2f} / {r['s200']:.2f}</span>
+            <span class="neon-label">Szczyt / Dołek 52T</span><span class="neon-value">{r['h52']:.2f} / {r['l52']:.2f}</span>
+            <div style="background:rgba(88,166,255,0.1); padding:10px; border-radius:10px;">
+                <small>Pozycja: <b>{r['sh']} szt.</b></small><br>
+                <small>SL: <b>{r['sl']:.2f}</b> | TP: <b>{r['tp']:.2f}</b></small>
+            </div>
+        """, unsafe_allow_html=True)
         
-        cols = st.columns(3)
-        for idx, r in enumerate(results):
-            with cols[idx % 3]:
-                st.markdown(f"""<div class='neon-card {r["vc"]}'>
-                    <h3 style='margin:0;'>{r['s']} | {r['v']}</h3>
-                    <h2 style='color:#58a6ff; margin:10px 0;'>{r['p']:.2f} USD</h2>
-                    <div class='metric-grid'>
-                        <div><span class='neon-label'>RSI</span><span class='neon-value'>{r['rsi']:.1f}</span></div>
-                        <div><span class='neon-label'>Pivot</span><span class='neon-value'>{r['pp']:.2f}</span></div>
-                        <div><span class='neon-label'>SMA 50</span><span class='neon-value'>{r['s50']:.2f}</span></div>
-                        <div><span class='neon-label'>SMA 200</span><span class='neon-value'>{r['s200']:.2f}</span></div>
-                    </div>
-                    <div style='background:rgba(88,166,255,0.1); padding:15px; border-radius:12px; margin-bottom:15px;'>
-                        <b>Pozycja: {r['sh']} szt.</b><br>
-                        <small style='color:#ff4b4b;'>SL: {r['sl']:.2f}</small> | <small style='color:#00ff88;'>TP: {r['tp']:.2f}</small>
-                    </div>
-                """, unsafe_allow_html=True)
-                
-                fig = go.Figure(data=[go.Candlestick(x=r['df'].index, open=r['df']['Open'], high=r['df']['High'], low=r['df']['Low'], close=r['df']['Close'])])
-                fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
-                st.plotly_chart(fig, use_container_width=True, key=f"ch_{r['s']}_{i}")
-                
-                if st.button(f"🤖 RAPORT AI {r['s']}", key=f"ai_{r['s']}_{i}"):
-                    st.info(get_ai_strategy(r))
-                
-                for n in r['news']:
-                    st.markdown(f"• [{n['t']}...]({n['l']})")
-                st.markdown("</div>", unsafe_allow_html=True)
+        # Stabilny Wykres
+        fig = go.Figure(data=[go.Candlestick(x=r['df'].index, open=r['df']['Open'], high=r['df']['High'], low=r['df']['Low'], close=r['df']['Close'])])
+        fig.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True, key=f"ch_{r['s']}")
+        
+        if st.button(f"🤖 ANALIZA AI {r['s']}", key=f"ai_{r['s']}"):
+            if AI_KEY:
+                client = OpenAI(api_key=AI_KEY)
+                resp = client.chat.completions.create(
+                    model="gpt-4o-mini", 
+                    messages=[{"role": "user", "content": f"Analiza {r['s']}: Cena {r['p']:.2f}, RSI {r['rsi']:.1f}. Podaj SL/TP i strategię 3 pkt."}]
+                )
+                st.info(resp.choices[0].message.content)
+            else: st.warning("Brak klucza OpenAI.")
+        st.markdown("</div>", unsafe_allow_html=True)
