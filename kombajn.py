@@ -1,4 +1,4 @@
-Tu masz **czysty `kombaj.py` (FULL, PRO MAX, na nowy Streamlit – używa `st.rerun`)**:
+
 
 python
 import streamlit as st
