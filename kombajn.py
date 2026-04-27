@@ -1,190 +1,170 @@
 import streamlit as st
-from openai import OpenAI
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
+from openai import OpenAI
 from streamlit_autorefresh import st_autorefresh
 import os
-from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
-# --- 1. KONFIGURACJA I PAMIĘĆ ---
+# --- KONFIGURACJA ŚRODOWISKA ---
+st.set_page_config(page_title="AI ALPHA MONSTER v72 PRO", layout="wide")
 DB_FILE = "moje_spolki.txt"
 
-def load_tickers():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r") as f:
-                content = f.read().strip()
-                return content if content else "NVDA, TSLA, BTC-USD, PKO.WA"
-        except:
-            return "NVDA, TSLA, BTC-USD, PKO.WA"
-    return "NVDA, TSLA, BTC-USD, PKO.WA"
+# Pobranie klucza OpenAI z Secrets
+AI_KEY = st.secrets.get("OPENAI_API_KEY", "")
+client = OpenAI(api_key=AI_KEY) if AI_KEY else None
 
-st.set_page_config(page_title="AI ALPHA GOLDEN v26", page_icon="📈", layout="wide")
+# Autorefresh co 5 minut (300 000 ms)
+st_autorefresh(interval=300000, key="data_refresh")
 
-# --- 2. STYLE WIZUALNE ---
+# --- SYSTEM STYLÓW NEON ---
 st.markdown("""
     <style>
-    .stApp { background-color: #050505; color: #e0e0e0; }
-    .ticker-card { 
-        background: linear-gradient(145deg, #0f111a, #1a1c2b); 
-        padding: 25px; border-radius: 15px; border: 1px solid #30363d; margin-bottom: 25px;
+    .stApp { background-color: #050505; color: #e0e0e0; font-family: 'Inter', sans-serif; }
+    .neon-card { 
+        background: rgba(13, 17, 23, 0.9); 
+        padding: 20px; border-radius: 15px; border: 1px solid #30363d; 
+        margin-bottom: 20px; transition: 0.3s;
     }
-    .top-tile {
-        background: #111420; padding: 12px; border-radius: 10px; border-bottom: 3px solid #00ff88; 
-        text-align: center; min-height: 180px;
-    }
-    .metric-row { display: flex; justify-content: space-between; border-bottom: 1px solid #21262d; padding: 6px 0; font-size: 0.9rem; }
-    .bid-ask-mini { font-family: monospace; font-size: 0.75rem; color: #58a6ff; }
-    .sig-buy { color: #00ff88 !important; font-weight: bold; }
-    .sig-sell { color: #ff4b4b !important; font-weight: bold; }
-    .sig-neutral { color: #8b949e; }
+    .buy { border: 2px solid #00ff88 !important; box-shadow: 0 0 15px rgba(0,255,136,0.2); color: #00ff88; }
+    .sell { border: 2px solid #ff4b4b !important; box-shadow: 0 0 15px rgba(255,75,75,0.2); color: #ff4b4b; }
+    .hold { border: 2px solid #8b949e !important; color: #8b949e; }
+    .neon-label { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; }
+    .neon-value { font-size: 1.1rem; font-weight: bold; color: #ffffff; }
+    .metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 15px 0; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. SILNIK ANALIZY ---
-def get_analysis(symbol):
+# --- FUNKCJE SILNIKA ---
+def fetch_analysis_data(symbol):
     try:
-        s_ticker = symbol.strip().upper()
-        t = yf.Ticker(s_ticker)
+        t = yf.Ticker(symbol.strip().upper())
+        df = t.history(period="1y", interval="1d") # 1 rok dla szczytów/dołków 52-tyg
+        if df.empty: return None
         
-        # Pobieranie danych: 1h do RSI i 1d do średnich/ekstremów
-        h1 = t.history(period="10d", interval="1h")
-        d1 = t.history(period="1y", interval="1d")
-        
-        if h1.empty or d1.empty: return None
-        
-        # Standaryzacja kolumn (obsługa MultiIndex)
-        if isinstance(h1.columns, pd.MultiIndex): h1.columns = h1.columns.get_level_values(0)
-        if isinstance(d1.columns, pd.MultiIndex): d1.columns = d1.columns.get_level_values(0)
-        
-        price = h1['Close'].iloc[-1]
-        
-        # Bid/Ask z info lub szacowany
+        # Dane bieżące
         info = t.info
-        bid = info.get('bid') or price * 0.9998
-        ask = info.get('ask') or price * 1.0002
+        curr = df['Close'].iloc[-1]
         
-        # Wskaźniki i Ekstrema
-        sma50 = d1['Close'].rolling(50).mean().iloc[-1]
-        sma200 = d1['Close'].rolling(200).mean().iloc[-1]
-        yearly_high = d1['High'].max()
-        yearly_low = d1['Low'].min()
+        # 1. Analiza 52-tygodniowa
+        high_52 = info.get("fiftyTwoWeekHigh", df['High'].max())
+        low_52 = info.get("fiftyTwoWeekLow", df['Low'].min())
         
-        # Pivot Point z wczoraj
-        hp, lp, cp = d1['High'].iloc[-2], d1['Low'].iloc[-2], d1['Close'].iloc[-2]
-        pp = (hp + lp + cp) / 3
-        atr = (d1['High'] - d1['Low']).rolling(14).mean().iloc[-1]
+        # 2. Pivot Points (Klasyczne)
+        prev = df.iloc[-2]
+        pivot = (prev['High'] + prev['Low'] + prev['Close']) / 3
+        r1, s1 = (2 * pivot) - prev['Low'], (2 * pivot) - prev['High']
         
-        # RSI 1h (14 okresów)
-        delta = h1['Close'].diff()
+        # 3. RSI (14 dni)
+        delta = df['Close'].diff()
         gain = delta.where(delta > 0, 0).rolling(14).mean()
         loss = delta.where(delta < 0, 0).abs().rolling(14).mean()
         rsi = 100 - (100 / (1 + (gain / (loss + 1e-9)))).iloc[-1]
         
-        # Werdykt
-        if rsi < 32: verd, vcl = "KUP 🔥", "sig-buy"
-        elif rsi > 68: verd, vcl = "SPRZEDAJ ⚠️", "sig-sell"
-        else: verd, vcl = "CZEKAJ ⏳", "sig-neutral"
+        # 4. Werdykt kafelka
+        if rsi < 35: v_text, v_class = "KUP 🔥", "buy"
+        elif rsi > 65: v_text, v_class = "SPRZEDAJ ⚠️", "sell"
+        else: v_text, v_class = "TRZYMAJ ⏳", "hold"
 
         return {
-            "symbol": s_ticker, "price": price, "bid": bid, "ask": ask, "rsi": rsi, 
-            "pp": pp, "sma50": sma50, "sma200": sma200, "verdict": verd, "vcl": vcl,
-            "y_high": yearly_high, "y_low": yearly_low,
-            "tp": price + (atr * 1.8), "sl": price - (atr * 1.3),
-            "df": h1, "change": ((price - cp) / cp * 100)
+            "s": symbol.upper(), "p": curr, "rsi": rsi, "pivot": pivot, "r1": r1, "s1": s1,
+            "h52": high_52, "l52": low_52, "v": v_text, "vc": v_class, "news": t.news[:2], "df": df
         }
-    except Exception as e:
-        return None
+    except: return None
 
-# --- 4. PANEL BOCZNY ---
+def get_ai_pro_analysis(data):
+    if not client: return "Brak klucza OpenAI w skrytce."
+    prompt = f"""
+    Analiza ekspercka dla {data['s']}:
+    Cena: {data['p']:.2f}, RSI: {data['rsi']:.1f}, Pivot: {data['pivot']:.2f}.
+    Szczyt 52-tyg: {data['h52']:.2f}, Dołek 52-tyg: {data['l52']:.2f}.
+    Podaj: Konkretny Stop Loss (SL) i Take Profit (TP), analizę świec z 1 dnia i strategię.
+    Bez lania wody, same fakty.
+    """
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200
+        )
+        return response.choices[0].message.content
+    except: return "Błąd połączenia z AI."
+
+# --- INTERFEJS UŻYTKOWNIKA ---
 with st.sidebar:
-    st.title("🚜 GOLDEN v26")
-    api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
-    t_input = st.text_area("Lista Symboli (oddziel przecinkiem):", value=load_tickers(), height=150)
-    if st.button("💾 ZAPISZ LISTĘ"):
-        with open(DB_FILE, "w") as f: f.write(t_input)
-        st.success("Lista zapisana!")
-    refresh = st.select_slider("Odświeżanie (s)", options=[30, 60, 300], value=60)
+    st.title("🚜 MONSTER v72")
+    new_ticker = st.text_input("Dodaj spółkę (np. NVDA, PKO.WA):")
+    if st.button("DODAJ I ZAPISZ"):
+        with open(DB_FILE, "a") as f: f.write(f"{new_ticker},")
+        st.success("Zapisano!")
+        st.rerun()
+    
+    st.divider()
+    kapital = st.number_input("Twój kapitał (PLN):", value=10000.0, step=1000.0)
+    st.info(f"Monitorowanie portfela: {kapital:,.2f} PLN")
 
-st_autorefresh(interval=refresh * 1000, key="v26_fsh")
+# Wczytywanie tickerów
+if os.path.exists(DB_FILE):
+    with open(DB_FILE, "r") as f:
+        symbols = [s.strip() for s in f.read().split(",") if s.strip()]
+else: symbols = ["AAPL", "TSLA"]
 
-# --- 5. LOGIKA GŁÓWNA ---
-tickers = [x.strip().upper() for x in t_input.split(",") if x.strip()]
-with ThreadPoolExecutor(max_workers=8) as executor:
-    all_data = [d for d in list(executor.map(get_analysis, tickers)) if d is not None]
+# Pobieranie danych
+results = []
+for sym in symbols:
+    res = fetch_analysis_data(sym)
+    if res: results.append(res)
 
-if all_data:
-    # --- TOP 10 RANKING ---
-    st.subheader("🔥 TOP SYGNAŁY (Najniższe RSI)")
-    sorted_top = sorted(all_data, key=lambda x: x['rsi'])[:10]
-    top_cols = st.columns(5)
-    for i, d in enumerate(sorted_top):
-        with top_cols[i % 5]:
+# --- RANKING TOP 10 ---
+st.subheader("🔥 TOP 10 SPÓŁEK (Ranking RSI)")
+top_10 = sorted(results, key=lambda x: x['rsi'])[:10]
+t_cols = st.columns(5)
+for i, r in enumerate(top_10):
+    with t_cols[i % 5]:
+        st.markdown(f"""
+        <div class="neon-card {r['vc']}" style="text-align:center;">
+            <b>{r['s']}</b><br><small>{r['p']:.2f}</small><br>
+            <div style="font-size:0.8rem; margin-top:5px;">{r['v']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+st.divider()
+
+# --- LISTA SZCZEGÓŁOWA ---
+for r in results:
+    with st.container():
+        st.markdown(f'<div class="neon-card {r["vc"]}">', unsafe_allow_html=True)
+        c1, c2, c3 = st.columns([1, 1.5, 1])
+        
+        with c1:
+            st.markdown(f"### {r['s']} | {r['v']}")
+            st.metric("Cena Bieżąca", f"{r['p']:.2f} USD")
             st.markdown(f"""
-                <div class="top-tile">
-                    <b style="font-size:1.2rem;">{d['symbol']}</b><br>
-                    <span style="font-size:1.1rem; color:#58a6ff;">{d['price']:.2f}</span><br>
-                    <div class="bid-ask-mini">B: {d['bid']:.2f} | A: {d['ask']:.2f}</div>
-                    <div class="{d['vcl']}" style="margin-top:5px;">{d['verdict']}</div>
-                    <small>RSI: {d['rsi']:.1f}</small>
+                <div class="metric-grid">
+                    <div><span class="neon-label">Szczyt 52T</span><br><span class="neon-value">{r['h52']:.2f}</span></div>
+                    <div><span class="neon-label">Dołek 52T</span><br><span class="neon-value">{r['l52']:.2f}</span></div>
+                    <div><span class="neon-label">RSI (14)</span><br><span class="neon-value">{r['rsi']:.1f}</span></div>
+                    <div><span class="neon-label">Pivot</span><br><span class="neon-value">{r['pivot']:.2f}</span></div>
                 </div>
             """, unsafe_allow_html=True)
 
-    st.divider()
-
-    # --- LISTA SZCZEGÓŁOWA ---
-    for d in all_data:
-        with st.container():
-            st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
-            c1, c2, c3 = st.columns([1.3, 2, 1.2])
+        with c2:
+            st.markdown("<span class="neon-label">AI STRATEGIA (SL/TP & ŚWIECE)</span>", unsafe_allow_html=True)
+            if st.button(f"GENERUJ ANALIZĘ AI", key=f"ai_{r['s']}"):
+                st.info(get_ai_pro_analysis(r))
             
-            with c1:
-                st.markdown(f"<h3 class='{d['vcl']}'>{d['symbol']} {d['verdict']}</h3>", unsafe_allow_html=True)
-                st.metric("CENA", f"{d['price']:.4f}", f"{d['change']:.2f}%")
-                st.markdown(f"""
-                    <div style="margin-top:15px;">
-                        <div class="metric-row"><span>RSI (1h)</span><b>{d['rsi']:.1f}</b></div>
-                        <div class="metric-row"><span>SMA 200</span><b>{d['sma200']:.2f}</b></div>
-                        <div class="metric-row"><span style="color:#00ff88;">Szczyt 12m</span><b>{d['y_high']:.2f}</b></div>
-                        <div class="metric-row"><span style="color:#ff4b4b;">Dołek 12m</span><b>{d['y_low']:.2f}</b></div>
-                    </div>
-                """, unsafe_allow_html=True)
+            st.markdown("<span class="neon-label">OSTATNIE WIADOMOŚCI</span>", unsafe_allow_html=True)
+            for n in r['news']:
+                st.markdown(f"• [{n['title'][:60]}...]({n['link']})")
 
-            with c2:
-                fig = go.Figure(data=[go.Candlestick(
-                    x=d['df'].index[-50:],
-                    open=d['df']['Open'][-50:],
-                    high=d['df']['High'][-50:],
-                    low=d['df']['Low'][-50:],
-                    close=d['df']['Close'][-50:]
-                )])
-                # Linie szczytów i dołków
-                fig.add_hline(y=d['y_high'], line_dash="dash", line_color="#00ff88", opacity=0.5)
-                fig.add_hline(y=d['y_low'], line_dash="dash", line_color="#ff4b4b", opacity=0.5)
-                fig.update_layout(template="plotly_dark", height=320, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
-                st.plotly_chart(fig, use_container_width=True, key=f"ch_{d['symbol']}")
+        with c3:
+            fig = go.Figure(data=[go.Candlestick(x=r['df'].index[-30:], open=r['df']['Open'][-30:],
+                            high=r['df']['High'][-30:], low=r['df']['Low'][-30:], close=r['df']['Close'][-30:])])
+            fig.update_layout(template="plotly_dark", height=250, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig, use_container_width=True, key=f"ch_{r['s']}")
 
-            with c3:
-                st.write(f"BID: **{d['bid']:.4f}**")
-                st.write(f"ASK: **{d['ask']:.4f}**")
-                st.write(f"Pivot Point: **{d['pp']:.2f}**")
-                st.write(f"Target (TP): **{d['tp']:.2f}**")
-                
-                if api_key and st.button(f"🤖 AI STRATEGIA", key=f"ai_{d['symbol']}"):
-                    try:
-                        client = OpenAI(api_key=api_key)
-                        prompt = (f"Jesteś ekspertem giełdowym. Przeanalizuj {d['symbol']}. "
-                                 f"Cena: {d['price']}, RSI: {d['rsi']:.1f}, SMA200: {d['sma200']:.2f}. "
-                                 f"Max 12m: {d['y_high']}, Min 12m: {d['y_low']}. "
-                                 f"Podaj konkretny werdykt i plan wejścia/wyjścia w 3 punktach.")
-                        resp = client.chat.completions.create(
-                            model="gpt-4o-mini", 
-                            messages=[{"role": "user", "content": prompt}]
-                        )
-                        st.info(resp.choices[0].message.content)
-                    except Exception as e:
-                        st.error("Błąd AI: Sprawdź klucz API.")
-            st.markdown('</div>', unsafe_allow_html=True)
-else:
-    st.info("Dodaj symbole i OpenAI Key w panelu bocznym, aby rozpocząć.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+st.markdown("<center><small>AI ALPHA MONSTER PRO v72 © 2026 | Odświeżanie automatyczne co 5 min</small></center>", unsafe_allow_html=True)
