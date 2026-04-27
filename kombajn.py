@@ -148,12 +148,25 @@ def perform_deep_analysis(symbol):
         rsi_val = 100 - (100 / (1 + (gain / (loss + 1e-9)))).iloc[-1]
         
         # ATR i Zarządzanie Wielkością Pozycji
-        tr = pd.concat([
-            df['High']-df['Low'], 
-            (df['High']-df['Close'].shift()).abs(), 
-            (df['Low']-df['Close'].shift()).abs()
-        ], axis=1).max(axis=1)
-        atr = tr.rolling(14).mean().iloc[-1]
+               # --- POPRAWIONY KALKULATOR POZYCJI (FIXED POSITION SIZING) ---
+        risk_per_trade = st.session_state.risk_cap * (st.session_state.risk_pct / 100)
+        
+        # Stop Loss oparty na 1.6x ATR
+        sl_distance = atr * 1.6
+        
+        if sl_distance > 0:
+            # Ile akcji kupić, aby w razie straty stracić TYLKO kwotę ryzyka?
+            num_shares = int(risk_per_trade / sl_distance)
+            
+            # Zabezpieczenie: Wartość pozycji nie może przekroczyć Twojego całego kapitału
+            max_shares_by_cap = int(st.session_state.risk_cap / price)
+            if num_shares > max_shares_by_cap:
+                num_shares = max_shares_by_cap
+                
+            position_val = num_shares * price
+        else:
+            num_shares, position_val = 0, 0
+
         
         # Kalkulator ryzyka
         risk_per_pos = st.session_state.risk_cap * (st.session_state.risk_pct / 100)
