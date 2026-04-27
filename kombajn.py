@@ -455,7 +455,7 @@ if results:
                         "Podaj konkretny plan wejścia, wyjścia, zarządzania pozycją i ryzykiem "
                         "dla krótkoterminowego trade'u."
                     )
-                     ai_res = client.chat.completions.create(
+                ai_res = client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[{"role": "user", "content": prompt}],
                     )
