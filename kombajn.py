@@ -5,166 +5,140 @@ import numpy as np
 import plotly.graph_objects as go
 from openai import OpenAI
 from streamlit_autorefresh import st_autorefresh
-import os
 import time
-from datetime import datetime
+import os
 from concurrent.futures import ThreadPoolExecutor
 
-# ==============================================================================
-# 1. KONFIGURACJA ŚRODOWISKA
-# ==============================================================================
+# --- KONFIGURACJA ---
+st.set_page_config(page_title="AI MONSTER v81 ULTRA FIX", layout="wide")
 DB_FILE = "moje_spolki.txt"
-st.set_page_config(page_title="AI MONSTER v80 COMPACT", page_icon="🚜", layout="wide")
-
 AI_KEY = st.secrets.get("OPENAI_API_KEY", "")
 client = OpenAI(api_key=AI_KEY) if AI_KEY else None
 
-if 'risk_cap' not in st.session_state: st.session_state.risk_cap = 10000.0
-if 'risk_pct' not in st.session_state: st.session_state.risk_pct = 1.0
-
 def load_tickers():
     if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r") as f: return f.read().strip()
-        except: pass
-    return "ADTX, ACRS, ALZN, ANIX, ATHE, BBI, BNOX"
+        with open(DB_FILE, "r") as f: return f.read().strip()
+    return "ADTX, ACRS, ALZN, ANIX, ATHE, BBI, BNOX, CMMB, DRMA, EVOK"
 
-# ==============================================================================
-# 2. STYLIZACJA COMPACT (Zmniejszone okna i czcionki)
-# ==============================================================================
+# --- STYLE CSS (Naprawione pod Penny Stocks) ---
 st.markdown("""
     <style>
     .stApp { background-color: #050505; color: #e0e0e0; font-family: 'Inter', sans-serif; }
     .compact-card { 
-        background: linear-gradient(145deg, #0d1117, #020202); 
-        padding: 15px; border-radius: 12px; border: 1px solid #30363d; 
-        margin-bottom: 15px; min-height: 650px; width: 100%;
-        transition: 0.2s;
+        background: #0d1117; padding: 20px; border-radius: 15px; 
+        border: 1px solid #30363d; margin-bottom: 20px; min-height: 600px;
     }
-    .buy { border-left: 4px solid #00ff88; }
-    .sell { border-left: 4px solid #ff4b4b; }
-    .hold { border-left: 4px solid #8b949e; }
-    
-    .n-label { font-size: 0.7rem; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; }
-    .n-val { font-size: 0.95rem; font-weight: 700; color: #ffffff; display: block; margin-bottom: 4px; }
-    
-    .metric-grid { 
-        display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; 
-        margin: 10px 0; background: rgba(255,255,255,0.02); padding: 10px; border-radius: 8px;
-    }
-    
-    .pos-mini-box {
-        background: rgba(88, 166, 255, 0.05); padding: 10px; 
-        border-radius: 8px; border: 1px solid #58a6ff; margin: 10px 0; text-align: center;
-    }
-    .sig-mini { font-weight: 900; font-size: 1rem; }
-    .block-container { max-width: 98% !important; padding-top: 1rem !important; }
+    .sig-buy { color: #00ff88; font-weight: bold; }
+    .sig-sell { color: #ff4b4b; font-weight: bold; }
+    .n-label { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; }
+    .n-val { font-size: 1rem; font-weight: bold; color: #ffffff; display: block; margin-bottom: 5px; }
+    .metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0; }
     </style>
     """, unsafe_allow_html=True)
 
-# ==============================================================================
-# 3. SILNIK ANALITYCZNY (WSZYSTKIE DANE)
-# ==============================================================================
-def fetch_data(symbol):
+# --- SILNIK POBIERANIA (Penny Stock Fix) ---
+def get_pro_data(symbol):
     try:
-        time.sleep(0.1)
         s = symbol.strip().upper()
+        time.sleep(0.3) # Spowolnienie, by uniknąć bana od Yahoo
         t = yf.Ticker(s)
-        df = t.history(period="2y", interval="1d", auto_adjust=True)
-        if df.empty or len(df) < 150: return None
         
-        c = df['Close'].replace(0, np.nan).ffill()
-        curr = c.iloc[-1]
+        # Pobieramy dane bez auto_adjust (ważne dla spółek poniżej 1 USD)
+        df = t.history(period="1y", interval="1d", auto_adjust=False)
         
-        # Wskaźniki
-        s50, s200 = c.rolling(50).mean().iloc[-1], c.rolling(200).mean().iloc[-1]
-        delta = c.diff(); g = delta.where(delta > 0, 0).rolling(14).mean(); l = delta.where(delta < 0, 0).abs().rolling(14).mean()
-        rsi = 100 - (100 / (1 + (g / (l + 1e-9)))).iloc[-1]
+        if df.empty or len(df) < 30: return None
         
-        exp1 = c.ewm(span=12).mean(); exp2 = c.ewm(span=26).mean(); macd = (exp1 - exp2).iloc[-1]
+        # Naprawa cen zerowych
+        df['Close'] = df['Close'].replace(0, np.nan).ffill()
+        curr = df['Close'].iloc[-1]
+        
+        # Obliczenia techniczne
+        sma50 = df['Close'].rolling(50).mean().iloc[-1]
+        sma200 = df['Close'].rolling(200).mean().iloc[-1]
+        
+        # RSI (14)
+        delta = df['Close'].diff()
+        gain = delta.where(delta > 0, 0).rolling(14).mean()
+        loss = delta.where(delta < 0, 0).abs().rolling(14).mean()
+        rsi = 100 - (100 / (1 + (gain / (loss + 1e-9)))).iloc[-1]
+        
+        # Ekstrema i Pivot
+        h52, l52 = df['High'].max(), df['Low'].min()
         prev = df.iloc[-2]
         pp = (prev['High'] + prev['Low'] + prev['Close']) / 3
-        h52, l52 = df['High'].tail(252).max(), df['Low'].tail(252).min()
         
         # ATR i Pozycja
-        tr = pd.concat([df['High']-df['Low'], (df['High']-c.shift()).abs()], axis=1).max(axis=1)
+        tr = pd.concat([df['High']-df['Low'], (df['High']-df['Close'].shift()).abs()], axis=1).max(axis=1)
         atr = tr.rolling(14).mean().iloc[-1]
-        sh = int((st.session_state.risk_cap * (st.session_state.risk_pct / 100)) / (atr * 1.5)) if atr > 0 else 0
         
-        v_text, v_class = ("KUP", "buy") if rsi < 35 else ("SPRZEDAJ", "sell") if rsi > 65 else ("CZEKAJ", "hold")
-        
-        # Formacja
-        last = df.iloc[-1]; body = abs(last['Open'] - last['Close'])
-        pattern = "DOJI" if body < (last['High'] - last['Low']) * 0.1 else "STANDARD"
+        risk = st.session_state.get('risk_cap', 10000) * (st.session_state.get('risk_pct', 1.0) / 100)
+        # Dla penny stocks używamy większego bufora ATR (2.0)
+        sh = int(risk / (atr * 2.0)) if atr > 0 else 0
 
         return {
-            "s": s, "p": curr, "rsi": rsi, "macd": macd, "pp": pp, "h52": h52, "l52": l52,
-            "sh": sh, "sl": curr-(atr*1.5), "tp": curr+(atr*3.5), "s50": s50, "s200": s200,
-            "df": df.tail(40), "v": v_text, "vc": v_class, "pat": pattern, "news": t.news[:2]
+            "s": s, "p": curr, "rsi": rsi, "s50": sma50, "s200": sma200, "h52": h52, "l52": l52,
+            "pp": pp, "sh": sh, "sl": curr - (atr * 2.0), "tp": curr + (atr * 4.0),
+            "df": df.tail(40), "news": t.news[:2]
         }
     except: return None
 
-def get_ai_response(r):
-    if not client: return "Brak klucza."
-    try:
-        p = f"Analiza {r['s']}: Cena {r['p']:.2f}, RSI {r['rsi']:.1f}, SMA200 {r['s200']:.2f}. Podaj SL/TP i plan."
-        return client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":p}], max_tokens=200).choices[0].message.content
-    except: return "AI błąd."
-
-# ==============================================================================
-# 4. INTERFEJS I WYŚWIETLANIE (Lista bez grup)
-# ==============================================================================
+# --- UI ---
 with st.sidebar:
-    st.title("🚜 MONSTER v80")
-    refresh_val = st.slider("Refresh (min):", 1, 15, 5)
-    st_autorefresh(interval=refresh_val * 60000, key="global_refresh")
-    t_in = st.text_area("Symbole:", load_tickers(), height=200)
-    st.session_state.risk_cap = st.number_input("Kapitał:", value=st.session_state.risk_cap)
-    st.session_state.risk_pct = st.slider("Ryzyko %:", 0.1, 5.0, st.session_state.risk_pct)
+    st.title("🚜 MONSTER v81 FIX")
+    t_in = st.text_area("Symbole (CSV):", load_tickers(), height=250)
+    st.session_state.risk_cap = st.number_input("Kapitał (PLN):", value=10000.0)
+    st.session_state.risk_pct = st.slider("Ryzyko %:", 0.1, 5.0, 1.0)
     if st.button("💾 ZAPISZ I ANALIZUJ"):
-        with open(DB_FILE, "w") as f: f.write(t_in); st.rerun()
+        with open(DB_FILE, "w") as f: f.write(t_in)
+        st.rerun()
+    st_autorefresh(interval=300000, key="data_refresh")
 
 symbols = [s.strip().upper() for s in t_in.split(",") if s.strip()]
 
-with ThreadPoolExecutor(max_workers=10) as exe:
-    results = [r for r in list(exe.map(fetch_data, symbols)) if r]
+# Pobieranie danych
+with ThreadPoolExecutor(max_workers=5) as exe: # Mniej pracowników = mniejsza szansa na ban od Yahoo
+    results = [r for r in list(exe.map(get_pro_data, symbols)) if r]
 
-st.subheader(f"🚜 Kombajn: {len(results)} spółek (Pełna Lista)")
+st.subheader(f"🚜 Aktywne analizy: {len(results)} spółek")
 
 cols = st.columns(3)
 for idx, r in enumerate(results):
     with cols[idx % 3]:
-        with st.container():
-            st.markdown(f"""
-            <div class="compact-card {r['vc']}">
-                <div style="display:flex; justify-content:space-between;">
-                    <b>{r['s']}</b><span class="sig-mini" style="color:{'#00ff88' if r['vc']=='buy' else '#ff4b4b' if r['vc']=='sell' else '#8b949e'}">{r['v']}</span>
-                </div>
-                <h2 style="color:#58a6ff; margin:5px 0;">{r['p']:.4f}</h2>
-                
-                <div class="pos-mini-box">
-                    <span class="n-label">Sugerowana Pozycja</span>
-                    <b style="font-size:1.2rem; color:#58a6ff;">{r['sh']} SZT.</b><br>
-                    <small>SL: {r['sl']:.2f} | TP: {r['tp']:.2f}</small>
-                </div>
+        # Karta spółki
+        st.markdown(f"""
+        <div class="compact-card">
+            <div style="display:flex; justify-content:space-between;">
+                <b style="font-size:1.5rem;">{r['s']}</b>
+                <span class="{'sig-buy' if r['rsi'] < 35 else 'sig-sell' if r['rsi'] > 65 else ''}">
+                    {'KUP 🔥' if r['rsi'] < 35 else 'SPRZEDAJ ⚠️' if r['rsi'] > 65 else 'CZEKAJ ⏳'}
+                </span>
+            </div>
+            <h1 style="color:#58a6ff; margin:10px 0;">{r['p']:.6f}</h1>
+            
+            <div style="background:rgba(88,166,255,0.1); padding:12px; border-radius:10px; margin-bottom:15px; border:1px solid #58a6ff;">
+                <span class="n-label">Sugerowana Pozycja</span>
+                <span style="font-size:1.4rem; font-weight:bold; color:#ffffff; display:block;">{r['sh']} SZT.</span>
+                <small style="color:#ff4b4b;">SL: {r['sl']:.6f}</small> | <small style="color:#00ff88;">TP: {r['tp']:.6f}</small>
+            </div>
 
-                <div class="metric-grid">
-                    <div><span class="n-label">RSI</span><span class="n-val">{r['rsi']:.1f}</span></div>
-                    <div><span class="n-label">MACD</span><span class="n-val">{r['macd']:.2f}</span></div>
-                    <div><span class="n-label">SMA200</span><span class="n-val">{r['s200']:.2f}</span></div>
-                    <div><span class="n-label">Pivot</span><span class="n-val">{r['pp']:.2f}</span></div>
-                    <div><span class="n-label">Max 52T</span><span class="n-val">{r['h52']:.2f}</span></div>
-                    <div><span class="n-label">Świeca</span><span class="n-val">{r['pat']}</span></div>
-                </div>
-            """, unsafe_allow_html=True)
-            
-            fig = go.Figure(data=[go.Candlestick(x=r['df'].index, open=r['df']['Open'], high=r['df']['High'], low=r['df']['Low'], close=r['df']['Close'])])
-            fig.update_layout(template="plotly_dark", height=220, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig, use_container_width=True, key=f"c_{r['s']}")
-            
-            if st.button(f"AI Analiza {r['s']}", key=f"a_{r['s']}"):
-                st.info(get_ai_response(r))
-            
-            for n in r['news']:
-                st.markdown(f"<small style='font-size:0.7rem;'>• <a href='{n.get('link','#')}'>{n.get('title','News')[:40]}...</a></small>", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
+            <div class="metric-grid">
+                <div><span class="n-label">RSI (14)</span><span class="n-val">{r['rsi']:.1f}</span></div>
+                <div><span class="n-label">Pivot Point</span><span class="n-val">{r['pp']:.4f}</span></div>
+                <div><span class="n-label">Szczyt 52T</span><span class="n-val">{r['h52']:.4f}</span></div>
+                <div><span class="n-label">Dołek 52T</span><span class="n-val">{r['l52']:.4f}</span></div>
+            </div>
+        """, unsafe_allow_html=True)
+        
+        # Wykres
+        fig = go.Figure(data=[go.Candlestick(x=r['df'].index, open=r['df']['Open'], high=r['df']['High'], low=r['df']['Low'], close=r['df']['Close'])])
+        fig.update_layout(template="plotly_dark", height=250, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+        st.plotly_chart(fig, use_container_width=True, key=f"c_{r['s']}")
+        
+        if st.button(f"🤖 AI ANALIZA {r['s']}", key=f"ai_{r['s']}"):
+            if client:
+                prompt = f"Analiza {r['s']}: Cena {r['p']:.6f}, RSI {r['rsi']:.1f}. Podaj SL/TP i plan 3 pkt dla Penny Stock."
+                resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
+                st.info(resp.choices.message.content)
+            else: st.warning("Brak klucza OpenAI.")
+
+        st.markdown("</div>", unsafe_allow_html=True)
