@@ -695,4 +695,4 @@ st.markdown(
     "Auto-refresh: 1–10 min</small></center>",
     unsafe_allow_html=True,
 )
-```
+
