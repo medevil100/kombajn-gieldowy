@@ -7,11 +7,10 @@ from streamlit_autorefresh import st_autorefresh
 import os
 from datetime import datetime
 import time
-from concurrent.futures import ThreadPoolExecutor
 
-# --- 1. KONFIGURACJA PLIKÓW I SEKRETY (SKRYTKA) ---
+# --- 1. KONFIGURACJA PLIKÓW I SKRYTKA SECRETS ---
 DB_FILE = "moje_spolki.txt"
-# Automatyczne pobieranie klucza ze skrytki Streamlit
+# Pobieranie klucza bezpośrednio ze skrytki Streamlit
 AI_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
 def load_tickers():
@@ -24,13 +23,13 @@ def load_tickers():
     return "BBI, BNOX, EVOK, HILS, INFI, KTRA, RGLS, ALZN, ANIX, ATHE"
 
 # Konfiguracja strony
-st.set_page_config(page_title="AI ALPHA GOLDEN v48.1 FINAL", page_icon="🚜", layout="wide")
+st.set_page_config(page_title="AI ALPHA GOLDEN v50 FINAL", page_icon="🚜", layout="wide")
 
 # Inicjalizacja stanów sesji
 if 'risk_cap' not in st.session_state: st.session_state.risk_cap = 10000.0
 if 'risk_pct' not in st.session_state: st.session_state.risk_pct = 1.0
 
-# --- 2. PEŁNA BIBLIOTEKA STYLÓW CSS (65 LINII GWARANTOWANE) ---
+# --- 2. PEŁNA BIBLIOTEKA STYLÓW CSS ---
 st.markdown("""
     <style>
     .stApp { background-color: #010101; color: #e0e0e0; font-family: 'Inter', sans-serif; }
@@ -84,11 +83,11 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. EKSTREMALNY SILNIK ANALITYCZNY (WSZYSTKIE WSKAŹNIKI) ---
+# --- 3. EKSTREMALNY SILNIK ANALITYCZNY ---
 def get_full_analysis(symbol):
     try:
-        # Zabezpieczenie przed Rate Limit (pauza między zapytaniami)
-        time.sleep(0.6)
+        # Ochrona przed blokadą Yahoo
+        time.sleep(0.5)
         s = symbol.strip().upper()
         ticker = yf.Ticker(s)
         df = ticker.history(period="250d", interval="1d")
@@ -96,7 +95,7 @@ def get_full_analysis(symbol):
         
         price = float(df['Close'].iloc[-1])
         
-        # Srednie i Wstęgi Bollingera
+        # Średnie i Wstęgi Bollingera
         sma50 = df['Close'].rolling(50).mean().iloc[-1]
         sma200 = df['Close'].rolling(200).mean().iloc[-1]
         ema20 = df['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
@@ -139,7 +138,7 @@ def get_full_analysis(symbol):
         elif rsi > 68 and price > bb_up: verd, vcl, v_type = "SPRZEDAJ ⚠️", "sig-sell", "sell"
         else: verd, vcl, v_type = "CZEKAJ ⏳", "sig-neutral", "neutral"
 
-        # AI Analiza (Z klucza ze skrytki)
+        # AI Analiza
         ai_msg = "Dodaj OpenAI Key w Secrets"
         if AI_KEY:
             try:
@@ -160,9 +159,9 @@ def get_full_analysis(symbol):
         }
     except: return None
 
-# --- 4. PANEL BOCZNY (PRZYCISK ZAPISZ I LISTA) ---
+# --- 4. PANEL BOCZNY ---
 with st.sidebar:
-    st.title("🚜 ALPHA ULTIMATE v48.1")
+    st.title("🚜 ALPHA ULTIMATE v50")
     st.markdown("---")
     st.session_state.risk_cap = st.number_input("Kapitał (PLN)", value=st.session_state.risk_cap, step=1000.0)
     st.session_state.risk_pct = st.slider("Ryzyko na pozycję (%)", 0.1, 5.0, st.session_state.risk_pct)
@@ -173,24 +172,21 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
     
-    # Naprawiony suwak odświeżania
-    refresh_val = st.select_slider("Odświeżanie (s)", options=[30, 60, 120, 300], value=60)
+    # Naprawiony suwak odświeżania (ręcznie wpisane opcje)
+    ref_val = st.select_slider("Odświeżanie (s)", options=[30, 60, 120, 300], value=60)
 
-st_autorefresh(interval=refresh_val * 1000, key="v481_refresh")
+st_autorefresh(interval=ref_val * 1000, key="v50_refresh")
 
-# --- 5. LOGIKA WYŚWIETLANIA I TERMINAL TOP 10 ---
+# --- 5. LOGIKA WYŚWIETLANIA ---
 tickers = [x.strip().upper() for x in ticker_area.replace('\n', ',').split(',') if x.strip()]
 
-@st.cache_data(ttl=refresh_val)
-def fetch_all_data(t_list):
-    results = []
-    # Sekwencyjne pobieranie zapobiega blokowaniu przez Yahoo przy dużych listach
-    for t in t_list:
-        res = get_full_analysis(t)
-        if res: results.append(res)
-    return results
-
-data_ready = fetch_all_data(tickers)
+# Pobieranie danych z paskiem postępu
+data_ready = []
+pbar = st.progress(0)
+for i, t in enumerate(tickers):
+    res = get_full_analysis(t)
+    if res: data_ready.append(res)
+    pbar.progress((i + 1) / len(tickers))
 
 if data_ready:
     st.subheader("🏆 TOP 10 SIGNAL TERMINAL (RANKING RSI)")
@@ -207,9 +203,9 @@ if data_ready:
         cols = st.columns(5)
         for idx, d in enumerate(data_ready[i:i+5]):
             with cols[idx]:
-                border = "#00ff88" if d['v_type'] == "buy" else "#ff4b4b" if d['v_type'] == "sell" else "#30363d"
+                accent = "#00ff88" if d['v_type'] == "buy" else "#ff4b4b" if d['v_type'] == "sell" else "#30363d"
                 st.markdown(f"""
-                <div class="main-card" style="border: 2px solid {border};">
+                <div class="main-card" style="border: 2px solid {accent};">
                     <div>
                         <div style="font-size:1.7rem; font-weight:bold;">{d['s']}</div>
                         <div style="color:#58a6ff; font-size:1.2rem;">{d['p']:.2f} PLN</div>
@@ -236,4 +232,4 @@ if data_ready:
                     fig.update_layout(template="plotly_dark", height=250, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False)
                     st.plotly_chart(fig, use_container_width=True)
 
-st.markdown(f"<div style='text-align:center; color:#8b949e; margin-top:50px;'>v48.1 | Ostatnie odświeżenie: {datetime.now().strftime('%H:%M:%S')}</div>", unsafe_allow_html=True)
+st.markdown(f"<div style='text-align:center; color:#8b949e; margin-top:50px;'>v50.0 FINAL | Ostatnie odświeżenie: {datetime.now().strftime('%H:%M:%S')}</div>", unsafe_allow_html=True)
