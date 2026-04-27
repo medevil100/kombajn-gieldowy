@@ -446,7 +446,7 @@ tickers_text = st.sidebar.text_area(
 
 if st.sidebar.button("💾 Zapisz listę"):
     save_tickers(tickers_text)
-    st.st.experimental_rerun()
+    st.st.rerun()
 
 st.title("AI ALPHA MONSTER PRO v74")
 
