@@ -15,10 +15,6 @@ from concurrent.futures import ThreadPoolExecutor
 # ==============================================================================
 # 1. KONFIGURACJA
 # ==============================================================================
-st.set_page_config(
-    page_title="AI ALPHA MONSTER PRO v71",
-    page_icon="🚜",
-    layout="wide",
 )
 
 session = requests.Session()
