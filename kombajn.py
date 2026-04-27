@@ -459,7 +459,7 @@ if results:
                         model="gpt-4o-mini",
                         messages=[{"role": "user", "content": prompt}],
                     )
-                    st.markdown(
+                st.markdown(
                         f"<div class='ai-strategy-box'>{ai_res.choices[0].message.content}</div>",
                         unsafe_allow_html=True,
                     )
