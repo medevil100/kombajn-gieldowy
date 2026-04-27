@@ -464,7 +464,7 @@ if results:
                         unsafe_allow_html=True,
                     )
 
-                st.markdown(
+                    st.markdown(
                     "<div style='text-align:left; margin-top:20px;'>"
                     "<span class='t-lab'>OSTATNIE NEWSY:</span></div>",
                     unsafe_allow_html=True,
