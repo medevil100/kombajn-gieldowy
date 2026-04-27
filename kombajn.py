@@ -6,13 +6,10 @@ import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 import os
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
 import time
 
-# --- 1. KONFIGURACJA PLIKÓW I SEKRETY ---
+# --- 1. KONFIGURACJA I SEKRETY ---
 DB_FILE = "moje_spolki.txt"
-
-# Pobieranie klucza bezpośrednio ze st.secrets (Skrytka Streamlit)
 AI_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
 def load_tickers():
@@ -20,221 +17,170 @@ def load_tickers():
         try:
             with open(DB_FILE, "r") as f:
                 content = f.read().strip()
-                return content if content else "PKO.WA, ALE.WA, KGH.WA, PKN.WA, BTC-USD, NVDA, TSLA"
-        except: return "PKO.WA, ALE.WA, KGH.WA, PKN.WA, BTC-USD, NVDA, TSLA"
-    return "PKO.WA, ALE.WA, KGH.WA, PKN.WA, BTC-USD, NVDA, TSLA"
+                return content if content else "BBI, BNOX, EVOK, HILS, INFI, KTRA, RGLS"
+        except: return "BBI, BNOX, EVOK, HILS, INFI, KTRA, RGLS"
+    return "BBI, BNOX, EVOK, HILS, INFI, KTRA, RGLS"
 
-# Konfiguracja strony
-st.set_page_config(page_title="AI ALPHA GOLDEN v44 FINAL MAXI", page_icon="🚜", layout="wide")
+st.set_page_config(page_title="AI ALPHA GOLDEN v46 ULTIMATE", page_icon="🚜", layout="wide")
 
-# Inicjalizacja stanów sesji
-if 'risk_cap' not in st.session_state: st.session_state.risk_cap = 50000.0
+if 'risk_cap' not in st.session_state: st.session_state.risk_cap = 10000.0
 if 'risk_pct' not in st.session_state: st.session_state.risk_pct = 1.0
 
-# --- 2. PEŁNA BIBLIOTEKA STYLÓW CSS (GWARANTOWANE 250+ LINII STRUKTURY) ---
+# --- 2. PEŁNE STYLE CSS (NEON DARK MODE) ---
 st.markdown("""
     <style>
-    .stApp { background-color: #020202; color: #e0e0e0; font-family: 'Inter', sans-serif; }
-    
-    /* Główne Kafelki */
-    .top-tile { 
-        background: linear-gradient(145deg, #0d1117, #050505); 
-        padding: 25px; border-radius: 20px; border: 1px solid #30363d; 
-        text-align: center; min-height: 550px; transition: all 0.4s ease;
-        display: flex; flex-direction: column; justify-content: space-between;
-        box-shadow: 5px 5px 15px rgba(0,0,0,0.3);
+    .stApp { background-color: #010101; color: #e0e0e0; }
+    .top-mini-tile {
+        padding: 12px; border-radius: 10px; text-align: center;
+        background: #0d1117; border: 1px solid #30363d; margin-bottom: 5px;
     }
-    .top-tile:hover { 
-        border-color: #58a6ff; transform: translateY(-8px); 
-        box-shadow: 0 12px 40px rgba(88, 166, 255, 0.15); 
-    }
+    .tile-buy { border: 2px solid #00ff88 !important; box-shadow: 0 0 15px rgba(0,255,136,0.2); }
+    .tile-sell { border: 2px solid #ff4b4b !important; box-shadow: 0 0 15px rgba(255,75,75,0.2); }
     
-    /* Sygnalizacja kolorystyczna */
-    .sig-buy { color: #00ff88; font-weight: 800; border: 2px solid #00ff88; padding: 8px 15px; border-radius: 12px; background: rgba(0, 255, 136, 0.1); font-size: 1.2rem; text-transform: uppercase; }
-    .sig-sell { color: #ff4b4b; font-weight: 800; border: 2px solid #ff4b4b; padding: 8px 15px; border-radius: 12px; background: rgba(255, 75, 75, 0.1); font-size: 1.2rem; text-transform: uppercase; }
-    .sig-neutral { color: #8b949e; font-weight: 800; border: 1px solid #30363d; padding: 8px 15px; border-radius: 12px; font-size: 1.2rem; }
-    
-    /* Kalkulator Pozycji */
-    .pos-calc { 
-        background: rgba(88, 166, 255, 0.1); border: 1px solid #58a6ff; 
-        border-radius: 15px; padding: 15px; margin: 15px 0; color: #58a6ff; 
+    .main-card { 
+        background: linear-gradient(145deg, #0d1117, #020202); 
+        padding: 20px; border-radius: 15px; border: 1px solid #30363d; 
+        text-align: center; min-height: 600px; transition: 0.3s;
     }
-    .pos-val { font-size: 1.6rem; font-weight: 900; display: block; }
-    .pos-label { font-size: 0.7rem; color: #8b949e; text-transform: uppercase; }
+    .main-card:hover { border-color: #58a6ff; transform: translateY(-3px); }
     
-    /* Grid Techniczny */
-    .tech-grid { 
-        display: grid; grid-template-columns: 1fr 1fr; gap: 8px; 
-        background: rgba(255,255,255,0.02); padding: 12px; border-radius: 12px; text-align: left;
-    }
-    .tech-item { border-bottom: 1px solid #21262d; padding: 5px 0; font-size: 0.85rem; display: flex; justify-content: space-between; }
-    .t-lab { color: #8b949e; }
-    .t-val { color: #ffffff; font-weight: bold; }
+    .sig-buy { color: #00ff88; font-weight: bold; font-size: 1.1rem; text-shadow: 0 0 5px #00ff88; }
+    .sig-sell { color: #ff4b4b; font-weight: bold; font-size: 1.1rem; text-shadow: 0 0 5px #ff4b4b; }
     
-    /* AI Analiza */
-    .ai-box { 
-        padding: 15px; border-radius: 12px; margin-top: 15px; font-size: 0.9rem; 
-        min-height: 90px; border-left: 5px solid #58a6ff; background: rgba(88, 166, 255, 0.07);
-        font-style: italic; display: flex; align-items: center; justify-content: center;
-    }
+    .pos-calc { background: rgba(88, 166, 255, 0.1); border-radius: 10px; padding: 10px; margin: 10px 0; border: 1px solid #58a6ff; }
+    .tech-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; font-size: 0.75rem; text-align: left; }
+    .tech-row { border-bottom: 1px solid #21262d; padding: 2px 0; display: flex; justify-content: space-between; }
     
-    /* Newsy rynkowe */
-    .news-section { margin-top: 20px; text-align: left; border-top: 1px dashed #30363d; padding-top: 15px; }
-    .news-link { 
-        color: #58a6ff; text-decoration: none; font-size: 0.8rem; 
-        display: block; margin-bottom: 8px; line-height: 1.2;
-    }
-    .news-link:hover { color: #ffffff; }
+    .ai-box { padding: 10px; border-radius: 8px; margin-top: 10px; font-size: 0.8rem; background: #161b22; border-left: 3px solid #58a6ff; line-height: 1.3; }
+    .news-link { color: #58a6ff; text-decoration: none; font-size: 0.7rem; display: block; margin-top: 4px; text-align: left; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. ROZBUDOWANY SILNIK ANALITYCZNY (v44) ---
-def get_analysis(symbol):
+# --- 3. SILNIK ANALITYCZNY (ALL INDICATORS) ---
+def get_full_analysis(symbol):
     try:
+        time.sleep(0.3) 
         s = symbol.strip().upper()
-        ticker = yf.Ticker(s)
-        
-        # Pobór danych z retry (stabilizacja dla GPW)
-        df = ticker.history(period="250d", interval="1d")
-        if df.empty or len(df) < 150: return None
+        t = yf.Ticker(s)
+        df = t.history(period="250d", interval="1d")
+        if df.empty or len(df) < 50: return None
         
         price = float(df['Close'].iloc[-1])
+        
+        # Srednie i Wstęgi
         sma50 = df['Close'].rolling(50).mean().iloc[-1]
         sma200 = df['Close'].rolling(200).mean().iloc[-1]
+        ema20 = df['Close'].ewm(span=20).mean().iloc[-1]
+        std = df['Close'].rolling(20).std().iloc[-1]
+        b_upper = ema20 + (std * 2)
+        b_lower = ema20 - (std * 2)
         
-        # Pivot Points
+        # MACD
+        exp1 = df['Close'].ewm(span=12).mean()
+        exp2 = df['Close'].ewm(span=26).mean()
+        macd = (exp1 - exp2).iloc[-1]
+        signal_line = (exp1 - exp2).ewm(span=9).mean().iloc[-1]
+        
+        # Pivot & RSI
         hp, lp, cp = df['High'].iloc[-2], df['Low'].iloc[-2], df['Close'].iloc[-2]
         pivot = (hp + lp + cp) / 3
-        
-        # RSI 14
         delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (delta.where(delta < 0, 0).abs()).rolling(14).mean()
+        gain, loss = (delta.where(delta > 0, 0)).rolling(14).mean(), (delta.where(delta < 0, 0).abs()).rolling(14).mean()
         rsi = 100 - (100 / (1 + (gain / (loss + 1e-9)))).iloc[-1]
         
-        # ATR i Zarządzanie Ryzykiem
+        # Risk & ATR
         tr = pd.concat([df['High']-df['Low'], (df['High']-df['Close'].shift()).abs(), (df['Low']-df['Close'].shift()).abs()], axis=1).max(axis=1)
         atr = tr.rolling(14).mean().iloc[-1]
-        
         risk_money = st.session_state.risk_cap * (st.session_state.risk_pct / 100)
-        sl_dist = atr * 1.6
-        shares = int(risk_money / sl_dist) if sl_dist > 0 else 0
+        shares = int(risk_money / (atr * 1.5)) if atr > 0 else 0
         
-        # INFO Z RYNKU (News)
-        market_news = []
+        # Newsy rynkowe
+        news = []
         try:
-            raw_news = ticker.news
-            if raw_news:
-                for n in raw_news[:2]:
-                    market_news.append({"title": n.get('title', '')[:65] + "...", "url": n.get('link', '#')})
+            for n in t.news[:2]: news.append({"t": n.get('title')[:55], "l": n.get('link')})
         except: pass
-        if not market_news: market_news = [{"title": "Brak komunikatów rynkowych", "url": "#"}]
 
-        # Sygnały
         v_type = "neutral"
-        if rsi < 32: verd, vcl, v_type = "KUP 🔥", "sig-buy", "buy"
-        elif rsi > 68: verd, vcl, v_type = "SPRZEDAJ ⚠️", "sig-sell", "sell"
-        else: verd, vcl, v_type = "CZEKAJ ⏳", "sig-neutral", "neutral"
+        if rsi < 32 and price > b_lower: verd, vcl, v_type = "KUP 🔥", "sig-buy", "buy"
+        elif rsi > 68 or price > b_upper: verd, vcl, v_type = "SPRZEDAJ ⚠️", "sig-sell", "sell"
+        else: verd, vcl, v_type = "CZEKAJ ⏳", "", "neutral"
 
-        # ANALIZA AI (Z klucza ze skrytki)
-        ai_comment = "Klucz AI nieobecny w skrytce"
+        ai_msg = "Wpisz OpenAI Key w Secrets"
         if AI_KEY:
             try:
                 client = OpenAI(api_key=AI_KEY)
-                prompt = f"Analiza {s}: Cena {price}, RSI {rsi:.0f}, SMA200 {sma200:.2f}. Podaj 1 konkretne, techniczne zdanie."
-                res = client.chat.completions.create(model="gpt-3.5-turbo", messages=[{"role": "user", "content": prompt}], max_tokens=40)
-                ai_comment = res.choices.message.content
-            except: ai_comment = "AI offline (Limit/Error)"
+                res = client.chat.completions.create(model="gpt-3.5-turbo", messages=[{"role": "user", "content": f"Analiza techniczna {s}: RSI {rsi:.0f}, MACD {macd:.2f}, Cena {price}. Napisz 1 konkretne zdanie bez lania wody."}], max_tokens=35)
+                ai_msg = res.choices.message.content
+            except: ai_msg = "AI Offline"
 
-        return {
-            "symbol": s, "price": price, "rsi": rsi, "sma50": sma50, "sma200": sma200,
-            "pivot": pivot, "verd": verd, "vcl": vcl, "v_type": v_type, "shares": shares,
-            "sl": price - sl_dist, "tp": price + (atr * 3.5), "ai": ai_comment,
-            "news": market_news, "df": df.tail(60), "total_val": shares * price
+        return { 
+            "s": s, "p": price, "rsi": rsi, "sma50": sma50, "sma200": sma200, "ema20": ema20,
+            "pivot": pivot, "macd": macd, "sig": signal_line, "verd": verd, "vcl": vcl, "v_type": v_type, 
+            "shares": shares, "sl": price - (atr*1.5), "tp": price + (atr*3), "ai": ai_msg, 
+            "news": news, "df": df.tail(40), "val": shares * price 
         }
     except: return None
 
-# --- 4. PANEL BOCZNY (SIDEBAR) ---
+# --- 4. PANEL BOCZNY ---
 with st.sidebar:
-    st.title("🚜 GOLDEN v44 MAXI")
-    st.markdown("---")
-    
-    st.subheader("💰 PORTFEL I RYZYKO")
-    st.session_state.risk_cap = st.number_input("Twój Kapitał (PLN)", value=st.session_state.risk_cap, step=1000.0)
-    st.session_state.risk_pct = st.slider("Ryzyko na pozycję (%)", 0.1, 5.0, st.session_state.risk_pct)
-    
-    st.subheader("📝 LISTA SYMBOLI")
-    ticker_input = st.text_area("Wpisz symbole (rozdzielone przecinkiem):", value=load_tickers(), height=200)
-    
+    st.title("🚜 ALPHA ULTIMATE")
+    st.session_state.risk_cap = st.number_input("Kapitał (PLN)", value=st.session_state.risk_cap)
+    st.session_state.risk_pct = st.slider("Ryzyko (%)", 0.1, 5.0, st.session_state.risk_pct)
+    ticker_area = st.text_area("Lista spółek:", value=load_tickers(), height=200)
     if st.button("💾 ZAPISZ I ANALIZUJ"):
-        with open(DB_FILE, "w") as f: f.write(ticker_input)
+        with open(DB_FILE, "w") as f: f.write(ticker_area)
         st.cache_data.clear()
-        st.success("Lista zaktualizowana!")
         st.rerun()
-    
-    refresh_rate = st.select_slider("Auto-odświeżanie (s)", options=[30, 60, 120, 300], value=60)
+    refresh = st.select_slider("Auto-refresh (s)", options=, value=60)
 
-st_autorefresh(interval=refresh_rate * 1000, key="v44_refresh")
+st_autorefresh(interval=refresh * 1000, key="v46_refresh")
 
-# --- 5. LOGIKA WYŚWIETLANIA ---
-symbols = [x.strip().upper() for x in ticker_input.replace('\n', ',').split(',') if x.strip()]
-
-@st.cache_data(ttl=refresh_rate)
-def fetch_parallel(s_list):
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        return [r for r in executor.map(get_analysis, s_list) if r is not None]
-
-data_ready = fetch_parallel(symbols)
+# --- 5. WYŚWIETLANIE ---
+tickers = [x.strip().upper() for x in ticker_area.replace('\n', ',').split(',') if x.strip()]
+data_ready = []
+pbar = st.progress(0)
+for i, t in enumerate(tickers):
+    res = get_full_analysis(t); data_ready.append(res) if res else None
+    pbar.progress((i + 1) / len(tickers))
 
 if data_ready:
-    st.subheader(f"🚀 TERMINAL ALPHA GOLDEN - {datetime.now().strftime('%H:%M:%S')}")
+    # --- TOP 10 TERMINAL ---
+    st.subheader("🏆 TOP 10 RANKING OKAZJI (RSI/TREND)")
+    top_10 = sorted(data_ready, key=lambda x: x['rsi'])[:10]
+    t_cols = st.columns(5)
+    for idx, d in enumerate(top_10):
+        with t_cols[idx % 5]:
+            b_cls = "tile-buy" if d['v_type'] == "buy" else "tile-sell" if d['v_type'] == "sell" else ""
+            st.markdown(f"""<div class="top-mini-tile {b_cls}"><b>{d['s']}</b> | {d['p']:.2f}<br><small>RSI: {d['rsi']:.0f}</small> | <b class="{d['vcl']}">{d['verd']}</b></div>""", unsafe_allow_html=True)
     
+    st.divider()
+    
+    # --- LISTA GŁÓWNA ---
     for i in range(0, len(data_ready), 5):
         cols = st.columns(5)
         for idx, d in enumerate(data_ready[i:i+5]):
             with cols[idx]:
-                accent_color = "#00ff88" if d['v_type'] == "buy" else "#ff4b4b" if d['v_type'] == "sell" else "#30363d"
-                
+                accent = "#00ff88" if d['v_type'] == "buy" else "#ff4b4b" if d['v_type'] == "sell" else "#30363d"
                 st.markdown(f"""
-                <div class="top-tile" style="border: 2px solid {accent_color};">
-                    <div>
-                        <div style="font-size:1.8rem; font-weight:900; letter-spacing:-1px;">{d['symbol']}</div>
-                        <div style="color:#58a6ff; font-size:1.4rem;">{d['price']:.2f} PLN</div>
-                        <div style="margin: 20px 0;"><span class="{d['vcl']}">{d['verd']}</span></div>
-                    </div>
-                    
-                    <div class="pos-calc">
-                        <span class="pos-label">Ilość do kupna:</span><br>
-                        <span class="pos-val">{d['shares']} szt.</span>
-                        <small>Wartość: {d['total_val']:.0f} PLN</small>
-                    </div>
-                    
+                <div class="main-card" style="border: 2px solid {accent};">
+                    <div style="font-size:1.6rem; font-weight:bold;">{d['s']}</div>
+                    <div style="color:#58a6ff; font-size:1.2rem;">{d['p']:.2f} PLN</div>
+                    <div style="margin: 15px 0;"><span class="{d['vcl']}">{d['verd']}</span></div>
+                    <div class="pos-calc">KUP: {d['shares']} szt.<br><small>{d['val']:.0f} PLN</small></div>
                     <div class="tech-grid">
-                        <div class="tech-item"><span class="t-lab">SMA 50:</span><span class="t-val">{d['sma50']:.2f}</span></div>
-                        <div class="tech-item"><span class="t-lab">SMA 200:</span><span class="t-val">{d['sma200']:.2f}</span></div>
-                        <div class="tech-item"><span class="t-lab">PIVOT:</span><span class="t-val">{d['pivot']:.2f}</span></div>
-                        <div class="tech-item"><span class="t-lab">RSI:</span><span class="t-val">{d['rsi']:.0f}</span></div>
+                        <div class="tech-row"><span>SMA200:</span><b>{d['sma200']:.2f}</b></div>
+                        <div class="tech-row"><span>EMA20:</span><b>{d['ema20']:.2f}</b></div>
+                        <div class="tech-row"><span>PIVOT:</span><b>{d['pivot']:.2f}</b></div>
+                        <div class="tech-row"><span>MACD:</span><b>{d['macd']:.2f}</b></div>
+                        <div class="tech-row"><span>RSI:</span><b>{d['rsi']:.0f}</b></div>
                     </div>
-                    
-                    <div class="ai-box">
-                        <b>🤖 AI:</b> {d['ai']}
-                    </div>
-                    
-                    <div class="news-section">
-                        <a href="{d['news'][0]['url']}" class="news-link" target="_blank">• {d['news'][0]['title']}</a>
-                        {('<a href="'+d['news'][1]['url']+'" class="news-link" target="_blank">• '+d['news'][1]['title']+'</a>') if len(d['news']) > 1 else ''}
+                    <div class="ai-box"><b>🤖 AI:</b> {d['ai']}</div>
+                    <div style="text-align:left; border-top:1px dashed #30363d; margin-top:10px; padding-top:5px;">
+                        <b>📢 NEWS:</b>
+                        {"".join([f'<a class="news-link" href="{n["l"]}" target="_blank">• {n["t"]}</a>' for n in d['news']])}
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
-                
-                with st.expander("📈 WYKRES I POZIOMY"):
-                    st.write(f"**Stop Loss:** {d['sl']:.2f} | **Take Profit:** {d['tp']:.2f}")
-                    fig = go.Figure(data=[go.Candlestick(x=d['df'].index, open=d['df']['Open'], high=d['df']['High'], low=d['df']['Low'], close=d['df']['Close'], name="Cena")])
-                    fig.add_trace(go.Scatter(x=d['df'].index, y=d['df']['Close'].rolling(50).mean(), line=dict(color='orange', width=1), name="SMA50"))
-                    fig.update_layout(template="plotly_dark", height=250, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False)
-                    st.plotly_chart(fig, use_container_width=True)
-
-else:
-    st.error("❌ Błąd pobierania danych. Sprawdź symbole (np. PKO.WA) lub stabilność połączenia z Yahoo Finance.")
-
-st.markdown(f"<div style='text-align:center; color:#8b949e; margin-top:50px;'>AI ALPHA GOLDEN v44 MAXI | Kapitał: {st.session_state.risk_cap} PLN</div>", unsafe_allow_html=True)
+                with st.expander("Analiza Wykresu"):
+                    fig = go.Figure(data=[go.Candlestick(x=d['df'].index, open=d['df']['Open'], high=d['df']['High'], low=d['df']['Low'], close=d['df']['Close'])])
+                    fig.update_layout(template="plotly_dark", height=250, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False); st.plotly_chart(fig, use_container_width=True)
