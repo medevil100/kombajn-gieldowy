@@ -9,8 +9,9 @@ from datetime import datetime
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-# --- 1. KONFIGURACJA PLIKÓW I SEKRETY ---
+# --- 1. KONFIGURACJA PLIKÓW I SEKRETY (SKRYTKA) ---
 DB_FILE = "moje_spolki.txt"
+# Automatyczne pobieranie klucza ze skrytki Streamlit
 AI_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
 def load_tickers():
@@ -22,12 +23,14 @@ def load_tickers():
         except: return "BBI, BNOX, EVOK, HILS, INFI, KTRA, RGLS, ALZN, ANIX, ATHE"
     return "BBI, BNOX, EVOK, HILS, INFI, KTRA, RGLS, ALZN, ANIX, ATHE"
 
-st.set_page_config(page_title="AI ALPHA GOLDEN v48 FINAL", page_icon="🚜", layout="wide")
+# Konfiguracja strony
+st.set_page_config(page_title="AI ALPHA GOLDEN v48.1 FINAL", page_icon="🚜", layout="wide")
 
+# Inicjalizacja stanów sesji
 if 'risk_cap' not in st.session_state: st.session_state.risk_cap = 10000.0
 if 'risk_pct' not in st.session_state: st.session_state.risk_pct = 1.0
 
-# --- 2. PEŁNA BIBLIOTEKA STYLÓW CSS (65 LINII) ---
+# --- 2. PEŁNA BIBLIOTEKA STYLÓW CSS (65 LINII GWARANTOWANE) ---
 st.markdown("""
     <style>
     .stApp { background-color: #010101; color: #e0e0e0; font-family: 'Inter', sans-serif; }
@@ -41,7 +44,7 @@ st.markdown("""
     .tile-buy { border: 2px solid #00ff88 !important; box-shadow: 0 0 15px rgba(0,255,136,0.2); }
     .tile-sell { border: 2px solid #ff4b4b !important; box-shadow: 0 0 15px rgba(255,75,75,0.2); }
     
-    /* Główne Karty */
+    /* Główne Karty Spółek */
     .main-card { 
         background: linear-gradient(145deg, #0d1117, #020202); 
         padding: 25px; border-radius: 18px; border: 1px solid #30363d; 
@@ -50,7 +53,7 @@ st.markdown("""
     }
     .main-card:hover { border-color: #58a6ff; transform: translateY(-5px); box-shadow: 0 12px 40px rgba(0,0,0,0.6); }
     
-    /* Sygnały */
+    /* Typografia Sygnałów */
     .sig-buy { color: #00ff88; font-weight: 900; font-size: 1.2rem; text-transform: uppercase; text-shadow: 0 0 10px #00ff8855; }
     .sig-sell { color: #ff4b4b; font-weight: 900; font-size: 1.2rem; text-transform: uppercase; text-shadow: 0 0 10px #ff4b4b55; }
     .sig-neutral { color: #8b949e; font-weight: 800; font-size: 1.1rem; }
@@ -84,6 +87,8 @@ st.markdown("""
 # --- 3. EKSTREMALNY SILNIK ANALITYCZNY (WSZYSTKIE WSKAŹNIKI) ---
 def get_full_analysis(symbol):
     try:
+        # Zabezpieczenie przed Rate Limit (pauza między zapytaniami)
+        time.sleep(0.6)
         s = symbol.strip().upper()
         ticker = yf.Ticker(s)
         df = ticker.history(period="250d", interval="1d")
@@ -91,22 +96,19 @@ def get_full_analysis(symbol):
         
         price = float(df['Close'].iloc[-1])
         
-        # Trend i Srednie
+        # Srednie i Wstęgi Bollingera
         sma50 = df['Close'].rolling(50).mean().iloc[-1]
         sma200 = df['Close'].rolling(200).mean().iloc[-1]
         ema20 = df['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
-        
-        # Bollinger Bands
         std_dev = df['Close'].rolling(20).std().iloc[-1]
-        bb_up = ema20 + (std_dev * 2)
-        bb_low = ema20 - (std_dev * 2)
+        bb_up, bb_low = ema20 + (std_dev * 2), ema20 - (std_dev * 2)
         
         # MACD
         ema12 = df['Close'].ewm(span=12, adjust=False).mean()
         ema26 = df['Close'].ewm(span=26, adjust=False).mean()
         macd_val = (ema12 - ema26).iloc[-1]
         
-        # Pivot
+        # Pivot Point Klasyczny
         prev = df.iloc[-2]
         pivot = (prev['High'] + prev['Low'] + prev['Close']) / 3
         
@@ -137,7 +139,7 @@ def get_full_analysis(symbol):
         elif rsi > 68 and price > bb_up: verd, vcl, v_type = "SPRZEDAJ ⚠️", "sig-sell", "sell"
         else: verd, vcl, v_type = "CZEKAJ ⏳", "sig-neutral", "neutral"
 
-        # AI Analiza
+        # AI Analiza (Z klucza ze skrytki)
         ai_msg = "Dodaj OpenAI Key w Secrets"
         if AI_KEY:
             try:
@@ -160,7 +162,7 @@ def get_full_analysis(symbol):
 
 # --- 4. PANEL BOCZNY (PRZYCISK ZAPISZ I LISTA) ---
 with st.sidebar:
-    st.title("🚜 ALPHA ULTIMATE v48")
+    st.title("🚜 ALPHA ULTIMATE v48.1")
     st.markdown("---")
     st.session_state.risk_cap = st.number_input("Kapitał (PLN)", value=st.session_state.risk_cap, step=1000.0)
     st.session_state.risk_pct = st.slider("Ryzyko na pozycję (%)", 0.1, 5.0, st.session_state.risk_pct)
@@ -171,19 +173,24 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
     
-    refresh_val = st.select_slider("Odświeżanie (s)", options=[30, 60, 120, 300, 600], value=60)
+    # Naprawiony suwak odświeżania
+    refresh_val = st.select_slider("Odświeżanie (s)", options=[30, 60, 120, 300], value=60)
 
-st_autorefresh(interval=refresh_val * 1000, key="v48_refresh")
+st_autorefresh(interval=refresh_val * 1000, key="v481_refresh")
 
 # --- 5. LOGIKA WYŚWIETLANIA I TERMINAL TOP 10 ---
 tickers = [x.strip().upper() for x in ticker_area.replace('\n', ',').split(',') if x.strip()]
 
 @st.cache_data(ttl=refresh_val)
-def fetch_all_parallel(t_list):
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        return [r for r in executor.map(get_full_analysis, t_list) if r is not None]
+def fetch_all_data(t_list):
+    results = []
+    # Sekwencyjne pobieranie zapobiega blokowaniu przez Yahoo przy dużych listach
+    for t in t_list:
+        res = get_full_analysis(t)
+        if res: results.append(res)
+    return results
 
-data_ready = fetch_all_parallel(tickers)
+data_ready = fetch_all_data(tickers)
 
 if data_ready:
     st.subheader("🏆 TOP 10 SIGNAL TERMINAL (RANKING RSI)")
@@ -200,9 +207,9 @@ if data_ready:
         cols = st.columns(5)
         for idx, d in enumerate(data_ready[i:i+5]):
             with cols[idx]:
-                accent = "#00ff88" if d['v_type'] == "buy" else "#ff4b4b" if d['v_type'] == "sell" else "#30363d"
+                border = "#00ff88" if d['v_type'] == "buy" else "#ff4b4b" if d['v_type'] == "sell" else "#30363d"
                 st.markdown(f"""
-                <div class="main-card" style="border: 2px solid {accent};">
+                <div class="main-card" style="border: 2px solid {border};">
                     <div>
                         <div style="font-size:1.7rem; font-weight:bold;">{d['s']}</div>
                         <div style="color:#58a6ff; font-size:1.2rem;">{d['p']:.2f} PLN</div>
@@ -229,4 +236,4 @@ if data_ready:
                     fig.update_layout(template="plotly_dark", height=250, margin=dict(l=0,r=0,b=0,t=0), xaxis_rangeslider_visible=False)
                     st.plotly_chart(fig, use_container_width=True)
 
-st.markdown(f"<div style='text-align:center; color:#8b949e; margin-top:50px;'>v48.0 | Ostatnie odświeżenie: {datetime.now().strftime('%H:%M:%S')}</div>", unsafe_allow_html=True)
+st.markdown(f"<div style='text-align:center; color:#8b949e; margin-top:50px;'>v48.1 | Ostatnie odświeżenie: {datetime.now().strftime('%H:%M:%S')}</div>", unsafe_allow_html=True)
