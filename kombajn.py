@@ -1,3 +1,6 @@
+Tu masz **czysty `kombaj.py` (FULL, PRO MAX, na nowy Streamlit – używa `st.rerun`)**:
+
+python
 import streamlit as st
 from openai import OpenAI
 import yfinance as yf
@@ -9,10 +12,6 @@ import requests
 import json
 import os
 from datetime import datetime
-
-# ======================================================================
-# 1. KONFIGURACJA
-# ======================================================================
 
 st.set_page_config(
     page_title="AI ALPHA MONSTER PRO v74",
@@ -39,10 +38,6 @@ if "risk_cap" not in st.session_state:
     st.session_state.risk_cap = 10000.0
 if "risk_pct" not in st.session_state:
     st.session_state.risk_pct = 1.0
-
-# ======================================================================
-# 2. CSS
-# ======================================================================
 
 st.markdown(
     """
@@ -158,10 +153,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ======================================================================
-# 3. UTILS + PLIK TICKERÓW
-# ======================================================================
-
 def load_tickers():
     if os.path.exists(TICKERS_FILE):
         try:
@@ -178,10 +169,6 @@ def save_tickers(text):
 
 def format_pln(v):
     return f"{v:,.2f} zł".replace(",", " ").replace(".", ",")
-
-# ======================================================================
-# 4. PORTFEL
-# ======================================================================
 
 def load_portfolio():
     if not os.path.exists(PORTFOLIO_FILE):
@@ -284,10 +271,6 @@ def portfolio_chart(portfolio):
         plot_bgcolor="rgba(0,0,0,0)",
     )
     return fig
-
-# ======================================================================
-# 5. ANALITYKA TECHNICZNA
-# ======================================================================
 
 def compute_rsi(series, period=14):
     delta = series.diff()
@@ -417,10 +400,6 @@ def analyze_symbol(symbol):
     except Exception:
         return None
 
-# ======================================================================
-# 6. AI SUMMARY PORTFELA
-# ======================================================================
-
 def ai_summary_portfolio(details):
     if not client:
         return "Brak klucza API."
@@ -447,10 +426,6 @@ def ai_summary_portfolio(details):
         return r.choices[0].message.content
     except Exception:
         return "Błąd AI."
-
-# ======================================================================
-# 7. UI GŁÓWNY – TICKERY, AUTO-REFRESH, PORTFEL, KAFELKI
-# ======================================================================
 
 st.sidebar.title("🚜 MONSTER v74 PRO")
 
@@ -499,10 +474,6 @@ total_value, total_pl, daily_pl, port_details = compute_portfolio_value(
 if total_value > 0:
     update_portfolio_history(portfolio, total_value)
 
-# ======================================================================
-# 8. TOP 10 SYGNAŁÓW (SCORING)
-# ======================================================================
-
 if results:
     st.subheader("🔥 TOP 10 (scoring 0–100)")
     top_cols = st.columns(5)
@@ -529,10 +500,6 @@ if results:
             )
 
 st.divider()
-
-# ======================================================================
-# 9. PORTFEL – KAFELKI + WYKRES
-# ======================================================================
 
 st.subheader("📊 Portfel (PLN)")
 col_p1, col_p2, col_p3, col_p4 = st.columns(4)
@@ -564,10 +531,6 @@ if st.checkbox("🤖 AI podsumowanie portfela"):
     st.markdown(f"<div class='ai-strategy-box'>{summary}</div>", unsafe_allow_html=True)
 
 st.divider()
-
-# ======================================================================
-# 10. KAFELKI DLA KAŻDEGO TICKERA
-# ======================================================================
 
 if results:
     cols = st.columns(3)
@@ -656,13 +619,9 @@ if results:
                     )
             st.markdown("</div>", unsafe_allow_html=True)
 
-# ======================================================================
-# 11. STOPKA
-# ======================================================================
-
 st.markdown(
     "<center><br><small style='color:#333;'>AI ALPHA MONSTER PRO v74 © 2026 | "
     "Auto-refresh: 1–10 min</small></center>",
     unsafe_allow_html=True,
 )
-
+```
