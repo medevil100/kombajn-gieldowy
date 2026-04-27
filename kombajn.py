@@ -50,11 +50,10 @@ st.markdown("""
 # --- 3. SILNIK ANALIZY ---
 def get_analysis(symbol):
     try:
-        time.sleep(0.5) # Ochrona przed Rate Limit
+        time.sleep(0.5) 
         symbol = symbol.strip().upper()
         t = yf.Ticker(symbol)
         
-        # Pobieranie danych (History jest stabilne, .info wiesza skrypt)
         h1 = t.history(period="10d", interval="1h")
         d1 = t.history(period="250d", interval="1d")
         
@@ -62,35 +61,29 @@ def get_analysis(symbol):
         
         price = h1['Close'].iloc[-1]
         
-        # Wskaźniki
         sma50 = d1['Close'].rolling(50).mean().iloc[-1]
         sma200 = d1['Close'].rolling(200).mean().iloc[-1]
         ema20 = d1['Close'].ewm(span=20).mean().iloc[-1]
         yearly_high = d1['High'].max()
         yearly_low = d1['Low'].min()
         
-        # Pivot i ATR
         hp, lp, cp = d1['High'].iloc[-2], d1['Low'].iloc[-2], d1['Close'].iloc[-2]
         pp = (hp + lp + cp) / 3
         atr = (d1['High'] - d1['Low']).rolling(14).mean().iloc[-1]
         
-        # RSI 1h
         delta = h1['Close'].diff()
         gain = delta.where(delta > 0, 0).rolling(14).mean()
         loss = delta.where(delta < 0, 0).abs().rolling(14).mean()
         rsi = 100 - (100 / (1 + (gain / (loss + 1e-9)))).iloc[-1]
         
-        # Kalkulator Pozycji
         risk_pln = st.session_state.risk_cap * (st.session_state.risk_pct / 100)
-        shares = int(risk_pln / (atr * 1.5)) if atr > 0 else 0
+        shares = int(risk_pln / (atr * 1.5)) if (atr and atr > 0) else 0
         
-        # Newsy (Safe Fetch)
         news_list = []
         try:
             for n in t.news[:2]: news_list.append({"t": n.get('title')[:55], "l": n.get('link')})
         except: news_list = [{"t": "Brak info rynkowego", "l": "#"}]
 
-        # Werdykt
         if rsi < 32: verd, vcl, v_type = "KUP 🔥", "sig-buy", "buy"
         elif rsi > 68: verd, vcl, v_type = "SPRZEDAJ ⚠️", "sig-sell", "sell"
         else: verd, vcl, v_type = "CZEKAJ ⏳", "", "neutral"
@@ -107,7 +100,6 @@ def get_analysis(symbol):
 # --- 4. PANEL BOCZNY ---
 with st.sidebar:
     st.title("🚜 GOLDEN v50 FINAL")
-    # Automatyczne pobieranie klucza ze skrytki (Secrets)
     api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
     
     st.subheader("💰 KONFIGURACJA PORTFELA")
@@ -136,7 +128,6 @@ def fetch_all(ticker_list):
 all_data = fetch_all(tickers)
 
 if all_data:
-    # --- TOP 10 RANKING ---
     st.subheader("🏆 TOP 10 SIGNAL TERMINAL")
     sorted_top = sorted(all_data, key=lambda x: x['rsi'])[:10]
     top_cols = st.columns(5)
@@ -153,7 +144,6 @@ if all_data:
 
     st.divider()
 
-    # --- LISTA SZCZEGÓŁOWA ---
     for d in all_data:
         with st.container():
             st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
@@ -172,23 +162,24 @@ if all_data:
 
             with c2:
                 fig = go.Figure(data=[go.Candlestick(x=d['df'].index, open=d['df']['Open'], high=d['df']['High'], low=d['df']['Low'], close=d['df']['Close'])])
-                fig.add_hline(y=d['y_high'], line_dash="dash", line_color="#00ff88")
-                fig.add_hline(y=d['y_low'], line_dash="dash", line_color="#ff4b4b")
                 fig.update_layout(template="plotly_dark", height=350, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
                 st.plotly_chart(fig, use_container_width=True, key=f"ch_{d['symbol']}")
 
             with c3:
                 st.write("**AI ANALIZA:**")
                 if api_key and st.button(f"🤖 ANALIZUJ {d['symbol']}", key=f"ai_{d['symbol']}"):
-                    client = OpenAI(api_key=api_key)
-                    prompt = f"Analiza {d['symbol']}: Cena {d['price']}, RSI {d['rsi']:.0f}, SMA200 {d['sma200']:.2f}. Podaj 1 konkretne zdanie strategii."
-                    resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-                    st.info(resp.choices[0].message.content)
+                    try:
+                        client = OpenAI(api_key=api_key)
+                        prompt = f"Analiza {d['symbol']}: Cena {d['price']}, RSI {d['rsi']:.0f}. Podaj 1 konkretne zdanie strategii."
+                        resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
+                        st.info(resp.choices[0].message.content)
+                    except:
+                        st.error("AI Error")
                 
-                st.markdown("<br><b>📢 NEWSY:</b>", unsafe_allow_html=True)
                 for n in d['news']:
                     st.markdown(f"<a href='{n['l']}' style='font-size:0.75rem; color:#58a6ff;'>• {n['t']}</a>", unsafe_allow_html=True)
-
             st.markdown('</div>', unsafe_allow_html=True)
+else:
+    st.info("Dodaj symbole i OpenAI Key w panelu bocznym.")
 
 st.markdown(f"<div style='text-align:center; color:gray;'>v50.0 FINAL | {datetime.now().strftime('%H:%M:%S')}</div>", unsafe_allow_html=True)
