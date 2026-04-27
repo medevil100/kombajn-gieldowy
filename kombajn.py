@@ -12,14 +12,9 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
 # ==============================================================================
-# 1. TOTALNY RESET I KONFIGURACJA
+# 1. KONFIGURACJA I TOTALNY RESET
 # ==============================================================================
-st.set_page_config(page_title="AI MONSTER v89 IRONCLAD", layout="wide")
-
-# Wymuszone czyszczenie pamięci podręcznej przy starcie
-if 'init' not in st.session_state:
-    st.cache_data.clear()
-    st.session_state.init = True
+st.set_page_config(page_title="AI MONSTER v90 FINAL", layout="wide")
 
 DB_FILE = "moje_spolki.txt"
 AI_KEY = st.secrets.get("OPENAI_API_KEY", "")
@@ -34,7 +29,7 @@ def load_tickers():
     return "ADTX, ACRS, ALZN, ANIX, ATHE, BBI, BNOX, CMMB, DRMA, EVOK"
 
 # ==============================================================================
-# 2. STABILNE STYLE CSS (FULL WIDTH - NO TABS)
+# 2. STABILNE STYLE CSS (WIDOK CIĄGŁY)
 # ==============================================================================
 st.markdown("""
     <style>
@@ -55,81 +50,85 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 3. PANCERNY SILNIK POBIERANIA (PENNY STOCK FIX)
+# 3. PANCERNY SILNIK POBIERANIA (FIX NAZWY I NaN)
 # ==============================================================================
-def fetch_iron_data(symbol):
+def fetch_data_engine(symbol):
     try:
-        time.sleep(random.uniform(0.2, 0.5)) # Ochrona przed banem Yahoo
+        # Bardzo ważne: mały delay, by Yahoo nas nie wyrzuciło
+        time.sleep(random.uniform(0.1, 0.3))
         s = symbol.strip().upper()
+        if not s: return None
+        
         t = yf.Ticker(s)
+        # Pobieranie RAW (Precyzja dla Penny Stocks)
+        df = t.history(period="1y", interval="1d", auto_adjust=False)
         
-        # Pobieranie RAW (Precyzja groszowa)
-        df = t.history(period="2y", interval="1d", auto_adjust=False)
-        if df.empty or len(df) < 150: return None
+        if df.empty or len(df) < 30: return None
         
-        # Naprawa danych
+        # Naprawa cen groszowych
         df['Close'] = df['Close'].replace(0, np.nan).ffill()
         c = df['Close']
         curr = float(c.iloc[-1])
         
-        # Wskaźniki
+        # Średnie
         s50 = c.rolling(50).mean().iloc[-1]
-        s200 = c.rolling(200).mean().iloc[-1]
+        s200 = c.rolling(200).mean().iloc[-1] if len(c) > 200 else s50
         
-        # RSI (Failsafe)
+        # RSI 14
         delta = c.diff()
         gain = delta.where(delta > 0, 0).rolling(14).mean()
         loss = delta.where(delta < 0, 0).abs().rolling(14).mean()
-        rsi = 100 - (100 / (1 + (gain / (loss + 1e-12)))) .iloc[-1]
+        rsi = 100 - (100 / (1 + (gain / (loss + 1e-12)))).iloc[-1]
         
-        # Ekstrema i Pivot
-        h52, l52 = df['High'].max(), df['Low'].min()
+        # Pivot i ATR
         prev = df.iloc[-2]
         pp = (prev['High'] + prev['Low'] + prev['Close']) / 3
+        h52, l52 = df['High'].max(), df['Low'].min()
         
-        # Pozycja ATR
         tr = pd.concat([df['High']-df['Low'], (df['High']-c.shift()).abs()], axis=1).max(axis=1)
         atr = tr.rolling(14).mean().iloc[-1]
+        
+        # Pozycja
         risk = st.session_state.risk_cap * (st.session_state.risk_pct / 100)
         sh = int(risk / (atr * 1.5)) if atr > 0 else 0
-
-        # Werdykt
-        v_txt, v_cls = ("KUP 🔥", "buy-line") if rsi < 35 else ("SPRZEDAJ ⚠️", "sell-line") if rsi > 65 else ("CZEKAJ ⏳", "hold-line")
+        
+        v_txt, v_cls = ("KUP 🔥", "buy-line") if rsi < 35 else ("SPRZEDAJ ⚠️", "sell-line") if rsi > 65 else ("TRZYMAJ ⏳", "hold-line")
 
         return {
             "s": s, "p": curr, "rsi": rsi, "pp": pp, "h52": h52, "l52": l52, "sh": sh,
             "sl": curr - (atr * 1.5), "tp": curr + (atr * 3.5), "s50": s50, "s200": s200,
-            "df": df.tail(60), "v": v_txt, "vc": v_cls, 
-            "news": [{"t": n.get('title')[:50], "l": n.get('link')} for n in t.news[:2] if n.get('title')]
+            "df": df.tail(60), "v": v_txt, "vc": v_cls
         }
-    except: return None
+    except:
+        return None
 
 # ==============================================================================
-# 4. INTERFEJS GŁÓWNY (BEZ GRUPOWANIA)
+# 4. INTERFEJS I PĘTLA RENDERUJĄCA (DOKOŃCZONA)
 # ==============================================================================
 with st.sidebar:
-    st.title("🚜 MONSTER v89")
-    st.write(f"Sync: {datetime.now().strftime('%H:%M:%S')}")
-    st_autorefresh(interval=300000, key="global_ref")
+    st.title("🚜 MONSTER v90 FINAL")
+    st_autorefresh(interval=300000, key="fsh")
     
-    t_in = st.text_area("Symbole (CSV):", load_tickers(), height=300)
+    t_in = st.text_area("Symbole (CSV):", load_tickers(), height=250)
     st.session_state.risk_cap = st.number_input("Kapitał PLN", value=st.session_state.risk_cap)
     st.session_state.risk_pct = st.slider("Ryzyko %", 0.1, 5.0, st.session_state.risk_pct)
     
     if st.button("💾 ZAPISZ I ANALIZUJ"):
         with open(DB_FILE, "w") as f: f.write(t_in)
-        st.cache_data.clear()
         st.rerun()
 
 symbols = [s.strip().upper() for s in t_in.split(",") if s.strip()]
 
-# Wielowątkowość (wolniejsza by Yahoo nie banowało)
-with ThreadPoolExecutor(max_workers=5) as exe:
-    results = [r for r in list(exe.map(fetch_iron_data, symbols)) if r]
+# Pobieranie danych - używamy nazwy funkcji fetch_data_engine
+with ThreadPoolExecutor(max_workers=8) as exe:
+    results = [r for r in list(exe.map(fetch_data_engine, symbols)) if r]
 
-st.subheader(f"🚜 Kombajn: {len(results)} aktywnych spółek (Widok ciągły)")
+st.subheader(f"🚜 Aktywne spółki: {len(results)} z {len(symbols)}")
 
-# RENDEROWANIE - 3 KOLUMNY, ZERO GRUP
+if not results:
+    st.error("Błąd: Serwer Yahoo Finance tymczasowo zablokował zapytania lub symbole są błędne. Spróbuj za 1 minutę.")
+
+# Renderowanie - 3 KOLUMNY, ZERO GRUP
 cols = st.columns(3)
 for idx, r in enumerate(results):
     with cols[idx % 3]:
@@ -158,19 +157,15 @@ for idx, r in enumerate(results):
                 </div>
             """, unsafe_allow_html=True)
             
-            # Wykres Świecowy (Unikalny key zapobiega błędom DOM)
             fig = go.Figure(data=[go.Candlestick(x=r['df'].index, open=r['df']['Open'], high=r['df']['High'], low=r['df']['Low'], close=r['df']['Close'])])
-            fig.update_layout(template="plotly_dark", height=380, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig, use_container_width=True, key=f"c_{r['s']}_{idx}", config={'displayModeBar': False})
+            fig.update_layout(template="plotly_dark", height=350, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+            st.plotly_chart(fig, use_container_width=True, key=f"c_{r['s']}_{idx}")
             
-            if st.button(f"🤖 ANALIZA AI {r['s']}", key=f"ai_{r['s']}_{idx}"):
-                if AI_KEY:
-                    p = f"Analiza {r['s']}: Cena {r['p']:.6f}, RSI {r['rsi']:.1f}. Podaj SL/TP i plan 3 pkt."
-                    res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":p}])
-                    st.info(res.choices[0].message.content)
+            if client and st.button(f"🤖 ANALIZA AI {r['s']}", key=f"ai_{r['s']}_{idx}"):
+                p = f"Analiza {r['s']}: Cena {r['p']:.6f}, RSI {r['rsi']:.1f}. Podaj SL/TP i plan 3 pkt."
+                res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":p}])
+                st.info(res.choices[0].message.content)
             
-            for n in r['news']:
-                st.markdown(f"<small>● <a href='{n['l']}' target='_blank' style='color:#58a6ff; text-decoration:none;'>{n['t']}...</a></small>", unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
-st.markdown("<center><small style='color:#444;'>AI ALPHA MONSTER PRO v89 IRONCLAD © 2026</small></center>", unsafe_allow_html=True)
+st.markdown("<center><small style='color:#444;'>AI ALPHA MONSTER PRO v90 FINAL © 2026</small></center>", unsafe_allow_html=True)
