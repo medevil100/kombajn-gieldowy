@@ -8,11 +8,13 @@ import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 import os
 import time
+import json
 import requests
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
 # ==============================================================================
-# 1. KONFIGURACJA ŚRODOWISKA I SESJI
+# 1. KONFIGURACJA
 # ==============================================================================
 st.set_page_config(
     page_title="AI ALPHA MONSTER PRO v71",
@@ -20,7 +22,6 @@ st.set_page_config(
     layout="wide",
 )
 
-# Sesja HTTP z nagłówkiem przeglądarki (mniej banów z Yahoo)
 session = requests.Session()
 session.headers.update({
     "User-Agent": (
@@ -31,6 +32,8 @@ session.headers.update({
 })
 
 DB_FILE = "moje_spolki.txt"
+PORTFOLIO_FILE = "portfolio.json"
+
 AI_KEY = st.secrets.get("OPENAI_API_KEY", "")
 client = OpenAI(api_key=AI_KEY) if AI_KEY else None
 
@@ -52,7 +55,119 @@ def load_tickers():
 
 
 # ==============================================================================
-# 2. CSS NEON DARK
+# 2. PORTFEL REAL-PRO (portfolio.json)
+# ==============================================================================
+def load_portfolio():
+    if os.path.exists(PORTFOLIO_FILE):
+        try:
+            with open(PORTFOLIO_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "positions" in data:
+                    return data
+        except Exception:
+            pass
+    return {"positions": []}
+
+
+def save_portfolio(portfolio):
+    try:
+        with open(PORTFOLIO_FILE, "w") as f:
+            json.dump(portfolio, f, indent=2)
+    except Exception:
+        pass
+
+
+def add_position(portfolio, symbol, qty, price, sl, tp):
+    if qty <= 0:
+        return portfolio
+    pos = {
+        "id": f"{symbol}_{datetime.utcnow().isoformat()}",
+        "symbol": symbol,
+        "qty": float(qty),
+        "entry_price": float(price),
+        "sl": float(sl),
+        "tp": float(tp),
+        "opened_at": datetime.utcnow().isoformat(),
+        "closed_at": None,
+        "status": "open",
+    }
+    portfolio["positions"].append(pos)
+    save_portfolio(portfolio)
+    return portfolio
+
+
+def close_position_partial(portfolio, symbol, qty_to_sell, current_price):
+    if qty_to_sell <= 0:
+        return portfolio
+    remaining = qty_to_sell
+    for pos in portfolio["positions"]:
+        if pos["status"] != "open":
+            continue
+        if pos["symbol"] != symbol:
+            continue
+        if remaining <= 0:
+            break
+        pos_qty = pos["qty"]
+        if pos_qty <= remaining + 1e-9:
+            remaining -= pos_qty
+            pos["qty"] = 0.0
+            pos["closed_at"] = datetime.utcnow().isoformat()
+            pos["status"] = "closed"
+        else:
+            pos["qty"] = pos_qty - remaining
+            remaining = 0.0
+    save_portfolio(portfolio)
+    return portfolio
+
+
+def compute_portfolio_metrics(portfolio, price_map):
+    rows = []
+    total_invested = 0.0
+    total_value = 0.0
+    for pos in portfolio["positions"]:
+        if pos["status"] != "open" or pos["qty"] <= 0:
+            continue
+        sym = pos["symbol"]
+        qty = pos["qty"]
+        entry = pos["entry_price"]
+        price = price_map.get(sym, entry)
+        invested = qty * entry
+        value = qty * price
+        pl = value - invested
+        rows.append({
+            "symbol": sym,
+            "qty": qty,
+            "entry_price": entry,
+            "current_price": price,
+            "invested": invested,
+            "value": value,
+            "pl": pl,
+        })
+        total_invested += invested
+        total_value += value
+
+    df = pd.DataFrame(rows) if rows else pd.DataFrame(
+        columns=["symbol", "qty", "entry_price", "current_price", "invested", "value", "pl"]
+    )
+    agg = None
+    if not df.empty:
+        agg = (
+            df.groupby("symbol")
+            .agg({
+                "qty": "sum",
+                "entry_price": "mean",
+                "current_price": "mean",
+                "invested": "sum",
+                "value": "sum",
+                "pl": "sum",
+            })
+            .reset_index()
+        )
+    return df, agg, total_invested, total_value
+
+
+# ==============================================================================
+# 3. CSS NEON
 # ==============================================================================
 st.markdown(
     """
@@ -196,11 +311,11 @@ st.markdown(
 )
 
 # ==============================================================================
-# 3. SILNIK ANALITYCZNY (RSI, SMA, ATR, SL/TP, NEWS)
+# 4. SILNIK ANALITYCZNY
 # ==============================================================================
 def get_monster_analysis(symbol: str):
     try:
-        time.sleep(np.random.uniform(0.1, 0.4))  # lekkie opóźnienie
+        time.sleep(np.random.uniform(0.1, 0.4))
         s = symbol.strip().upper()
         t = yf.Ticker(s, session=session)
 
@@ -208,35 +323,29 @@ def get_monster_analysis(symbol: str):
         if df_raw.empty or len(df_raw) < 200:
             return None
 
-        # naprawa zerowych cen
         df_raw["Close"] = df_raw["Close"].replace(0, np.nan).ffill()
         c = df_raw["Close"]
         curr_price = float(c.iloc[-1])
 
-        # SMA
         s20 = c.rolling(20).mean().iloc[-1]
         s50 = c.rolling(50).mean().iloc[-1]
         s100 = c.rolling(100).mean().iloc[-1]
         s200 = c.rolling(200).mean().iloc[-1]
 
-        # RSI 14
         delta = c.diff()
         g = delta.where(delta > 0, 0).rolling(14).mean()
         l = delta.where(delta < 0, 0).abs().rolling(14).mean()
         rsi_val = 100 - (100 / (1 + (g / (l + 1e-12)))).iloc[-1]
 
-        # MACD
         e12 = c.ewm(span=12).mean()
         e26 = c.ewm(span=26).mean()
         macd_val = (e12 - e26).iloc[-1]
 
-        # Pivot + 52T
         prev = df_raw.iloc[-2]
         pivot = (prev["High"] + prev["Low"] + prev["Close"]) / 3
         h52 = df_raw["High"].tail(252).max()
         l52 = df_raw["Low"].tail(252).min()
 
-        # ATR
         high = df_raw["High"]
         low = df_raw["Low"]
         close = df_raw["Close"]
@@ -250,13 +359,11 @@ def get_monster_analysis(symbol: str):
         ).max(axis=1)
         atr = tr.rolling(14).mean().iloc[-1]
 
-        # Pozycja, SL, TP
         risk_cash = st.session_state.risk_cap * (st.session_state.risk_pct / 100.0)
         sh = int(risk_cash / (atr * 1.5)) if atr > 0 else 0
         sl = curr_price - (atr * 1.5)
         tp = curr_price + (atr * 3.5)
 
-        # Werdykt
         if rsi_val < 33:
             v_text, v_class, v_type = "KUP 🔥", "sig-buy", "buy"
         elif rsi_val > 67:
@@ -264,7 +371,6 @@ def get_monster_analysis(symbol: str):
         else:
             v_text, v_class, v_type = "CZEKAJ ⏳", "sig-neutral", "neutral"
 
-        # Newsy
         news = []
         try:
             for n in t.news[:3]:
@@ -304,11 +410,12 @@ def get_monster_analysis(symbol: str):
 
 
 # ==============================================================================
-# 4. UI + WIELOWĄTKOWOŚĆ + ZERO BŁĘDÓW DOM
+# 5. UI: SIDEBAR, AUTO-REFRESH, TICKERY
 # ==============================================================================
 st.sidebar.title("🚜 MONSTER v71 PRO")
 
-st_autorefresh(interval=60000, key="global_monster_refresh")
+refresh_minutes = st.sidebar.slider("Auto-refresh (minuty):", 1, 10, 1)
+st_autorefresh(interval=refresh_minutes * 60 * 1000, key="global_monster_refresh")
 
 t_area = st.sidebar.text_area("Lista Symboli (CSV):", load_tickers(), height=250)
 st.session_state.risk_cap = st.sidebar.number_input(
@@ -325,12 +432,19 @@ if st.sidebar.button("💾 ZAPISZ I START"):
 
 symbols = [s.strip().upper() for s in t_area.split(",") if s.strip()]
 
+# ==============================================================================
+# 6. ANALIZA WIELOWĄTKOWA
+# ==============================================================================
 with ThreadPoolExecutor(max_workers=10) as executor:
     results = [r for r in executor.map(get_monster_analysis, symbols) if r]
 
+portfolio = load_portfolio()
+
 if results:
-    # TOP 10 po RSI
-    st.subheader("🔥 TOP SYGNAŁY (Najniższe RSI)")
+    price_map = {r["symbol"]: r["price"] for r in results}
+
+    # TOP 10
+    st.subheader("🔥 TOP 10 SYGNAŁÓW (Najniższe RSI)")
     top_cols = st.columns(5)
     for i, r in enumerate(sorted(results, key=lambda x: x["rsi"])[:10]):
         tile_class = (
@@ -352,6 +466,7 @@ if results:
 
     st.divider()
 
+    # GŁÓWNA SIATKA
     cols = st.columns(3)
     for idx, r in enumerate(results):
         with cols[idx % 3]:
@@ -366,7 +481,7 @@ if results:
                         </div>
 
                         <div class="pos-calc-box">
-                            <span class="pos-label">WIELKOŚĆ POZYCJI</span>
+                            <span class="pos-label">WIELKOŚĆ POZYCJI (RYZYKO)</span>
                             <span class="pos-val">{r['sh']} SZT.</span>
                             <small>SL: {r['sl']:.6f} | TP: {r['tp']:.6f}</small>
                         </div>
@@ -436,13 +551,50 @@ if results:
                     paper_bgcolor="rgba(0,0,0,0)",
                     plot_bgcolor="rgba(0,0,0,0)",
                 )
-                # unikalny key -> brak błędów DOM
                 st.plotly_chart(
                     fig,
                     use_container_width=True,
                     key=f"chart_{r['symbol']}_{idx}",
                     config={"displayModeBar": False},
                 )
+
+                qty_key = f"qty_{r['symbol']}_{idx}"
+                if qty_key not in st.session_state:
+                    st.session_state[qty_key] = r["sh"]
+                qty = st.number_input(
+                    f"Ilość ({r['symbol']})",
+                    min_value=0,
+                    value=int(st.session_state[qty_key]),
+                    key=qty_key,
+                )
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button(
+                        f"🟢 KUP do portfela {r['symbol']}",
+                        key=f"buy_{r['symbol']}_{idx}",
+                    ):
+                        portfolio = add_position(
+                            portfolio,
+                            r["symbol"],
+                            qty,
+                            r["price"],
+                            r["sl"],
+                            r["tp"],
+                        )
+                        st.experimental_rerun()
+                with c2:
+                    if st.button(
+                        f"🔴 SPRZEDAJ z portfela {r['symbol']}",
+                        key=f"sell_{r['symbol']}_{idx}",
+                    ):
+                        portfolio = close_position_partial(
+                            portfolio,
+                            r["symbol"],
+                            qty,
+                            r["price"],
+                        )
+                        st.experimental_rerun()
 
                 if client and st.button(
                     f"🤖 STRATEGIA AI {r['symbol']}",
@@ -479,9 +631,68 @@ if results:
 
                 st.markdown("</div>", unsafe_allow_html=True)
 
+    # ==============================================================================
+    # 7. PORTFEL – PODSUMOWANIE
+    # ==============================================================================
+    st.divider()
+    st.subheader("💼 PORTFEL REAL (PLN)")
+
+    df_pos, df_agg, total_invested, total_value = compute_portfolio_metrics(
+        portfolio, price_map
+    )
+    total_pl = total_value - total_invested
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Zainwestowane", f"{total_invested:,.2f} PLN")
+    with c2:
+        st.metric("Wartość bieżąca", f"{total_value:,.2f} PLN")
+    with c3:
+        st.metric(
+            "P/L łączny",
+            f"{total_pl:,.2f} PLN",
+            delta=f"{total_pl:,.2f} PLN",
+        )
+
+    st.markdown("### Otwarte pozycje (zagregowane)")
+    if df_agg is not None and not df_agg.empty:
+        st.dataframe(
+            df_agg.style.format(
+                {
+                    "qty": "{:,.2f}",
+                    "entry_price": "{:,.4f}",
+                    "current_price": "{:,.4f}",
+                    "invested": "{:,.2f}",
+                    "value": "{:,.2f}",
+                    "pl": "{:,.2f}",
+                }
+            ),
+            use_container_width=True,
+        )
+    else:
+        st.info("Brak otwartych pozycji.")
+
+    st.markdown("### Wszystkie pozycje (historia)")
+    if not df_pos.empty:
+        st.dataframe(
+            df_pos.style.format(
+                {
+                    "qty": "{:,.2f}",
+                    "entry_price": "{:,.4f}",
+                    "current_price": "{:,.4f}",
+                    "invested": "{:,.2f}",
+                    "value": "{:,.2f}",
+                    "pl": "{:,.2f}",
+                }
+            ),
+            use_container_width=True,
+        )
+    else:
+        st.info("Brak pozycji w portfelu.")
+
 st.markdown(
     "<center><small style='color:#333;'>AI ALPHA MONSTER PRO v71 ULTRA © 2026 | "
-    "Auto-refresh: 60s</small></center>",
+    "Auto-refresh: 1–10 min</small></center>",
     unsafe_allow_html=True,
 )
 ```
