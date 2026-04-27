@@ -464,13 +464,12 @@ if results:
                         unsafe_allow_html=True,
                     )
 
-                   st.markdown(
+                 st.markdown(
                     "<div style='text-align:left; margin-top:20px;'>"
                     "<span class='t-lab'>OSTATNIE NEWSY:</span></div>",
                     unsafe_allow_html=True,
                 )
                 
-                # Zmieniono 'r' na 'res', aby pasowało do pętli głównej
                 for n in res["news"]:
                     if n.get("link"):
                         st.markdown(
@@ -478,8 +477,12 @@ if results:
                             unsafe_allow_html=True,
                         )
 
-                # Zamknięcie głównego kontenera main-card
                 st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown(
+    "<center><br><small style='color:#333;'>AI ALPHA MONSTER PRO v71 ULTRA © 2026 | "
+    "Auto-refresh: 60s</small></center>",
+    unsafe_allow_html=True,
 
 # Stopka - teraz z poprawnym domknięciem nawiasów
 st.markdown(
