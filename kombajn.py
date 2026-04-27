@@ -455,19 +455,19 @@ if results:
                         "Podaj konkretny plan wejścia, wyjścia, zarządzania pozycją i ryzykiem "
                         "dla krótkoterminowego trade'u."
                     )
-                    res = client.chat.completions.create(
+                                        ai_res = client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[{"role": "user", "content": prompt}],
                     )
                     st.markdown(
-                        f"<div class='ai-strategy-box'>{res.choices[0].message.content}</div>",
+                        f"<div class='ai-strategy-box'>{ai_res.choices[0].message.content}</div>",
                         unsafe_allow_html=True,
                     )
 
-                 st.markdown(
+                st.markdown(
                     "<div style='text-align:left; margin-top:20px;'>"
                     "<span class='t-lab'>OSTATNIE NEWSY:</span></div>",
-                    unsafe_allow_html=True,)
+                    unsafe_allow_html=True,
                 )
                 
                 for n in res["news"]:
@@ -479,13 +479,9 @@ if results:
 
                 st.markdown("</div>", unsafe_allow_html=True)
 
+# Stopka - musi być wyrównana do lewej (zero spacji na początku)
 st.markdown(
     "<center><br><small style='color:#333;'>AI ALPHA MONSTER PRO v71 ULTRA © 2026 | "
     "Auto-refresh: 60s</small></center>",
     unsafe_allow_html=True,
-
-# Stopka - teraz z poprawnym domknięciem nawiasów
-st.markdown(
-    "<center><br><small style='color:#333;'>AI ALPHA MONSTER PRO v71 ULTRA © 2026 | "
-    "Auto-refresh: 60s</small></center>",
-    unsafe_allow_html=True,
+)
