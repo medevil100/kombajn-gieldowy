@@ -464,7 +464,7 @@ if results:
                         unsafe_allow_html=True,
                     )
 
-                             # Używamy ai_resp, aby nie nadpisać danych spółki w 'res'
+                    # Używamy ai_resp, aby nie nadpisać danych spółki w 'res'
                     ai_resp = client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[{"role": "user", "content": prompt}],
