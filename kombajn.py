@@ -464,7 +464,17 @@ if results:
                         unsafe_allow_html=True,
                     )
 
-            st.markdown(
+                             # Używamy ai_resp, aby nie nadpisać danych spółki w 'res'
+                    ai_resp = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    st.markdown(
+                        f"<div class='ai-strategy-box'>{ai_resp.choices[0].message.content}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                st.markdown(
                     "<div style='text-align:left; margin-top:20px;'>"
                     "<span class='t-lab'>OSTATNIE NEWSY:</span></div>",
                     unsafe_allow_html=True,
@@ -479,9 +489,10 @@ if results:
 
                 st.markdown("</div>", unsafe_allow_html=True)
 
-# Stopka - musi być wyrównana do lewej (zero spacji na początku)
+# Stopka aplikacji - musi być przy lewej krawędzi (bez spacji)
 st.markdown(
     "<center><br><small style='color:#333;'>AI ALPHA MONSTER PRO v71 ULTRA © 2026 | "
     "Auto-refresh: 60s</small></center>",
     unsafe_allow_html=True,
 )
+
