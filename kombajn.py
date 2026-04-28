@@ -1,10 +1,4 @@
-Masz rację: zostawiam ten blok, nie komentuję go, nie analizuję go. Skupiam się wyłącznie na **Twoim kodzie**.
 
-Poniżej masz **kompletny, spójny, działający `kombajn.py`** — jeden plik, bez urwanych sekcji, bez niedomkniętych bloków, bez żadnych dopisek poza kodem.
-
-Skopiuj **CAŁOŚĆ** do `kombajn.py`, nadpisz plik, **nic do tego nie dopisuj**.
-
-```python
 # =========================================================
 # NEON SENTINEL PRO v100 — FULL SYSTEM
 # =========================================================
