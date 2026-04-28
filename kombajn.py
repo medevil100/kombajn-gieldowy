@@ -220,7 +220,31 @@ if results:
 st.divider()
 
 # ---------------------------------------------------------
-# KARTY SPÓŁEK
+# --- POPRAWIONE ZARZĄDZANIE LISTĄ SPÓŁEK ---
+
+# 1. Inicjalizacja session_state PRZED text_area
+if "tickers_text" not in st.session_state:
+    if os.path.exists(TICKERS_FILE):
+        with open(TICKERS_FILE, "r") as f:
+            st.session_state.tickers_text = f.read().strip()
+    else:
+        st.session_state.tickers_text = ""
+
+# 2. Pole tekstowe korzysta TYLKO z session_state
+tickers_text = st.sidebar.text_area(
+    "Lista symboli (CSV):",
+    st.session_state.tickers_text,
+    height=200,
+    placeholder="NVDA, TSLA, AAPL"
+)
+
+# 3. Zapis listy + rerun
+if st.sidebar.button("💾 Zapisz listę"):
+    st.session_state.tickers_text = tickers_text
+    with open(TICKERS_FILE, "w") as f:
+        f.write(tickers_text)
+    st.rerun()
+
 # ---------------------------------------------------------
 
 if results:
