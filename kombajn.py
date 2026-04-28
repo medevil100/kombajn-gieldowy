@@ -14,7 +14,6 @@ DB_FILE = "moje_spolki.txt"
 
 st.set_page_config(page_title="AI ALPHA GOLDEN v26 PRO", page_icon="🏆", layout="wide")
 
-# Inicjalizacja stanów sesji
 if "ai_results" not in st.session_state: st.session_state.ai_results = {}
 if "risk_cap" not in st.session_state: st.session_state.risk_cap = 10000.0
 if "risk_pct" not in st.session_state: st.session_state.risk_pct = 1.0
@@ -36,13 +35,14 @@ st.markdown("""
     }
     .top-tile {
         background: #111420; padding: 12px; border-radius: 10px; border-bottom: 3px solid #00ff88; 
-        text-align: center; min-height: 180px;
+        text-align: center; min-height: 200px;
     }
     .metric-row { display: flex; justify-content: space-between; border-bottom: 1px solid #21262d; padding: 6px 0; font-size: 0.9rem; }
     .sig-buy { color: #00ff88; font-weight: bold; }
     .sig-sell { color: #ff4b4b; font-weight: bold; }
-    .calc-box { background: rgba(0, 255, 136, 0.1); border: 1px dashed #00ff88; padding: 10px; border-radius: 8px; margin-top: 10px; font-size: 0.85rem; }
-    .stat-header { background: #0d1117; padding: 20px; border-radius: 15px; border: 1px solid #30363d; margin-bottom: 20px; }
+    .price-sl { color: #ff4b4b; font-weight: bold; background: rgba(255,75,75,0.1); padding: 2px 5px; border-radius: 4px; }
+    .price-tp { color: #00ff88; font-weight: bold; background: rgba(0,255,136,0.1); padding: 2px 5px; border-radius: 4px; }
+    .calc-box { background: rgba(88, 166, 255, 0.1); border: 1px dashed #58a6ff; padding: 10px; border-radius: 8px; margin-top: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -56,21 +56,15 @@ def get_analysis(symbol):
     try:
         symbol = symbol.strip().upper()
         t = yf.Ticker(symbol)
-        h1 = t.history(period="10d", interval="1h")
+        h1 = t.history(period="15d", interval="1h")
         d1 = t.history(period="1y", interval="1d")
         
         if h1.empty or d1.empty: return None
         h1, d1 = fix_col(h1), fix_col(d1)
         
         price = float(h1['Close'].iloc[-1])
-        cp = float(d1['Close'].iloc[-2]) 
-        
-        try:
-            info = t.info
-            bid = info.get('bid') or price * 0.9995
-            ask = info.get('ask') or price * 1.0005
-        except:
-            bid, ask = price * 0.9995, price * 1.0005
+        # Dane z 10 świec D1 dla AI
+        last_10_d1 = d1.tail(10)[['High', 'Low', 'Close']].to_string()
         
         sma200 = float(d1['Close'].rolling(200).mean().iloc[-1])
         y_high = float(d1['High'].max())
@@ -86,9 +80,9 @@ def get_analysis(symbol):
         elif rsi > 68: verd, vcl = "SPRZEDAJ 🔴", "sig-sell"
 
         return {
-            "symbol": symbol, "price": price, "bid": bid, "ask": ask, "rsi": rsi, 
-            "sma200": sma200, "verdict": verd, "vcl": vcl, "y_high": y_high, "y_low": y_low,
-            "df": h1, "change": ((price - cp) / cp * 100)
+            "symbol": symbol, "price": price, "rsi": rsi, "sma200": sma200, 
+            "verdict": verd, "vcl": vcl, "y_high": y_high, "y_low": y_low,
+            "df": h1, "d1_history": last_10_d1, "change": ((price - d1['Close'].iloc[-2]) / d1['Close'].iloc[-2] * 100)
         }
     except: return None
 
@@ -97,21 +91,16 @@ with st.sidebar:
     st.title("🏆 GOLDEN v26 PRO")
     api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
     
-    st.subheader("⚙️ Zarządzanie Ryzykiem")
-    st.session_state.risk_cap = st.number_input("Kapitał Portfela:", value=float(st.session_state.risk_cap))
-    st.session_state.risk_pct = st.slider("Ryzyko na transakcję (%)", 0.1, 5.0, float(st.session_state.risk_pct))
+    st.session_state.risk_cap = st.number_input("Kapitał:", value=float(st.session_state.risk_cap))
+    st.session_state.risk_pct = st.slider("Ryzyko %", 0.1, 5.0, float(st.session_state.risk_pct))
     
-    t_input = st.text_area("Lista Symboli (CSV):", value=load_tickers(), height=150)
-    if st.button("💾 ZAPISZ LISTĘ"):
+    t_input = st.text_area("Lista Symboli:", value=load_tickers(), height=120)
+    if st.button("💾 ZAPISZ"):
         with open(DB_FILE, "w", encoding="utf-8") as f: f.write(t_input)
-        st.success("Zapisano listę!")
+        st.success("OK")
     
     refresh = st.select_slider("Refresh (s)", options=[30, 60, 300], value=60)
-    if st.button("🧹 Wyczyść analizy AI"):
-        st.session_state.ai_results = {}
-        st.rerun()
-
-st_autorefresh(interval=refresh * 1000, key="v26_refresh_main")
+    st_autorefresh(interval=refresh * 1000, key="v26_ref")
 
 # --- 5. LOGIKA GŁÓWNA ---
 tickers = [x.strip().upper() for x in t_input.split(",") if x.strip()]
@@ -119,79 +108,55 @@ with ThreadPoolExecutor(max_workers=8) as executor:
     all_data = [d for d in list(executor.map(get_analysis, tickers)) if d is not None]
 
 if all_data:
-    # --- PANEL STATYSTYK ---
-    st.markdown('<div class="stat-header">', unsafe_allow_html=True)
-    s1, s2, s3, s4 = st.columns(4)
-    risk_val = st.session_state.risk_cap * (st.session_state.risk_pct / 100)
-    s1.metric("Kapitał", f"{st.session_state.risk_cap:,.0f}")
-    s2.metric("Ryzyko/Trade", f"{risk_val:,.2f}")
-    s3.metric("Aktywne Symbole", len(all_data))
-    s4.metric("Skaner", "Online 🟢")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # --- RANKING TOP ---
-    st.subheader("🔥 RANKING SYGNAŁÓW (RSI)")
+    # RANKING TOP 10
+    st.subheader("🔥 TOP 10 SYGNAŁÓW (Według RSI)")
+    sorted_data = sorted(all_data, key=lambda x: x['rsi'])
     top_cols = st.columns(5)
-    for i, d in enumerate(sorted(all_data, key=lambda x: x['rsi'])[:10]):
+    for i, d in enumerate(sorted_data[:10]):
         with top_cols[i % 5]:
-            st.markdown(f"""<div class="top-tile"><b>{d['symbol']}</b><br><span style="font-size:1.1rem; color:#00ff88;">{d['price']:.2f}</span><br><div class="bid-ask-mini">B: {d['bid']:.2f} | A: {d['ask']:.2f}</div><div class="{d['vcl']}">{d['verdict']}</div><small>RSI: {d['rsi']:.1f}</small></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="top-tile"><b>{d['symbol']}</b><br><span style="font-size:1.2rem; color:#00ff88;">{d['price']:.2f}</span><br><div class="{d['vcl']}">{d['verdict']}</div><small>RSI: {d['rsi']:.1f}<br>SMA200: {d['sma200']:.2f}</small></div>""", unsafe_allow_html=True)
 
     st.divider()
 
-    # --- KARTY INSTRUMENTÓW ---
     for d in all_data:
         with st.container():
             st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
-            c1, c2, c3 = st.columns([1.3, 2, 1.2])
+            c1, c2, c3 = st.columns([1.2, 2, 1.3])
             
             with c1:
-                st.markdown(f"<h3 class='{d['vcl']}'>{d['symbol']}</h3>", unsafe_allow_html=True)
+                st.markdown(f"### {d['symbol']}")
                 st.metric("CENA", f"{d['price']:.4f}", f"{d['change']:.2f}%")
-                st.markdown(f"""
-                    <div class="metric-row"><span>RSI (1h)</span><b>{d['rsi']:.1f}</b></div>
-                    <div class="metric-row"><span>SMA 200</span><b>{d['sma200']:.2f}</b></div>
-                    <div class="metric-row"><span style="color:#00ff88;">High 52t</span><b>{d['y_high']:.2f}</b></div>
-                    <div class="metric-row"><span style="color:#ff4b4b;">Low 52t</span><b>{d['y_low']:.2f}</b></div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"""<div class="metric-row"><span>RSI (1h)</span><b>{d['rsi']:.1f}</b></div><div class="metric-row"><span>SMA 200</span><b>{d['sma200']:.2f}</b></div><div class="metric-row"><span style="color:#00ff88;">High 52t</span><b>{d['y_high']:.2f}</b></div><div class="metric-row"><span style="color:#ff4b4b;">Low 52t</span><b>{d['y_low']:.2f}</b></div>""", unsafe_allow_html=True)
 
             with c2:
                 fig = go.Figure(data=[go.Candlestick(x=d['df'].index[-60:], open=d['df']['Open'][-60:], high=d['df']['High'][-60:], low=d['df']['Low'][-60:], close=d['df']['Close'][-60:])])
-                fig.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
-                st.plotly_chart(fig, use_container_width=True, key=f"chart_{d['symbol']}")
+                fig.update_layout(template="plotly_dark", height=320, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
+                st.plotly_chart(fig, use_container_width=True, key=f"ch_{d['symbol']}")
 
             with c3:
-                st.write(f"BID/ASK: `{d['bid']:.2f}` / `{d['ask']:.2f}`")
                 if api_key:
-                    if st.button(f"🧠 AI STRATEGIA", key=f"btn_{d['symbol']}"):
-                        try:
-                            client = OpenAI(api_key=api_key)
-                            prompt = (f"Jesteś bezwzględnym traderem. Analiza {d['symbol']}: Cena {d['price']}, RSI {d['rsi']:.1f}, SMA200 {d['sma200']:.2f}. "
-                                      f"Podaj konkretnie: 1. AKCJA, 2. WEJŚCIE, 3. SL, 4. TP, 5. POWÓD (max 10 słów). "
-                                      f"Format SL musi być dokładnie taki: 'SL: [liczba]'. Nie lej wody.")
-                            resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-                            st.session_state.ai_results[d['symbol']] = resp.choices[0].message.content
-                        except Exception as e:
-                            st.error(f"Błąd AI: {e}")
+                    if st.button(f"🧠 ANALIZA PRO: {d['symbol']}", key=f"ai_{d['symbol']}"):
+                        client = OpenAI(api_key=api_key)
+                        prompt = (f"Jesteś ekspertem Price Action. Przeanalizuj {d['symbol']}. Cena: {d['price']}, RSI: {d['rsi']:.1f}, SMA200: {d['sma200']:.2f}.\n"
+                                  f"Ostatnie 10 świec D1 (H/L/C):\n{d['d1_history']}\n"
+                                  f"Podaj Werdykt: KUP/SPRZEDAJ/CZEKAJ. Następnie podaj poziomy w formacie SL: [cena] i TP: [cena]. "
+                                  f"Uzasadnij krótko trend na bazie tych 10 świec.")
+                        resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
+                        st.session_state.ai_results[d['symbol']] = resp.choices.message.content
                     
                     if d['symbol'] in st.session_state.ai_results:
-                        res_text = st.session_state.ai_results[d['symbol']]
-                        st.info(res_text)
+                        res = st.session_state.ai_results[d['symbol']]
+                        # Kolorowanie SL i TP w tekście
+                        res = res.replace("SL:", '<span class="price-sl">SL:</span>').replace("TP:", '<span class="price-tp">TP:</span>')
+                        st.markdown(f"<div style='font-size:0.9rem;'>{res}</div>", unsafe_allow_html=True)
                         
-                        # KALKULATOR POZYCJI
-                        sl_match = re.search(r"SL:\s*([\d\.,]+)", res_text)
+                        # Kalkulator
+                        sl_match = re.search(r"SL:.*?([\d\.,]+)", res)
                         if sl_match:
                             try:
                                 sl_val = float(sl_match.group(1).replace(',', '.'))
-                                diff = abs(d['price'] - sl_val)
-                                if diff > 0:
-                                    shares = risk_val / diff
-                                    st.markdown(f"""<div class="calc-box">
-                                        <b>Kalkulator Pozycji:</b><br>
-                                        Ryzyko kwotowe: {risk_val:.2f}<br>
-                                        Ilość: <b>{int(shares)} szt.</b><br>
-                                        Wartość pozycji: {(int(shares) * d['price']):.2f}
-                                    </div>""", unsafe_allow_html=True)
+                                risk = st.session_state.risk_cap * (st.session_state.risk_pct / 100)
+                                shares = risk / abs(d['price'] - sl_val)
+                                st.markdown(f"""<div class="calc-box"><b>Position Size:</b> {int(shares)} szt.<br><b>Koszt:</b> {(int(shares)*d['price']):.2f}</div>""", unsafe_allow_html=True)
                             except: pass
             st.markdown('</div>', unsafe_allow_html=True)
-else:
-    st.info("Dodaj symbole w panelu bocznym i upewnij się, że masz klucz OpenAI.")
