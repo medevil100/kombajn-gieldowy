@@ -7,14 +7,15 @@ from streamlit_autorefresh import st_autorefresh
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+import json
 import re
 
-# --- 1. KONFIGURACJA ---
+# --- 1. KONFIGURACJA PLIKÓW ---
 DB_FILE = "moje_spolki.txt"
-st.set_page_config(page_title="AI ALPHA GOLDEN v26 PRO", page_icon="🏆", layout="wide")
+LOG_FILE = "trade_log.json"
+st.set_page_config(page_title="NEON ALPHA SENTINEL v81", page_icon="🚨", layout="wide")
 
 if "ai_results" not in st.session_state: st.session_state.ai_results = {}
-if "last_signals" not in st.session_state: st.session_state.last_signals = {}
 
 def load_tickers():
     if os.path.exists(DB_FILE):
@@ -23,141 +24,135 @@ def load_tickers():
         except: return "NVDA, TSLA, BTC-USD"
     return "NVDA, TSLA, BTC-USD"
 
-# --- 2. STYLE I AUDIO ---
+def load_trades():
+    if os.path.exists(LOG_FILE):
+        try:
+            with open(LOG_FILE, "r") as f: return json.load(f)
+        except: return []
+    return []
+
+def save_trade(trade):
+    trades = load_trades()
+    trades.append(trade)
+    with open(LOG_FILE, "w") as f: json.dump(trades, f)
+
+# --- 2. NEON SENTINEL STYLE ---
 st.markdown("""
     <style>
-    .stApp { background-color: #050505; color: #e0e0e0; }
-    .ticker-card { 
-        background: linear-gradient(145deg, #0f111a, #1a1c2b); 
-        padding: 20px; border-radius: 15px; border: 1px solid #30363d; margin-bottom: 20px;
-    }
-    .sig-buy { color: #00ff88; font-weight: bold; border: 1px solid #00ff88; padding: 2px 8px; border-radius: 5px; background: rgba(0,255,136,0.1); }
-    .sig-sell { color: #ff4b4b; font-weight: bold; border: 1px solid #ff4b4b; padding: 2px 8px; border-radius: 5px; background: rgba(255,75,75,0.1); }
-    .metric-box { background: rgba(255,255,255,0.03); padding: 10px; border-radius: 8px; text-align: center; font-size: 0.9rem; }
-    .ai-brief { background: rgba(88, 166, 255, 0.05); padding: 12px; border-radius: 8px; border-left: 3px solid #58a6ff; margin-top: 15px; font-size: 0.85rem; line-height: 1.4; }
+    .stApp { background-color: #020202; color: #ffffff; font-family: 'Courier New', monospace; }
+    .neon-card { background: #0d0d0d; border: 1px solid #1f1f1f; padding: 25px; border-radius: 20px; margin-bottom: 25px; }
+    .alert-critical { background: rgba(255, 0, 85, 0.2); border: 2px solid #ff0055; padding: 15px; border-radius: 10px; animation: blink 1s infinite; color: #ff0055; font-weight: bold; text-align: center; margin-bottom: 20px; }
+    .alert-profit { background: rgba(0, 255, 136, 0.2); border: 2px solid #00ff88; padding: 15px; border-radius: 10px; color: #00ff88; font-weight: bold; text-align: center; margin-bottom: 20px; }
+    @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+    .metric-value { font-size: 1.5rem; font-weight: bold; }
+    .neon-buy { color: #00ff88; text-shadow: 0 0 10px #00ff88; border: 1px solid #00ff88; padding: 3px 10px; border-radius: 5px; }
     </style>
     """, unsafe_allow_html=True)
 
-# Funkcja do dźwięku (ukryta w HTML)
-def play_sound():
-    sound_html = """
-    <audio autoplay><source src="https://soundjay.com" type="audio/mpeg"></audio>
-    """
-    st.markdown(sound_html, unsafe_allow_html=True)
-
-# --- 3. SILNIK ANALIZY ---
+# --- 3. SILNIK DANYCH ---
 def fix_col(df):
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     return df
 
-def get_analysis(symbol):
+def get_ticker_data(symbol):
     try:
         t = yf.Ticker(symbol.strip().upper())
-        h1 = t.history(period="15d", interval="1h")
-        d1 = t.history(period="1y", interval="1d")
-        if h1.empty or d1.empty: return None
-        h1, d1 = fix_col(h1), fix_col(d1)
-        
-        price = float(h1['Close'].iloc[-1])
-        last_10_days = d1.tail(10)[['High', 'Low', 'Close']].to_string()
-        
-        delta = h1['Close'].diff()
-        gain = delta.where(delta > 0, 0).rolling(14).mean()
-        loss = delta.where(delta < 0, 0).abs().rolling(14).mean()
-        rsi = float(100 - (100 / (1 + (gain / (loss + 1e-9)))).iloc[-1])
-        
-        return {
-            "symbol": symbol.strip().upper(), "price": price, "rsi": rsi, 
-            "df": h1, "d1_history": last_10_days,
-            "change": ((price - d1['Close'].iloc[-2]) / d1['Close'].iloc[-2] * 100)
-        }
+        df = t.history(period="1y", interval="1d")
+        if df.empty: return None
+        df = fix_col(df)
+        price = float(df['Close'].iloc[-1])
+        h, l, c = df['High'].iloc[-2], df['Low'].iloc[-2], df['Close'].iloc[-2]
+        pp = (h + l + c) / 3
+        rsi = (100 - (100 / (1 + (df['Close'].diff().where(df['Close'].diff() > 0, 0).rolling(14).mean() / 
+                                 df['Close'].diff().where(df['Close'].diff() < 0, 0).abs().rolling(14).mean() + 1e-9)))).iloc[-1]
+        return {"symbol": symbol.strip().upper(), "price": price, "rsi": rsi, "pp": pp, "df": df.tail(45)}
     except: return None
 
-def get_ai_verdict(d, api_key):
-    if d['symbol'] in st.session_state.ai_results:
-        return st.session_state.ai_results[d['symbol']]
-    
+def get_ai_analysis(d, api_key):
+    if d['symbol'] in st.session_state.ai_results: return st.session_state.ai_results[d['symbol']]
     try:
         client = OpenAI(api_key=api_key)
-        prompt = (f"Jesteś analitykiem technicznym. Analizuj {d['symbol']} (Cena: {d['price']}). RSI: {d['rsi']:.1f}. "
-                  f"Ostatnie 10 dni H/L/C:\n{d['d1_history']}\n"
-                  f"Format odpowiedzi (BEZ LANIA WODY):\n"
-                  f"WERDYKT: [KUP/SPRZEDAJ/TRZYMAJ]\n"
-                  f"SL: [cena] | TP: [cena]\n"
-                  f"ANALIZA: [max 2 konkretne zdania o trendzie z 10 świec]")
-        resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-        res = resp.choices.message.content
+        prompt = f"Analiza {d['symbol']} @ {d['price']}. RSI {d['rsi']:.1f}. Zwróć JSON: {{'werdykt': 'KUP'|'SPRZEDAJ'|'TRZYMAJ', 'sl': cena, 'tp': cena, 'powod': 'max 8 slow'}}"
+        resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], response_format={ "type": "json_object" })
+        res = json.loads(resp.choices.message.content)
         st.session_state.ai_results[d['symbol']] = res
         return res
-    except: return "Błąd AI"
+    except: return None
 
 # --- 4. PANEL BOCZNY ---
 with st.sidebar:
-    st.title("🏆 GOLDEN v26 PRO")
+    st.title("🚨 SENTINEL v81")
     api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
-    t_input = st.text_area("Lista Symboli:", value=load_tickers(), height=120)
-    if st.button("💾 ZAPISZ I SKANUJ"):
+    risk_cap = st.number_input("💵 Kapitał:", value=10000.0)
+    t_input = st.text_area("Tickery:", value=load_tickers(), height=120)
+    if st.button("🚀 SYNC"):
         st.session_state.ai_results = {}
         with open(DB_FILE, "w", encoding="utf-8") as f: f.write(t_input)
         st.rerun()
-    refresh = st.select_slider("Auto-Refresh (s)", options=[30, 60, 300], value=60)
-    st_autorefresh(interval=refresh * 1000, key="auto_ref_v26")
+    if st.button("🗑️ Reset Dziennika"):
+        if os.path.exists(LOG_FILE): os.remove(LOG_FILE)
+        st.rerun()
+    st_autorefresh(interval=60000, key="v81_ref")
 
 # --- 5. LOGIKA GŁÓWNA ---
+trades = load_trades()
 tickers = [x.strip().upper() for x in t_input.split(",") if x.strip()]
 with ThreadPoolExecutor(max_workers=5) as executor:
-    all_data = [d for d in list(executor.map(get_analysis, tickers)) if d is not None]
+    all_data = {d['symbol']: d for d in list(executor.map(get_ticker_data, tickers)) if d is not None}
 
+# --- SENTINEL ALERTS ---
+if trades:
+    for t in trades:
+        curr_p = all_data.get(t['symbol'], {}).get('price')
+        if curr_p:
+            if curr_p <= float(t['sl']):
+                st.markdown(f'<div class="alert-critical">🚨 ALARM STOP-LOSS: {t["symbol"]} przebił {t["sl"]}! AKTUALNA CENA: {curr_p:.2f}</div>', unsafe_allow_html=True)
+            elif curr_p >= float(t['tp']):
+                st.markdown(f'<div class="alert-profit">💰 ALARM TAKE-PROFIT: {t["symbol"]} osiągnął {t["tp"]}! GRATULACJE!</div>', unsafe_allow_html=True)
+
+# Podsumowanie Portfela
+total_cost = sum([t['cost'] for t in trades])
+c1, c2, c3 = st.columns(3)
+c1.metric("KAPITAŁ", f"{risk_cap:,.0f}")
+c2.metric("W POZYCJACH", f"{total_cost:,.2f}", delta=f"{((total_cost/risk_cap)*100):.1f}%", delta_color="off")
+c3.metric("AKTYWNE TREJDY", len(trades))
+
+st.divider()
+
+# Wyświetlanie kart
 if all_data:
-    st.subheader(f"📊 MONITORING RYNKU - {datetime.now().strftime('%H:%M:%S')}")
-    
-    for d in all_data:
-        # Pobieramy werdykt AI
-        ai_info = get_ai_verdict(d, api_key) if api_key else "Brak klucza AI"
+    for sym, d in all_data.items():
+        ai = get_ai_analysis(d, api_key) if api_key else None
+        st.markdown(f'<div class="neon-card">', unsafe_allow_html=True)
+        col1, col2, col3 = st.columns([1.2, 2.5, 1.3])
         
-        # Ekstrakcja danych z tekstu AI
-        verdict_match = re.search(r"WERDYKT:\s*(\w+)", ai_info)
-        sl_match = re.search(r"SL:\s*([\d\.,]+)", ai_info)
-        tp_match = re.search(r"TP:\s*([\d\.,]+)", ai_info)
-        analiza_match = re.search(r"ANALIZA:\s*(.*)", ai_info, re.DOTALL)
+        with col1:
+            st.markdown(f"### {d['symbol']}")
+            if ai: st.markdown(f'<span class="neon-buy">{ai["werdykt"]}</span>', unsafe_allow_html=True)
+            st.markdown(f'<br><small>PRICE:</small> <b>{d["price"]:.2f}</b><br><small>RSI:</small> <b>{d["rsi"]:.1f}</b>', unsafe_allow_html=True)
 
-        current_v = verdict_match.group(1) if verdict_match else "TRZYMAJ"
-        sl_txt = sl_match.group(1) if sl_match else "---"
-        tp_txt = tp_match.group(1) if tp_match else "---"
-        brief = analiza_match.group(1) if analiza_match else "Brak analizy."
+        with col2:
+            fig = go.Figure(data=[go.Candlestick(x=d['df'].index, open=d['df']['Open'], high=d['df']['High'], low=d['df']['Low'], close=d['df']['Close'])])
+            fig.update_layout(template="plotly_dark", height=200, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig, use_container_width=True, key=f"v_{d['symbol']}")
 
-        # System powiadomień dźwiękowych
-        if "KUP" in current_v.upper() and st.session_state.last_signals.get(d['symbol']) != "KUP":
-            play_sound()
-            st.session_state.last_signals[d['symbol']] = "KUP"
+        with col3:
+            if ai:
+                diff = abs(d['price'] - float(ai['sl']))
+                shares = int((risk_cap * 0.02) / diff) if diff > 0 else 0
+                cost = shares * d['price']
+                
+                st.markdown(f"**TP: {ai['tp']}**")
+                st.markdown(f"**SL: {ai['sl']}**")
+                
+                if st.button(f"📥 ZAPISZ {shares}szt.", key=f"log_{d['symbol']}"):
+                    save_trade({"symbol": d['symbol'], "price": d['price'], "shares": shares, "cost": cost, "sl": ai['sl'], "tp": ai['tp'], "date": str(datetime.now())})
+                    st.rerun()
+                st.caption(f"Koszt: {cost:.2f} | {ai['powod']}")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-        v_class = "sig-buy" if "KUP" in current_v.upper() else "sig-sell" if "SPRZEDAJ" in current_v.upper() else ""
-
-        with st.container():
-            st.markdown(f"""
-            <div class="ticker-card">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <h2 style="margin:0;">{d['symbol']} <span class="{v_class}" style="font-size: 0.9rem;">{current_v}</span></h2>
-                    <div style="text-align: right;">
-                        <span style="font-size: 1.4rem; font-weight: bold;">{d['price']:.2f}</span>
-                        <span style="color: {'#00ff88' if d['change'] > 0 else '#ff4b4b'}; font-size: 0.9rem;">({d['change']:.2f}%)</span>
-                    </div>
-                </div>
-                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; margin-top: 15px;">
-                    <div class="metric-box">RSI: <br><b>{d['rsi']:.1f}</b></div>
-                    <div class="metric-box" style="border-bottom: 2px solid #ff4b4b;">STOP LOSS: <br><b style="color:#ff4b4b;">{sl_txt}</b></div>
-                    <div class="metric-box" style="border-bottom: 2px solid #00ff88;">TAKE PROFIT: <br><b style="color:#00ff88;">{tp_txt}</b></div>
-                    <div class="metric-box">ZMIANA 24H: <br><b>{d['change']:.2f}%</b></div>
-                </div>
-                <div class="ai-brief">
-                    <b>💡 ANALIZA KONTEKSTOWA:</b><br>{brief}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            with st.expander("🔍 Interaktywny Wykres 1H"):
-                fig = go.Figure(data=[go.Candlestick(x=d['df'].index[-60:], open=d['df']['Open'][-60:], high=d['df']['High'][-60:], low=d['df']['Low'][-60:], close=d['df']['Close'][-60:])])
-                fig.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
-                st.plotly_chart(fig, use_container_width=True, key=f"ch_{d['symbol']}")
-else:
-    st.info("👈 Wpisz symbole w panelu bocznym (np. AAPL, TSLA, BTC-USD).")
+# Dziennik
+if trades:
+    with st.expander("📓 TWÓJ DZIENNIK SENTINEL"):
+        df_trades = pd.DataFrame(trades)
+        st.dataframe(df_trades.style.highlight_between(left=0, right=df_trades['sl'], subset=['price'], color='#440011'))
