@@ -239,7 +239,7 @@ tickers_text = st.sidebar.text_area(
 )
 
 # 3. Zapis listy + rerun
-if
+if  st.sidebar.button("💾 Zapisz listę"):
     st.session_state.tickers_text = tickers_text
     with open(TICKERS_FILE, "w") as f:
         f.write(tickers_text)
