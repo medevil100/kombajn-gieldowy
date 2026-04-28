@@ -598,6 +598,4 @@ with tab_system:
 # =========================================================
 # KONIEC PLIKU PRO v100
 # =========================================================
-```
 
-Jeśli po wklejeniu tego dalej wyskoczy błąd — wklej sam traceback, bez żadnych innych dopisków.
