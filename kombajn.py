@@ -1,45 +1,78 @@
+# =========================================================
+# NEON SENTINEL PRO v100 — FULL SYSTEM (PART 1/3)
+# =========================================================
+
 import streamlit as st
 from openai import OpenAI
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
-import os
-from concurrent.futures import ThreadPoolExecutor
+import time
 import json
+import os
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
-# ---------------------------------------------------------
+# =========================================================
 # 1. SESSION STATE & CONFIG
-# ---------------------------------------------------------
+# =========================================================
+
 DEFAULTS = {
     "risk_cap": 10000.0,
     "risk_pct": 2.0,
     "ai_results": {},
-    "alerts": {},          # {symbol: {"above": float|None, "below": float|None}}
-    "portfolio": None      # lazy load
+    "alerts": {},
+    "portfolio": None,
+    "ai_logs": [],
+    "ai_errors": [],
+    "ai_batch_time": None,
+    "ai_batch_count": 0,
+    "ai_bad_tickers": [],
+    "ai_mode": False,
+    "dry_run": False,
+    "batch_limit": 50,
 }
 
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-if "run_ai_now" not in st.session_state:
-    st.session_state.run_ai_now = False
-
 DB_FILE = "moje_spolki.txt"
 PORTFOLIO_FILE = "portfolio.json"
 
 st.set_page_config(
-    page_title="NEON SENTINEL PRO v98",
+    page_title="NEON SENTINEL PRO v100",
     page_icon="⚡",
     layout="wide"
 )
 
-# ---------------------------------------------------------
-# 2. HELPERS: TICKERS & PORTFOLIO
-# ---------------------------------------------------------
+# =========================================================
+# 2. CSS — NEON DARK STYLE
+# =========================================================
+
+st.markdown("""
+<style>
+.stApp { background-color: #020202; color: #ffffff; font-family: 'Courier New', monospace; }
+.neon-card { background: #0d0d0d; border: 1px solid #1f1f1f; padding: 25px; border-radius: 20px; margin-bottom: 30px; }
+.status-buy { color: #00ff88; text-shadow: 0 0 10px #00ff88; font-weight: bold; border: 2px solid #00ff88; padding: 5px 15px; border-radius: 10px; }
+.status-sell { color: #ff0055; text-shadow: 0 0 10px #ff0055; font-weight: bold; border: 2px solid #ff0055; padding: 5px 15px; border-radius: 10px; }
+.status-hold { color: #58a6ff; text-shadow: 0 0 10px #58a6ff; font-weight: bold; border: 2px solid #58a6ff; padding: 5px 15px; border-radius: 10px; }
+.tp-box { border: 1px solid #00ff88; padding: 12px; border-radius: 10px; color: #00ff88; text-align: center; background: rgba(0,255,136,0.1); font-weight: bold; }
+.sl-box { border: 1px solid #ff0055; padding: 12px; border-radius: 10px; color: #ff0055; text-align: center; background: rgba(255,0,85,0.1); font-weight: bold; }
+.top-tile { background: #111; border: 1px solid #333; padding: 15px; border-radius: 12px; text-align: center; border-bottom: 4px solid #58a6ff; }
+.score-badge { margin-top:6px; display:inline-block; padding:4px 10px; border-radius:999px; font-size:0.8rem; border:1px solid #58a6ff; color:#58a6ff; }
+.alert-badge { display:inline-block; margin-top:6px; font-size:0.75rem; color:#ffcc00; }
+.ai-log-box { background:#111; padding:15px; border-radius:10px; border:1px solid #333; margin-bottom:10px; font-size:0.8rem; }
+</style>
+""", unsafe_allow_html=True)
+
+# =========================================================
+# 3. HELPERS
+# =========================================================
+
 def load_tickers():
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r", encoding="utf-8") as f:
@@ -64,9 +97,115 @@ def save_portfolio(p):
     with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
         json.dump(p, f, indent=4)
 
-# ---------------------------------------------------------
-# 3. CSS — NEON STYLE
-# ---------------------------------------------------------
+# =========================================================
+# 4. SIDEBAR — SETTINGS + AI LOGS (dual view)
+# =========================================================
+
+with st.sidebar:
+    st.title("⚡ PRO v100 — Panel Sterowania")
+
+    st.session_state.ai_mode = st.checkbox("AI Mode (ON/OFF)", value=st.session_state.ai_mode)
+    st.session_state.dry_run = st.checkbox("Dry‑run (bez yfinance)", value=st.session_state.dry_run)
+    st.session_state.batch_limit = st.number_input("Limit batcha (max tickers):", 1, 200, st.session_state.batch_limit)
+
+    st.markdown("---")
+
+    t_in = st.text_area("Lista Symboli:", value=load_tickers(), height=150)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("💾 Zapisz listę"):
+            with open(DB_FILE, "w", encoding="utf-8") as f:
+                f.write(t_in)
+            st.success("Zapisano listę tickerów.")
+
+    with col2:
+        if st.button("🧹 Reset AI Cache"):
+            st.session_state.ai_results = {}
+            st.session_state.ai_logs = []
+            st.session_state.ai_errors = []
+            st.session_state.ai_bad_tickers = []
+            st.success("AI cache wyczyszczony.")
+
+    st.markdown("---")
+    st.subheader("📡 AI LOGS (Live)")
+
+    if st.session_state.ai_logs:
+        for log in st.session_state.ai_logs[-10:]:
+            st.markdown(f"<div class='ai-log-box'>{log}</div>", unsafe_allow_html=True)
+    else:
+        st.info("Brak logów AI.")
+
+    st_autorefresh(interval=60000, key="v100_ref")
+
+# =========================================================
+# 5. TABS LAYOUT
+# =========================================================
+
+tab_dashboard, tab_ai_logs, tab_ai_settings, tab_compare, tab_biotech, tab_portfolio, tab_system = st.tabs([
+    "📊 Dashboard",
+    "🧠 AI Logs",
+    "⚙️ AI Settings",
+    "⚔️ Comparison Mode",
+    "🧬 Biotech Radar",
+    "💼 Portfolio",
+    "🛠 System"
+])
+# =========================================================
+# NEON SENTINEL PRO v100 — FULL SYSTEM (PART 1/3)
+# =========================================================
+
+import streamlit as st
+from openai import OpenAI
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from streamlit_autorefresh import st_autorefresh
+import time
+import json
+import os
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+
+# =========================================================
+# 1. SESSION STATE & CONFIG
+# =========================================================
+
+DEFAULTS = {
+    "risk_cap": 10000.0,
+    "risk_pct": 2.0,
+    "ai_results": {},
+    "alerts": {},
+    "portfolio": None,
+    "ai_logs": [],
+    "ai_errors": [],
+    "ai_batch_time": None,
+    "ai_batch_count": 0,
+    "ai_bad_tickers": [],
+    "ai_mode": False,
+    "dry_run": False,
+    "batch_limit": 50,
+}
+
+for k, v in DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+DB_FILE = "moje_spolki.txt"
+PORTFOLIO_FILE = "portfolio.json"
+
+st.set_page_config(
+    page_title="NEON SENTINEL PRO v100",
+    page_icon="⚡",
+    layout="wide"
+)
+
+# =========================================================
+# 2. CSS — NEON DARK STYLE
+# =========================================================
+
 st.markdown("""
 <style>
 .stApp { background-color: #020202; color: #ffffff; font-family: 'Courier New', monospace; }
@@ -79,26 +218,195 @@ st.markdown("""
 .top-tile { background: #111; border: 1px solid #333; padding: 15px; border-radius: 12px; text-align: center; border-bottom: 4px solid #58a6ff; }
 .score-badge { margin-top:6px; display:inline-block; padding:4px 10px; border-radius:999px; font-size:0.8rem; border:1px solid #58a6ff; color:#58a6ff; }
 .alert-badge { display:inline-block; margin-top:6px; font-size:0.75rem; color:#ffcc00; }
+.ai-log-box { background:#111; padding:15px; border-radius:10px; border:1px solid #333; margin-bottom:10px; font-size:0.8rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# 4. TECHNICAL ENGINE
-# ---------------------------------------------------------
-def fix_col(df):
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df
+# =========================================================
+# 3. HELPERS
+# =========================================================
+
+def load_tickers():
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            return f.read()
+    return "NVDA, TSLA, BTC-USD, PKO.WA"
+
+def load_portfolio():
+    if st.session_state.portfolio is not None:
+        return st.session_state.portfolio
+    if not os.path.exists(PORTFOLIO_FILE):
+        st.session_state.portfolio = {"positions": [], "history": []}
+        return st.session_state.portfolio
+    try:
+        with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
+            st.session_state.portfolio = json.load(f)
+    except:
+        st.session_state.portfolio = {"positions": [], "history": []}
+    return st.session_state.portfolio
+
+def save_portfolio(p):
+    st.session_state.portfolio = p
+    with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
+        json.dump(p, f, indent=4)
+
+# =========================================================
+# 4. SIDEBAR — SETTINGS + AI LOGS (dual view)
+# =========================================================
+
+with st.sidebar:
+    st.title("⚡ PRO v100 — Panel Sterowania")
+
+    st.session_state.ai_mode = st.checkbox("AI Mode (ON/OFF)", value=st.session_state.ai_mode)
+    st.session_state.dry_run = st.checkbox("Dry‑run (bez yfinance)", value=st.session_state.dry_run)
+    st.session_state.batch_limit = st.number_input("Limit batcha (max tickers):", 1, 200, st.session_state.batch_limit)
+
+    st.markdown("---")
+
+    t_in = st.text_area("Lista Symboli:", value=load_tickers(), height=150)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("💾 Zapisz listę"):
+            with open(DB_FILE, "w", encoding="utf-8") as f:
+                f.write(t_in)
+            st.success("Zapisano listę tickerów.")
+
+    with col2:
+        if st.button("🧹 Reset AI Cache"):
+            st.session_state.ai_results = {}
+            st.session_state.ai_logs = []
+            st.session_state.ai_errors = []
+            st.session_state.ai_bad_tickers = []
+            st.success("AI cache wyczyszczony.")
+
+    st.markdown("---")
+    st.subheader("📡 AI LOGS (Live)")
+
+    if st.session_state.ai_logs:
+        for log in st.session_state.ai_logs[-10:]:
+            st.markdown(f"<div class='ai-log-box'>{log}</div>", unsafe_allow_html=True)
+    else:
+        st.info("Brak logów AI.")
+
+    st_autorefresh(interval=60000, key="v100_ref")
+
+# =========================================================
+# 5. TABS LAYOUT
+# =========================================================
+
+tab_dashboard, tab_ai_logs, tab_ai_settings, tab_compare, tab_biotech, tab_portfolio, tab_system = st.tabs([
+    "📊 Dashboard",
+    "🧠 AI Logs",
+    "⚙️ AI Settings",
+    "⚔️ Comparison Mode",
+    "🧬 Biotech Radar",
+    "💼 Portfolio",
+    "🛠 System"
+])
+# =========================================================
+# 6. AI ENGINE (Turbo Batch + Logging)
+# =========================================================
+
+def log_ai(msg):
+    ts = datetime.now().strftime("%H:%M:%S")
+    st.session_state.ai_logs.append(f"[{ts}] {msg}")
+
+def log_error(msg):
+    ts = datetime.now().strftime("%H:%M:%S")
+    st.session_state.ai_errors.append(f"[{ts}] {msg}")
+
+def run_ai_single(d, key):
+    try:
+        client = OpenAI(api_key=key)
+
+        prompt = (
+            f"Analiza {d['symbol']} @ {d['price']}.\n"
+            f"DATA: RSI {d['rsi']:.1f}, High {d['high']}, Low {d['low']}, "
+            f"Pivot {d['pp']:.2f}, MA50 {d['ma50']:.2f}, MA200 {d['ma200']:.2f}.\n"
+            f"Zwróć werdykt w formacie JSON:\n"
+            f"{{"
+            f"\"w\": \"KUP\"|\"SPRZEDAJ\"|\"TRZYMAJ\", "
+            f"\"sl\": cena_sl, "
+            f"\"tp\": cena_tp, "
+            f"\"score\": liczba_od_0_do_100, "
+            f"\"uzas\": \"max 10 slow uzasadnienia technicznego\""
+            f"}}"
+        )
+
+        log_ai(f"AI start → {d['symbol']}")
+
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"}
+        )
+
+        res = json.loads(resp.choices[0].message.content)
+
+        if "score" not in res:
+            base = max(0, min(100, 100 - abs(d["rsi"] - 50) * 2))
+            res["score"] = int(base)
+
+        st.session_state.ai_results[d["symbol"]] = res
+        log_ai(f"AI OK → {d['symbol']} (score {res['score']})")
+        return res
+
+    except Exception as e:
+        log_error(f"AI ERROR → {d['symbol']}: {e}")
+        st.session_state.ai_bad_tickers.append(d["symbol"])
+        return None
+
+
+def run_ai_batch(data_list, key):
+    if not st.session_state.ai_mode:
+        log_ai("AI Mode OFF → batch pominięty.")
+        return
+
+    start = time.time()
+    st.session_state.ai_batch_count = 0
+    st.session_state.ai_bad_tickers = []
+
+    log_ai("=== AI TURBO BATCH START ===")
+
+    for d in data_list[: st.session_state.batch_limit]:
+        run_ai_single(d, key)
+        st.session_state.ai_batch_count += 1
+
+    end = time.time()
+    st.session_state.ai_batch_time = round(end - start, 2)
+
+    log_ai(f"=== AI TURBO BATCH DONE: {st.session_state.ai_batch_count} tickerów, {st.session_state.ai_batch_time}s ===")
+    if st.session_state.ai_bad_tickers:
+        log_ai(f"Błędne tickery: {', '.join(st.session_state.ai_bad_tickers)}")
+
+
+# =========================================================
+# 7. DATA FETCH ENGINE (with dry-run)
+# =========================================================
 
 def get_data(symbol):
     try:
+        if st.session_state.dry_run:
+            return {
+                "symbol": symbol.upper(),
+                "price": round(np.random.uniform(1, 200), 2),
+                "rsi": round(np.random.uniform(10, 90), 1),
+                "ma50": round(np.random.uniform(1, 200), 2),
+                "ma200": round(np.random.uniform(1, 200), 2),
+                "pp": round(np.random.uniform(1, 200), 2),
+                "high": round(np.random.uniform(1, 200), 2),
+                "low": round(np.random.uniform(1, 200), 2),
+                "df": pd.DataFrame(),
+                "change": round(np.random.uniform(-10, 10), 2),
+            }
+
         t = yf.Ticker(symbol.strip().upper())
         df = t.history(period="1y", interval="1d")
 
         if df.empty or len(df) < 50:
+            st.session_state.ai_bad_tickers.append(symbol)
             return None
-
-        df = fix_col(df)
 
         price = float(df["Close"].iloc[-1])
         ma50 = df["Close"].rolling(50).mean().iloc[-1]
@@ -119,6 +427,7 @@ def get_data(symbol):
         rsi = float(100 - (100 / (1 + gain / (loss + 1e-9))).iloc[-1])
 
         if rsi < 1.0:
+            st.session_state.ai_bad_tickers.append(symbol)
             return None
 
         return {
@@ -134,241 +443,61 @@ def get_data(symbol):
             "change": ((price - prev_c) / prev_c * 100)
         }
 
-    except:
+    except Exception as e:
+        log_error(f"DATA ERROR → {symbol}: {e}")
+        st.session_state.ai_bad_tickers.append(symbol)
         return None
 
-# ---------------------------------------------------------
-# 5. AI ENGINE (WITH SCORING 0–100)
-# ---------------------------------------------------------
-def run_ai(d, key):
-    if d["symbol"] in st.session_state.ai_results:
-        return st.session_state.ai_results[d["symbol"]]
 
-    try:
-        client = OpenAI(api_key=key)
+# =========================================================
+# 8. TAB: DASHBOARD
+# =========================================================
 
-        prompt = (
-            f"Analiza {d['symbol']} @ {d['price']}.\n"
-            f"DATA: RSI {d['rsi']:.1f}, High {d['high']}, Low {d['low']}, "
-            f"Pivot {d['pp']:.2f}, MA50 {d['ma50']:.2f}, MA200 {d['ma200']:.2f}.\n"
-            f"Zwróć werdykt w formacie JSON:\n"
-            f"{{"
-            f"\"w\": \"KUP\"|\"SPRZEDAJ\"|\"TRZYMAJ\", "
-            f"\"sl\": cena_sl, "
-            f"\"tp\": cena_tp, "
-            f"\"score\": liczba_od_0_do_100, "
-            f"\"uzas\": \"max 10 slow uzasadnienia technicznego\""
-            f"}}"
-        )
+with tab_dashboard:
 
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"}
-        )
+    st.header("📊 Dashboard — NEON SENTINEL PRO v100")
 
-        res = json.loads(resp.choices[0].message.content)
+    tickers = [x.strip().upper() for x in t_in.split(",") if x.strip()]
 
-        if "score" not in res:
-            base = max(0, min(100, 100 - abs(d["rsi"] - 50) * 2))
-            res["score"] = int(base)
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        data_list = [d for d in executor.map(get_data, tickers) if d is not None]
 
-        st.session_state.ai_results[d["symbol"]] = res
-        return res
+    if st.session_state.ai_mode:
+        run_ai_batch(data_list, key)
 
-    except:
-        return None
-
-# ---------------------------------------------------------
-# 6. SIDEBAR: SETTINGS, TICKERS, PORTFOLIO, ALERTS, AI TURBO
-# ---------------------------------------------------------
-with st.sidebar:
-    st.title("⚡ SENTINEL PRO v98")
-
-    key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
-
-    st.session_state.risk_cap = st.number_input("💵 Kapitał portfela:", value=st.session_state.risk_cap)
-    st.session_state.risk_pct = st.slider("Ryzyko % na trade", 0.5, 5.0, st.session_state.risk_pct)
-
-    t_in = st.text_area("Lista Symboli:", value=load_tickers(), height=150)
-
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
-        if st.button("🚀 SKANUJ I ZAPISZ"):
-            with open(DB_FILE, "w", encoding="utf-8") as f:
-                f.write(t_in)
-            st.session_state.ai_results = {}
-            st.session_state.run_ai_now = False
-            st.rerun()
-    with col_btn2:
-        if st.button("🤖 AI TURBO BATCH (max 50)"):
-            st.session_state.ai_results = {}
-            st.session_state.run_ai_now = True
-            st.rerun()
-
-    st.markdown("---")
-    st.subheader("📦 Portfolio")
-
-    p = load_portfolio()
-
-    with st.expander("Dodaj / edytuj pozycję", expanded=False):
-        colp1, colp2 = st.columns(2)
-        with colp1:
-            new_sym = st.text_input("Symbol", value="")
-            qty = st.number_input("Ilość", value=0.0, step=1.0)
-        with colp2:
-            buy_price = st.number_input("Cena zakupu", value=0.0, step=0.01)
-            add_btn = st.button("➕ Zapisz pozycję")
-
-        if add_btn and new_sym and qty > 0 and buy_price > 0:
-            updated = False
-            for pos in p["positions"]:
-                if pos["symbol"].upper() == new_sym.upper():
-                    pos["qty"] = qty
-                    pos["buy_price"] = buy_price
-                    updated = True
-                    break
-            if not updated:
-                p["positions"].append({
-                    "symbol": new_sym.upper(),
-                    "qty": qty,
-                    "buy_price": buy_price
-                })
-            save_portfolio(p)
-            st.success("Pozycja zapisana.")
-            st.rerun()
-
-    if p["positions"]:
-        st.write("Aktualne pozycje:")
-        st.table(pd.DataFrame(p["positions"]))
-
-    st.markdown("---")
-    st.subheader("⏰ Alerty cenowe")
-
-    alert_sym = st.text_input("Symbol alertu", value="")
-    col_a1, col_a2 = st.columns(2)
-    with col_a1:
-        above = st.text_input("Alert powyżej ceny", value="")
-    with col_a2:
-        below = st.text_input("Alert poniżej ceny", value="")
-    if st.button("💾 Zapisz alert"):
-        if alert_sym:
-            st.session_state.alerts[alert_sym.upper()] = {
-                "above": float(above) if above.strip() else None,
-                "below": float(below) if below.strip() else None
-            }
-            st.success("Alert zapisany.")
-    if st.session_state.alerts:
-        st.write("Aktywne alerty:")
-        st.json(st.session_state.alerts)
-
-    st_autorefresh(interval=60000, key="v98_ref")
-
-# ---------------------------------------------------------
-# 7. MAIN DATA FETCH
-# ---------------------------------------------------------
-tickers = [x.strip().upper() for x in t_in.split(",") if x.strip()]
-
-with ThreadPoolExecutor(max_workers=10) as executor:
-    data_list = [d for d in executor.map(get_data, tickers) if d is not None]
-
-# ---------------------------------------------------------
-# 8. PORTFOLIO HEATMAP (BASED ON VALUE & SCORE)
-# ---------------------------------------------------------
-def build_portfolio_heatmap(data_list, portfolio):
-    if not portfolio["positions"]:
-        return None
-
-    df_prices = {d["symbol"]: d for d in data_list}
-    rows = []
-    for pos in portfolio["positions"]:
-        sym = pos["symbol"].upper()
-        if sym not in df_prices:
-            continue
-        d = df_prices[sym]
-        ai = st.session_state.ai_results.get(sym)
-        score = ai["score"] if ai else None
-        value = pos["qty"] * d["price"]
-        rows.append({
-            "symbol": sym,
-            "value": value,
-            "score": score if score is not None else 50
-        })
-
-    if not rows:
-        return None
-
-    df = pd.DataFrame(rows)
-    df = df.sort_values("value", ascending=False)
-
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=df["score"],
-            x=df["symbol"],
-            y=["AI score"],
-            colorscale="RdYlGn",
-            zmin=0,
-            zmax=100,
-            text=[f"{s}<br>{v:,.0f} ({sc})" for s, v, sc in zip(df["symbol"], df["value"], df["score"])],
-            hoverinfo="text"
-        )
-    )
-    fig.update_layout(
-        title="Heatmapa portfela (AI score 0–100)",
-        template="plotly_dark",
-        height=260,
-        margin=dict(l=0, r=0, t=40, b=0)
-    )
-    return fig
-
-# ---------------------------------------------------------
-# 9. DASHBOARD
-# ---------------------------------------------------------
-if data_list:
-
-    # TOP 10
-    st.subheader("🔥 TOP 10 SYGNAŁÓW (Techniczny + AI Scoring)")
-    t_cols = st.columns(5)
+    st.subheader("🔥 TOP 10 SYGNAŁÓW (Techniczny + AI Score)")
+    cols = st.columns(5)
 
     ranked = []
-    for r in data_list:
-        ai_brief = run_ai(r, key) if key and st.session_state.run_ai_now else None
-        score = ai_brief["score"] if ai_brief else 0
-        ranked.append((r, ai_brief, score))
+    for d in data_list:
+        ai = st.session_state.ai_results.get(d["symbol"])
+        score = ai["score"] if ai else 0
+        ranked.append((d, ai, score))
 
     ranked = sorted(ranked, key=lambda x: x[2], reverse=True)[:10]
 
-    for i, (r, ai_brief, score) in enumerate(ranked):
-        tag = ai_brief["w"] if ai_brief else "---"
+    for i, (d, ai, score) in enumerate(ranked):
+        tag = ai["w"] if ai else "---"
         color = "#00ff88" if tag == "KUP" else "#ff4b4b" if tag == "SPRZEDAJ" else "#58a6ff"
-        with t_cols[i % 5]:
+
+        with cols[i % 5]:
             st.markdown(
-                f"<div class='top-tile'><b>{r['symbol']}</b><br>"
+                f"<div class='top-tile'><b>{d['symbol']}</b><br>"
                 f"<span style='color:{color}; font-weight:bold;'>{tag}</span><br>"
-                f"<small>Cena: {r['price']:.2f}</small><br>"
-                f"<small>RSI: {r['rsi']:.1f}</small><br>"
+                f"<small>Cena: {d['price']:.2f}</small><br>"
+                f"<small>RSI: {d['rsi']:.1f}</small><br>"
                 f"<span class='score-badge'>AI score: {score}</span></div>",
                 unsafe_allow_html=True
             )
 
     st.divider()
 
-    # HEATMAP PORTFOLIO
-    p = load_portfolio()
-    heatmap_fig = build_portfolio_heatmap(data_list, p)
-    if heatmap_fig:
-        st.plotly_chart(heatmap_fig, use_container_width=True)
-
-    st.divider()
-
-    # FULL CARDS
     for d in data_list:
-        ai = run_ai(d, key) if key and st.session_state.run_ai_now else None
+        ai = st.session_state.ai_results.get(d["symbol"])
 
-        st.markdown('<div class="neon-card">', unsafe_allow_html=True)
+        st.markdown("<div class='neon-card'>", unsafe_allow_html=True)
         c1, c2, c3 = st.columns([1.5, 2.5, 1.5])
 
-        # LEFT PANEL
         with c1:
             st.markdown(f"### {d['symbol']}")
 
@@ -378,74 +507,241 @@ if data_list:
                     else "status-sell" if ai["w"] == "SPRZEDAJ"
                     else "status-hold"
                 )
-                st.markdown(f'<span class="{cls}">{ai["w"]}</span>', unsafe_allow_html=True)
+                st.markdown(f"<span class='{cls}'>{ai['w']}</span>", unsafe_allow_html=True)
                 st.markdown(f"<div class='score-badge'>AI score: {ai['score']}</div>", unsafe_allow_html=True)
 
             st.markdown(f"<br>Cena: **{d['price']:.2f}** ({d['change']:.2f}%)")
             st.write(f"Szczyt: {d['high']:.2f} | Dołek: {d['low']:.2f}")
             st.write(f"Pivot: {d['pp']:.2f} | RSI: {d['rsi']:.1f}")
 
-            alerts = st.session_state.alerts.get(d["symbol"], {})
-            alert_msgs = []
-            if alerts:
-                if alerts.get("above") is not None and d["price"] >= alerts["above"]:
-                    alert_msgs.append(f"⚠ Cena >= {alerts['above']}")
-                if alerts.get("below") is not None and d["price"] <= alerts["below"]:
-                    alert_msgs.append(f"⚠ Cena <= {alerts['below']}")
-            if alert_msgs:
-                st.markdown(
-                    "<div class='alert-badge'>" + "<br>".join(alert_msgs) + "</div>",
-                    unsafe_allow_html=True
-                )
-
-        # CHART
         with c2:
-            fig = go.Figure(
-                data=[go.Candlestick(
-                    x=d["df"].index,
-                    open=d["df"]["Open"],
-                    high=d["df"]["High"],
-                    low=d["df"]["Low"],
-                    close=d["df"]["Close"]
-                )]
-            )
-            fig.add_hline(y=d["pp"], line_dash="dot", line_color="#58a6ff", annotation_text="Pivot")
-            fig.update_layout(
-                template="plotly_dark",
-                height=280,
-                margin=dict(l=0, r=0, t=0, b=0),
-                xaxis_rangeslider_visible=False
-            )
-            st.plotly_chart(fig, use_container_width=True, key=f"f_{d['symbol']}")
+            if not st.session_state.dry_run:
+                fig = go.Figure(
+                    data=[go.Candlestick(
+                        x=d["df"].index,
+                        open=d["df"]["Open"],
+                        high=d["df"]["High"],
+                        low=d["df"]["Low"],
+                        close=d["df"]["Close"]
+                    )]
+                )
+                fig.add_hline(y=d["pp"], line_dash="dot", line_color="#58a6ff", annotation_text="Pivot")
+                fig.update_layout(template="plotly_dark", height=280, margin=dict(l=0, r=0, t=0, b=0))
+                st.plotly_chart(fig, use_container_width=True)
 
-        # RIGHT PANEL
         with c3:
             if ai:
-                st.markdown(f'<div class="tp-box"><small>TAKE PROFIT</small><br><b>{ai["tp"]}</b></div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="sl-box" style="margin-top:10px;"><small>STOP LOSS</small><br><b>{ai["sl"]}</b></div>', unsafe_allow_html=True)
-
-                try:
-                    diff = abs(d["price"] - float(ai["sl"]))
-                    risk_val = st.session_state.risk_cap * (st.session_state.risk_pct / 100)
-                    shares = int(risk_val / diff) if diff > 0 else 0
-
-                    st.markdown(
-                        f"<div style='background:#111; padding:15px; border-radius:10px; "
-                        f"border:1px solid #333; margin-top:15px; text-align:center;'>"
-                        f"KUP: <b style='color:#00ff88; font-size:1.3rem;'>{shares} szt.</b>"
-                        f"<br><small><i>{ai['uzas']}</i></small></div>",
-                        unsafe_allow_html=True
-                    )
-                except:
-                    pass
+                st.markdown(f"<div class='tp-box'><small>TAKE PROFIT</small><br><b>{ai['tp']}</b></div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='sl-box' style='margin-top:10px;'><small>STOP LOSS</small><br><b>{ai['sl']}</b></div>", unsafe_allow_html=True)
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-    if st.session_state.run_ai_now:
-        st.session_state.run_ai_now = False
 
-else:
-    st.info("System gotowy. Wpisz symbole i klucz OpenAI (PRO v98).")
+# =========================================================
+# 9. TAB: AI LOGS (zakładka)
+# =========================================================
+
+with tab_ai_logs:
+    st.header("🧠 AI Logs — pełna historia")
+
+    if st.session_state.ai_logs:
+        for log in reversed(st.session_state.ai_logs):
+            st.markdown(f"<div class='ai-log-box'>{log}</div>", unsafe_allow_html=True)
+    else:
+        st.info("Brak logów AI.")
+
+    st.subheader("❌ Błędne tickery")
+    if st.session_state.ai_bad_tickers:
+        st.write(st.session_state.ai_bad_tickers)
+    else:
+        st.write("Brak błędów.")
+
+    st.subheader("⏱ Czas batcha")
+    if st.session_state.ai_batch_time:
+        st.write(f"{st.session_state.ai_batch_time}s")
+    else:
+        st.write("Batch jeszcze nie wykonany.")
 
 
+# =========================================================
+# 10. TAB: COMPARISON MODE
+# =========================================================
 
+with tab_compare:
+    st.header("⚔️ Comparison Mode — porównanie dwóch tickerów")
+
+    colA, colB = st.columns(2)
+    with colA:
+        tA = st.text_input("Ticker A")
+    with colB:
+        tB = st.text_input("Ticker B")
+
+    if st.button("🔍 Porównaj"):
+        if not tA or not tB:
+            st.error("Podaj oba tickery.")
+        else:
+            dA = get_data(tA)
+            dB = get_data(tB)
+
+            if not dA or not dB:
+                st.error("Brak danych dla jednego z tickerów.")
+            else:
+                aiA = st.session_state.ai_results.get(tA)
+                aiB = st.session_state.ai_results.get(tB)
+
+                st.subheader("📊 Dane techniczne")
+                df = pd.DataFrame([
+                    ["Cena", dA["price"], dB["price"]],
+                    ["RSI", dA["rsi"], dB["rsi"]],
+                    ["MA50", dA["ma50"], dB["ma50"]],
+                    ["MA200", dA["ma200"], dB["ma200"]],
+                    ["Pivot", dA["pp"], dB["pp"]],
+                    ["AI score", aiA["score"] if aiA else "-", aiB["score"] if aiB else "-"],
+                ], columns=["Parametr", tA, tB])
+                st.table(df)
+
+                st.subheader("⚖ Werdykt AI")
+                if aiA and aiB:
+                    if aiA["score"] > aiB["score"]:
+                        st.success(f"**{tA}** jest silniejszy technicznie.")
+                    elif aiA["score"] < aiB["score"]:
+                        st.success(f"**{tB}** jest silniejszy technicznie.")
+                    else:
+                        st.info("Remis — oba mają taki sam AI score.")
+                else:
+                    st.info("Brak pełnej analizy AI.")
+# =========================================================
+# 11. TAB: BIOTECH RADAR
+# =========================================================
+
+with tab_biotech:
+    st.header("🧬 Biotech Radar — anomalie, spike’i, gapy, wolumen")
+
+    st.write("System analizuje tickery pod kątem nietypowych ruchów.")
+
+    if not data_list:
+        st.info("Brak danych — przejdź do Dashboard i wykonaj skan.")
+    else:
+        anomalies = []
+
+        for d in data_list:
+            spike = d["change"] > 15
+            gap = abs(d["high"] - d["low"]) > d["low"] * 0.05
+            vol_anom = False  # placeholder — można dodać wolumen później
+
+            score = 0
+            if spike: score += 40
+            if gap: score += 30
+            if vol_anom: score += 30
+
+            anomalies.append({
+                "symbol": d["symbol"],
+                "price": d["price"],
+                "change": d["change"],
+                "rsi": d["rsi"],
+                "spike": spike,
+                "gap": gap,
+                "vol": vol_anom,
+                "score": score
+            })
+
+        df = pd.DataFrame(anomalies)
+        df = df.sort_values("score", ascending=False)
+
+        st.subheader("🔥 Najbardziej podejrzane ruchy (TOP 20)")
+        st.dataframe(df.head(20))
+
+
+# =========================================================
+# 12. TAB: PORTFOLIO
+# =========================================================
+
+with tab_portfolio:
+    st.header("💼 Portfolio — zarządzanie pozycjami")
+
+    p = load_portfolio()
+
+    st.subheader("Aktualne pozycje")
+    if p["positions"]:
+        st.table(pd.DataFrame(p["positions"]))
+    else:
+        st.info("Brak pozycji w portfelu.")
+
+    st.subheader("Dodaj / edytuj pozycję")
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        sym = st.text_input("Symbol")
+    with col2:
+        qty = st.number_input("Ilość", value=0.0)
+    with col3:
+        price = st.number_input("Cena zakupu", value=0.0)
+
+    if st.button("➕ Zapisz pozycję"):
+        if sym and qty > 0 and price > 0:
+            updated = False
+            for pos in p["positions"]:
+                if pos["symbol"].upper() == sym.upper():
+                    pos["qty"] = qty
+                    pos["buy_price"] = price
+                    updated = True
+                    break
+            if not updated:
+                p["positions"].append({
+                    "symbol": sym.upper(),
+                    "qty": qty,
+                    "buy_price": price
+                })
+            save_portfolio(p)
+            st.success("Pozycja zapisana.")
+            st.rerun()
+        else:
+            st.error("Uzupełnij wszystkie pola.")
+
+    st.subheader("📈 Historia wartości portfela")
+    if "value_history" in p and p["value_history"]:
+        dfh = pd.DataFrame(p["value_history"])
+        st.line_chart(dfh["value"])
+    else:
+        st.info("Brak historii wartości.")
+
+
+# =========================================================
+# 13. TAB: SYSTEM
+# =========================================================
+
+with tab_system:
+    st.header("🛠 System Diagnostics — PRO v100")
+
+    st.subheader("Wersja aplikacji")
+    st.write("NEON SENTINEL PRO v100")
+
+    st.subheader("Tryby pracy")
+    st.write(f"AI Mode: {'ON' if st.session_state.ai_mode else 'OFF'}")
+    st.write(f"Dry‑run: {'ON' if st.session_state.dry_run else 'OFF'}")
+    st.write(f"Batch limit: {st.session_state.batch_limit}")
+
+    st.subheader("Test yfinance")
+    try:
+        test = yf.Ticker("AAPL").history(period="1d")
+        if not test.empty:
+            st.success("yfinance działa poprawnie.")
+        else:
+            st.warning("yfinance zwrócił pusty wynik.")
+    except Exception as e:
+        st.error(f"Błąd yfinance: {e}")
+
+    st.subheader("Test OpenAI API")
+    if key:
+        try:
+            client = OpenAI(api_key=key)
+            st.success("Klucz OpenAI wygląda OK.")
+        except Exception as e:
+            st.error(f"Błąd OpenAI: {e}")
+    else:
+        st.warning("Brak klucza OpenAI.")
+
+
+# =========================================================
+# KONIEC PLIKU PRO v100
+# =========================================================
