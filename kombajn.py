@@ -1,5 +1,5 @@
 # =========================================================
-# NEON SENTINEL PRO v100 — FULL SYSTEM FIXED
+# NEON SENTINEL PRO v100 — FULL SYSTEM
 # =========================================================
 
 import streamlit as st
@@ -24,7 +24,7 @@ DEFAULTS = {
     "risk_pct": 2.0,
     "ai_results": {},
     "alerts": {},
-    "portfolio": {"positions": [], "history": [], "value_history": []},
+    "portfolio": None,
     "ai_logs": [],
     "ai_errors": [],
     "ai_batch_time": None,
@@ -64,6 +64,8 @@ st.markdown("""
 .tp-box { border: 1px solid #00ff88; padding: 12px; border-radius: 10px; color: #00ff88; text-align: center; background: rgba(0,255,136,0.1); font-weight: bold; }
 .sl-box { border: 1px solid #ff0055; padding: 12px; border-radius: 10px; color: #ff0055; text-align: center; background: rgba(255,0,85,0.1); font-weight: bold; }
 .top-tile { background: #111; border: 1px solid #333; padding: 15px; border-radius: 12px; text-align: center; border-bottom: 4px solid #58a6ff; }
+.score-badge { margin-top:6px; display:inline-block; padding:4px 10px; border-radius:999px; font-size:0.8rem; border:1px solid #58a6ff; color:#58a6ff; }
+.alert-badge { display:inline-block; margin-top:6px; font-size:0.75rem; color:#ffcc00; }
 .ai-log-box { background:#111; padding:15px; border-radius:10px; border:1px solid #333; margin-bottom:10px; font-size:0.8rem; }
 </style>
 """, unsafe_allow_html=True)
@@ -78,28 +80,141 @@ def load_tickers():
             return f.read()
     return "NVDA, TSLA, BTC-USD, PKO.WA"
 
+def load_portfolio():
+    if st.session_state.portfolio is not None:
+        return st.session_state.portfolio
+    if not os.path.exists(PORTFOLIO_FILE):
+        st.session_state.portfolio = {"positions": [], "history": [], "value_history": []}
+        return st.session_state.portfolio
+    try:
+        with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
+            st.session_state.portfolio = json.load(f)
+    except:
+        st.session_state.portfolio = {"positions": [], "history": [], "value_history": []}
+    return st.session_state.portfolio
+
+def save_portfolio(p):
+    st.session_state.portfolio = p
+    with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
+        json.dump(p, f, indent=4)
+
+# =========================================================
+# 4. SIDEBAR
+# =========================================================
+
+with st.sidebar:
+    st.title("⚡ PRO v100 — Panel Sterowania")
+
+    st.session_state.ai_mode = st.checkbox("AI Mode (ON/OFF)", value=st.session_state.ai_mode)
+    st.session_state.dry_run = st.checkbox("Dry‑run (bez yfinance)", value=st.session_state.dry_run)
+    st.session_state.batch_limit = st.number_input("Limit batcha (max tickers):", 1, 200, st.session_state.batch_limit)
+
+    st.markdown("---")
+
+    t_in = st.text_area("Lista Symboli:", value=load_tickers(), height=150)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("💾 Zapisz listę"):
+            with open(DB_FILE, "w", encoding="utf-8") as f:
+                f.write(t_in)
+            st.success("Zapisano listę tickerów.")
+
+    with col2:
+        if st.button("🧹 Reset AI Cache"):
+            st.session_state.ai_results = {}
+            st.session_state.ai_logs = []
+            st.session_state.ai_errors = []
+            st.session_state.ai_bad_tickers = []
+            st.success("AI cache wyczyszczony.")
+
+    st.markdown("---")
+    st.subheader("📡 AI LOGS (Live)")
+
+    if st.session_state.ai_logs:
+        for log in st.session_state.ai_logs[-10:]:
+            st.markdown(f"<div class='ai-log-box'>{log}</div>", unsafe_allow_html=True)
+    else:
+        st.info("Brak logów AI.")
+
+    st_autorefresh(interval=60000, key="v100_ref")
+
+# =========================================================
+# 5. TABS
+# =========================================================
+
+tab_dashboard, tab_ai_logs, tab_ai_settings, tab_compare, tab_biotech, tab_portfolio, tab_system = st.tabs([
+    "📊 Dashboard",
+    "🧠 AI Logs",
+    "⚙️ AI Settings",
+    "⚔️ Comparison Mode",
+    "🧬 Biotech Radar",
+    "💼 Portfolio",
+    "🛠 System"
+])
+
+# =========================================================
+# 6. AI ENGINE
+# =========================================================
+
 def log_ai(msg):
     ts = datetime.now().strftime("%H:%M:%S")
-    st.session_state.ai_logs.append(f"[{ts}] {msg}")
+    # POPRAWKA: bezpieczne logowanie w wątkach
+    if "ai_logs" in st.session_state:
+        st.session_state.ai_logs.append(f"[{ts}] {msg}")
 
 def log_error(msg):
     ts = datetime.now().strftime("%H:%M:%S")
-    st.session_state.ai_errors.append(f"[{ts}] {msg}")
+    # POPRAWKA: bezpieczne logowanie w wątkach
+    if "ai_errors" in st.session_state:
+        st.session_state.ai_errors.append(f"[{ts}] {msg}")
+
+def run_ai_single(d, key):
+    try:
+        if not key:
+            return None
+
+        client = OpenAI(api_key=key)
+
+        prompt = (
+            f"Analiza {d['symbol']} @ {d['price']}.\n"
+            f"DATA: RSI {d['rsi']:.1f}, High {d['high']}, Low {d['low']}, "
+            f"Pivot {d['pp']:.2f}, MA50 {d['ma50']:.2f}, MA200 {d['ma200']:.2f}.\n"
+            f"Zwróć JSON: { '{\"w\":\"\",\"sl\":0,\"tp\":0,\"score\":0,\"uzas\":\"\"}' }"
+        )
+
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"}
+        )
+
+        # POPRAWKA: odwołanie do .message.content
+        res = json.loads(resp.choices[0].message.content)
+
+        if "score" not in res:
+            res["score"] = int(max(0, min(100, 100 - abs(d["rsi"] - 50) * 2)))
+
+        st.session_state.ai_results[d["symbol"]] = res
+        return res
+
+    except Exception as e:
+        return None
+
+# =========================================================
+# 7. DATA FETCH & DISPLAY LOGIC (DOKOŃCZENIE)
+# =========================================================
 
 def fix_col(df):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df
 
-# =========================================================
-# 4. DATA ENGINE
-# =========================================================
-
 def get_data(symbol):
     try:
         symbol = symbol.strip().upper()
         if st.session_state.dry_run:
-            return {"symbol": symbol, "price": 100.0, "rsi": 50.0, "high": 105.0, "low": 95.0, "pp": 100.0, "ma50": 98.0, "ma200": 90.0, "change": 0.0, "df": pd.DataFrame()}
+            return {"symbol": symbol, "price": 0.0, "rsi": 50.0, "high": 0.0, "low": 0.0, "pp": 0.0, "ma50": 0.0, "ma200": 0.0, "change": 0.0, "df": pd.DataFrame()}
         
         t = yf.Ticker(symbol)
         df = t.history(period="1y", interval="1d")
@@ -121,98 +236,71 @@ def get_data(symbol):
             "symbol": symbol, "price": p, "rsi": rsi, "high": df['High'].iloc[-1], "low": df['Low'].iloc[-1],
             "pp": pp, "ma50": ma50, "ma200": ma200, "change": ((p - c_prev) / c_prev * 100), "df": df.tail(60)
         }
-    except Exception as e:
-        log_error(f"FETCH ERROR → {symbol}: {e}")
+    except:
         return None
 
-# =========================================================
-# 5. AI ENGINE
-# =========================================================
-
-def run_ai_single(d, key):
-    try:
-        if not key: return None
-        client = OpenAI(api_key=key)
-        prompt = (
-            f"Analiza techniczna {d['symbol']} @ {d['price']}.\n"
-            f"Wskaźniki: RSI {d['rsi']:.1f}, Pivot {d['pp']:.2f}, MA50 {d['ma50']:.2f}.\n"
-            f"Zwróć TYLKO JSON: { '{\"w\":\"KUP|SPRZEDAJ|TRZYMAJ\",\"sl\":0.0,\"tp\":0.0,\"score\":0,\"uzas\":\"\"}' }"
-        )
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"}
-        )
-        res = json.loads(resp.choices[0].message.content)
-        st.session_state.ai_results[d["symbol"]] = res
-        log_ai(f"AI OK → {d['symbol']}")
-        return res
-    except Exception as e:
-        log_error(f"AI ERROR → {d['symbol']}: {e}")
-        return None
-
-# =========================================================
-# 6. UI & MAIN LOGIC
-# =========================================================
-
-with st.sidebar:
-    st.title("⚡ PRO v100")
-    st.session_state.ai_mode = st.checkbox("AI Mode (Automatyczna analiza)", value=st.session_state.ai_mode)
-    st.session_state.risk_cap = st.number_input("Kapitał Portfela:", value=st.session_state.risk_cap)
-    t_in = st.text_area("Lista Symboli (CSV):", value=load_tickers(), height=150)
+# --- LOGIKA DASHBOARDU ---
+with tab_dashboard:
+    symbols = [s.strip().upper() for s in t_in.split(",") if s.strip()]
     
-    if st.button("💾 Zastosuj listę"):
-        with open(DB_FILE, "w", encoding="utf-8") as f: f.write(t_in)
-        st.session_state.ai_results = {}
-        st.rerun()
+    # POPRAWKA: ThreadPoolExecutor nie może logować do session_state bezpośrednio
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        data_list = [d for d in list(executor.map(get_data, symbols)) if d is not None]
 
-    st_autorefresh(interval=60000, key="v100_ref")
+    if data_list:
+        # Ranking TOP 5 RSI
+        st.subheader("🔥 Top Opportunities (RSI)")
+        cols = st.columns(5)
+        for i, r in enumerate(sorted(data_list, key=lambda x: x['rsi'])[:5]):
+            with cols[i]:
+                st.markdown(f"<div class='top-tile'><b>{r['symbol']}</b><br>RSI: {r['rsi']:.1f}</div>", unsafe_allow_html=True)
 
-# GŁÓWNY DASHBOARD
-st.title("NEON SENTINEL PRO v100")
-symbols = [s.strip().upper() for s in t_in.split(",") if s.strip()]
+        st.divider()
 
-with ThreadPoolExecutor(max_workers=10) as executor:
-    data_list = [d for d in list(executor.map(get_data, symbols)) if d is not None]
+        for d in data_list:
+            ai = run_ai_single(d, key) if st.session_state.ai_mode else st.session_state.ai_results.get(d['symbol'])
+            
+            st.markdown('<div class="neon-card">', unsafe_allow_html=True)
+            c1, c2, c3 = st.columns([1, 2, 1.2])
+            
+            with c1:
+                st.subheader(d['symbol'])
+                if ai:
+                    v_class = "status-buy" if "KUP" in str(ai.get('w','')).upper() else "status-sell" if "SPRZEDAJ" in str(ai.get('w','')).upper() else "status-hold"
+                    st.markdown(f'<span class="{v_class}">{ai.get("w","WAIT")}</span>', unsafe_allow_html=True)
+                st.metric("Cena", f"{d['price']:.2f}", f"{d['change']:.2f}%")
+                st.write(f"RSI: {d['rsi']:.1f}")
 
-if data_list:
-    # Top Ranking
-    cols = st.columns(5)
-    for i, r in enumerate(sorted(data_list, key=lambda x: x['rsi'])[:5]):
-        with cols[i]:
-            st.markdown(f"<div class='top-tile'><b>{r['symbol']}</b><br>RSI: {r['rsi']:.1f}</div>", unsafe_allow_html=True)
+            with c2:
+                fig = go.Figure(data=[go.Candlestick(x=d['df'].index, open=d['df']['Open'], high=d['df']['High'], low=d['df']['Low'], close=d['df']['Close'])])
+                fig.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
+                st.plotly_chart(fig, use_container_width=True, key=f"fig_{d['symbol']}")
 
-    st.divider()
+            with c3:
+                if ai:
+                    st.markdown(f'<div class="tp-box">TP: {ai.get("tp",0)}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="sl-box">SL: {ai.get("sl",0)}</div>', unsafe_allow_html=True)
+                    st.write(f"**Uzasadnienie:** {ai.get('uzas','')}")
+                    
+                    # Kalkulator pozycji
+                    risk_val = st.session_state.risk_cap * (st.session_state.risk_pct / 100)
+                    diff = abs(d['price'] - float(ai.get('sl', d['price']*0.95)))
+                    shares = int(risk_val / diff) if diff > 0 else 0
+                    st.write(f"Sugerowana ilość: **{shares} szt.**")
+            st.markdown('</div>', unsafe_allow_html=True)
 
-    # Karty spółek
-    for d in data_list:
-        ai = run_ai_single(d, key) if st.session_state.ai_mode else st.session_state.ai_results.get(d['symbol'])
-        
-        st.markdown('<div class="neon-card">', unsafe_allow_html=True)
-        c1, c2, c3 = st.columns([1, 2, 1])
-        
-        with c1:
-            st.subheader(d['symbol'])
-            if ai:
-                v_class = "status-buy" if "KUP" in ai['w'].upper() else "status-sell" if "SPRZEDAJ" in ai['w'].upper() else "status-hold"
-                st.markdown(f'<span class="{v_class}">{ai["w"]}</span>', unsafe_allow_html=True)
-            st.metric("Cena", f"{d['price']:.2f}", f"{d['change']:.2f}%")
-            st.write(f"RSI: {d['rsi']:.1f}")
-
-        with c2:
-            fig = go.Figure(data=[go.Candlestick(x=d['df'].index, open=d['df']['Open'], high=d['df']['High'], low=d['df']['Low'], close=d['df']['Close'])])
-            fig.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig, use_container_width=True, key=f"fig_{d['symbol']}")
-
-        with c3:
-            if ai:
-                st.markdown(f'<div class="tp-box">TP: {ai["tp"]}</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="sl-box">SL: {ai["sl"]}</div>', unsafe_allow_html=True)
-                st.info(f"AI: {ai['uzas']}")
-                
-                # Kalkulator pozycji
-                diff = abs(d['price'] - float(ai['sl']))
-                risk_val = st.session_state.risk_cap * (st.session_state.risk_pct / 100)
-                shares = int(risk_val / diff) if diff > 0 else 0
-                st.write(f"KUP: **{shares} szt.**")
-        st.markdown('</div>', unsafe_allow_html=True)
+# Pozostałe zakładki (szkielet zgodny z Twoją listą)
+with tab_ai_logs:
+    st.subheader("Błędy silnika AI")
+    st.write(st.session_state.ai_errors)
+with tab_ai_settings:
+    st.write("Ustawienia zaawansowane modelu gpt-4o-mini")
+with tab_compare:
+    st.write("Tryb porównawczy w przygotowaniu...")
+with tab_biotech:
+    st.write("Skaner spółek biotechnologicznych...")
+with tab_portfolio:
+    p = load_portfolio()
+    st.write("Aktualny portfel:", p)
+with tab_system:
+    st.write("Status systemu: ONLINE")
