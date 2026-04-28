@@ -257,4 +257,4 @@ if results:
 
 st.markdown("<center><br><small style='color:#333;'>AI ALPHA MONSTER PRO v74 © 2026</small></center>", unsafe_allow_html=True)
 
-[UWAGA — KOD KOŃCZY SIĘ TUTAJ, BEZ BACKTICKÓW]
+
