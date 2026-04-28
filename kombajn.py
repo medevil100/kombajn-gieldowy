@@ -160,11 +160,17 @@ tab_dashboard, tab_ai_logs, tab_ai_settings, tab_compare, tab_biotech, tab_portf
 
 def log_ai(msg):
     ts = datetime.now().strftime("%H:%M:%S")
+    if "ai_logs" not in st.session_state or st.session_state.ai_logs is None:
+        st.session_state.ai_logs = []
     st.session_state.ai_logs.append(f"[{ts}] {msg}")
+
 
 def log_error(msg):
     ts = datetime.now().strftime("%H:%M:%S")
+    if "ai_errors" not in st.session_state or st.session_state.ai_errors is None:
+        st.session_state.ai_errors = []
     st.session_state.ai_errors.append(f"[{ts}] {msg}")
+
 
 def run_ai_single(d, key):
     try:
