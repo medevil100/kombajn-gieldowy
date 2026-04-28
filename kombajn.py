@@ -1,4 +1,3 @@
-
 # =========================================================
 # NEON SENTINEL PRO v100 — FULL SYSTEM
 # =========================================================
@@ -9,7 +8,6 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 import time
 import json
@@ -50,7 +48,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# klucz OpenAI (z secrets; jeśli chcesz ręcznie, możesz dodać text_input)
 key = st.secrets.get("OPENAI_API_KEY", "")
 
 # =========================================================
@@ -102,7 +99,7 @@ def save_portfolio(p):
         json.dump(p, f, indent=4)
 
 # =========================================================
-# 4. SIDEBAR — SETTINGS + AI LOGS (dual view)
+# 4. SIDEBAR
 # =========================================================
 
 with st.sidebar:
@@ -143,7 +140,7 @@ with st.sidebar:
     st_autorefresh(interval=60000, key="v100_ref")
 
 # =========================================================
-# 5. TABS LAYOUT
+# 5. TABS
 # =========================================================
 
 tab_dashboard, tab_ai_logs, tab_ai_settings, tab_compare, tab_biotech, tab_portfolio, tab_system = st.tabs([
@@ -157,7 +154,7 @@ tab_dashboard, tab_ai_logs, tab_ai_settings, tab_compare, tab_biotech, tab_portf
 ])
 
 # =========================================================
-# 6. AI ENGINE (Turbo Batch + Logging)
+# 6. AI ENGINE
 # =========================================================
 
 def log_ai(msg):
@@ -179,14 +176,7 @@ def run_ai_single(d, key):
             f"Analiza {d['symbol']} @ {d['price']}.\n"
             f"DATA: RSI {d['rsi']:.1f}, High {d['high']}, Low {d['low']}, "
             f"Pivot {d['pp']:.2f}, MA50 {d['ma50']:.2f}, MA200 {d['ma200']:.2f}.\n"
-            f"Zwróć werdykt w formacie JSON:\n"
-            f"{{"
-            f"\"w\": \"KUP\"|\"SPRZEDAJ\"|\"TRZYMAJ\", "
-            f"\"sl\": cena_sl, "
-            f"\"tp\": cena_tp, "
-            f"\"score\": liczba_od_0_do_100, "
-            f"\"uzas\": \"max 10 slow uzasadnienia technicznego\""
-            f"}}"
+            f"Zwróć JSON: { '{\"w\":\"\",\"sl\":0,\"tp\":0,\"score\":0,\"uzas\":\"\"}' }"
         )
 
         log_ai(f"AI start → {d['symbol']}")
@@ -200,8 +190,7 @@ def run_ai_single(d, key):
         res = json.loads(resp.choices[0].message.content)
 
         if "score" not in res:
-            base = max(0, min(100, 100 - abs(d["rsi"] - 50) * 2))
-            res["score"] = int(base)
+            res["score"] = int(max(0, min(100, 100 - abs(d["rsi"] - 50) * 2)))
 
         st.session_state.ai_results[d["symbol"]] = res
         log_ai(f"AI OK → {d['symbol']} (score {res['score']})")
@@ -212,35 +201,26 @@ def run_ai_single(d, key):
         st.session_state.ai_bad_tickers.append(d["symbol"])
         return None
 
-
 def run_ai_batch(data_list, key):
     if not st.session_state.ai_mode:
-        log_ai("AI Mode OFF → batch pominięty.")
         return
 
     if not key:
-        log_error("Brak klucza OpenAI — batch pominięty.")
+        log_error("Brak klucza OpenAI.")
         return
 
     start = time.time()
     st.session_state.ai_batch_count = 0
     st.session_state.ai_bad_tickers = []
 
-    log_ai("=== AI TURBO BATCH START ===")
-
     for d in data_list[: st.session_state.batch_limit]:
         run_ai_single(d, key)
         st.session_state.ai_batch_count += 1
 
-    end = time.time()
-    st.session_state.ai_batch_time = round(end - start, 2)
-
-    log_ai(f"=== AI TURBO BATCH DONE: {st.session_state.ai_batch_count} tickerów, {st.session_state.ai_batch_time}s ===")
-    if st.session_state.ai_bad_tickers:
-        log_ai(f"Błędne tickery: {', '.join(st.session_state.ai_bad_tickers)}")
+    st.session_state.ai_batch_time = round(time.time() - start, 2)
 
 # =========================================================
-# 7. DATA FETCH ENGINE (with dry-run)
+# 7. DATA FETCH
 # =========================================================
 
 def get_data(symbol):
@@ -263,7 +243,6 @@ def get_data(symbol):
         df = t.history(period="1y", interval="1d")
 
         if df.empty or len(df) < 50:
-            st.session_state.ai_bad_tickers.append(symbol)
             return None
 
         price = float(df["Close"].iloc[-1])
@@ -284,10 +263,6 @@ def get_data(symbol):
         loss = delta.where(delta < 0, 0).abs().rolling(14).mean()
         rsi = float(100 - (100 / (1 + gain / (loss + 1e-9))).iloc[-1])
 
-        if rsi < 1.0:
-            st.session_state.ai_bad_tickers.append(symbol)
-            return None
-
         return {
             "symbol": symbol.upper(),
             "price": price,
@@ -303,11 +278,10 @@ def get_data(symbol):
 
     except Exception as e:
         log_error(f"DATA ERROR → {symbol}: {e}")
-        st.session_state.ai_bad_tickers.append(symbol)
         return None
 
 # =========================================================
-# 8. TAB: DASHBOARD
+# 8. DASHBOARD
 # =========================================================
 
 with tab_dashboard:
@@ -322,7 +296,7 @@ with tab_dashboard:
     if st.session_state.ai_mode:
         run_ai_batch(data_list, key)
 
-    st.subheader("🔥 TOP 10 SYGNAŁÓW (Techniczny + AI Score)")
+    st.subheader("🔥 TOP 10 SYGNAŁÓW")
     cols = st.columns(5)
 
     ranked = []
@@ -394,7 +368,7 @@ with tab_dashboard:
         st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================================================
-# 9. TAB: AI LOGS
+# 9. AI LOGS
 # =========================================================
 
 with tab_ai_logs:
@@ -407,19 +381,13 @@ with tab_ai_logs:
         st.info("Brak logów AI.")
 
     st.subheader("❌ Błędne tickery")
-    if st.session_state.ai_bad_tickers:
-        st.write(st.session_state.ai_bad_tickers)
-    else:
-        st.write("Brak błędów.")
+    st.write(st.session_state.ai_bad_tickers or "Brak błędów.")
 
     st.subheader("⏱ Czas batcha")
-    if st.session_state.ai_batch_time:
-        st.write(f"{st.session_state.ai_batch_time}s")
-    else:
-        st.write("Batch jeszcze nie wykonany.")
+    st.write(st.session_state.ai_batch_time or "Batch jeszcze nie wykonany.")
 
 # =========================================================
-# 10. TAB: COMPARISON MODE
+# 10. COMPARISON MODE
 # =========================================================
 
 with tab_compare:
@@ -432,170 +400,3 @@ with tab_compare:
         tB = st.text_input("Ticker B")
 
     if st.button("🔍 Porównaj"):
-        if not tA or not tB:
-            st.error("Podaj oba tickery.")
-        else:
-            dA = get_data(tA)
-            dB = get_data(tB)
-
-            if not dA or not dB:
-                st.error("Brak danych dla jednego z tickerów.")
-            else:
-                aiA = st.session_state.ai_results.get(tA.upper())
-                aiB = st.session_state.ai_results.get(tB.upper())
-
-                st.subheader("📊 Dane techniczne")
-                df = pd.DataFrame([
-                    ["Cena", dA["price"], dB["price"]],
-                    ["RSI", dA["rsi"], dB["rsi"]],
-                    ["MA50", dA["ma50"], dB["ma50"]],
-                    ["MA200", dA["ma200"], dB["ma200"]],
-                    ["Pivot", dA["pp"], dB["pp"]],
-                    ["AI score", aiA["score"] if aiA else "-", aiB["score"] if aiB else "-"],
-                ], columns=["Parametr", tA.upper(), tB.upper()])
-                st.table(df)
-
-                st.subheader("⚖ Werdykt AI")
-                if aiA and aiB:
-                    if aiA["score"] > aiB["score"]:
-                        st.success(f"**{tA.upper()}** jest silniejszy technicznie.")
-                    elif aiA["score"] < aiB["score"]:
-                        st.success(f"**{tB.upper()}** jest silniejszy technicznie.")
-                    else:
-                        st.info("Remis — oba mają taki sam AI score.")
-                else:
-                    st.info("Brak pełnej analizy AI.")
-
-# =========================================================
-# 11. TAB: BIOTECH RADAR
-# =========================================================
-
-with tab_biotech:
-    st.header("🧬 Biotech Radar — anomalie, spike’i, gapy, wolumen")
-
-    st.write("System analizuje tickery pod kątem nietypowych ruchów.")
-
-    if 'data_list' not in locals() or not data_list:
-        st.info("Brak danych — przejdź do Dashboard i wykonaj skan.")
-    else:
-        anomalies = []
-
-        for d in data_list:
-            spike = d["change"] > 15
-            gap = abs(d["high"] - d["low"]) > d["low"] * 0.05
-            vol_anom = False  # placeholder — można dodać wolumen później
-
-            score = 0
-            if spike: score += 40
-            if gap: score += 30
-            if vol_anom: score += 30
-
-            anomalies.append({
-                "symbol": d["symbol"],
-                "price": d["price"],
-                "change": d["change"],
-                "rsi": d["rsi"],
-                "spike": spike,
-                "gap": gap,
-                "vol": vol_anom,
-                "score": score
-            })
-
-        df = pd.DataFrame(anomalies)
-        df = df.sort_values("score", ascending=False)
-
-        st.subheader("🔥 Najbardziej podejrzane ruchy (TOP 20)")
-        st.dataframe(df.head(20))
-
-# =========================================================
-# 12. TAB: PORTFOLIO
-# =========================================================
-
-with tab_portfolio:
-    st.header("💼 Portfolio — zarządzanie pozycjami")
-
-    p = load_portfolio()
-
-    st.subheader("Aktualne pozycje")
-    if p["positions"]:
-        st.table(pd.DataFrame(p["positions"]))
-    else:
-        st.info("Brak pozycji w portfelu.")
-
-    st.subheader("Dodaj / edytuj pozycję")
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        sym = st.text_input("Symbol")
-    with col2:
-        qty = st.number_input("Ilość", value=0.0)
-    with col3:
-        price = st.number_input("Cena zakupu", value=0.0)
-
-    if st.button("➕ Zapisz pozycję"):
-        if sym and qty > 0 and price > 0:
-            updated = False
-            for pos in p["positions"]:
-                if pos["symbol"].upper() == sym.upper():
-                    pos["qty"] = qty
-                    pos["buy_price"] = price
-                    updated = True
-                    break
-            if not updated:
-                p["positions"].append({
-                    "symbol": sym.upper(),
-                    "qty": qty,
-                    "buy_price": price
-                })
-            save_portfolio(p)
-            st.success("Pozycja zapisana.")
-            st.rerun()
-        else:
-            st.error("Uzupełnij wszystkie pola.")
-
-    st.subheader("📈 Historia wartości portfela")
-    if "value_history" in p and p["value_history"]:
-        dfh = pd.DataFrame(p["value_history"])
-        st.line_chart(dfh["value"])
-    else:
-        st.info("Brak historii wartości.")
-
-# =========================================================
-# 13. TAB: SYSTEM
-# =========================================================
-
-with tab_system:
-    st.header("🛠 System Diagnostics — PRO v100")
-
-    st.subheader("Wersja aplikacji")
-    st.write("NEON SENTINEL PRO v100")
-
-    st.subheader("Tryby pracy")
-    st.write(f"AI Mode: {'ON' if st.session_state.ai_mode else 'OFF'}")
-    st.write(f"Dry‑run: {'ON' if st.session_state.dry_run else 'OFF'}")
-    st.write(f"Batch limit: {st.session_state.batch_limit}")
-
-    st.subheader("Test yfinance")
-    try:
-        test = yf.Ticker("AAPL").history(period="1d")
-        if not test.empty:
-            st.success("yfinance działa poprawnie.")
-        else:
-            st.warning("yfinance zwrócił pusty wynik.")
-    except Exception as e:
-        st.error(f"Błąd yfinance: {e}")
-
-    st.subheader("Test OpenAI API")
-    if key:
-        try:
-            client = OpenAI(api_key=key)
-            st.success("Klucz OpenAI wygląda OK.")
-        except Exception as e:
-            st.error(f"Błąd OpenAI: {e}")
-    else:
-        st.warning("Brak klucza OpenAI.")
-
-# =========================================================
-# KONIEC PLIKU PRO v100
-# =========================================================
-
