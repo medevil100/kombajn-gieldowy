@@ -1,10 +1,6 @@
-- **AI scoring 0–100**
-- **heatmapą portfela**
-- **alertami cenowymi**
-- **pełnym modułem portfolio**
-- dalej **single-file, neon, bez śmieci**.
 
-```python
+
+
 import streamlit as st
 from openai import OpenAI
 import yfinance as yf
@@ -442,4 +438,3 @@ if data_list:
 
 else:
     st.info("System gotowy. Wpisz symbole i klucz OpenAI (PRO v97).")
-```
