@@ -7,14 +7,19 @@ from streamlit_autorefresh import st_autorefresh
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+import re
 
 # --- 1. KONFIGURACJA I PAMIĘĆ SESJI ---
 DB_FILE = "moje_spolki.txt"
 
-st.set_page_config(page_title="AI ALPHA GOLDEN v26", page_icon="🏆", layout="wide")
+st.set_page_config(page_title="AI ALPHA GOLDEN v26 PRO", page_icon="🏆", layout="wide")
 
 if "ai_results" not in st.session_state:
     st.session_state.ai_results = {}
+if "risk_cap" not in st.session_state:
+    st.session_state.risk_cap = 10000.0
+if "risk_pct" not in st.session_state:
+    st.session_state.risk_pct = 1.0
 
 def load_tickers():
     if os.path.exists(DB_FILE):
@@ -36,9 +41,9 @@ st.markdown("""
         text-align: center; min-height: 180px;
     }
     .metric-row { display: flex; justify-content: space-between; border-bottom: 1px solid #21262d; padding: 6px 0; font-size: 0.9rem; }
-    .bid-ask-mini { font-family: monospace; font-size: 0.75rem; color: #58a6ff; }
     .sig-buy { color: #00ff88; font-weight: bold; }
     .sig-sell { color: #ff4b4b; font-weight: bold; }
+    .calc-box { background: rgba(0, 255, 136, 0.1); border: 1px dashed #00ff88; padding: 10px; border-radius: 8px; margin-top: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -59,7 +64,7 @@ def get_analysis(symbol):
         h1, d1 = fix_col(h1), fix_col(d1)
         
         price = float(h1['Close'].iloc[-1])
-        cp = float(d1['Close'].iloc[-2]) # Cena zamknięcia wczoraj
+        cp = float(d1['Close'].iloc[-2]) 
         
         try:
             bid = t.info.get('bid') or price * 0.9995
@@ -71,7 +76,6 @@ def get_analysis(symbol):
         y_high = float(d1['High'].max())
         y_low = float(d1['Low'].min())
         
-        # RSI 1h
         delta = h1['Close'].diff()
         gain = delta.where(delta > 0, 0).rolling(14).mean()
         loss = delta.where(delta < 0, 0).abs().rolling(14).mean()
@@ -90,8 +94,13 @@ def get_analysis(symbol):
 
 # --- 4. PANEL BOCZNY ---
 with st.sidebar:
-    st.title("🏆 GOLDEN v26")
+    st.title("🏆 GOLDEN v26 PRO")
     api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
+    
+    st.subheader("⚙️ Zarządzanie Ryzykiem")
+    st.session_state.risk_cap = st.number_input("Kapitał Portfela:", value=st.session_state.risk_cap)
+    st.session_state.risk_pct = st.slider("Ryzyko na transakcję (%)", 0.1, 5.0, st.session_state.risk_pct)
+    
     t_input = st.text_area("Lista Symboli:", value=load_tickers(), height=150)
     if st.button("💾 ZAPISZ LISTĘ"):
         with open(DB_FILE, "w", encoding="utf-8") as f: f.write(t_input)
@@ -110,7 +119,6 @@ with ThreadPoolExecutor(max_workers=8) as executor:
     all_data = [d for d in list(executor.map(get_analysis, tickers)) if d is not None]
 
 if all_data:
-    # Ranking TOP
     st.subheader("🔥 RANKING SYGNAŁÓW")
     top_cols = st.columns(5)
     for i, d in enumerate(sorted(all_data, key=lambda x: x['rsi'])[:10]):
@@ -119,7 +127,6 @@ if all_data:
 
     st.divider()
 
-    # Detale
     for d in all_data:
         with st.container():
             st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
@@ -140,12 +147,33 @@ if all_data:
                 if api_key:
                     if st.button(f"🧠 AI STRATEGIA", key=f"btn_{d['symbol']}"):
                         client = OpenAI(api_key=api_key)
-                        prompt = f"Analiza {d['symbol']}: Cena {d['price']}, RSI {d['rsi']:.1f}, SMA200 {d['sma200']:.2f}. Podaj krótki plan tradingowy."
+                        prompt = (f"Jesteś bezwzględnym traderem. Analiza {d['symbol']}: Cena {d['price']}, RSI {d['rsi']:.1f}, SMA200 {d['sma200']:.2f}. "
+                                  f"Podaj konkretnie: 1. AKCJA, 2. WEJŚCIE, 3. SL, 4. TP, 5. POWÓD (max 10 słów). "
+                                  f"Format SL musi być: 'SL: [liczba]'. Nie lej wody.")
                         resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-                        st.session_state.ai_results[d['symbol']] = resp.choices[0].message.content
+                        st.session_state.ai_results[d['symbol']] = resp.choices.message.content
                     
                     if d['symbol'] in st.session_state.ai_results:
-                        st.info(st.session_state.ai_results[d['symbol']])
+                        res_text = st.session_state.ai_results[d['symbol']]
+                        st.info(res_text)
+                        
+                        # KALKULATOR WIELKOŚCI POZYCJI
+                        try:
+                            # Szukamy ceny SL w tekście od AI
+                            sl_match = re.search(r"SL:\s*([\d\.]+)", res_text)
+                            if sl_match:
+                                sl_price = float(sl_match.group(1))
+                                risk_amount = st.session_state.risk_cap * (st.session_state.risk_pct / 100)
+                                diff = abs(d['price'] - sl_price)
+                                if diff > 0:
+                                    shares = risk_amount / diff
+                                    st.markdown(f"""<div class="calc-box">
+                                        <b>Kalkulator Pozycji:</b><br>
+                                        Ryzykujesz: {risk_amount:.2f}<br>
+                                        Kup: <b>{int(shares)} szt.</b><br>
+                                        Wartość: {(shares * d['price']):.2f}
+                                    </div>""", unsafe_allow_html=True)
+                        except: pass
             st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.info("Brak danych. Sprawdź tickery i połączenie.")
+    st.info("Dodaj tickery w sidebarze, aby rozpocząć.")
