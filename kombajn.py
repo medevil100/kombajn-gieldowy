@@ -446,6 +446,6 @@ if data_list:
 
 else:
     st.info("System gotowy. Wpisz symbole i klucz OpenAI (PRO v98).")
-```
 
-Jeśli chcesz kolejny krok (np. **AI Deep Mode** albo **porównanie dwóch tickerów head‑to‑head**), możemy to dobudować modułowo.
+
+
