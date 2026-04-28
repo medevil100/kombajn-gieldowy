@@ -172,6 +172,14 @@ def log_error(msg):
     st.session_state.ai_errors.append(f"[{ts}] {msg}")
 
 
+def ensure_state_lists():
+    if "ai_bad_tickers" not in st.session_state or st.session_state.ai_bad_tickers is None:
+        st.session_state.ai_bad_tickers = []
+    if "ai_results" not in st.session_state or st.session_state.ai_results is None:
+        st.session_state.ai_results = {}
+
+
+
 def run_ai_single(d, key):
     try:
         if not key:
