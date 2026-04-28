@@ -1,5 +1,3 @@
-Masz słowo. Poniżej masz **NEON SENTINEL PRO v97** z:
-
 - **AI scoring 0–100**
 - **heatmapą portfela**
 - **alertami cenowymi**
