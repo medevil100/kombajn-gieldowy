@@ -1,6 +1,3 @@
-
-
-
 import streamlit as st
 from openai import OpenAI
 import yfinance as yf
@@ -28,11 +25,14 @@ for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
+if "run_ai_now" not in st.session_state:
+    st.session_state.run_ai_now = False
+
 DB_FILE = "moje_spolki.txt"
 PORTFOLIO_FILE = "portfolio.json"
 
 st.set_page_config(
-    page_title="NEON SENTINEL PRO v97",
+    page_title="NEON SENTINEL PRO v98",
     page_icon="⚡",
     layout="wide"
 )
@@ -169,9 +169,7 @@ def run_ai(d, key):
 
         res = json.loads(resp.choices[0].message.content)
 
-        # fallback jeśli model nie zwróci score
         if "score" not in res:
-            # prosty heurystyczny scoring z RSI
             base = max(0, min(100, 100 - abs(d["rsi"] - 50) * 2))
             res["score"] = int(base)
 
@@ -182,10 +180,10 @@ def run_ai(d, key):
         return None
 
 # ---------------------------------------------------------
-# 6. SIDEBAR: SETTINGS, TICKERS, PORTFOLIO, ALERTS
+# 6. SIDEBAR: SETTINGS, TICKERS, PORTFOLIO, ALERTS, AI TURBO
 # ---------------------------------------------------------
 with st.sidebar:
-    st.title("⚡ SENTINEL PRO v97")
+    st.title("⚡ SENTINEL PRO v98")
 
     key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
 
@@ -194,11 +192,19 @@ with st.sidebar:
 
     t_in = st.text_area("Lista Symboli:", value=load_tickers(), height=150)
 
-    if st.button("🚀 SKANUJ I ZAPISZ"):
-        with open(DB_FILE, "w", encoding="utf-8") as f:
-            f.write(t_in)
-        st.session_state.ai_results = {}
-        st.rerun()
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button("🚀 SKANUJ I ZAPISZ"):
+            with open(DB_FILE, "w", encoding="utf-8") as f:
+                f.write(t_in)
+            st.session_state.ai_results = {}
+            st.session_state.run_ai_now = False
+            st.rerun()
+    with col_btn2:
+        if st.button("🤖 AI TURBO BATCH (max 50)"):
+            st.session_state.ai_results = {}
+            st.session_state.run_ai_now = True
+            st.rerun()
 
     st.markdown("---")
     st.subheader("📦 Portfolio")
@@ -215,7 +221,6 @@ with st.sidebar:
             add_btn = st.button("➕ Zapisz pozycję")
 
         if add_btn and new_sym and qty > 0 and buy_price > 0:
-            # nadpisujemy jeśli istnieje
             updated = False
             for pos in p["positions"]:
                 if pos["symbol"].upper() == new_sym.upper():
@@ -257,7 +262,7 @@ with st.sidebar:
         st.write("Aktywne alerty:")
         st.json(st.session_state.alerts)
 
-    st_autorefresh(interval=60000, key="v97_ref")
+    st_autorefresh(interval=60000, key="v98_ref")
 
 # ---------------------------------------------------------
 # 7. MAIN DATA FETCH
@@ -327,7 +332,7 @@ if data_list:
 
     ranked = []
     for r in data_list:
-        ai_brief = run_ai(r, key) if key else None
+        ai_brief = run_ai(r, key) if key and st.session_state.run_ai_now else None
         score = ai_brief["score"] if ai_brief else 0
         ranked.append((r, ai_brief, score))
 
@@ -340,6 +345,7 @@ if data_list:
             st.markdown(
                 f"<div class='top-tile'><b>{r['symbol']}</b><br>"
                 f"<span style='color:{color}; font-weight:bold;'>{tag}</span><br>"
+                f"<small>Cena: {r['price']:.2f}</small><br>"
                 f"<small>RSI: {r['rsi']:.1f}</small><br>"
                 f"<span class='score-badge'>AI score: {score}</span></div>",
                 unsafe_allow_html=True
@@ -357,7 +363,7 @@ if data_list:
 
     # FULL CARDS
     for d in data_list:
-        ai = run_ai(d, key) if key else None
+        ai = run_ai(d, key) if key and st.session_state.run_ai_now else None
 
         st.markdown('<div class="neon-card">', unsafe_allow_html=True)
         c1, c2, c3 = st.columns([1.5, 2.5, 1.5])
@@ -379,7 +385,6 @@ if data_list:
             st.write(f"Szczyt: {d['high']:.2f} | Dołek: {d['low']:.2f}")
             st.write(f"Pivot: {d['pp']:.2f} | RSI: {d['rsi']:.1f}")
 
-            # ALERT CHECK
             alerts = st.session_state.alerts.get(d["symbol"], {})
             alert_msgs = []
             if alerts:
@@ -436,5 +441,11 @@ if data_list:
 
         st.markdown("</div>", unsafe_allow_html=True)
 
+    if st.session_state.run_ai_now:
+        st.session_state.run_ai_now = False
+
 else:
-    st.info("System gotowy. Wpisz symbole i klucz OpenAI (PRO v97).")
+    st.info("System gotowy. Wpisz symbole i klucz OpenAI (PRO v98).")
+```
+
+Jeśli chcesz kolejny krok (np. **AI Deep Mode** albo **porównanie dwóch tickerów head‑to‑head**), możemy to dobudować modułowo.
