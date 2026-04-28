@@ -252,48 +252,95 @@ def get_data(symbol):
 
 # --- GŁÓWNA LOGIKA DASHBOARDU ---
 with tab_dashboard:
-    symbols = [s.strip().upper() for s in t_in.split(",") if s.strip()]
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        data_list = [d for d in list(executor.map(get_data, symbols)) if d is not None]
+    raw_input = t_in.split(",")
+    symbols = [s.strip().upper() for s in raw_input if s.strip()]
+    
+    if not symbols:
+        st.warning("Lista symboli jest pusta. Dodaj tickery w panelu bocznym.")
+    else:
+        # Wizualny wskaźnik ładowania danych
+        with st.status("🚀 Pobieranie danych rynkowych...", expanded=False) as status:
+            data_list = []
+            for sym in symbols:
+                st.write(f"Pobieranie: {sym}...")
+                res = get_data(sym)
+                if res:
+                    data_list.append(res)
+            status.update(label=f"Pobrano {len(data_list)} instrumentów", state="complete")
 
-    if data_list:
-        st.subheader("🔥 Top 5 Okazji (RSI)")
-        cols = st.columns(5)
-        for i, r in enumerate(sorted(data_list, key=lambda x: x['rsi'])[:5]):
-            with cols[i]:
-                st.markdown(f"<div class='top-tile'><b>{r['symbol']}</b><br>RSI: {r['rsi']:.1f}</div>", unsafe_allow_html=True)
+        if not data_list:
+            st.error("Błąd: Nie udało się pobrać danych dla żadnego symbolu. Sprawdź połączenie lub tickery.")
+        else:
+            # Ranking TOP 5 RSI
+            st.subheader("🔥 Top 5 Okazji (RSI)")
+            sorted_by_rsi = sorted(data_list, key=lambda x: x['rsi'])
+            cols = st.columns(min(len(sorted_by_rsi), 5))
+            for i, r in enumerate(sorted_by_rsi[:5]):
+                with cols[i]:
+                    st.markdown(f"""
+                        <div class='top-tile'>
+                            <b style='color:#00ff88'>{r['symbol']}</b><br>
+                            <small>RSI: {r['rsi']:.1f}</small><br>
+                            <small>{r['price']:.2f}</small>
+                        </div>
+                    """, unsafe_allow_html=True)
 
-        st.divider()
+            st.divider()
 
-        for d in data_list:
-            ai = run_ai_single(d, key) if st.session_state.ai_mode else st.session_state.ai_results.get(d['symbol'])
-            
-            st.markdown('<div class="neon-card">', unsafe_allow_html=True)
-            c1, c2, c3 = st.columns([1, 2, 1.2])
-            
-            with c1:
-                st.subheader(d['symbol'])
-                if ai:
-                    v_class = "status-buy" if "KUP" in str(ai.get('w','')).upper() else "status-sell" if "SPRZEDAJ" in str(ai.get('w','')).upper() else "status-hold"
-                    st.markdown(f'<span class="{v_class}">{ai.get("w","ANALIZA...")}</span>', unsafe_allow_html=True)
-                st.metric("Cena", f"{d['price']:.2f}", f"{d['change']:.2f}%")
-                st.write(f"RSI: {d['rsi']:.1f} | Pivot: {d['pp']:.2f}")
+            # Pętla wyświetlania kart
+            for d in data_list:
+                # Automatyczna analiza AI jeśli tryb ON
+                if st.session_state.ai_mode and d['symbol'] not in st.session_state.ai_results:
+                    with st.spinner(f"AI analizuje {d['symbol']}..."):
+                        run_ai_single(d, key)
+                
+                ai = st.session_state.ai_results.get(d['symbol'])
+                
+                st.markdown('<div class="neon-card">', unsafe_allow_html=True)
+                c1, c2, c3 = st.columns([1, 2, 1.2])
+                
+                with c1:
+                    st.markdown(f"### {d['symbol']}")
+                    if ai:
+                        v = str(ai.get('w', 'WAIT')).upper()
+                        v_class = "status-buy" if "KUP" in v else "status-sell" if "SPRZEDAJ" in v else "status-hold"
+                        st.markdown(f'<span class="{v_class}">{v}</span>', unsafe_allow_html=True)
+                    st.metric("Cena", f"{d['price']:.2f}", f"{d['change']:.2f}%")
+                    st.write(f"RSI: **{d['rsi']:.1f}**")
+                    st.write(f"Pivot: `{d['pp']:.2f}`")
 
-            with c2:
-                fig = go.Figure(data=[go.Candlestick(x=d['df'].index, open=d['df']['Open'], high=d['df']['High'], low=d['df']['Low'], close=d['df']['Close'])])
-                fig.update_layout(template="plotly_dark", height=280, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
-                st.plotly_chart(fig, use_container_width=True, key=f"fig_{d['symbol']}")
+                with c2:
+                    if not d['df'].empty:
+                        fig = go.Figure(data=[go.Candlestick(
+                            x=d['df'].index, open=d['df']['Open'], high=d['df']['High'],
+                            low=d['df']['Low'], close=d['df']['Close']
+                        )])
+                        fig.update_layout(template="plotly_dark", height=280, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
+                        st.plotly_chart(fig, use_container_width=True, key=f"fig_{d['symbol']}")
+                    else:
+                        st.warning("Brak danych historycznych dla wykresu.")
 
-            with c3:
-                if ai:
-                    st.markdown(f'<div class="tp-box">TP: {ai.get("tp",0)}</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="sl-box">SL: {ai.get("sl",0)}</div>', unsafe_allow_html=True)
-                    st.write(f"**Uzasadnienie:** {ai.get('uzas','')}")
-                    risk_val = st.session_state.risk_cap * (st.session_state.risk_pct / 100)
-                    diff = abs(d['price'] - float(ai.get('sl', d['price']*0.95)))
-                    shares = int(risk_val / diff) if diff > 0 else 0
-                    st.write(f"KUP: **{shares} szt.**")
-            st.markdown('</div>', unsafe_allow_html=True)
+                with c3:
+                    if ai:
+                        st.markdown(f'<div class="tp-box"><small>TP</small><br>{ai.get("tp",0)}</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="sl-box"><small>SL</small><br>{ai.get("sl",0)}</div>', unsafe_allow_html=True)
+                        st.markdown(f"<small><b>AI:</b> {ai.get('uzas','')}</small>", unsafe_allow_html=True)
+                        
+                        # Kalkulator
+                        try:
+                            risk_val = st.session_state.risk_cap * (st.session_state.risk_pct / 100)
+                            sl_price = float(ai.get('sl', 0))
+                            if sl_price > 0 and abs(d['price'] - sl_price) > 0:
+                                shares = int(risk_val / abs(d['price'] - sl_price))
+                                st.success(f"KUP: **{shares} szt.**")
+                        except:
+                            st.write("Błąd kalkulatora.")
+                    else:
+                        if st.button("🧠 Analizuj", key=f"btn_{d['symbol']}"):
+                            run_ai_single(d, key)
+                            st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
+
 
 # Puste sekcje dla zachowania struktury v100
 with tab_ai_logs: st.write(st.session_state.ai_logs)
