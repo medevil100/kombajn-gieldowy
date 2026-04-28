@@ -108,8 +108,7 @@ with ThreadPoolExecutor(max_workers=8) as executor:
     all_data = [d for d in list(executor.map(get_analysis, tickers)) if d is not None]
 
 if all_data:
-    # RANKING TOP 10
-    st.subheader("🔥 TOP 10 SYGNAŁÓW (Według RSI)")
+    st.subheader("🔥 TOP 10 SYGNAŁÓW")
     sorted_data = sorted(all_data, key=lambda x: x['rsi'])
     top_cols = st.columns(5)
     for i, d in enumerate(sorted_data[:10]):
@@ -135,20 +134,23 @@ if all_data:
 
             with c3:
                 if api_key:
-                    if st.button(f"🧠 ANALIZA PRO: {d['symbol']}", key=f"ai_{d['symbol']}"):
-                        client = OpenAI(api_key=api_key)
-                        prompt = (f"Jesteś ekspertem Price Action. Przeanalizuj {d['symbol']}. Cena: {d['price']}, RSI: {d['rsi']:.1f}, SMA200: {d['sma200']:.2f}.\n"
-                                  f"Ostatnie 10 świec D1 (H/L/C):\n{d['d1_history']}\n"
-                                  f"Podaj Werdykt: KUP/SPRZEDAJ/CZEKAJ. Następnie podaj poziomy w formacie SL: [cena] i TP: [cena]. "
-                                  f"Uzasadnij krótko trend na bazie tych 10 świec.")
-                        resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-                        st.session_state.ai_results[d['symbol']] = resp.choices.message.content
+                    if st.button(f"🧠 ANALIZA PRO: {d['symbol']}", key=f"ai_btn_{d['symbol']}"):
+                        try:
+                            client = OpenAI(api_key=api_key)
+                            prompt = (f"Jesteś traderem PRO. Przeanalizuj {d['symbol']}. Cena: {d['price']}, RSI: {d['rsi']:.1f}, SMA200: {d['sma200']:.2f}.\n"
+                                      f"Ostatnie 10 dni (H/L/C):\n{d['d1_history']}\n"
+                                      f"Podaj: 1. WERDYKT, 2. Poziomy SL: [cena] i TP: [cena], 3. KRÓTKIE uzasadnienie trendu.")
+                            resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
+                            # FIX: Dodano [0] do choices
+                            st.session_state.ai_results[d['symbol']] = resp.choices[0].message.content
+                        except Exception as e:
+                            st.error(f"Błąd AI: {e}")
                     
                     if d['symbol'] in st.session_state.ai_results:
                         res = st.session_state.ai_results[d['symbol']]
-                        # Kolorowanie SL i TP w tekście
-                        res = res.replace("SL:", '<span class="price-sl">SL:</span>').replace("TP:", '<span class="price-tp">TP:</span>')
-                        st.markdown(f"<div style='font-size:0.9rem;'>{res}</div>", unsafe_allow_html=True)
+                        # Stylizacja kolorami
+                        res_html = res.replace("SL:", '<span class="price-sl">SL:</span>').replace("TP:", '<span class="price-tp">TP:</span>')
+                        st.markdown(f"<div style='font-size:0.9rem;'>{res_html}</div>", unsafe_allow_html=True)
                         
                         # Kalkulator
                         sl_match = re.search(r"SL:.*?([\d\.,]+)", res)
@@ -157,6 +159,6 @@ if all_data:
                                 sl_val = float(sl_match.group(1).replace(',', '.'))
                                 risk = st.session_state.risk_cap * (st.session_state.risk_pct / 100)
                                 shares = risk / abs(d['price'] - sl_val)
-                                st.markdown(f"""<div class="calc-box"><b>Position Size:</b> {int(shares)} szt.<br><b>Koszt:</b> {(int(shares)*d['price']):.2f}</div>""", unsafe_allow_html=True)
+                                st.markdown(f"""<div class="calc-box"><b>Position:</b> {int(shares)} szt. | <b>Koszt:</b> {(int(shares)*d['price']):.2f}</div>""", unsafe_allow_html=True)
                             except: pass
             st.markdown('</div>', unsafe_allow_html=True)
