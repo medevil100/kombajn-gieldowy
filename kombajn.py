@@ -14,12 +14,10 @@ DB_FILE = "moje_spolki.txt"
 
 st.set_page_config(page_title="AI ALPHA GOLDEN v26 PRO", page_icon="🏆", layout="wide")
 
-if "ai_results" not in st.session_state:
-    st.session_state.ai_results = {}
-if "risk_cap" not in st.session_state:
-    st.session_state.risk_cap = 10000.0
-if "risk_pct" not in st.session_state:
-    st.session_state.risk_pct = 1.0
+# Inicjalizacja stanów sesji
+if "ai_results" not in st.session_state: st.session_state.ai_results = {}
+if "risk_cap" not in st.session_state: st.session_state.risk_cap = 10000.0
+if "risk_pct" not in st.session_state: st.session_state.risk_pct = 1.0
 
 def load_tickers():
     if os.path.exists(DB_FILE):
@@ -43,7 +41,8 @@ st.markdown("""
     .metric-row { display: flex; justify-content: space-between; border-bottom: 1px solid #21262d; padding: 6px 0; font-size: 0.9rem; }
     .sig-buy { color: #00ff88; font-weight: bold; }
     .sig-sell { color: #ff4b4b; font-weight: bold; }
-    .calc-box { background: rgba(0, 255, 136, 0.1); border: 1px dashed #00ff88; padding: 10px; border-radius: 8px; margin-top: 10px; }
+    .calc-box { background: rgba(0, 255, 136, 0.1); border: 1px dashed #00ff88; padding: 10px; border-radius: 8px; margin-top: 10px; font-size: 0.85rem; }
+    .stat-header { background: #0d1117; padding: 20px; border-radius: 15px; border: 1px solid #30363d; margin-bottom: 20px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -67,8 +66,9 @@ def get_analysis(symbol):
         cp = float(d1['Close'].iloc[-2]) 
         
         try:
-            bid = t.info.get('bid') or price * 0.9995
-            ask = t.info.get('ask') or price * 1.0005
+            info = t.info
+            bid = info.get('bid') or price * 0.9995
+            ask = info.get('ask') or price * 1.0005
         except:
             bid, ask = price * 0.9995, price * 1.0005
         
@@ -98,20 +98,20 @@ with st.sidebar:
     api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
     
     st.subheader("⚙️ Zarządzanie Ryzykiem")
-    st.session_state.risk_cap = st.number_input("Kapitał Portfela:", value=st.session_state.risk_cap)
-    st.session_state.risk_pct = st.slider("Ryzyko na transakcję (%)", 0.1, 5.0, st.session_state.risk_pct)
+    st.session_state.risk_cap = st.number_input("Kapitał Portfela:", value=float(st.session_state.risk_cap))
+    st.session_state.risk_pct = st.slider("Ryzyko na transakcję (%)", 0.1, 5.0, float(st.session_state.risk_pct))
     
-    t_input = st.text_area("Lista Symboli:", value=load_tickers(), height=150)
+    t_input = st.text_area("Lista Symboli (CSV):", value=load_tickers(), height=150)
     if st.button("💾 ZAPISZ LISTĘ"):
         with open(DB_FILE, "w", encoding="utf-8") as f: f.write(t_input)
-        st.success("Zapisano!")
+        st.success("Zapisano listę!")
     
     refresh = st.select_slider("Refresh (s)", options=[30, 60, 300], value=60)
     if st.button("🧹 Wyczyść analizy AI"):
         st.session_state.ai_results = {}
         st.rerun()
 
-st_autorefresh(interval=refresh * 1000, key="v26_refresh")
+st_autorefresh(interval=refresh * 1000, key="v26_refresh_main")
 
 # --- 5. LOGIKA GŁÓWNA ---
 tickers = [x.strip().upper() for x in t_input.split(",") if x.strip()]
@@ -119,7 +119,18 @@ with ThreadPoolExecutor(max_workers=8) as executor:
     all_data = [d for d in list(executor.map(get_analysis, tickers)) if d is not None]
 
 if all_data:
-    st.subheader("🔥 RANKING SYGNAŁÓW")
+    # --- PANEL STATYSTYK ---
+    st.markdown('<div class="stat-header">', unsafe_allow_html=True)
+    s1, s2, s3, s4 = st.columns(4)
+    risk_val = st.session_state.risk_cap * (st.session_state.risk_pct / 100)
+    s1.metric("Kapitał", f"{st.session_state.risk_cap:,.0f}")
+    s2.metric("Ryzyko/Trade", f"{risk_val:,.2f}")
+    s3.metric("Aktywne Symbole", len(all_data))
+    s4.metric("Skaner", "Online 🟢")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # --- RANKING TOP ---
+    st.subheader("🔥 RANKING SYGNAŁÓW (RSI)")
     top_cols = st.columns(5)
     for i, d in enumerate(sorted(all_data, key=lambda x: x['rsi'])[:10]):
         with top_cols[i % 5]:
@@ -127,6 +138,7 @@ if all_data:
 
     st.divider()
 
+    # --- KARTY INSTRUMENTÓW ---
     for d in all_data:
         with st.container():
             st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
@@ -135,7 +147,12 @@ if all_data:
             with c1:
                 st.markdown(f"<h3 class='{d['vcl']}'>{d['symbol']}</h3>", unsafe_allow_html=True)
                 st.metric("CENA", f"{d['price']:.4f}", f"{d['change']:.2f}%")
-                st.markdown(f"""<div class="metric-row"><span>RSI (1h)</span><b>{d['rsi']:.1f}</b></div><div class="metric-row"><span>SMA 200</span><b>{d['sma200']:.2f}</b></div><div class="metric-row"><span style="color:#00ff88;">High 52t</span><b>{d['y_high']:.2f}</b></div><div class="metric-row"><span style="color:#ff4b4b;">Low 52t</span><b>{d['y_low']:.2f}</b></div>""", unsafe_allow_html=True)
+                st.markdown(f"""
+                    <div class="metric-row"><span>RSI (1h)</span><b>{d['rsi']:.1f}</b></div>
+                    <div class="metric-row"><span>SMA 200</span><b>{d['sma200']:.2f}</b></div>
+                    <div class="metric-row"><span style="color:#00ff88;">High 52t</span><b>{d['y_high']:.2f}</b></div>
+                    <div class="metric-row"><span style="color:#ff4b4b;">Low 52t</span><b>{d['y_low']:.2f}</b></div>
+                """, unsafe_allow_html=True)
 
             with c2:
                 fig = go.Figure(data=[go.Candlestick(x=d['df'].index[-60:], open=d['df']['Open'][-60:], high=d['df']['High'][-60:], low=d['df']['Low'][-60:], close=d['df']['Close'][-60:])])
@@ -146,34 +163,35 @@ if all_data:
                 st.write(f"BID/ASK: `{d['bid']:.2f}` / `{d['ask']:.2f}`")
                 if api_key:
                     if st.button(f"🧠 AI STRATEGIA", key=f"btn_{d['symbol']}"):
-                        client = OpenAI(api_key=api_key)
-                        prompt = (f"Jesteś bezwzględnym traderem. Analiza {d['symbol']}: Cena {d['price']}, RSI {d['rsi']:.1f}, SMA200 {d['sma200']:.2f}. "
-                                  f"Podaj konkretnie: 1. AKCJA, 2. WEJŚCIE, 3. SL, 4. TP, 5. POWÓD (max 10 słów). "
-                                  f"Format SL musi być: 'SL: [liczba]'. Nie lej wody.")
-                        resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-                        st.session_state.ai_results[d['symbol']] = resp.choices.message.content
+                        try:
+                            client = OpenAI(api_key=api_key)
+                            prompt = (f"Jesteś bezwzględnym traderem. Analiza {d['symbol']}: Cena {d['price']}, RSI {d['rsi']:.1f}, SMA200 {d['sma200']:.2f}. "
+                                      f"Podaj konkretnie: 1. AKCJA, 2. WEJŚCIE, 3. SL, 4. TP, 5. POWÓD (max 10 słów). "
+                                      f"Format SL musi być dokładnie taki: 'SL: [liczba]'. Nie lej wody.")
+                            resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
+                            st.session_state.ai_results[d['symbol']] = resp.choices[0].message.content
+                        except Exception as e:
+                            st.error(f"Błąd AI: {e}")
                     
                     if d['symbol'] in st.session_state.ai_results:
                         res_text = st.session_state.ai_results[d['symbol']]
                         st.info(res_text)
                         
-                        # KALKULATOR WIELKOŚCI POZYCJI
-                        try:
-                            # Szukamy ceny SL w tekście od AI
-                            sl_match = re.search(r"SL:\s*([\d\.]+)", res_text)
-                            if sl_match:
-                                sl_price = float(sl_match.group(1))
-                                risk_amount = st.session_state.risk_cap * (st.session_state.risk_pct / 100)
-                                diff = abs(d['price'] - sl_price)
+                        # KALKULATOR POZYCJI
+                        sl_match = re.search(r"SL:\s*([\d\.,]+)", res_text)
+                        if sl_match:
+                            try:
+                                sl_val = float(sl_match.group(1).replace(',', '.'))
+                                diff = abs(d['price'] - sl_val)
                                 if diff > 0:
-                                    shares = risk_amount / diff
+                                    shares = risk_val / diff
                                     st.markdown(f"""<div class="calc-box">
                                         <b>Kalkulator Pozycji:</b><br>
-                                        Ryzykujesz: {risk_amount:.2f}<br>
-                                        Kup: <b>{int(shares)} szt.</b><br>
-                                        Wartość: {(shares * d['price']):.2f}
+                                        Ryzyko kwotowe: {risk_val:.2f}<br>
+                                        Ilość: <b>{int(shares)} szt.</b><br>
+                                        Wartość pozycji: {(int(shares) * d['price']):.2f}
                                     </div>""", unsafe_allow_html=True)
-                        except: pass
+                            except: pass
             st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.info("Dodaj tickery w sidebarze, aby rozpocząć.")
+    st.info("Dodaj symbole w panelu bocznym i upewnij się, że masz klucz OpenAI.")
