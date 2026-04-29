@@ -92,15 +92,29 @@ with st.sidebar:
     api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
     st.session_state.risk_cap_pln = st.number_input("💵 Kapitał (PLN):", value=float(st.session_state.risk_cap_pln))
     risk_per_trade = st.slider("🎯 Ryzyko (%)", 0.1, 5.0, 1.0)
-    st_autorefresh(interval=120000, key="auto_ref")
+    
+    # SUWAK ODŚWIEŻANIA
+    refresh_min = st.slider("⏱️ Odświeżanie auto (min)", 1, 10, 2)
+    st_autorefresh(interval=refresh_min * 60 * 1000, key="auto_ref")
+    
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r") as f: default_tickers = f.read()
     else: default_tickers = "NVDA, TSLA"
+    
     t_in = st.text_area("Lista Tickerów:", value=default_tickers, height=150)
-    if st.button("🚀 SKANUJ"):
-        st.session_state.ai_results = {}; st.session_state.full_analysis = {}
-        with open(DB_FILE, "w") as f: f.write(t_in)
-        st.rerun()
+    
+    # PRZYCISKI AKCJI
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button("🚀 SKANUJ"):
+            st.session_state.ai_results = {}; st.session_state.full_analysis = {}
+            with open(DB_FILE, "w") as f: f.write(t_in)
+            st.rerun()
+    with col_btn2:
+        if st.button("🔄 REFRESH"):
+            # Czyści pamięć podręczną wyników, aby pobrać świeże dane giełdowe
+            st.session_state.ai_results = {}
+            st.rerun()
 
 # --- 5. LOGIKA ---
 symbols = [s.strip().upper() for s in t_in.split(",") if s.strip()]
@@ -112,7 +126,7 @@ for sym in symbols:
         data_list.append(res)
 
 if data_list:
-    # --- TOP 10 RADAR (PRZYWRÓCONY RSI I WERDYKT) ---
+    # --- TOP 10 RADAR ---
     st.subheader("🔥 TOP 10 RADAR")
     sorted_top = sorted(data_list, key=lambda x: x['rsi'])[:10]
     cols = st.columns(5); cols2 = st.columns(5); all_cols = cols + cols2
@@ -158,10 +172,12 @@ if data_list:
                     risk_usd = (st.session_state.risk_cap_pln * (risk_per_trade / 100)) / usd_pln_rate
                     if diff_usd > 0:
                         shares = int(risk_usd / diff_usd)
-                        st.success(f"KUP: {shares} szt.")
-                        st.caption(f"{(shares * d['price'] * usd_pln_rate):.2f} PLN")
-                except: pass
-                if st.button("🧠 PEŁNA ANALIZA", key=f"btn_{d['symbol']}"):
+                        st.success(f"KUP: {shares} SZT.")
+                        st.caption(f"Ryzyko: {(risk_usd * usd_pln_rate):.2f} PLN")
+                except:
+                    st.write("Błąd kalkulatora")
+                
+                if st.button("🧠 ANALIZA", key=f"btn_{d['symbol']}"):
                     run_ai_full(d, api_key)
                     st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
