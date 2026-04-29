@@ -97,7 +97,8 @@ def get_data(symbol):
 def run_ai_short(d, key):
     if d['symbol'] in st.session_state.ai_results: return st.session_state.ai_results[d['symbol']]
     try:
-        client = OpenAI(api_key=key)
+      api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
+
         prompt = f"Analiza {d['symbol']} @ {d['price']}. RSI:{d['rsi']:.1f}. Zwróć JSON: {{\"w\": \"KUP/SPRZEDAJ/TRZYMAJ\", \"sl\": cena, \"tp\": cena}}"
         resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"})
         res = json.loads(resp.choices[0].message.content)
