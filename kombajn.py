@@ -31,8 +31,8 @@ st.markdown("""
     .sl-box { color: #ff4b4b; font-weight: bold; }
     /* Dodane style dla trendów i bid/ask */
     .trend-tag { padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; margin-right: 4px; border: 1px solid #333; }
-    .bid-val { color: #00ff88; font-weight: bold; }
-    .ask-val { color: #ff4b4b; font-weight: bold; }
+    .bid-style { color: #00ff88; font-weight: bold; }
+    .ask-style { color: #ff4b4b; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -43,19 +43,18 @@ def get_data(symbol):
         df = t.history(period="1y", interval="1d")
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        
         p = float(df['Close'].iloc[-1])
         h, l = float(df['High'].iloc[-1]), float(df['Low'].iloc[-1])
         pp = (df['High'].iloc[-2] + df['Low'].iloc[-2] + df['Close'].iloc[-2]) / 3
         delta = df['Close'].diff()
         rsi = float(100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / (delta.where(delta < 0, 0).abs().rolling(14).mean() + 1e-9)))).iloc[-1])
         
-        # --- MODYFIKACJA 1: Pobieranie Bid/Ask ---
+        # MODYFIKACJA 1: Bid/Ask
         info = t.info
-        bid = info.get('bid') or p * 0.999
-        ask = info.get('ask') or p * 1.001
-
-        # --- MODYFIKACJA 2: Obliczanie Trendów ---
+        bid = info.get('bid') or p * 0.9995
+        ask = info.get('ask') or p * 1.0005
+        
+        # MODYFIKACJA 2: Trendy (Krótki, Średni, Długi)
         sma20 = df['Close'].rolling(20).mean().iloc[-1]
         sma50 = df['Close'].rolling(50).mean().iloc[-1]
         sma200 = df['Close'].rolling(200).mean().iloc[-1]
@@ -74,10 +73,11 @@ def get_data(symbol):
     except: return None
 
 def run_ai_short(d, key):
+    """Szybki werdykt do kafelków i startu"""
     if d['symbol'] in st.session_state.ai_results: return st.session_state.ai_results[d['symbol']]
     try:
         client = OpenAI(api_key=key)
-        prompt = f"Analiza {d['symbol']} @ {d['price']}. RSI:{d['rsi']:.1f}, Pivot:{d['pp']:.2f}. Zwróć JSON: {{\"w\": \"KUP/SPRZEDAJ/TRZYMAJ\", \"sl\": cena, \"tp\": cena}}"
+        prompt = f"Analiza {d['symbol']} @ {d['price']}. RSI:{d['rsi']:.1f}, Pivot:{d['pp']:.2f}. Zwróć JSON: {{\"w\": \"KUP/SPRZEDAJ/TRZYMAJ\", \"sl\": {d['price']*0.95}, \"tp\": {d['price']*1.1}}}"
         resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"})
         res = json.loads(resp.choices[0].message.content)
         st.session_state.ai_results[d['symbol']] = res
@@ -85,6 +85,7 @@ def run_ai_short(d, key):
     except: return None
 
 def run_ai_full(d, key):
+    """Pełna analiza na żądanie bez lania wody"""
     try:
         client = OpenAI(api_key=key)
         prompt = (f"Jako ekspert techniczny przeanalizuj {d['symbol']} @ {d['price']}. RSI:{d['rsi']:.1f}, Pivot:{d['pp']:.2f}, High:{d['high']}, Low:{d['low']}. "
@@ -102,6 +103,7 @@ with st.sidebar:
     st.session_state.risk_cap = st.number_input("💵 Kapitał:", value=st.session_state.risk_cap)
     risk_per_trade = st.slider("🎯 Ryzyko na transakcję (%)", 0.1, 5.0, 1.0)
     
+    # SUWAK ODŚWIEŻANIA
     refresh_min = st.slider("⏱️ Odświeżanie (minuty)", 1, 10, 2)
     st_autorefresh(interval=refresh_min * 60 * 1000, key="auto_ref")
 
@@ -126,6 +128,7 @@ with st.spinner("Pobieranie danych..."):
             data_list.append(res)
 
 if data_list:
+    # TOP 10 RADAR
     st.subheader("🔥 TOP 10 RADAR")
     sorted_top = sorted(data_list, key=lambda x: x['rsi'])[:10]
     cols = st.columns(5)
@@ -146,6 +149,7 @@ if data_list:
 
     st.divider()
 
+    # LISTA GŁÓWNA
     for d in data_list:
         ai = d.get('ai')
         card_border = "neon-card-buy" if ai and "KUP" in ai['w'].upper() else ""
@@ -169,7 +173,7 @@ if data_list:
             
             st.markdown(f"CENA: **{d['price']:.2f}** ({d['change']:.2f}%)")
             # WYŚWIETLANIE BID / ASK
-            st.markdown(f"B: <span class='bid-val'>{d['bid']:.2f}</span> | A: <span class='ask-val'>{d['ask']:.2f}</span>", unsafe_allow_html=True)
+            st.markdown(f"B: <span class='bid-style'>{d['bid']:.2f}</span> | A: <span class='ask-style'>{d['ask']:.2f}</span>", unsafe_allow_html=True)
             st.write(f"H: {d['high']:.2f} | L: {d['low']:.2f} | PP: {d['pp']:.2f}")
             st.write(f"RSI: **{d['rsi']:.1f}**")
 
@@ -183,22 +187,18 @@ if data_list:
             if ai:
                 st.markdown(f"<span class='tp-box'>TP: {ai['tp']}</span><br><span class='sl-box'>SL: {ai['sl']}</span>", unsafe_allow_html=True)
                 
-                # --- MODYFIKACJA 3: KALKULATOR POZYCJI ---
+                # MODYFIKACJA 3: KALKULATOR POZYCJI
                 try:
                     sl_price = float(ai['sl'])
-                    price = float(d['price'])
-                    risk_amount = st.session_state.risk_cap * (risk_per_trade / 100)
-                    diff = abs(price - sl_price)
-                    
+                    risk_val = st.session_state.risk_cap * (risk_per_trade / 100)
+                    diff = abs(d['price'] - sl_price)
                     if diff > 0:
-                        shares = int(risk_amount / diff)
-                        st.success(f"POZYCJA: {shares} szt.")
-                        st.caption(f"Ryzyko: {risk_amount:.2f} USD")
-                    else:
-                        st.warning("SL zbyt blisko ceny")
-                except:
-                    st.error("Błąd kalkulatora")
+                        shares = int(risk_val / diff)
+                        st.success(f"KUP: {shares} szt.")
+                        st.caption(f"Ryzyko: {risk_val:.2f} USD")
+                except: pass
 
+                # PRZYCISK PEŁNEJ ANALIZY
                 if st.button("🧠 PEŁNA ANALIZA", key=f"full_{d['symbol']}"):
                     run_ai_full(d, api_key)
                 
