@@ -15,7 +15,7 @@ if "risk_cap_pln" not in st.session_state: st.session_state.risk_cap_pln = 40000
 
 DB_FILE = "moje_spolki.txt"
 
-# --- 2. STYLE NEONOWE (ZACHOWANE) ---
+# --- 2. STYLE NEONOWE ---
 st.markdown("""
 <style>
     .stApp { background-color: #020202; color: #e0e0e0; font-family: 'Courier New', monospace; }
@@ -31,8 +31,8 @@ st.markdown("""
 # --- 3. SILNIK DANYCH ---
 def get_usdpln():
     try:
-        # Pobieranie realnego kursu USD/PLN
-        return float(yf.Ticker("USDPLN=X").fast_info['last_price'])
+        data = yf.Ticker("USDPLN=X").fast_info['last_price']
+        return float(data)
     except: return 4.0
 
 def get_data(symbol):
@@ -41,13 +41,11 @@ def get_data(symbol):
         df = t.history(period="1y", interval="1d")
         if df.empty: return None
         
-        # POPRAWKA: Cena Live i realny Bid/Ask
+        # POPRAWKA: Realny Bid/Ask zamiast wyliczanych
         p = t.fast_info['last_price']
-        info = t.info
-        bid = info.get('bid') or p * 0.9998
-        ask = info.get('ask') or p * 1.0002
+        bid = t.info.get('bid') or p * 0.9998
+        ask = t.info.get('ask') or p * 1.0002
         
-        # Wskaźniki
         delta = df['Close'].diff()
         rsi = float(100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / (delta.where(delta < 0, 0).abs().rolling(14).mean() + 1e-9)))).iloc[-1])
         
@@ -63,18 +61,15 @@ def get_data(symbol):
     except: return None
 
 def run_ai_short(d, key):
-    # Usunięto cache session_state, aby AI odświeżało się z każdą nową ceną
     try:
         client = OpenAI(api_key=key)
-        prompt = f"Analiza {d['symbol']} @ {d['price']}. RSI:{d['rsi']:.1f}. Zwróć JSON: {{\"w\": \"KUP\", \"sl\": {round(d['price']*0.95, 2)}, \"tp\": {round(d['price']*1.1, 2)}}}"
+        prompt = f"Analiza {d['symbol']} @ {d['price']}. RSI:{d['rsi']:.1f}. Zwróć JSON: {{\"w\": \"KUP\", \"sl\": {round(d['price']*0.95, 2)}, \"tp\": {round(d['price']*1.12, 2)}}}"
         resp = client.chat.completions.create(
             model="gpt-4o-mini", 
-            messages=[{"role": "user", "content": prompt}], 
+            messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"}
         )
-        # POPRAWKA: dodano .message.content
-        res = json.loads(resp.choices[0].message.content)
-        return res
+        return json.loads(resp.choices[0].message.content)
     except: return {"w": "CZEKAJ", "sl": 0, "tp": 0}
 
 # --- 4. PANEL ---
@@ -83,12 +78,8 @@ with st.sidebar:
     st.title("🚜 MONSTER v102")
     api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
     st.session_state.risk_cap_pln = st.number_input("💵 Kapitał (PLN):", value=float(st.session_state.risk_cap_pln))
-    risk_per_trade_pct = st.slider("🎯 Ryzyko na spółkę (%)", 1, 100, 10)
+    risk_pct = st.slider("🎯 Ryzyko na spółkę (%)", 1, 100, 10)
     
-    # Oblicz budżet na jeden trade
-    trade_budget_pln = st.session_state.risk_cap_pln * (risk_per_trade_pct / 100)
-    
-    # AUTOMATYCZNE ODŚWIEŻANIE (co 1 minutę)
     st_autorefresh(interval=60 * 1000, key="auto_ref")
     
     if os.path.exists(DB_FILE):
@@ -98,11 +89,11 @@ with st.sidebar:
     t_in = st.text_area("Lista Tickerów:", value=default_tickers, height=150)
     
     if st.button("🚀 SKANUJ"):
-        with open(DB_FILE, "w") as f: f.write(t_in) # Zapisywanie listy
-        st.session_state.ai_results = {} # Reset AI przy nowym skanie
+        with open(DB_FILE, "w") as f: f.write(t_in)
+        st.session_state.ai_results = {}
         st.rerun()
 
-# --- 5. LOGIKA WYŚWIETLANIA ---
+# --- 5. LOGIKA ---
 symbols = [s.strip().upper() for s in t_in.split(",") if s.strip()]
 data_list = []
 for sym in symbols:
@@ -112,15 +103,18 @@ for sym in symbols:
         data_list.append(res)
 
 if data_list:
-    # --- RADAR TOP 10 ---
-    st.subheader("🔥 RADAR RSI")
+    # --- TOP 10 RADAR (ORYGINALNY WYGLĄD) ---
+    st.subheader("🔥 TOP 10 RADAR")
     sorted_top = sorted(data_list, key=lambda x: x['rsi'])[:10]
-    cols = st.columns(len(sorted_top))
+    cols = st.columns(5); cols2 = st.columns(5); all_cols = cols + cols2
     for i, r in enumerate(sorted_top):
-        with cols[i]:
+        with all_cols[i]:
+            ai_v = r.get('ai', {}).get('w', '---').upper()
+            v_col = "#00ff88" if "KUP" in ai_v else "#ff4b4b" if "SPRZEDAJ" in ai_v else "#58a6ff"
             st.markdown(f"""
-                <div class="top-tile">
-                    <b>{r['symbol']}</b><br>{r['price']:.2f}<br>
+                <div class="top-tile" style="border-bottom: 4px solid {v_col};">
+                    <b>{r['symbol']}</b> | <span style="color:{v_col}">{r['price']:.2f}</span><br>
+                    <span style="color:{v_col}; font-weight:bold;">{ai_v}</span><br>
                     <small>RSI: {r['rsi']:.1f}</small>
                 </div>
             """, unsafe_allow_html=True)
@@ -130,32 +124,27 @@ if data_list:
     # LISTA GŁÓWNA
     for d in data_list:
         ai = d.get('ai', {"w": "CZEKAJ", "sl": 0, "tp": 0})
-        is_buy = "KUP" in str(ai['w']).upper()
-        card_border = "neon-card-buy" if is_buy else ""
-        
-        st.markdown(f'<div class="neon-card {card_border}">', unsafe_allow_html=True)
+        is_buy = "KUP" in str(ai.get('w','')).upper()
+        st.markdown(f'<div class="neon-card {"neon-card-buy" if is_buy else ""}">', unsafe_allow_html=True)
         c1, c2, c3 = st.columns([1.5, 3, 1.5])
         with c1:
             st.markdown(f"## {d['symbol']}")
             t_html = "".join([f'<span class="trend-tag" style="color:{"#00ff88" if v=="UP" else "#ff4b4b"}">{k}:{v}</span>' for k,v in d['trends'].items()])
             st.markdown(t_html, unsafe_allow_html=True)
-            st.markdown(f"<h3 style='color:{"#00ff88" if is_buy else "#ff4b4b"};'>{ai['w']}</h3>", unsafe_allow_html=True)
+            st.markdown(f"<h3 style='color:{"#00ff88" if is_buy else "#ff4b4b"}'>{ai['w']}</h3>", unsafe_allow_html=True)
             st.write(f"CENA: **{d['price']:.2f}**")
             st.markdown(f"B: <span style='color:#00ff88'>{d['bid']:.2f}</span> | A: <span style='color:#ff4b4b'>{d['ask']:.2f}</span>", unsafe_allow_html=True)
-            st.write(f"RSI: **{d['rsi']:.1f}**")
         with c2:
             fig = go.Figure(data=[go.Candlestick(x=d['df'].index, open=d['df']['Open'], high=d['df']['High'], low=d['df']['Low'], close=d['df']['Close'])])
             fig.update_layout(template="plotly_dark", height=200, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True, key=f"f_{d['symbol']}")
         with c3:
-            # KALKULACJA ILOŚCI (USD -> PLN)
-            price_in_pln = d['ask'] * usd_pln_rate
-            quantity = int(trade_budget_pln / price_in_pln) if price_in_pln > 0 else 0
-            
-            st.markdown(f"**ILOŚĆ (PLN):**")
-            st.markdown(f"<h2 style='color:#00ff88'>{quantity} szt.</h2>", unsafe_allow_html=True)
-            st.write(f"Koszt: {quantity * price_in_pln:.2f} PLN")
-            st.markdown(f"---")
+            # Kalkulator Ilości
+            price_pln = d['ask'] * usd_pln_rate
+            budget_pln = st.session_state.risk_cap_pln * (risk_pct / 100)
+            qty = int(budget_pln / price_pln) if price_pln > 0 else 0
+            st.markdown(f"**DO KUPNA:**")
+            st.markdown(f"<h2 style='color:#00ff88'>{qty} szt.</h2>", unsafe_allow_html=True)
             st.markdown(f"TP: <span class='tp-box'>{ai['tp']}</span>", unsafe_allow_html=True)
             st.markdown(f"SL: <span class='sl-box'>{ai['sl']}</span>", unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
