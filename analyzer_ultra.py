@@ -39,8 +39,6 @@ def rsi(values, period=14):
     return 100 - 100 / (1 + rs)
 
 def atr(candles, period=14):
-    if len(candles) <= 1:
-        return math.nan
     trs = []
     for i in range(1, len(candles)):
         h = candles[i]["high"]
@@ -56,7 +54,6 @@ def macd_calc(values):
     ema12 = ema(values, 12)
     ema26 = ema(values, 26)
     macd = ema12 - ema26
-    # uproszczony sygnał – nie idealny MACD, ale wystarczający do komentarza
     signal = ema([macd] * 9, 9)
     hist = macd - signal
     return macd, signal, hist
@@ -66,9 +63,6 @@ def macd_calc(values):
 # =========================
 
 def analyze_ultra(symbol, candles):
-    if len(candles) < 30:
-        raise ValueError("Za mało świec do analizy")
-
     closes = [c["close"] for c in candles]
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
@@ -84,12 +78,12 @@ def analyze_ultra(symbol, candles):
     atr14_v = atr(candles, 14)
     macd_v, macd_sig, macd_hist = macd_calc(closes)
     vol20 = sma(volumes, 20)
-    vol_rel = volumes[-1] / vol20 if vol20 and vol20 == vol20 else 1
+    vol_rel = volumes[-1] / vol20 if vol20 else 1
 
     s = 1 if last > ema10 else -1
     m = 1 if last > ema50 else -1
     l = 1 if last > ema200 else -1
-    trend_score = s + 2 * m + 3 * l
+    trend_score = s + 2*m + 3*l
 
     P = (prev["high"] + prev["low"] + prev["close"]) / 3
     R1 = 2 * P - prev["low"]
@@ -102,7 +96,7 @@ def analyze_ultra(symbol, candles):
     sl = low52
 
     dist = (last - high52) / high52 if high52 else 0
-    breakout = 3 * dist + 2 * vol_rel + (rsi14_v / 100 if rsi14_v == rsi14_v else 0.5)
+    breakout = 3 * dist + 2 * vol_rel + (rsi14_v / 100)
 
     pressure = "KUPUJĄCY DOMINUJĄ" if last > (prev["open"] + prev["close"]) / 2 else "SPRZEDAJĄCY DOMINUJĄ"
 
@@ -125,9 +119,7 @@ def analyze_ultra(symbol, candles):
     else:
         setup = "NEUTRAL"
 
-    if atr14_v != atr14_v:
-        risk = "BRAK DANYCH"
-    elif atr14_v < last * 0.01:
+    if atr14_v < last * 0.01:
         risk = "NISKIE"
     elif atr14_v < last * 0.02:
         risk = "ŚREDNIE"
@@ -171,17 +163,15 @@ def analyze_ultra(symbol, candles):
     }
 
 # =========================
-# MODUŁ AI — gpt‑4o‑mini
+# AI — gpt‑4o‑mini
 # =========================
 
 def call_ai_gpt40mini(payload: dict) -> str:
     url = "https://api.openai.com/v1/chat/completions"
-
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {st.secrets['OPENAI_API_KEY']}",
     }
-
     body = {
         "model": "gpt-4o-mini",
         "messages": [
@@ -189,24 +179,18 @@ def call_ai_gpt40mini(payload: dict) -> str:
                 "role": "system",
                 "content": (
                     "Jesteś profesjonalnym analitykiem giełdowym. "
-                    "Analizujesz dane techniczne (trend, EMA, RSI, MACD, ATR, wolumen, breakout, momentum, zmienność, ryzyko). "
-                    "Na tej podstawie formułujesz krótki, konkretny komentarz inwestycyjny po polsku: "
-                    "jak wygląda sytuacja, jakie są scenariusze, jakie jest ryzyko i ogólny wniosek."
+                    "Odpowiadasz po polsku. "
+                    "Tworzysz krótki komentarz inwestycyjny na podstawie danych technicznych."
                 ),
             },
-            {
-                "role": "user",
-                "content": json.dumps(payload, ensure_ascii=False),
-            },
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
         "temperature": 0.25,
-        "max_tokens": 600,
+        "max_tokens": 500,
     }
-
-    resp = requests.post(url, headers=headers, json=body, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
-    return data["choices"][0]["message"]["content"]
+    r = requests.post(url, headers=headers, json=body, timeout=30)
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
 
 # =========================
 # UI + KOLORY
@@ -217,36 +201,12 @@ st.set_page_config(page_title="NEON KOMBAJN ULTRA", layout="wide")
 st.markdown("""
 <style>
 body { background-color: #050510; color: #e0e0ff; }
-.block {
-    background: #0a0a18;
-    padding: 20px;
-    margin-bottom: 25px;
-    border-radius: 12px;
-    border: 1px solid #222;
-    box-shadow: 0 0 12px #00eaff33;
-}
-.title {
-    font-size: 26px;
-    font-weight: bold;
-    color: #00eaff;
-}
-.section {
-    font-size: 16px;
-    margin-top: 10px;
-    color: #9ad7ff;
-}
-.value {
-    font-size: 18px;
-    font-weight: bold;
-    color: #ffffff;
-}
-.ai-block {
-    background: #111122;
-    padding: 15px;
-    border-radius: 10px;
-    margin-top: 10px;
-    border: 1px solid #333;
-}
+.block { background: #0a0a18; padding: 20px; margin-bottom: 25px; border-radius: 12px;
+         border: 1px solid #222; box-shadow: 0 0 12px #00eaff33; }
+.title { font-size: 26px; font-weight: bold; color: #00eaff; }
+.section { font-size: 16px; margin-top: 10px; color: #9ad7ff; }
+.value { font-size: 18px; font-weight: bold; color: #ffffff; }
+.ai-block { background: #111122; padding: 15px; border-radius: 10px; margin-top: 10px; border: 1px solid #333; }
 .signal-KUP { color: #00ff88; font-weight: 700; }
 .signal-TRZYMAJ { color: #00aaff; font-weight: 700; }
 .signal-SPRZEDAJ { color: #ff0044; font-weight: 700; }
@@ -255,7 +215,7 @@ body { background-color: #050510; color: #e0e0ff; }
 
 st.title("💹 NEON KOMBAJN ULTRA — z AI")
 
-symbols_input = st.text_input("Tickery (oddzielone przecinkami):", "AAPL, MSFT, TSLA, NVDA")
+symbols_input = st.text_input("Tickery:", "AAPL, MSFT, TSLA, NVDA")
 symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
 
 @st.cache_data(show_spinner=False)
@@ -293,94 +253,32 @@ for symbol in symbols:
         candles = load_candles(symbol)
         analysis = analyze_ultra(symbol, candles)
     except Exception as e:
-        st.error(f"Błąd analizy dla {symbol}: {e}")
+        st.error(f"Błąd: {e}")
         st.markdown("</div>", unsafe_allow_html=True)
         continue
 
-    st.markdown("<div class='section'>Kurs:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['last']:.2f}</div>", unsafe_allow_html=True)
+    def row(label, value):
+        st.markdown(f"<div class='section'>{label}:</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='value'>{value}</div>", unsafe_allow_html=True)
 
-    st.markdown("<div class='section'>Trend (score):</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['trend_score']}</div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='section'>EMA10 / EMA50 / EMA200:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['ema10']:.2f} / {analysis['ema50']:.2f} / {analysis['ema200']:.2f}</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<div class='section'>RSI14 / ATR14:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['rsi14']:.2f} / {analysis['atr14']:.2f}</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<div class='section'>MACD / sygnał / histogram:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['macd']:.2f} / {analysis['macd_signal']:.2f} / {analysis['macd_hist']:.2f}</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<div class='section'>Wolumen relatywny (20):</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['volume_rel']:.2f}</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<div class='section'>Breakout score:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['breakout']:.2f}</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<div class='section'>Pivot P / R1 / S1:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['pivot_P']:.2f} / {analysis['pivot_R1']:.2f} / {analysis['pivot_S1']:.2f}</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<div class='section'>TP / SL:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['tp']:.2f} / {analysis['sl']:.2f}</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<div class='section'>Presja rynku:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['pressure']}</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<div class='section'>Momentum / zmienność:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['momentum']:.2f} / {analysis['volatility']:.2f}</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<div class='section'>Formacja świecowa:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['candle_pattern']}</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<div class='section'>Setup:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['setup']}</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<div class='section'>Ryzyko:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['risk']}</div>",
-        unsafe_allow_html=True,
-    )
+    row("Kurs", f"{analysis['last']:.2f}")
+    row("Trend (score)", analysis["trend_score"])
+    row("EMA10 / EMA50 / EMA200", f"{analysis['ema10']:.2f} / {analysis['ema50']:.2f} / {analysis['ema200']:.2f}")
+    row("RSI14 / ATR14", f"{analysis['rsi14']:.2f} / {analysis['atr14']:.2f}")
+    row("MACD / sygnał / histogram", f"{analysis['macd']:.2f} / {analysis['macd_signal']:.2f} / {analysis['macd_hist']:.2f}")
+    row("Wolumen relatywny", f"{analysis['volume_rel']:.2f}")
+    row("Breakout score", f"{analysis['breakout']:.2f}")
+    row("Pivot P / R1 / S1", f"{analysis['pivot_P']:.2f} / {analysis['pivot_R1']:.2f} / {analysis['pivot_S1']:.2f}")
+    row("TP / SL", f"{analysis['tp']:.2f} / {analysis['sl']:.2f}")
+    row("Presja rynku", analysis["pressure"])
+    row("Momentum / zmienność", f"{analysis['momentum']:.2f} / {analysis['volatility']:.2f}")
+    row("Formacja świecowa", analysis["candle_pattern"])
+    row("Setup", analysis["setup"])
+    row("Ryzyko", analysis["risk"])
 
     sig_class = f"signal-{analysis['signal']}"
     st.markdown("<div class='section'>Sygnał końcowy:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value {sig_class}'>{analysis['signal']}</div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown(f"<div class='value {sig_class}'>{analysis['signal']}</div>", unsafe_allow_html=True)
 
     if st.button(f"🤖 Analiza AI dla {symbol}", key=f"ai_{symbol}_{st.session_state['run_id']}"):
         payload = {
@@ -388,12 +286,11 @@ for symbol in symbols:
             "analysis": {k: v for k, v in analysis.items() if k != "raw_candles"},
             "candles_tail": analysis["raw_candles"],
         }
-
-        with st.spinner("AI analizuje dane..."):
+        with st.spinner("AI analizuje..."):
             try:
                 ai_text = call_ai_gpt40mini(payload)
             except Exception as e:
-                ai_text = f"Błąd podczas wywołania AI: {e}"
+                ai_text = f"Błąd AI: {e}"
 
         st.markdown("<div class='ai-block'>", unsafe_allow_html=True)
         st.markdown("### 🤖 Wynik analizy AI:", unsafe_allow_html=True)
