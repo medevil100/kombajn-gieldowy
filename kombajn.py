@@ -315,4 +315,4 @@ for t in sorted_list:
                 st.markdown(f"- {note}")
         else:
             st.caption("Brak analizy AI (kliknij przycisk).")
-```
+
