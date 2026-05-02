@@ -6,56 +6,61 @@ from openai import OpenAI
 from streamlit_autorefresh import st_autorefresh
 
 # --- KONFIG ---
-st.set_page_config(layout="wide", page_title="NEON ULTRA PRO MAX", page_icon="🚀")
+st.set_page_config(layout="wide", page_title="WALL STREET ULTRA TERMINAL", page_icon="💼")
 
-# --- CSS NEON + HEATMAP + ALERTY ---
+# --- CSS WALL STREET (granat + złoto) ---
 st.markdown("""
 <style>
-body { background:#050510; color:#e0e0ff; }
-.stApp { background:#050510; }
+body { background:#020612; color:#e0e0ff; }
+.stApp { background:#020612; }
 
 .tile {
     border-radius:18px; padding:18px; text-align:center;
-    border:1px solid #222; box-shadow:0 0 25px #39FF1422;
+    border:1px solid #1b2838; box-shadow:0 0 25px #000000aa;
     min-height:350px;
+    background:linear-gradient(145deg, #050b18 0%, #020612 60%, #0b101f 100%);
 }
 
-/* ALERTY */
-.tile-KUP { background:#002000; box-shadow:0 0 25px #00FF0044; }
-.tile-SPRZEDAJ { background:#200000; box-shadow:0 0 25px #FF000044; }
-.tile-TRZYMAJ { background:#001820; box-shadow:0 0 25px #00FFFF44; }
+/* ALERTY – tło kafelka wg sygnału */
+.tile-KUP { box-shadow:0 0 25px #ffd70055; border-color:#ffd700; }
+.tile-SPRZEDAJ { box-shadow:0 0 25px #ff4b4b55; border-color:#ff4b4b; }
+.tile-TRZYMAJ { box-shadow:0 0 25px #00bcd455; border-color:#00bcd4; }
 
-/* HEATMAP TRENDÓW */
-.trend-strong-up { border:2px solid #00FF00; }
-.trend-up { border:2px solid #39FF14; }
-.trend-neutral { border:2px solid #888; }
-.trend-down { border:2px solid #FF3131; }
-.trend-strong-down { border:2px solid #FF0000; }
+/* HEATMAP TRENDÓW – ramka */
+.trend-strong-up { border-width:2px; border-color:#00ff7f !important; }
+.trend-up { border-width:2px; border-color:#32cd32 !important; }
+.trend-neutral { border-width:2px; border-color:#888 !important; }
+.trend-down { border-width:2px; border-color:#ff6347 !important; }
+.trend-strong-down { border-width:2px; border-color:#ff0000 !important; }
 
-.price { font-size:2.2rem; font-weight:bold; color:white; }
-.bid { color:#00FF00; font-weight:bold; }
-.ask { color:#FF3131; font-weight:bold; }
+.price { font-size:2.2rem; font-weight:bold; color:#fdfdfd; }
+.bid { color:#7CFC00; font-weight:bold; }
+.ask { color:#ff4b4b; font-weight:bold; }
 
-.tp { color:#00FF00; font-weight:bold; }
-.sl { color:#FF3131; font-weight:bold; }
+.tp { color:#7CFC00; font-weight:bold; }
+.sl { color:#ff4b4b; font-weight:bold; }
 
 .signal-KUP {
-    color:#39FF14; border:2px solid #39FF14;
+    color:#ffd700; border:1px solid #ffd700;
     padding:6px; border-radius:10px; font-weight:bold;
 }
 .signal-SPRZEDAJ {
-    color:#FF3131; border:2px solid #FF3131;
+    color:#ff4b4b; border:1px solid #ff4b4b;
     padding:6px; border-radius:10px; font-weight:bold;
 }
 .signal-TRZYMAJ {
-    color:#00FFFF; border:2px solid #00FFFF;
+    color:#00bcd4; border:1px solid #00bcd4;
     padding:6px; border-radius:10px; font-weight:bold;
 }
 
 .stButton>button {
-    background:#111; border:2px solid #39FF14;
-    color:#39FF14; font-weight:bold; width:100%;
-    box-shadow:0 0 15px #39FF1444;
+    background:#08101f; border:1px solid #ffd700;
+    color:#ffd700; font-weight:bold; width:100%;
+    box-shadow:0 0 15px #000000aa;
+}
+
+h1, h2, h3 {
+    color:#ffd700;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -66,11 +71,19 @@ if "OPENAI_API_KEY" in st.secrets:
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # --- AUTOREFRESH ---
-st_autorefresh(interval=5 * 60 * 1000, key="mega_ultra_clean_v1")
+st_autorefresh(interval=5 * 60 * 1000, key="wall_street_ultra_v1")
 
-# --- PRZYCISK ODSWIEŻANIA ---
-if st.button("🔄 ODSWIEŻ DANE"):
-    st.experimental_rerun()
+# --- SESSION STATE NA TICKERY ---
+if "tickers_text" not in st.session_state:
+    st.session_state["tickers_text"] = "CDR.WA PKO.WA AAPL NVDA TSLA BTC-USD"
+
+# --- HEADER + ODSWIEŻ ---
+col_title, col_btn = st.columns([4, 1])
+with col_title:
+    st.markdown("<h1>💼 WALL STREET ULTRA TERMINAL</h1>", unsafe_allow_html=True)
+with col_btn:
+    if st.button("🔄 ODSWIEŻ DANE"):
+        st.experimental_rerun()
 
 # --- ULTRA ENGINE ---
 def ultra(symbol):
@@ -112,8 +125,8 @@ def ultra(symbol):
         # ATR
         tr = pd.concat([
             df["High"] - df["Low"],
-            abs(df["High"] - df["Close"].shift()),
-            abs(df["Low"] - df["Close"].shift())
+            (df["High"] - df["Close"].shift()).abs(),
+            (df["Low"] - df["Close"].shift()).abs()
         ], axis=1).max(axis=1)
         atr = tr.rolling(14).mean().iloc[-1]
 
@@ -175,30 +188,39 @@ def ultra(symbol):
             "df": df.tail(60)
         }
 
-    except:
+    except Exception:
         return None
 
-# --- UI ---
-st.markdown("<h1 style='color:#39FF14; text-shadow:0 0 15px #39FF14;'>🚀 NEON ULTRA PRO MAX</h1>", unsafe_allow_html=True)
-
-st.sidebar.title("💠 KONTROLA")
-tickers_in = st.sidebar.text_area("Tickery:", "CDR.WA PKO.WA AAPL NVDA TSLA BTC-USD", height=200)
-tickers = [x.strip().upper() for x in tickers_in.replace(",", " ").split() if x.strip()]
+# --- SIDEBAR TICKERY (zapis w session_state) ---
+st.sidebar.title("📋 LISTA SPÓŁEK")
+tickers_text = st.sidebar.text_area(
+    "Tickery (spacje / przecinki):",
+    st.session_state["tickers_text"],
+    height=200
+)
+st.session_state["tickers_text"] = tickers_text
+tickers = [x.strip().upper() for x in tickers_text.replace(",", " ").split() if x.strip()]
 
 if not tickers:
     st.info("Wklej tickery w sidebarze.")
     st.stop()
 
+# --- LICZENIE WYNIKÓW ---
 results = []
 for t in tickers:
     r = ultra(t)
     if r:
         results.append(r)
 
+if not results:
+    st.warning("Brak danych dla podanych tickerów.")
+    st.stop()
+
 # --- TOP 10 WYBICIA ---
 st.subheader("🔥 TOP 10 – Największa możliwość wybicia")
 
 def breakout_score(r):
+    # wolumen + trend + RSI w strefie wybicia (55–65)
     rsi_factor = max(0, 70 - abs(r["rsi"] - 60))
     return r["vol"] * 2 + r["score"] * 3 + rsi_factor
 
@@ -217,12 +239,12 @@ for i, r in enumerate(top10):
         st.line_chart(chart_df, height=70)
 
         st.markdown(f"""
-        <div style="font-size:1.3rem; color:#39FF14; font-weight:bold;">{r['symbol']}</div>
+        <div style="font-size:1.1rem; color:#ffd700; font-weight:bold;">{r['symbol']}</div>
         <div class="price">{r['price']:.2f}</div>
         <b>Score:</b> {r['score']}<br>
         <b>RSI:</b> {r['rsi']:.1f}<br>
         <b>Vol x:</b> {r['vol']:.2f}<br>
-        <div class="signal-{r['signal']}">{r['signal']}</div>
+        <div class="signal-{r['signal']}'>{r['signal']}</div>
         """, unsafe_allow_html=True)
 
         st.markdown("</div>", unsafe_allow_html=True)
@@ -243,39 +265,48 @@ for i, r in enumerate(results):
         st.line_chart(chart_df, height=80)
 
         st.markdown(f"""
-        <div style="font-size:1.6rem; color:#39FF14; font-weight:bold;">{r['symbol']}</div>
+        <div style="font-size:1.4rem; color:#ffd700; font-weight:bold;">{r['symbol']}</div>
         <div class="price">{r['price']:.2f}</div>
         <span class="bid">B: {r['bid']}</span> | <span class="ask">A: {r['ask']}</span>
         <hr>
-        MA20: {r['ma20']:.2f}<br>
-        MA50: {r['ma50']:.2f}<br>
-        MA200: {r['ma200']:.2f}
+        MA20: {r['ma20']:.2f} | MA50: {r['ma50']:.2f} | MA200: {r['ma200']:.2f}<br>
+        EMA200: {r['ema200']:.2f}
         <hr>
-        Swing High: {r['swing_high']:.2f}<br>
-        Swing Low: {r['swing_low']:.2f}
+        Swing High: {r['swing_high']:.2f} | Swing Low: {r['swing_low']:.2f}<br>
+        Pivot: {r['pivot']:.2f} | R1: {r['r1']:.2f} | S1: {r['s1']:.2f}
         <hr>
-        <b>TP:</b> <span class="tp">{r['tp']:.2f}</span><br>
-        <b>SL:</b> <span class="sl">{r['sl']:.2f}</span>
+        <b>TP:</b> <span class="tp">{r['tp']:.2f}</span> |
+        <b>SL:</b> <span class="sl">{r['sl']:.2f}</span><br>
+        ATR: {r['atr']:.2f} | RSI: {r['rsi']:.1f}
         <hr>
-        <div class="signal-{r['signal']}">{r['signal']}</div>
+        <div class="signal-{r['signal']}'>{r['signal']}</div>
         """, unsafe_allow_html=True)
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-        if st.button(f"AI – {r['symbol']}", key=f"ai_{r['symbol']}"):
-            if client:
-                with st.spinner("Analiza AI..."):
-                    prompt = (
-                        f"Analiza {r['symbol']}: Kurs {r['price']}, Trend score {r['score']}, "
-                        f"RSI {r['rsi']:.1f}, ATR {r['atr']:.2f}, TP {r['tp']:.2f}, SL {r['sl']:.2f}. "
-                        "Podaj: 1. Ocena wejścia, 2. Ryzyko, 3. Werdykt. Zero lania wody."
-                    )
-                    resp = client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=[
-                            {"role": "system", "content": "Jesteś bezdusznym systemem operacyjnym. Mówisz tylko o faktach."},
-                            {"role": "user", "content": prompt}
-                        ],
-                        temperature=0.1
-                    )
-                    st.info(resp.choices[0].message.content)
+        if client and st.button(f"AI – {r['symbol']}", key=f"ai_{r['symbol']}"):
+            with st.spinner("Analiza AI..."):
+                prompt = (
+                    f"Spółka {r['symbol']}. "
+                    f"Kurs: {r['price']:.2f}. "
+                    f"RSI: {r['rsi']:.1f}. ATR: {r['atr']:.2f}. "
+                    f"MA20: {r['ma20']:.2f}, MA50: {r['ma50']:.2f}, MA200: {r['ma200']:.2f}, EMA200: {r['ema200']:.2f}. "
+                    f"Swing High: {r['swing_high']:.2f}, Swing Low: {r['swing_low']:.2f}. "
+                    f"Pivot: {r['pivot']:.2f}, R1: {r['r1']:.2f}, S1: {r['s1']:.2f}. "
+                    f"Trend score: {r['score']}, sygnał: {r['signal']}, wolumen relatywny: {r['vol']:.2f}. "
+                    "Podaj krótko: 1) Ocena wejścia (konkret, bez definicji), "
+                    "2) Ryzyko (konkretne poziomy, nie ogólniki), "
+                    "3) Werdykt (KUP / OBSERWUJ / ODRZUĆ) – bez lania wody."
+                )
+                resp = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "Jesteś bezdusznym systemem tradingowym. Mówisz tylko w punktach, krótko, technicznie. Zero lania wody, zero definicji, zero edukacji."
+                        },
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.05
+                )
+                st.info(resp.choices[0].message.content)
