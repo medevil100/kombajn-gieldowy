@@ -1,9 +1,13 @@
-import requests
-import json
-import streamlit as st
-import yfinance as yf
-import math
+Masz rację — zróbmy to porządnie, od zera, w jednym strzale.
 
+Poniżej **pełny, poprawiony plik** z AI (`gpt-4o-mini`), gotowy jako `kombajn_ultra.py`:
+
+```python
+import math
+import json
+import requests
+import yfinance as yf
+import streamlit as st
 
 # =========================
 # SILNIK ULTRA — KOMBAJN DANYCH
@@ -64,36 +68,6 @@ def macd_calc(values):
 def analyze_ultra(symbol, candles):
     if len(candles) < 30:
         raise ValueError("Za mało świec do analizy")
-def call_ai_gpt40mini(payload):
-    url = "https://api.openai.com/v1/chat/completions"
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {st.secrets['OPENAI_API_KEY']}"
-    }
-
-    body = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Jesteś profesjonalnym analitykiem giełdowym. "
-                    "Analizujesz dane techniczne, momentum, wolumen, breakouty, ryzyko i trend. "
-                    "Generujesz precyzyjne, krótkie i konkretne wnioski inwestycyjne."
-                )
-            },
-            {
-                "role": "user",
-                "content": json.dumps(payload, ensure_ascii=False)
-            }
-        ],
-        "temperature": 0.2
-    }
-
-    r = requests.post(url, headers=headers, json=body)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
 
     closes = [c["close"] for c in candles]
     highs = [c["high"] for c in candles]
@@ -116,14 +90,14 @@ def call_ai_gpt40mini(payload):
     s = 1 if last > ema10 else -1 if last < ema10 else 0
     m = 1 if last > ema50 else -1 if last < ema50 else 0
     l = 1 if last > ema200 else -1 if last < ema200 else 0
-    trend_score = 1*s + 2*m + 3*l
+    trend_score = 1 * s + 2 * m + 3 * l
 
     # Pivot
     P = (prev["high"] + prev["low"] + prev["close"]) / 3
-    R1 = 2*P - prev["low"]
-    S1 = 2*P - prev["high"]
+    R1 = 2 * P - prev["low"]
+    S1 = 2 * P - prev["high"]
 
-    # 52W high/low
+    # High/low z dostępnego zakresu
     high52 = max(highs)
     low52 = min(lows)
 
@@ -131,7 +105,7 @@ def call_ai_gpt40mini(payload):
     sl = low52
 
     dist = (last - high52) / high52 if high52 else 0
-    breakout = 3*dist + 2*vol_rel + (rsi14_v / 100 if rsi14_v == rsi14_v else 0.5)
+    breakout = 3 * dist + 2 * vol_rel + (rsi14_v / 100 if rsi14_v == rsi14_v else 0.5)
 
     pressure = "KUPUJĄCY DOMINUJĄ" if last > (prev["open"] + prev["close"]) / 2 else "SPRZEDAJĄCY DOMINUJĄ"
 
@@ -167,6 +141,7 @@ def call_ai_gpt40mini(payload):
         signal = "KUP"
     elif trend_score <= -2:
         signal = "SPRZEDAJ"
+        # można dodać warunek na breakout < 0, ale zostawiamy prosto
     else:
         signal = "TRZYMAJ"
 
@@ -200,12 +175,55 @@ def call_ai_gpt40mini(payload):
     }
 
 # =========================
+# MODUŁ AI — gpt‑4o‑mini
+# =========================
+
+def call_ai_gpt40mini(payload: dict) -> str:
+    """
+    Wywołanie OpenAI gpt‑4o‑mini na podstawie payloadu z analizy.
+    Wymaga klucza w st.secrets["OPENAI_API_KEY"].
+    """
+    url = "https://api.openai.com/v1/chat/completions"
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {st.secrets['OPENAI_API_KEY']}",
+    }
+
+    body = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Jesteś profesjonalnym analitykiem giełdowym. "
+                    "Analizujesz dane techniczne (trend, EMA, RSI, MACD, ATR, wolumen, breakout, momentum, zmienność, ryzyko). "
+                    "Na tej podstawie formułujesz krótki, konkretny komentarz inwestycyjny: "
+                    "jak wygląda sytuacja, jakie są scenariusze, jakie jest ryzyko i ogólny wniosek."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(payload, ensure_ascii=False),
+            },
+        ],
+        "temperature": 0.25,
+        "max_tokens": 600,
+    }
+
+    resp = requests.post(url, headers=headers, json=body, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    return data["choices"][0]["message"]["content"]
+
+# =========================
 # UI — KOMBAJN ULTRA
 # =========================
 
-# st.set_page_config(page_title="NEON KOMBAJN ULTRA", layout="wide")
+st.set_page_config(page_title="NEON KOMBAJN ULTRA", layout="wide")
 
-st.markdown("""
+st.markdown(
+    """
 <style>
 body { background-color: #050510; color: #e0e0ff; }
 .block {
@@ -242,18 +260,20 @@ body { background-color: #050510; color: #e0e0ff; }
 .signal-TRZYMAJ { color: #00aaff; font-weight: 700; }
 .signal-SPRZEDAJ { color: #ff0044; font-weight: 700; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
-st.title("💹 NEON KOMBAJN ULTRA — per spółka, bez tabel")
+st.title("💹 NEON KOMBAJN ULTRA — per spółka, z AI, bez tabel")
 
 symbols_input = st.text_input(
     "Wpisz tickery (np. AAPL, MSFT, TSLA):",
-    "AAPL, MSFT, TSLA, NVDA"
+    "AAPL, MSFT, TSLA, NVDA",
 )
 symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
 
 # =========================
-# POPRAWIONY loader świec
+# Loader świec (yfinance)
 # =========================
 
 @st.cache_data(show_spinner=False)
@@ -266,25 +286,27 @@ def load_candles(symbol: str):
     def to_float(x):
         try:
             return float(x)
-        except:
+        except Exception:
             try:
                 return float(x.item())
-            except:
+            except Exception:
                 return float(x.astype(float))
 
     for _, row in data.iterrows():
-        candles.append({
-            "open": to_float(row["Open"]),
-            "high": to_float(row["High"]),
-            "low": to_float(row["Low"]),
-            "close": to_float(row["Close"]),
-            "volume": to_float(row["Volume"]),
-        })
+        candles.append(
+            {
+                "open": to_float(row["Open"]),
+                "high": to_float(row["High"]),
+                "low": to_float(row["Low"]),
+                "close": to_float(row["Close"]),
+                "volume": to_float(row["Volume"]),
+            }
+        )
 
     return candles
 
 # =========================
-# UNIKALNE KEY — FIX removeChild
+# Unikalne key — fix removeChild
 # =========================
 
 if "run_id" not in st.session_state:
@@ -296,7 +318,10 @@ st.session_state["run_id"] += 1
 # =========================
 
 for symbol in symbols:
-    st.markdown(f"<div class='block'><div class='title'>{symbol}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='block'><div class='title'>{symbol}</div>",
+        unsafe_allow_html=True,
+    )
 
     try:
         candles = load_candles(symbol)
@@ -307,100 +332,122 @@ for symbol in symbols:
         continue
 
     st.markdown("<div class='section'>Kurs:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['last']:.2f}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='value'>{analysis['last']:.2f}</div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown("<div class='section'>Trend (score):</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['trend_score']}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='value'>{analysis['trend_score']}</div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown("<div class='section'>EMA10 / EMA50 / EMA200:</div>", unsafe_allow_html=True)
     st.markdown(
         f"<div class='value'>{analysis['ema10']:.2f} / {analysis['ema50']:.2f} / {analysis['ema200']:.2f}</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
     st.markdown("<div class='section'>RSI14 / ATR14:</div>", unsafe_allow_html=True)
     st.markdown(
         f"<div class='value'>{analysis['rsi14']:.2f} / {analysis['atr14']:.2f}</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
     st.markdown("<div class='section'>MACD / sygnał / histogram:</div>", unsafe_allow_html=True)
     st.markdown(
         f"<div class='value'>{analysis['macd']:.2f} / {analysis['macd_signal']:.2f} / {analysis['macd_hist']:.2f}</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
     st.markdown("<div class='section'>Wolumen relatywny (20):</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['volume_rel']:.2f}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='value'>{analysis['volume_rel']:.2f}</div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown("<div class='section'>Breakout score:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['breakout']:.2f}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='value'>{analysis['breakout']:.2f}</div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown("<div class='section'>Pivot P / R1 / S1:</div>", unsafe_allow_html=True)
     st.markdown(
         f"<div class='value'>{analysis['pivot_P']:.2f} / {analysis['pivot_R1']:.2f} / {analysis['pivot_S1']:.2f}</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
     st.markdown("<div class='section'>TP / SL:</div>", unsafe_allow_html=True)
     st.markdown(
         f"<div class='value'>{analysis['tp']:.2f} / {analysis['sl']:.2f}</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
     st.markdown("<div class='section'>Presja rynku:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['pressure']}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='value'>{analysis['pressure']}</div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown("<div class='section'>Momentum / zmienność:</div>", unsafe_allow_html=True)
     st.markdown(
         f"<div class='value'>{analysis['momentum']:.2f} / {analysis['volatility']:.2f}</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
     st.markdown("<div class='section'>Formacja świecowa:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['candle_pattern']}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='value'>{analysis['candle_pattern']}</div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown("<div class='section'>Setup:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['setup']}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='value'>{analysis['setup']}</div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown("<div class='section'>Ryzyko:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['risk']}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='value'>{analysis['risk']}</div>",
+        unsafe_allow_html=True,
+    )
 
     sig_class = f"signal-{analysis['signal']}"
     st.markdown("<div class='section'>Sygnał końcowy:</div>", unsafe_allow_html=True)
     st.markdown(
         f"<div class='value {sig_class}'>{analysis['signal']}</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
-    # AI — FIX key
-    if st.button(f"🤖 Analiza AI dla {symbol}", key=f"ai_{symbol}_{st.session_state['run_id']}"):
-    payload = {
-        "symbol": symbol,
-        "analysis": {k: v for k, v in analysis.items() if k != "raw_candles"},
-        "candles_tail": analysis["raw_candles"],
-    }
+    # =========================
+    # BLOK AI — gpt‑4o‑mini
+    # =========================
+    if st.button(
+        f"🤖 Analiza AI dla {symbol}",
+        key=f"ai_{symbol}_{st.session_state['run_id']}",
+    ):
+        payload = {
+            "symbol": symbol,
+            "analysis": {k: v for k, v in analysis.items() if k != "raw_candles"},
+            "candles_tail": analysis["raw_candles"],
+        }
 
-    with st.spinner("AI analizuje dane..."):
-        ai_text = call_ai_gpt40mini(payload)
+        with st.spinner("AI analizuje dane..."):
+            try:
+                ai_text = call_ai_gpt40mini(payload)
+            except Exception as e:
+                ai_text = f"Błąd podczas wywołania AI: {e}"
 
-    st.markdown("<div class='ai-block'>", unsafe_allow_html=True)
-    st.markdown("### 🤖 Wynik analizy AI:")
-    st.write(ai_text)
+        st.markdown("<div class='ai-block'>", unsafe_allow_html=True)
+        st.markdown("### 🤖 Wynik analizy AI:")
+        st.write(ai_text)
+        st.markdown("</div>", unsafe_allow_html=True)
+
     st.markdown("</div>", unsafe_allow_html=True)
+```
 
-
-    st.markdown("</div>", unsafe_allow_html=True)
-    # Kontynuacja bloku wyświetlania (od momentu urwania):
-    st.markdown("<div class='section'>Wolumen relatywny:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['volume_rel']:.2f}x</div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='section'>Sygnał Ultra:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='signal-{analysis['signal']}'>{analysis['signal']}</div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='section'>Presja rynku:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['pressure']}</div>", unsafe_allow_html=True)
-
-    st.markdown(f"<div class='section'>Ryzyko (ATR): <span class='value'>{analysis['risk']}</span></div>", unsafe_allow_html=True)
-    
-    st.markdown("</div>", unsafe_allow_html=True) # Domknięcie bloku spółki
+To możesz 1:1 wkleić jako plik.  
+Jak będziesz chciał wersję „ultra PRO” (ranking, breakout top list, filtry GPW/NC, itd.) — zrobimy kolejną iterację, już na tym czystym fundamencie.
