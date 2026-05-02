@@ -180,7 +180,7 @@ def call_ai_gpt40mini(payload: dict) -> str:
                 "content": (
                     "Jesteś profesjonalnym analitykiem giełdowym. "
                     "Odpowiadasz po polsku. "
-                    "Tworzysz krótki komentarz inwestycyjny na podstawie danych technicznych."
+                    "Tworzysz krótki komentarz inwestycyjny."
                 ),
             },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
