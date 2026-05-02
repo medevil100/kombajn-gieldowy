@@ -444,5 +444,3 @@ for symbol in symbols:
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-To możesz 1:1 wkleić jako plik.  
-Jak będziesz chciał wersję „ultra PRO” (ranking, breakout top list, filtry GPW/NC, itd.) — zrobimy kolejną iterację, już na tym czystym fundamencie.
