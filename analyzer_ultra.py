@@ -170,7 +170,7 @@ def analyze_ultra(symbol, candles):
 # UI — KOMBAJN ULTRA
 # =========================
 
-#st.set_page_config(page_title="NEON KOMBAJN ULTRA", layout="wide")
+# st.set_page_config(page_title="NEON KOMBAJN ULTRA", layout="wide")
 
 st.markdown("""
 <style>
