@@ -1,352 +1,182 @@
-
 import streamlit as st
 import yfinance as yf
+import pandas as pd
+import pandas_ta as ta
+from streamlit_autorefresh import st_autorefresh
+import openai
+import os
 import math
 
 # =========================
-# SILNIK ULTRA — KOMBAJN DANYCH
+# SILNIK ULTRA — MATEMATYKA
 # =========================
 
-def ema(values, period):
-    if not values:
-        return math.nan
-    k = 2 / (period + 1)
-    e = values[0]
-    for v in values[1:]:
-        e = v * k + e * (1 - k)
-    return e
+def calculate_rsi(closes, period=14):
+    if len(closes) <= period: return 50
+    delta = pd.Series(closes).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs.iloc[-1]))
 
-def sma(values, period):
-    if len(values) < period:
-        return math.nan
-    return sum(values[-period:]) / period
+def calculate_atr(df, period=14):
+    high = df['High']
+    low = df['Low']
+    close = df['Close'].shift(1)
+    tr = pd.concat([high - low, abs(high - close), abs(low - close)], axis=1).max(axis=1)
+    return tr.rolling(period).mean().iloc[-1]
 
-def rsi(values, period=14):
-    if len(values) <= period:
-        return math.nan
-    gains = 0
-    losses = 0
-    for i in range(len(values) - period, len(values)):
-        diff = values[i] - values[i - 1]
-        if diff > 0:
-            gains += diff
-        else:
-            losses -= diff
-    if losses == 0:
-        return 100
-    rs = (gains / period) / (losses / period)
-    return 100 - 100 / (1 + rs)
-
-def atr(candles, period=14):
-    if len(candles) <= 1:
-        return math.nan
-    trs = []
-    for i in range(1, len(candles)):
-        h = candles[i]["high"]
-        l = candles[i]["low"]
-        pc = candles[i - 1]["close"]
-        tr = max(h - l, abs(h - pc), abs(l - pc))
-        trs.append(tr)
-    return sma(trs, period)
-
-def macd_calc(values):
-    if len(values) < 26:
-        return math.nan, math.nan, math.nan
-    ema12 = ema(values, 12)
-    ema26 = ema(values, 26)
-    macd = ema12 - ema26
-    signal = ema(values[-9:], 9)
-    hist = macd - signal
-    return macd, signal, hist
-
-def analyze_ultra(symbol, candles):
-    if len(candles) < 30:
-        raise ValueError("Za mało świec do analizy")
-
-    closes = [c["close"] for c in candles]
-    highs = [c["high"] for c in candles]
-    lows = [c["low"] for c in candles]
-    volumes = [c["volume"] for c in candles]
-
-    last = closes[-1]
-    prev = candles[-2]
-
-    ema10 = ema(closes, 10)
-    ema50 = ema(closes, 50)
-    ema200 = ema(closes, 200)
-    rsi14_v = rsi(closes, 14)
-    atr14_v = atr(candles, 14)
-    macd_v, macd_sig, macd_hist = macd_calc(closes)
-    vol20 = sma(volumes, 20)
-    vol_rel = volumes[-1] / vol20 if vol20 == vol20 and vol20 != 0 else 1.0
-
-    # Trend score
-    s = 1 if last > ema10 else -1 if last < ema10 else 0
-    m = 1 if last > ema50 else -1 if last < ema50 else 0
-    l = 1 if last > ema200 else -1 if last < ema200 else 0
-    trend_score = 1*s + 2*m + 3*l
-
-    # Pivot
-    P = (prev["high"] + prev["low"] + prev["close"]) / 3
-    R1 = 2*P - prev["low"]
-    S1 = 2*P - prev["high"]
-
-    # 52W high/low (z dostępnego zakresu)
-    high52 = max(highs)
-    low52 = min(lows)
-
-    # TP/SL
-    tp = high52
-    sl = low52
-
-    # Breakout
-    dist = (last - high52) / high52 if high52 else 0
-    breakout = 3*dist + 2*vol_rel + (rsi14_v / 100 if rsi14_v == rsi14_v else 0.5)
-
-    # Presja rynku
-    pressure = "KUPUJĄCY DOMINUJĄ" if last > (prev["open"] + prev["close"]) / 2 else "SPRZEDAJĄCY DOMINUJĄ"
-
-    # Momentum
-    momentum = last - closes[-5]
-
-    # Zmienność
-    volatility = max(highs[-10:]) - min(lows[-10:])
-
-    # Prosta formacja świecowa
-    body = candles[-1]["close"] - candles[-1]["open"]
-    rng = candles[-1]["high"] - candles[-1]["low"]
-    if body > 0 and abs(body) > 0.6 * rng:
-        candle_pattern = "MOCNA BYCZA ŚWIECA"
-    elif body < 0 and abs(body) > 0.6 * rng:
-        candle_pattern = "MOCNA NIEDŹWIEDZIA ŚWIECA"
-    else:
-        candle_pattern = "BRAK"
-
-    # Setup
-    if breakout > 5:
-        setup = "BREAKOUT LONG"
-    elif breakout < -2:
-        setup = "BREAKOUT SHORT"
-    else:
-        setup = "NEUTRAL"
-
-    # Ryzyko
-    if atr14_v != atr14_v:
-        risk = "BRAK DANYCH"
-    elif atr14_v < last * 0.01:
-        risk = "NISKIE"
-    elif atr14_v < last * 0.02:
-        risk = "ŚREDNIE"
-    else:
-        risk = "WYSOKIE"
-
-    # Sygnał
-    if trend_score >= 4 and breakout > 3:
-        signal = "KUP"
-    elif trend_score <= -2:
-        signal = "SPRZEDAJ"
-    else:
-        signal = "TRZYMAJ"
-
-    return {
-        "symbol": symbol,
-        "last": last,
-        "trend_score": trend_score,
-        "ema10": ema10,
-        "ema50": ema50,
-        "ema200": ema200,
-        "rsi14": rsi14_v,
-        "atr14": atr14_v,
-        "macd": macd_v,
-        "macd_signal": macd_sig,
-        "macd_hist": macd_hist,
-        "volume_rel": vol_rel,
-        "breakout": breakout,
-        "pivot_P": P,
-        "pivot_R1": R1,
-        "pivot_S1": S1,
-        "tp": tp,
-        "sl": sl,
-        "pressure": pressure,
-        "momentum": momentum,
-        "volatility": volatility,
-        "candle_pattern": candle_pattern,
-        "setup": setup,
-        "risk": risk,
-        "signal": signal,
-        "raw_candles": candles[-100:],
-    }
-
-# =========================
-# UI — KOMBAJN ULTRA (ROZBITY NA SPÓŁKI)
-# =========================
-
-st.set_page_config(page_title="NEON KOMBAJN ULTRA", layout="wide")
+# --- DESIGN I STYLE NEONOWE ---
+st.set_page_config(layout="wide", page_title="NEON ULTRA TERMINAL AI")
 
 st.markdown("""
-<style>
-body { background-color: #050510; color: #e0e0ff; }
-.block {
-    background: #0a0a18;
-    padding: 20px;
-    margin-bottom: 25px;
-    border-radius: 12px;
-    border: 1px solid #222;
-    box-shadow: 0 0 12px #00eaff33;
-}
-.title {
-    font-size: 26px;
-    font-weight: bold;
-    color: #00eaff;
-}
-.section {
-    font-size: 16px;
-    margin-top: 10px;
-    color: #9ad7ff;
-}
-.value {
-    font-size: 18px;
-    font-weight: bold;
-    color: #ffffff;
-}
-.ai-block {
-    background: #111122;
-    padding: 15px;
-    border-radius: 10px;
-    margin-top: 10px;
-    border: 1px solid #333;
-}
-.signal-KUP { color: #00ff88; font-weight: 700; }
-.signal-TRZYMAJ { color: #00aaff; font-weight: 700; }
-.signal-SPRZEDAJ { color: #ff0044; font-weight: 700; }
-</style>
+    <style>
+    body { background-color: #050510; color: #e0e0ff; }
+    .stApp { background-color: #050510; }
+    .neon-card { border: 1px solid #222; padding: 20px; border-radius: 12px; background: #0a0a18; box-shadow: 0 0 15px #39FF1422; margin-bottom: 20px; }
+    .neon-title { color: #39FF14; text-shadow: 0 0 10px #39FF14; font-weight: bold; font-size: 24px; }
+    .signal-KUP { color: #39FF14; font-weight: bold; text-shadow: 0 0 10px #39FF14; border: 1px solid #39FF14; padding: 5px; border-radius: 5px; text-align: center; }
+    .signal-SPRZEDAJ { color: #FF3131; font-weight: bold; text-shadow: 0 0 10px #FF3131; border: 1px solid #FF3131; padding: 5px; border-radius: 5px; text-align: center; }
+    .signal-TRZYMAJ { color: #00FFFF; font-weight: bold; text-shadow: 0 0 10px #00FFFF; border: 1px solid #00FFFF; padding: 5px; border-radius: 5px; text-align: center; }
+    .neon-bid { color: #00FF00; font-weight: bold; text-shadow: 0 0 5px #00FF00; }
+    .neon-ask { color: #FF0000; font-weight: bold; text-shadow: 0 0 5px #FF0000; }
+    .tp-label { color: #39FF14; font-weight: bold; }
+    .sl-label { color: #FF3131; font-weight: bold; }
+    .stButton>button { background-color: #1a1a1a; color: #39FF14; border: 1px solid #39FF14; box-shadow: 0 0 10px #39FF14; width: 100%; }
+    .top-card { border: 1px solid #333; padding: 10px; border-radius: 5px; background: #0a0a0a; margin-bottom: 10px; text-align: center; }
+    hr { border: 0.5px solid #333; }
+    </style>
 """, unsafe_allow_html=True)
 
-st.title("💹 NEON KOMBAJN ULTRA — per spółka, bez tabel")
+# --- KONFIGURACJA ODŚWIEŻANIA ---
+refresh_min = st.sidebar.slider("Odświeżanie (min)", 1, 10, 5)
+st_autorefresh(interval=refresh_min * 60 * 1000, key="ultra_refresh")
 
-symbols_input = st.text_input(
-    "Wpisz tickery (np. AAPL, MSFT, TSLA):",
-    "AAPL, MSFT, TSLA, NVDA"
-)
-symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
+if "OPENAI_API_KEY" in st.secrets:
+    openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-@st.cache_data(show_spinner=False)
-def load_candles(symbol: str):
-    data = yf.download(symbol, period="6mo", interval="1d")
-    data = data.dropna()
-    candles = []
-    for _, row in data.iterrows():
-        candles.append({
-            "open": float(row["Open"]),
-            "high": float(row["High"]),
-            "low": float(row["Low"]),
-            "close": float(row["Close"]),
-            "volume": float(row["Volume"]),
-        })
-    return candles
-
-for symbol in symbols:
-    st.markdown(f"<div class='block'><div class='title'>{symbol}</div>", unsafe_allow_html=True)
-
+# --- POBIERANIE I ANALIZA DANYCH ---
+def fetch_ultra_data(symbol):
     try:
-        candles = load_candles(symbol)
-        analysis = analyze_ultra(symbol, candles)
-    except Exception as e:
-        st.error(f"❌ Błąd dla {symbol}: {e}")
-        st.markdown("</div>", unsafe_allow_html=True)
-        continue
+        tk = yf.Ticker(symbol)
+        df = tk.history(period="1y")
+        if df.empty: return None
+        
+        info = tk.info
+        last = df['Close'].iloc[-1]
+        
+        # Wskaźniki Ultra
+        ema10 = df['Close'].ewm(span=10).mean().iloc[-1]
+        ema50 = df['Close'].ewm(span=50).mean().iloc[-1]
+        ema200 = df['Close'].ewm(span=200).mean().iloc[-1]
+        rsi_val = calculate_rsi(df['Close'])
+        atr_val = calculate_atr(df)
+        
+        # Trend Score & Litery (W/S)
+        t1 = "W" if last > ema10 else "S"
+        t2 = "W" if last > ema50 else "S"
+        t3 = "W" if last > ema200 else "S"
+        trend_score = (1 if t1=="W" else -1) + (2 if t2=="W" else -2) + (3 if t3=="W" else -3)
+        
+        # Formacja świecy
+        body = last - df['Open'].iloc[-1]
+        rng = df['High'].iloc[-1] - df['Low'].iloc[-1]
+        pattern = "BYCZA" if body > 0 and abs(body) > 0.6 * rng else "NIEDŹWIEDZIA" if body < 0 and abs(body) > 0.6 * rng else "NEUTRALNA"
+        
+        # Sygnał
+        if trend_score >= 4 and rsi_val < 70: sig, s_class = "KUP", "signal-KUP"
+        elif trend_score <= -4: sig, s_class = "SPRZEDAJ", "signal-SPRZEDAJ"
+        else: sig, s_class = "TRZYMAJ", "signal-TRZYMAJ"
 
-    # Kurs
-    st.markdown("<div class='section'>Kurs:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['last']:.2f}</div>", unsafe_allow_html=True)
+        return {
+            "symbol": symbol, "price": last, "bid": info.get('bid', 'N/A'), "ask": info.get('ask', 'N/A'),
+            "trends": (t1, t2, t3), "trend_score": trend_score, "rsi": rsi_val, "atr": atr_val,
+            "pattern": pattern, "signal": sig, "s_class": s_class,
+            "h52": df['High'].max(), "l52": df['Low'].max(),
+            "pivot": (df['High'].iloc[-1] + df['Low'].iloc[-1] + last) / 3,
+            "vol_rel": df['Volume'].iloc[-1] / df['Volume'].tail(20).mean()
+        }
+    except: return None
 
-    # Trend
-    st.markdown("<div class='section'>Trend (score):</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['trend_score']}</div>", unsafe_allow_html=True)
+# --- UI PANEL BOCZNY ---
+st.sidebar.title("💠 Sterowanie")
+user_input = st.sidebar.text_area("Wklej tickery (oddziel spacją):", "CDR.WA PKO.WA ALE.WA AAPL NVDA TSLA BTC-USD")
+tickers = [t.strip().upper() for t in user_input.replace(",", " ").split() if t.strip()]
 
-    # EMA
-    st.markdown("<div class='section'>EMA10 / EMA50 / EMA200:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['ema10']:.2f} / {analysis['ema50']:.2f} / {analysis['ema200']:.2f}</div>",
-        unsafe_allow_html=True
-    )
+st.markdown("<h1 class='neon-text'>🚀 NEON KOMBAJN ULTRA AI</h1>", unsafe_allow_html=True)
 
-    # RSI / ATR
-    st.markdown("<div class='section'>RSI14 / ATR14:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['rsi14']:.2f} / {analysis['atr14']:.2f}</div>",
-        unsafe_allow_html=True
-    )
+if tickers:
+    results = [fetch_ultra_data(t) for t in tickers if fetch_ultra_data(t)]
+    
+    # --- TOP 10 RADAR ---
+    st.subheader("🔥 RADAR WYBIĆ ULTRA (VOL)")
+    top_10 = sorted(results, key=lambda x: x['vol_rel'], reverse=True)[:10]
+    for i in range(0, len(top_10), 5):
+        cols = st.columns(5)
+        for j, item in enumerate(top_10[i:i+5]):
+            with cols[j]:
+                st.markdown(f"""
+                <div class="top-card">
+                    <div style="color:#39FF14; font-weight:bold;">{item['symbol']}</div>
+                    <div style="font-size:1.2rem;">{item['price']:.2f}</div>
+                    <div style="color:#888; font-size:0.8rem;">Vol: {item['vol_rel']:.2f}x</div>
+                    <div class="{item['s_class']}" style="margin-top:5px; font-size:0.7rem;">{item['signal']}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
-    # MACD
-    st.markdown("<div class='section'>MACD / sygnał / histogram:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['macd']:.2f} / {analysis['macd_signal']:.2f} / {analysis['macd_hist']:.2f}</div>",
-        unsafe_allow_html=True
-    )
+    st.divider()
 
-    # Wolumen relatywny
-    st.markdown("<div class='section'>Wolumen relatywny (20):</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['volume_rel']:.2f}</div>", unsafe_allow_html=True)
+    # --- LISTA GŁÓWNA ---
+    for data in results:
+        with st.container():
+            st.markdown(f"<div class='neon-card'>", unsafe_allow_html=True)
+            c1, c2, c3, c4 = st.columns([1.5, 1.2, 1, 2.2])
+            
+            with c1:
+                st.markdown(f"<div class='neon-title'>{data['symbol']}</div>", unsafe_allow_html=True)
+                st.markdown(f"Cena: **{data['price']:.2f}**")
+                st.markdown(f"Bid: <span class='neon-bid'>{data['bid']}</span> | Ask: <span class='neon-ask'>{data['ask']}</span>", unsafe_allow_html=True)
+                st.write(f"Świeca: **{data['pattern']}**")
 
-    # Breakout
-    st.markdown("<div class='section'>Breakout score:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['breakout']:.2f}</div>", unsafe_allow_html=True)
+            with c2:
+                st.write("Wskaźniki Ultra:")
+                st.markdown(f"Trend (K/Ś/D): **{data['trends'][0]}|{data['trends'][1]}|{data['trends'][2]}**")
+                st.write(f"Trend Score: **{data['trend_score']}**")
+                st.write(f"RSI: **{data['rsi']:.1f}** | Vol: **{data['vol_rel']:.2f}x**")
 
-    # Pivot
-    st.markdown("<div class='section'>Pivot P / R1 / S1:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['pivot_P']:.2f} / {analysis['pivot_R1']:.2f} / {analysis['pivot_S1']:.2f}</div>",
-        unsafe_allow_html=True
-    )
+            with c3:
+                st.markdown(f"<div class='{data['s_class']}'>{data['signal']}</div>", unsafe_allow_html=True)
+                st.markdown(f"TP: <span class='tp-label'>{(data['price']*1.05):.2f}</span>", unsafe_allow_html=True)
+                st.markdown(f"SL: <span class='sl-label'>{(data['price']*0.97):.2f}</span>", unsafe_allow_html=True)
+                st.write(f"Pivot: {data['pivot']:.2f}")
 
-    # TP / SL
-    st.markdown("<div class='section'>TP / SL:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['tp']:.2f} / {analysis['sl']:.2f}</div>",
-        unsafe_allow_html=True
-    )
+            with c4:
+                if st.button(f"PEŁNA ANALIZA AI 🤖", key=f"ai_{data['symbol']}"):
+                    with st.spinner("Generowanie raportu technicznego..."):
+                        prompt = f"""
+                        ANALIZA TECHNICZNA: {data['symbol']}
+                        CENA: {data['price']} | PIVOT: {data['pivot']:.2f} | TREND SCORE: {data['trend_score']}
+                        RSI: {data['rsi']:.1f} | VOL REL: {data['vol_rel']:.2f}x | ŚWIECA: {data['pattern']} | SZCZYT 52T: {data['h52']}
 
-    # Presja
-    st.markdown("<div class='section'>Presja rynku:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['pressure']}</div>", unsafe_allow_html=True)
-
-    # Momentum / zmienność
-    st.markdown("<div class='section'>Momentum / zmienność:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value'>{analysis['momentum']:.2f} / {analysis['volatility']:.2f}</div>",
-        unsafe_allow_html=True
-    )
-
-    # Formacja świecowa
-    st.markdown("<div class='section'>Formacja świecowa:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['candle_pattern']}</div>", unsafe_allow_html=True)
-
-    # Setup
-    st.markdown("<div class='section'>Setup:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['setup']}</div>", unsafe_allow_html=True)
-
-    # Ryzyko
-    st.markdown("<div class='section'>Ryzyko:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value'>{analysis['risk']}</div>", unsafe_allow_html=True)
-
-    # Sygnał
-    sig_class = f"signal-{analysis['signal']}"
-    st.markdown("<div class='section'>Sygnał końcowy:</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='value {sig_class}'>{analysis['signal']}</div>",
-        unsafe_allow_html=True
-    )
-
-    # AI — na klik (tu na razie tylko pokazuję payload, możesz podpiąć swój EAI)
-    if st.button(f"🤖 Analiza AI dla {symbol}", key=f"ai_{symbol}"):
-        st.markdown("<div class='ai-block'>", unsafe_allow_html=True)
-        st.markdown("🔍 **Payload do AI (pod Twój klucz EAI):**")
-        st.json({
-            "symbol": symbol,
-            "analysis": {k: v for k, v in analysis.items() if k != "raw_candles"},
-            "candles_tail": analysis["raw_candles"],
-        })
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown("</div>", unsafe_allow_html=True)
+                        ZASADY:
+                        1. Zakaz używania: "sugeruje", "możliwe", "warto zwrócić uwagę", "inwestorzy".
+                        2. Styl: Bezlitosny, surowy terminal danych. Zero lania wody.
+                        3. Format:
+                           - TREND: [Ocena siły + relacja do Pivotu]
+                           - MOMENTUM: [RSI vs Wykupienie + zasięg do Szczytu 52T w %]
+                           - WOLUMEN: [Werdykt: Akumulacja / Brak zainteresowania]
+                           - REKOMENDACJA: [KUPUJ/SPRZEDAJ/CZEKAJ + poziom SL na ATR {data['atr']:.2f}]
+                        """
+                        try:
+                            resp = openai.chat.completions.create(
+                                model="gpt-4o", 
+                                messages=[
+                                    {"role": "system", "content": "Jesteś wojskowym systemem analizy danych giełdowych Bloomberg. Mówisz krótko, twardo, tylko fakty techniczne."}, 
+                                    {"role": "user", "content": prompt}
+                                ]
+                            )
+                            st.info(f"**WERDYKT ULTRA AI:**\n\n{resp.choices[0].message.content}")
+                        except: st.error("Sprawdź OPENAI_API_KEY w Secrets.")
+            st.markdown("</div>", unsafe_allow_html=True)
+else:
+    st.info("Wklej symbole w panelu bocznym.")
