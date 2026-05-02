@@ -1,6 +1,5 @@
 streamlit
 yfinance
 pandas
-pandas-ta
-streamlit-autorefresh
 openai
+streamlit-autorefresh
