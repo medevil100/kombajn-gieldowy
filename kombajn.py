@@ -1,4 +1,4 @@
-```python
+
 # kombajn.py – NEON BREAKOUT SCANNER (PL, AI tylko na kliknięcie, przycisk per spółka)
 
 import random
