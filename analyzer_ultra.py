@@ -352,3 +352,16 @@ for symbol in symbols:
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
+    # Kontynuacja bloku wyświetlania (od momentu urwania):
+    st.markdown("<div class='section'>Wolumen relatywny:</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='value'>{analysis['volume_rel']:.2f}x</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='section'>Sygnał Ultra:</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='signal-{analysis['signal']}'>{analysis['signal']}</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='section'>Presja rynku:</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='value'>{analysis['pressure']}</div>", unsafe_allow_html=True)
+
+    st.markdown(f"<div class='section'>Ryzyko (ATR): <span class='value'>{analysis['risk']}</span></div>", unsafe_allow_html=True)
+    
+    st.markdown("</div>", unsafe_allow_html=True) # Domknięcie bloku spółki
