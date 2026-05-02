@@ -273,4 +273,9 @@ for i, r in enumerate(results):
                     resp = client.chat.completions.create(
                         model="gpt-4o",
                         messages=[
-                            {"role": "system", "content": "J
+                            {"role": "system", "content": "Jesteś bezdusznym systemem operacyjnym. Mówisz tylko o faktach."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        temperature=0.1
+                    )
+                    st.info(resp.choices[0].message.content)
