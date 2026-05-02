@@ -1,3 +1,11 @@
+Masz rację, tak się będziemy tylko męczyć.  
+Zróbmy to po ludzku: **podmieniasz CAŁY plik na ten poniżej** i koniec historii.
+
+---
+
+### ✅ Pełny, działający `kombajn.py` (odświeżanie, zapisz listę, pełne kafelki, AI, PRO)
+
+```python
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -182,7 +190,6 @@ tickers_text = st.sidebar.text_area(
     height=200
 )
 
-# aktualizacja session_state na bieżąco
 st.session_state["tickers_text"] = tickers_text
 
 tickers = [
@@ -190,6 +197,7 @@ tickers = [
     for x in tickers_text.replace(",", " ").split()
     if x.strip()
 ]
+
 # ============================================================
 # 6. SILNIK ANALITYCZNY AI PRO
 # ============================================================
@@ -205,25 +213,20 @@ def detect_candle_pattern(df: pd.DataFrame) -> str:
     po, ph, pl, pc = prev["Open"], prev["High"], prev["Low"], prev["Close"]
 
     body = abs(c - o)
-    rng = h - l
     upper = h - max(o, c)
     lower = min(o, c) - l
 
     sygnaly = []
 
-    # młot
     if lower > body * 2 and upper < body and c > o:
         sygnaly.append("Możliwy młot (bycze odbicie).")
 
-    # młot odwrotny
     if upper > body * 2 and lower < body and c < o:
         sygnaly.append("Możliwy młot odwrotny (potencjalne odwrócenie).")
 
-    # objęcie wzrostowe
     if pc < po and c > o and c > pc and o < po:
         sygnaly.append("Możliwe objęcie wzrostowe (bycze odwrócenie).")
 
-    # objęcie spadkowe
     if pc > po and c < o and c < pc and o > po:
         sygnaly.append("Możliwe objęcie spadkowe (niedźwiedzie odwrócenie).")
 
@@ -243,18 +246,15 @@ def ultra(symbol: str):
         close = df["Close"]
         high = df["High"]
         low = df["Low"]
-        open_ = df["Open"]
 
         last = float(close.iloc[-1])
 
-        # Średnie kroczące
         ma20 = float(close.rolling(20).mean().iloc[-1])
         ma50 = float(close.rolling(50).mean().iloc[-1])
         ma100 = float(close.rolling(100).mean().iloc[-1])
         ma200 = float(close.rolling(200).mean().iloc[-1])
         ema200 = float(close.ewm(span=200).mean().iloc[-1])
 
-        # MACD
         ema12 = close.ewm(span=12).mean()
         ema26 = close.ewm(span=26).mean()
         macd_line = ema12 - ema26
@@ -263,14 +263,12 @@ def ultra(symbol: str):
         macd_sig = float(macd_signal.iloc[-1])
         macd_hist = float(macd - macd_sig)
 
-        # RSI
         delta = close.diff()
         gain = delta.where(delta > 0, 0).rolling(14).mean().iloc[-1]
         loss = -delta.where(delta < 0, 0).rolling(14).mean().iloc[-1]
         rs = gain / loss if loss != 0 else 999
         rsi = float(100 - (100 / (1 + rs)))
 
-        # ATR
         tr = pd.concat([
             high - low,
             (high - close.shift()).abs(),
@@ -278,31 +276,25 @@ def ultra(symbol: str):
         ], axis=1).max(axis=1)
         atr = float(tr.rolling(14).mean().iloc[-1])
 
-        # Swing high/low
         swing_high = float(high.tail(10).max())
         swing_low = float(low.tail(10).min())
 
-        # TP/SL dynamiczne
         tp = max(last + atr * 2, swing_high)
         sl = min(last - atr * 1.5, swing_low)
 
-        # Pivoty
         ph, pl, pc = float(high.iloc[-1]), float(low.iloc[-1]), last
         pivot = (ph + pl + pc) / 3
         r1 = 2 * pivot - pl
         s1 = 2 * pivot - ph
 
-        # Wolumen relatywny
         vol_rel = float(df["Volume"].iloc[-1] / df["Volume"].tail(20).mean())
 
-        # Score trendu
         score = 0
         score += 1 if last > ma20 else -1
         score += 2 if last > ma50 else -2
         score += 2 if last > ma100 else -2
         score += 3 if last > ma200 else -3
 
-        # Sygnał
         if score >= 6 and macd > macd_sig and rsi < 70:
             signal = "KUP"
         elif score <= -4 and macd < macd_sig and rsi > 30:
@@ -344,7 +336,7 @@ def ultra(symbol: str):
         return None
 
 # ============================================================
-# 7. LICZENIE WYNIKÓW (BEZ PODWÓJNEGO WYWOŁANIA)
+# 7. LICZENIE WYNIKÓW
 # ============================================================
 
 results = []
@@ -469,6 +461,7 @@ for i in range(0, len(top_vol), 5):
             """, unsafe_allow_html=True)
 
 st.divider()
+
 # ============================================================
 # 10. KAFLE GŁÓWNE – SPÓŁKI + SZCZEGÓŁY PRO + AI PER SPÓŁKA
 # ============================================================
@@ -481,7 +474,6 @@ for r in results:
 
         c1, c2, c3, c4 = st.columns([1.8, 1.5, 1.3, 2.4])
 
-        # --- LEWA: SYMBOL + CENA + BID/ASK ---
         with c1:
             st.markdown(
                 f"<div class='neon-title' style='font-size:3rem;'>{r['symbol']}</div>",
@@ -498,7 +490,6 @@ for r in results:
             )
             st.write(f"Wolumen relatywny: {r['vol']:.2f}x")
 
-        # --- ŚRODEK 1: TREND / RSI / ATR ---
         with c2:
             st.write(f"Score trendu: **{r['score']}**")
             st.write(f"RSI: **{r['rsi']:.1f}**")
@@ -506,7 +497,6 @@ for r in results:
             st.write(f"Swing High: {r['swing_high']:.2f}")
             st.write(f"Swing Low: {r['swing_low']:.2f}")
 
-        # --- ŚRODEK 2: TP/SL + PIVOTY ---
         with c3:
             st.markdown(
                 f"**TP: <span class='tp-val'>{r['tp']:.2f}</span>**",
@@ -520,14 +510,12 @@ for r in results:
             st.write(f"R1: {r['r1']:.2f}")
             st.write(f"S1: {r['s1']:.2f}")
 
-        # --- PRAWO: SYGNAŁ + AI + SZCZEGÓŁY PRO ---
         with c4:
             st.markdown(
                 f"<div class='signal-{r['signal']}'>{r['signal']}</div>",
                 unsafe_allow_html=True
             )
 
-            # AI per spółka
             if client and st.button(f"🤖 DIAGNOZA AI – {r['symbol']}", key=f"ai_{r['symbol']}"):
                 with st.spinner("AI analizuje tę spółkę..."):
                     prompt = f"""
@@ -561,13 +549,11 @@ Bez definicji, bez lania wody.
                     )
                     st.session_state["ai_single"][r["symbol"]] = resp.choices[0].message.content
 
-            # Wyświetlenie ostatniej diagnozy AI dla tej spółki (jeśli jest)
             if r["symbol"] in st.session_state["ai_single"]:
                 st.markdown("<div class='ai-box'>", unsafe_allow_html=True)
                 st.write(st.session_state["ai_single"][r["symbol"]])
                 st.markdown("</div>", unsafe_allow_html=True)
 
-            # Szczegóły PRO w expanderze
             with st.expander("📊 Szczegóły PRO"):
                 st.markdown("<div class='pro-box'>", unsafe_allow_html=True)
                 st.write(f"MA20: {r['ma20']:.2f}")
@@ -582,3 +568,7 @@ Bez definicji, bez lania wody.
                 st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("</div>", unsafe_allow_html=True)
+```
+
+Podmień cały plik na to, zapisz, zrestartuj appkę.  
+Jeśli po tym dalej coś będzie nie tak, wtedy już będziemy szukać bardzo konkretnie po objawach, nie po zgadywankach. 
