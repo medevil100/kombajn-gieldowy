@@ -1,415 +1,422 @@
+# kombajn.py – NEON BREAKOUT SCANNER (jednomodułowy)
+# Real-time (mock), TOP10 wybicia, trendy S/M/L, 52W, pivot, TP/SL, AI analiza, Streamlit UI
 
-// neon_breakout_scanner_single_module.js
-// Jednomodułowy skaner: real-time, TOP10 wybicia, trendy S/M/L, 52W, pivot, TP/SL, AI analiza
+import time
+import random
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional
+import streamlit as st
 
-// =========================
-// KONFIGURACJA
-// =========================
-const CONFIG = {
-  api: {
-    baseRest: "https://your-broker-rest-endpoint",
-    baseWs: "wss://your-broker-ws-endpoint",
-    secretKeyHeader: "x-api-key"
-    // klucz trzymasz w secrecie na stimi / env, NIE w kodzie
-  },
-  refreshIntervalsMinutes: [1, 2, 3, 5, 10],
-  defaultRefreshMinutes: 1,
-  maxCandlesHistory: 200,
-  topBreakoutLimit: 10
-};
+# =========================
+# KONFIGURACJA
+# =========================
+REFRESH_INTERVALS = [1, 2, 3, 5, 10]  # minuty
+DEFAULT_REFRESH = 1
+MAX_CANDLES = 200
+TOP_LIMIT = 10
 
-// =========================
-// STAN APLIKACJI
-// =========================
-const STATE = {
-  watchlist: [],          // lista symboli
-  tickers: {},            // symbol -> TickerData
-  ws: null,               // WebSocket
-  refreshTimer: null,
-  refreshMinutes: CONFIG.defaultRefreshMinutes,
-  aiSelected: new Set(),  // symbole wybrane do AI
-  lastTop10: []           // ostatnia lista TOP10
-};
+# =========================
+# STRUKTURY DANYCH
+# =========================
+@dataclass
+class Pivot:
+    P: float = 0.0
+    R1: float = 0.0
+    S1: float = 0.0
 
-// =========================
-// TYPY / STRUKTURY
-// =========================
-/**
- * @typedef {Object} TickerData
- * @property {string} symbol
- * @property {number} bid
- * @property {number} ask
- * @property {number} last
- * @property {number} volume
- * @property {string} time
- * @property {number[]} closes
- * @property {number[]} highs
- * @property {number[]} lows
- * @property {number[]} volumes
- * @property {number} ema10
- * @property {number} ema50
- * @property {number} ema200
- * @property {number} rsi14
- * @property {number} high52w
- * @property {number} low52w
- * @property {{P:number,R1:number,S1:number}} pivot
- * @property {{short:string,mid:string,long:string,score:number}} trend
- * @property {{tp:number,sl:number}} tpSl
- * @property {number} breakoutScore
- * @property {{signal:string,tp:number,sl:number,notes:string[]}|null} ai
- */
 
-// =========================
-// FUNKCJE POMOCNICZE (MATH)
-// =========================
-function ema(values, period) {
-  if (!values || values.length === 0) return NaN;
-  const k = 2 / (period + 1);
-  let emaVal = values[0];
-  for (let i = 1; i < values.length; i++) {
-    emaVal = values[i] * k + emaVal * (1 - k);
-  }
-  return emaVal;
-}
+@dataclass
+class TrendInfo:
+    short: str = "NEUTRAL"
+    mid: str = "NEUTRAL"
+    long: str = "NEUTRAL"
+    score: int = 0
 
-function sma(values, period) {
-  if (!values || values.length < period) return NaN;
-  const slice = values.slice(-period);
-  const sum = slice.reduce((a, b) => a + b, 0);
-  return sum / period;
-}
 
-function rsi(values, period = 14) {
-  if (!values || values.length <= period) return NaN;
-  let gains = 0;
-  let losses = 0;
-  for (let i = values.length - period; i < values.length; i++) {
-    const diff = values[i] - values[i - 1];
-    if (diff > 0) gains += diff;
-    else losses -= diff;
-  }
-  const avgGain = gains / period;
-  const avgLoss = losses / period;
-  if (avgLoss === 0) return 100;
-  const rs = avgGain / avgLoss;
-  return 100 - 100 / (1 + rs);
-}
+@dataclass
+class TpSl:
+    tp: float = 0.0
+    sl: float = 0.0
 
-// =========================
-// TREND / PIVOT / TP-SL / BREAKOUT
-// =========================
-function calcTrend(close, ema10, ema50, ema200) {
-  const s = Math.sign(close - ema10);
-  const m = Math.sign(close - ema50);
-  const l = Math.sign(close - ema200);
-  const score = 1 * s + 2 * m + 3 * l;
 
-  const toTrend = (x) => (x > 0 ? "UP" : x < 0 ? "DOWN" : "NEUTRAL");
+@dataclass
+class AiResult:
+    signal: str
+    tp: float
+    sl: float
+    notes: List[str]
 
-  return {
-    short: toTrend(s),
-    mid: toTrend(m),
-    long: toTrend(l),
-    score
-  };
-}
 
-function calcPivots(prevHigh, prevLow, prevClose) {
-  const P = (prevHigh + prevLow + prevClose) / 3;
-  const R1 = 2 * P - prevLow;
-  const S1 = 2 * P - prevHigh;
-  return { P, R1, S1 };
-}
+@dataclass
+class TickerData:
+    symbol: str
+    bid: float = 0.0
+    ask: float = 0.0
+    last: float = 0.0
+    volume: float = 0.0
+    time: float = 0.0
+    closes: List[float] = field(default_factory=list)
+    highs: List[float] = field(default_factory=list)
+    lows: List[float] = field(default_factory=list)
+    volumes: List[float] = field(default_factory=list)
+    ema10: float = 0.0
+    ema50: float = 0.0
+    ema200: float = 0.0
+    rsi14: float = 0.0
+    high52w: float = 0.0
+    low52w: float = 0.0
+    pivot: Pivot = field(default_factory=Pivot)
+    trend: TrendInfo = field(default_factory=TrendInfo)
+    tpsl: TpSl = field(default_factory=TpSl)
+    breakout_score: float = 0.0
+    ai: Optional[AiResult] = None
 
-function calcTpSl(ticker) {
-  const tp = ticker.high52w || ticker.pivot.R1 || ticker.last * 1.05;
-  const sl = ticker.low52w || ticker.pivot.S1 || ticker.last * 0.95;
-  return { tp, sl };
-}
 
-function calcBreakoutScore(ticker) {
-  const dist52 = ticker.high52w
-    ? (ticker.last - ticker.high52w) / ticker.high52w
-    : 0;
-  const volSma20 = sma(ticker.volumes, 20);
-  const volRel = volSma20 ? ticker.volume / volSma20 : 1;
-  const mom = ticker.rsi14 ? ticker.rsi14 / 100 : 0.5;
-  return 3 * dist52 + 2 * volRel + 1 * mom;
-}
+# =========================
+# FUNKCJE MATEMATYCZNE
+# =========================
+def ema(values: List[float], period: int) -> float:
+    if not values:
+        return float("nan")
+    k = 2 / (period + 1)
+    ema_val = values[0]
+    for v in values[1:]:
+        ema_val = v * k + ema_val * (1 - k)
+    return ema_val
 
-function signalFromTrendScore(score) {
-  if (score >= 4) return "BUY";
-  if (score <= -2) return "SELL";
-  return "HOLD";
-}
 
-// =========================
-// REAL-TIME / REST
-// =========================
-async function fetchWatchlist() {
-  // TODO: podłącz do własnego źródła (plik, API, baza)
-  // Na razie przykładowo:
-  STATE.watchlist = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"];
-}
+def sma(values: List[float], period: int) -> float:
+    if len(values) < period:
+        return float("nan")
+    s = values[-period:]
+    return sum(s) / period
 
-async function fetchHistoryForSymbol(symbol) {
-  // TODO: REST history endpoint
-  // Zwróć przykładowe dane (mock) – do podmiany na realne
-  const candles = [];
-  const now = Date.now();
-  let price = 100;
-  for (let i = 0; i < CONFIG.maxCandlesHistory; i++) {
-    const high = price * (1 + Math.random() * 0.01);
-    const low = price * (1 - Math.random() * 0.01);
-    const close = low + Math.random() * (high - low);
-    const volume = 1000 + Math.random() * 5000;
-    candles.push({
-      time: new Date(now - (CONFIG.maxCandlesHistory - i) * 60000).toISOString(),
-      high,
-      low,
-      close,
-      volume
-    });
-    price = close;
-  }
-  return candles;
-}
 
-async function initTicker(symbol) {
-  const candles = await fetchHistoryForSymbol(symbol);
-  const closes = candles.map((c) => c.close);
-  const highs = candles.map((c) => c.high);
-  const lows = candles.map((c) => c.low);
-  const volumes = candles.map((c) => c.volume);
+def rsi(values: List[float], period: int = 14) -> float:
+    if len(values) <= period:
+        return float("nan")
+    gains = 0.0
+    losses = 0.0
+    for i in range(len(values) - period, len(values)):
+        diff = values[i] - values[i - 1]
+        if diff > 0:
+            gains += diff
+        else:
+            losses -= diff
+    avg_gain = gains / period
+    avg_loss = losses / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - 100 / (1 + rs)
 
-  const ema10 = ema(closes, 10);
-  const ema50 = ema(closes, 50);
-  const ema200 = ema(closes, 200);
-  const rsi14 = rsi(closes, 14);
 
-  const lastClose = closes[closes.length - 1];
-  const prev = candles[candles.length - 2] || candles[candles.length - 1];
-  const pivot = calcPivots(prev.high, prev.low, prev.close);
+# =========================
+# LOGIKA WSKAŹNIKÓW
+# =========================
+def calc_trend(close: float, ema10_v: float, ema50_v: float, ema200_v: float) -> TrendInfo:
+    s = 1 if close > ema10_v else -1 if close < ema10_v else 0
+    m = 1 if close > ema50_v else -1 if close < ema50_v else 0
+    l = 1 if close > ema200_v else -1 if close < ema200_v else 0
+    score = 1 * s + 2 * m + 3 * l
 
-  const high52w = Math.max(...highs);
-  const low52w = Math.min(...lows);
+    def to_trend(x: int) -> str:
+        if x > 0:
+            return "UP"
+        if x < 0:
+            return "DOWN"
+        return "NEUTRAL"
 
-  const trend = calcTrend(lastClose, ema10, ema50, ema200);
-  const tpSl = calcTpSl({
-    last: lastClose,
-    high52w,
-    low52w,
-    pivot
-  });
-  const breakoutScore = calcBreakoutScore({
-    last: lastClose,
-    high52w,
-    volume: volumes[volumes.length - 1],
-    volumes,
-    rsi14
-  });
+    return TrendInfo(short=to_trend(s), mid=to_trend(m), long=to_trend(l), score=score)
 
-  /** @type {TickerData} */
-  const ticker = {
-    symbol,
-    bid: lastClose * 0.999,
-    ask: lastClose * 1.001,
-    last: lastClose,
-    volume: volumes[volumes.length - 1],
-    time: new Date().toISOString(),
-    closes,
-    highs,
-    lows,
-    volumes,
-    ema10,
-    ema50,
-    ema200,
-    rsi14,
-    high52w,
-    low52w,
-    pivot,
-    trend,
-    tpSl,
-    breakoutScore,
-    ai: null
-  };
 
-  STATE.tickers[symbol] = ticker;
-}
+def calc_pivots(prev_high: float, prev_low: float, prev_close: float) -> Pivot:
+    P = (prev_high + prev_low + prev_close) / 3
+    R1 = 2 * P - prev_low
+    S1 = 2 * P - prev_high
+    return Pivot(P=P, R1=R1, S1=S1)
 
-function connectWebSocket() {
-  // TODO: podłącz do realnego WS brokera
-  // Tu mock: co kilka sekund aktualizujemy last/bid/ask/volume
-  setInterval(() => {
-    STATE.watchlist.forEach((symbol) => {
-      const t = STATE.tickers[symbol];
-      if (!t) return;
-      const delta = (Math.random() - 0.5) * 0.5;
-      const newLast = Math.max(0.01, t.last + delta);
-      t.last = newLast;
-      t.bid = newLast * 0.999;
-      t.ask = newLast * 1.001;
-      t.volume = t.volume + Math.random() * 1000;
-      t.time = new Date().toISOString();
 
-      // aktualizacja wskaźników na podstawie nowej ceny
-      t.closes.push(newLast);
-      if (t.closes.length > CONFIG.maxCandlesHistory) t.closes.shift();
-      t.ema10 = ema(t.closes, 10);
-      t.ema50 = ema(t.closes, 50);
-      t.ema200 = ema(t.closes, 200);
-      t.rsi14 = rsi(t.closes, 14);
-      t.trend = calcTrend(t.last, t.ema10, t.ema50, t.ema200);
-      t.tpSl = calcTpSl(t);
-      t.breakoutScore = calcBreakoutScore(t);
-    });
-  }, 3000);
-}
+def calc_tpsl(t: TickerData) -> TpSl:
+    tp = t.high52w or t.pivot.R1 or t.last * 1.05
+    sl = t.low52w or t.pivot.S1 or t.last * 0.95
+    return TpSl(tp=tp, sl=sl)
 
-// =========================
-// AI ANALIZA
-// =========================
-async function analyzeWithAI(ticker) {
-  // TODO: podłącz do prawdziwego endpointu AI (klucz z secreta)
-  // Tu mock – szybka, konkretna odpowiedź
-  const signal = signalFromTrendScore(ticker.trend.score);
-  const tp = ticker.tpSl.tp;
-  const sl = ticker.tpSl.sl;
-  const notes = [
-    `Trend S/M/L: ${ticker.trend.short}/${ticker.trend.mid}/${ticker.trend.long}`,
-    `RSI14: ${ticker.rsi14.toFixed(1)}`,
-    `Cena vs 52W High: ${ticker.last.toFixed(2)} / ${ticker.high52w.toFixed(2)}`
-  ];
-  ticker.ai = { signal, tp, sl, notes };
-  return ticker.ai;
-}
 
-// =========================
-// LOGIKA TOP10 WYBICIA
-// =========================
-function computeTop10Breakouts() {
-  const list = Object.values(STATE.tickers);
-  const sorted = list
-    .slice()
-    .sort((a, b) => b.breakoutScore - a.breakoutScore)
-    .slice(0, CONFIG.topBreakoutLimit);
-  STATE.lastTop10 = sorted.map((t) => t.symbol);
-  return sorted;
-}
+def calc_breakout_score(t: TickerData) -> float:
+    dist52 = (t.last - t.high52w) / t.high52w if t.high52w else 0.0
+    vol_sma20 = sma(t.volumes, 20)
+    vol_rel = t.volume / vol_sma20 if vol_sma20 and vol_sma20 == vol_sma20 else 1.0
+    mom = t.rsi14 / 100 if t.rsi14 == t.rsi14 else 0.5
+    return 3 * dist52 + 2 * vol_rel + 1 * mom
 
-// =========================
-// RENDER (NA RAZIE: KONSOLE / JSON)
-// =========================
-function renderTable() {
-  const rows = Object.values(STATE.tickers).map((t) => {
-    const signal = signalFromTrendScore(t.trend.score);
-    return {
-      symbol: t.symbol,
-      bidAsk: `${t.bid.toFixed(2)} / ${t.ask.toFixed(2)}`,
-      last: t.last.toFixed(2),
-      trendS: t.trend.short,
-      trendM: t.trend.mid,
-      trendL: t.trend.long,
-      signal,
-      high52w: t.high52w.toFixed(2),
-      low52w: t.low52w.toFixed(2),
-      pivotP: t.pivot.P.toFixed(2),
-      tp: t.tpSl.tp.toFixed(2),
-      sl: t.tpSl.sl.toFixed(2),
-      breakoutScore: t.breakoutScore.toFixed(2),
-      aiSignal: t.ai ? t.ai.signal : null
-    };
-  });
 
-  console.clear();
-  console.log("=== NEON BREAKOUT SCANNER (ALL) ===");
-  console.table(rows);
+def signal_from_trend_score(score: int) -> str:
+    if score >= 4:
+        return "BUY"
+    if score <= -2:
+        return "SELL"
+    return "HOLD"
 
-  const top10 = computeTop10Breakouts().map((t) => t.symbol);
-  console.log("TOP10 BREAKOUT:", top10.join(", "));
-}
 
-// =========================
-// ODŚWIEŻANIE
-// =========================
-function setRefreshInterval(minutes) {
-  STATE.refreshMinutes = minutes;
-  if (STATE.refreshTimer) clearInterval(STATE.refreshTimer);
-  STATE.refreshTimer = setInterval(() => {
-    renderTable();
-  }, minutes * 60 * 1000);
-}
+# =========================
+# MOCK DANYCH HISTORYCZNYCH (DO PODMIANY NA API)
+# =========================
+def mock_history(symbol: str) -> List[Dict]:
+    candles = []
+    now = time.time()
+    price = random.uniform(50, 150)
+    for i in range(MAX_CANDLES):
+        high = price * (1 + random.random() * 0.01)
+        low = price * (1 - random.random() * 0.01)
+        close = random.uniform(low, high)
+        volume = random.uniform(1000, 5000)
+        candles.append(
+            {
+                "time": now - (MAX_CANDLES - i) * 60,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": volume,
+            }
+        )
+        price = close
+    return candles
 
-function manualRefresh() {
-  renderTable();
-}
 
-// =========================
-// AI ANALIZA DLA WYBRANYCH
-// =========================
-async function runAiForSelected() {
-  const symbols = Array.from(STATE.aiSelected);
-  for (const symbol of symbols) {
-    const t = STATE.tickers[symbol];
-    if (!t) continue;
-    await analyzeWithAI(t);
-  }
-  renderTable();
-}
+def init_ticker(symbol: str) -> TickerData:
+    candles = mock_history(symbol)
+    closes = [c["close"] for c in candles]
+    highs = [c["high"] for c in candles]
+    lows = [c["low"] for c in candles]
+    volumes = [c["volume"] for c in candles]
 
-// =========================
-// API DLA UI (PRZYCISKI, CHECKBOXY)
-// =========================
-function toggleAiForSymbol(symbol) {
-  if (STATE.aiSelected.has(symbol)) STATE.aiSelected.delete(symbol);
-  else STATE.aiSelected.add(symbol);
-}
+    ema10_v = ema(closes, 10)
+    ema50_v = ema(closes, 50)
+    ema200_v = ema(closes, 200)
+    rsi14_v = rsi(closes, 14)
 
-function getStateSnapshot() {
-  return {
-    watchlist: STATE.watchlist,
-    tickers: STATE.tickers,
-    top10: STATE.lastTop10,
-    aiSelected: Array.from(STATE.aiSelected),
-    refreshMinutes: STATE.refreshMinutes
-  };
-}
+    last_close = closes[-1]
+    prev = candles[-2] if len(candles) > 1 else candles[-1]
+    pivot = calc_pivots(prev["high"], prev["low"], prev["close"])
 
-// =========================
-// START
-// =========================
-async function startNeonScanner() {
-  await fetchWatchlist();
-  for (const symbol of STATE.watchlist) {
-    await initTicker(symbol);
-  }
-  connectWebSocket();
-  setRefreshInterval(CONFIG.defaultRefreshMinutes);
-  manualRefresh();
-}
+    high52w = max(highs)
+    low52w = min(lows)
 
-// Uruchomienie (jeśli plik odpalany bezpośrednio w Node)
-if (require.main === module) {
-  startNeonScanner().catch(console.error);
+    trend = calc_trend(last_close, ema10_v, ema50_v, ema200_v)
+    tpsl = calc_tpsl(
+        TickerData(
+            symbol=symbol,
+            last=last_close,
+            high52w=high52w,
+            low52w=low52w,
+            pivot=pivot,
+        )
+    )
 
-  // przykładowo: po 10 sekundach włącz AI dla pierwszego symbolu
-  setTimeout(() => {
-    const first = STATE.watchlist[0];
-    if (first) {
-      toggleAiForSymbol(first);
-      runAiForSelected();
+    tmp = TickerData(
+        symbol=symbol,
+        bid=last_close * 0.999,
+        ask=last_close * 1.001,
+        last=last_close,
+        volume=volumes[-1],
+        time=time.time(),
+        closes=closes,
+        highs=highs,
+        lows=lows,
+        volumes=volumes,
+        ema10=ema10_v,
+        ema50=ema50_v,
+        ema200=ema200_v,
+        rsi14=rsi14_v,
+        high52w=high52w,
+        low52w=low52w,
+        pivot=pivot,
+        trend=trend,
+        tpsl=tpsl,
+    )
+    tmp.breakout_score = calc_breakout_score(tmp)
+    return tmp
+
+
+# =========================
+# MOCK REAL-TIME (DO PODMIANY NA WEBSOCKET/API)
+# =========================
+def update_realtime(t: TickerData) -> None:
+    delta = (random.random() - 0.5) * 0.5
+    new_last = max(0.01, t.last + delta)
+    t.last = new_last
+    t.bid = new_last * 0.999
+    t.ask = new_last * 1.001
+    t.volume += random.uniform(100, 1000)
+    t.time = time.time()
+
+    t.closes.append(new_last)
+    if len(t.closes) > MAX_CANDLES:
+        t.closes.pop(0)
+
+    t.ema10 = ema(t.closes, 10)
+    t.ema50 = ema(t.closes, 50)
+    t.ema200 = ema(t.closes, 200)
+    t.rsi14 = rsi(t.closes, 14)
+    t.trend = calc_trend(t.last, t.ema10, t.ema50, t.ema200)
+    t.tpsl = calc_tpsl(t)
+    t.breakout_score = calc_breakout_score(t)
+
+
+# =========================
+# AI ANALIZA (MOCK – KRÓTKO, KONKRETNIE)
+# =========================
+def analyze_with_ai(t: TickerData) -> AiResult:
+    signal = signal_from_trend_score(t.trend.score)
+    tp = t.tpsl.tp
+    sl = t.tpsl.sl
+    notes = [
+        f"Trend S/M/L: {t.trend.short}/{t.trend.mid}/{t.trend.long}",
+        f"RSI14: {t.rsi14:.1f}",
+        f"Cena vs 52W High: {t.last:.2f} / {t.high52w:.2f}",
+    ]
+    return AiResult(signal=signal, tp=tp, sl=sl, notes=notes)
+
+
+# =========================
+# INICJALIZACJA STANU STREAMLIT
+# =========================
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"]
+
+if "tickers" not in st.session_state:
+    st.session_state.tickers: Dict[str, TickerData] = {
+        s: init_ticker(s) for s in st.session_state.watchlist
     }
-  }, 10000);
-}
 
-// Eksport do użycia w UI (np. w NEON COMMANDER)
-module.exports = {
-  startNeonScanner,
-  manualRefresh,
-  setRefreshInterval,
-  toggleAiForSymbol,
-  runAiForSelected,
-  getStateSnapshot,
-  CONFIG,
-  STATE
-};
+if "ai_selected" not in st.session_state:
+    st.session_state.ai_selected = set()
+
+if "refresh_minutes" not in st.session_state:
+    st.session_state.refresh_minutes = DEFAULT_REFRESH
+
+# =========================
+# UI – NEON DASHBOARD
+# =========================
+st.set_page_config(page_title="NEON BREAKOUT SCANNER", layout="wide")
+
+st.markdown(
+    """
+    <style>
+    body { background-color: #050510; color: #e0e0ff; }
+    .neon-buy { color: #00ff88; font-weight: 700; }
+    .neon-hold { color: #00aaff; font-weight: 700; }
+    .neon-sell { color: #ff0044; font-weight: 700; }
+    .neon-tp { color: #00ff00; font-weight: 700; }
+    .neon-sl { color: #ff0000; font-weight: 700; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.title("💹 NEON BREAKOUT SCANNER – kombajn.py")
+
+col_left, col_mid, col_right = st.columns([2, 2, 2])
+
+with col_left:
+    refresh = st.selectbox(
+        "Interwał odświeżania (minuty)",
+        REFRESH_INTERVALS,
+        index=REFRESH_INTERVALS.index(st.session_state.refresh_minutes),
+    )
+    st.session_state.refresh_minutes = refresh
+
+with col_mid:
+    if st.button("🔄 ODSWIEŻ TERAZ"):
+        for t in st.session_state.tickers.values():
+            update_realtime(t)
+
+with col_right:
+    show_top10_only = st.checkbox("Pokaż tylko TOP 10 wybicia", value=False)
+
+# AI wybór
+st.subheader("AI – wybierz spółki do analizy")
+ai_cols = st.columns(len(st.session_state.watchlist))
+for i, symbol in enumerate(st.session_state.watchlist):
+    with ai_cols[i]:
+        checked = symbol in st.session_state.ai_selected
+        new_val = st.checkbox(symbol, value=checked, key=f"ai_{symbol}")
+        if new_val:
+            st.session_state.ai_selected.add(symbol)
+        else:
+            st.session_state.ai_selected.discard(symbol)
+
+if st.button("🤖 ANALIZUJ WYBRANE (AI)"):
+    for sym in st.session_state.ai_selected:
+        t = st.session_state.tickers.get(sym)
+        if t:
+            t.ai = analyze_with_ai(t)
+
+# Aktualizacja real-time przy każdym rerunie
+for t in st.session_state.tickers.values():
+    update_realtime(t)
+
+# TOP10
+all_tickers = list(st.session_state.tickers.values())
+sorted_by_breakout = sorted(all_tickers, key=lambda x: x.breakout_score, reverse=True)
+top10 = sorted_by_breakout[:TOP_LIMIT]
+symbols_top10 = [t.symbol for t in top10]
+
+st.markdown(f"**TOP10 wybicia:** {', '.join(symbols_top10)}")
+
+# Tabela
+st.subheader("Tabela spółek")
+
+def signal_badge(sig: str) -> str:
+    if sig == "BUY":
+        return '<span class="neon-buy">BUY</span>'
+    if sig == "SELL":
+        return '<span class="neon-sell">SELL</span>'
+    return '<span class="neon-hold">HOLD</span>'
+
+
+rows_html = []
+rows_html.append(
+    "<tr>"
+    "<th>TICKER</th><th>Bid / Ask</th><th>Last</th>"
+    "<th>Trend S</th><th>Trend M</th><th>Trend L</th>"
+    "<th>Signal</th><th>52W Low</th><th>52W High</th>"
+    "<th>Pivot P</th><th>TP</th><th>SL</th><th>Breakout</th><th>AI</th>"
+    "</tr>"
+)
+
+for t in (top10 if show_top10_only else all_tickers):
+    sig = signal_from_trend_score(t.trend.score)
+    ai_sig = t.ai.signal if t.ai else "-"
+    ai_color = (
+        "neon-buy" if ai_sig == "BUY" else "neon-sell" if ai_sig == "SELL" else "neon-hold"
+    )
+    rows_html.append(
+        "<tr>"
+        f"<td>{t.symbol}</td>"
+        f"<td>{t.bid:.2f} / {t.ask:.2f}</td>"
+        f"<td>{t.last:.2f}</td>"
+        f"<td>{t.trend.short}</td>"
+        f"<td>{t.trend.mid}</td>"
+        f"<td>{t.trend.long}</td>"
+        f"<td>{signal_badge(sig)}</td>"
+        f"<td>{t.low52w:.2f}</td>"
+        f"<td>{t.high52w:.2f}</td>"
+        f"<td>{t.pivot.P:.2f}</td>"
+        f"<td><span class='neon-tp'>{t.tpsl.tp:.2f}</span></td>"
+        f"<td><span class='neon-sl'>{t.tpsl.sl:.2f}</span></td>"
+        f"<td>{t.breakout_score:.2f}</td>"
+        f"<td><span class='{ai_color}'>{ai_sig}</span></td>"
+        "</tr>"
+    )
+
+table_html = (
+    "<table border='1' style='border-collapse:collapse;width:100%;font-size:13px;'>"
+    + "".join(rows_html)
+    + "</table>"
+)
+st.markdown(table_html, unsafe_allow_html=True)
+
+# Auto-refresh (prosty – użytkownik odświeża stronę / F5; można dodać st_autorefresh)
+st.caption(f"Odświeżanie logiczne co rerun, interwał docelowy: {st.session_state.refresh_minutes} min (manualne).")
