@@ -30,8 +30,11 @@ st.markdown("""
 refresh_min = st.sidebar.slider("Odświeżanie (min)", 1, 10, 5)
 st_autorefresh(interval=refresh_min * 60 * 1000, key="market_refresh")
 
-# KLUCZ API (z GitHub Secrets)
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# KLUCZ API (System Streamlit Secrets)
+if "OPENAI_API_KEY" in st.secrets:
+    openai.api_key = st.secrets["OPENAI_API_KEY"]
+else:
+    st.sidebar.error("⚠️ Brak OPENAI_API_KEY w Secrets!")
 
 # --- FUNKCJE ANALITYCZNE ---
 def fetch_stock_data(symbol):
@@ -47,14 +50,14 @@ def fetch_stock_data(symbol):
         bid = info.get('bid', 'N/A')
         ask = info.get('ask', 'N/A')
         
-        # 4. Trendy (SMA 20, 50, 200)
+        # 4. Trendy (SMA 20, 50, 200) - Zamiana na LITERY (W / S)
         sma20 = ta.sma(df['Close'], length=20).iloc[-1]
         sma50 = ta.sma(df['Close'], length=50).iloc[-1]
         sma200 = ta.sma(df['Close'], length=200).iloc[-1]
         
-        t_short = "↑" if last_price > sma20 else "↓"
-        t_mid = "↑" if last_price > sma50 else "↓"
-        t_long = "↑" if last_price > sma200 else "↓"
+        t_short = "W" if last_price > sma20 else "S"
+        t_mid = "W" if last_price > sma50 else "S"
+        t_long = "W" if last_price > sma200 else "S"
         
         # 9. Sygnał
         if last_price > sma50 and sma20 > sma50: signal = ("KUP", "neon-buy")
@@ -112,7 +115,8 @@ if tickers:
                 st.write(f"Szczyt 52tyg: {data['h52']:.2f}")
 
             with c2:
-                st.write("Trendy (K/Ś/D):")
+                st.write("Trend (K/Ś/D):")
+                # Wyświetlanie liter zamiast strzałek
                 st.markdown(f"**{data['trends'][0]} | {data['trends'][1]} | {data['trends'][2]}**")
                 st.markdown(f"<div class='{data['signal'][1]}'>{data['signal'][0]}</div>", unsafe_allow_html=True)
             
@@ -123,13 +127,23 @@ if tickers:
 
             with c4:
                 # 7. AI ANALIZA (BEZ LANIA WODY)
-                if st.button(f"SZYBKI ANALIZATOR AI 🤖", key=f"ai_{data['symbol']}"):
-                    with st.spinner("Decyzja AI..."):
-                        prompt = f"Analiza {data['symbol']}: Cena {data['price']}, Pivot {data['pivot']}, Trend {data['trends']}, Vol Score {data['score']:.2f}. Podaj konkretny werdykt: WYBICIE TAK/NIE, powód techniczny i decyzja: KUPUJ/CZEKAJ. Max 2 zdania."
-                        try:
-                            resp = openai.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": "Mówisz konkretnie jak terminal finansowy."}, {"role": "user", "content": prompt}])
-                            st.info(f"**Werdykt AI:** {resp.choices.message.content}")
-                        except: st.error("Błąd AI. Sprawdź klucz w Secrets.")
+                if st.button(f"ANALIZA AI 🤖", key=f"ai_{data['symbol']}"):
+                    if "OPENAI_API_KEY" not in st.secrets:
+                        st.error("Błąd: Dodaj klucz w Settings -> Secrets!")
+                    else:
+                        with st.spinner("Werdykt AI..."):
+                            prompt = f"Analiza {data['symbol']}: Cena {data['price']}, Pivot {data['pivot']}, Trend {data['trends']}, Vol Score {data['score']:.2f}. Podaj konkretny werdykt: WYBICIE TAK/NIE, powód techniczny i decyzja: KUPUJ/CZEKAJ. Max 2 zdania."
+                            try:
+                                resp = openai.chat.completions.create(
+                                    model="gpt-4o", 
+                                    messages=[
+                                        {"role": "system", "content": "Mówisz krótko, konkretnie i bez uprzejmości jak terminal giełdowy."}, 
+                                        {"role": "user", "content": prompt}
+                                    ]
+                                )
+                                st.info(f"**AI:** {resp.choices[0].message.content}")
+                            except Exception as e:
+                                st.error(f"Błąd API: {e}")
             
             st.divider()
 else:
