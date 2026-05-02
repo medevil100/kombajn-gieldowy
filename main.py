@@ -21,8 +21,16 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- 3. KLUCZ API I REFRESH ---
+import openai
+from openai import OpenAI
+
+# Pobieranie klucza z Secrets
+client = None
 if "OPENAI_API_KEY" in st.secrets:
-    openai.api_key = st.secrets["OPENAI_API_KEY"]
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+else:
+    st.sidebar.error("⚠️ Brak klucza OPENAI_API_KEY w Secrets!")
+
 
 st_autorefresh(interval=5 * 60 * 1000, key="hub_core_v1")
 
