@@ -50,7 +50,7 @@ def fetch_stock_data(symbol):
         bid = info.get('bid', 'N/A')
         ask = info.get('ask', 'N/A')
         
-        # 4. Trendy (SMA 20, 50, 200) - Zamiana na LITERY (W / S)
+        # 4. Trendy (SMA 20, 50, 200) - Litery (W / S)
         sma20 = ta.sma(df['Close'], length=20).iloc[-1]
         sma50 = ta.sma(df['Close'], length=50).iloc[-1]
         sma200 = ta.sma(df['Close'], length=200).iloc[-1]
@@ -116,7 +116,6 @@ if tickers:
 
             with c2:
                 st.write("Trend (K/Ś/D):")
-                # Wyświetlanie liter zamiast strzałek
                 st.markdown(f"**{data['trends'][0]} | {data['trends'][1]} | {data['trends'][2]}**")
                 st.markdown(f"<div class='{data['signal'][1]}'>{data['signal'][0]}</div>", unsafe_allow_html=True)
             
@@ -126,22 +125,34 @@ if tickers:
                 st.write(f"Pivot: **{data['pivot']:.2f}**")
 
             with c4:
-                # 7. AI ANALIZA (BEZ LANIA WODY)
-                if st.button(f"ANALIZA AI 🤖", key=f"ai_{data['symbol']}"):
+                # 7. GŁĘBOKA ANALIZA AI
+                if st.button(f"PEŁNA ANALIZA AI 🤖", key=f"ai_{data['symbol']}"):
                     if "OPENAI_API_KEY" not in st.secrets:
                         st.error("Błąd: Dodaj klucz w Settings -> Secrets!")
                     else:
-                        with st.spinner("Werdykt AI..."):
-                            prompt = f"Analiza {data['symbol']}: Cena {data['price']}, Pivot {data['pivot']}, Trend {data['trends']}, Vol Score {data['score']:.2f}. Podaj konkretny werdykt: WYBICIE TAK/NIE, powód techniczny i decyzja: KUPUJ/CZEKAJ. Max 2 zdania."
+                        with st.spinner("Generowanie raportu technicznego..."):
+                            prompt = f"""
+                            Jesteś starszym analitykiem giełdowym. Wykonaj gęstą od faktów analizę dla {data['symbol']}.
+                            DANE: Cena {data['price']}, Pivot {data['pivot']}, Trend K/Ś/D: {data['trends']}, 
+                            Wolumen: {data['score']:.2f}x średniej, Szczyt 52tyg: {data['h52']}.
+
+                            WYMAGANIA:
+                            1. Oceń trend względem Pivotu i SMA.
+                            2. Zinterpretuj wolumen (czy to akumulacja?).
+                            3. Oblicz potencjał do szczytu 52tyg (zasięg %).
+                            4. Werdykt końcowy: KUPUJ/CZEKAJ/SPRZEDAJ i dlaczego.
+                            BEZ LANIA WODY.
+                            """
                             try:
                                 resp = openai.chat.completions.create(
                                     model="gpt-4o", 
                                     messages=[
-                                        {"role": "system", "content": "Mówisz krótko, konkretnie i bez uprzejmości jak terminal giełdowy."}, 
+                                        {"role": "system", "content": "Jesteś analitykiem technicznym. Piszesz krótko, technicznie, w punktach."}, 
                                         {"role": "user", "content": prompt}
-                                    ]
+                                    ],
+                                    max_tokens=250
                                 )
-                                st.info(f"**AI:** {resp.choices[0].message.content}")
+                                st.info(f"**RAPORT AI:**\n\n{resp.choices[0].message.content}")
                             except Exception as e:
                                 st.error(f"Błąd API: {e}")
             
