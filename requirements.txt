@@ -1,6 +1,6 @@
 streamlit
-openai
 yfinance
 pandas
-plotly
+pandas-ta
 streamlit-autorefresh
+openai
