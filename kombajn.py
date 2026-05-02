@@ -8,7 +8,7 @@ from streamlit_autorefresh import st_autorefresh
 # --- KONFIG ---
 st.set_page_config(layout="wide", page_title="WALL STREET ULTRA TERMINAL", page_icon="💼")
 
-# --- CSS WALL STREET (granat + złoto) ---
+# --- CSS WALL STREET ---
 st.markdown("""
 <style>
 body { background:#020612; color:#e0e0ff; }
@@ -17,16 +17,16 @@ body { background:#020612; color:#e0e0ff; }
 .tile {
     border-radius:18px; padding:18px; text-align:center;
     border:1px solid #1b2838; box-shadow:0 0 25px #000000aa;
-    min-height:350px;
+    min-height:360px;
     background:linear-gradient(145deg, #050b18 0%, #020612 60%, #0b101f 100%);
 }
 
-/* ALERTY – tło kafelka wg sygnału */
+/* ALERTY */
 .tile-KUP { box-shadow:0 0 25px #ffd70055; border-color:#ffd700; }
 .tile-SPRZEDAJ { box-shadow:0 0 25px #ff4b4b55; border-color:#ff4b4b; }
 .tile-TRZYMAJ { box-shadow:0 0 25px #00bcd455; border-color:#00bcd4; }
 
-/* HEATMAP TRENDÓW – ramka */
+/* HEATMAP TRENDÓW */
 .trend-strong-up { border-width:2px; border-color:#00ff7f !important; }
 .trend-up { border-width:2px; border-color:#32cd32 !important; }
 .trend-neutral { border-width:2px; border-color:#888 !important; }
@@ -59,9 +59,7 @@ body { background:#020612; color:#e0e0ff; }
     box-shadow:0 0 15px #000000aa;
 }
 
-h1, h2, h3 {
-    color:#ffd700;
-}
+h1, h2, h3 { color:#ffd700; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -85,7 +83,7 @@ with col_btn:
     if st.button("🔄 ODSWIEŻ DANE"):
         st.experimental_rerun()
 
-# --- ULTRA ENGINE ---
+# --- ULTRA ENGINE (pełny, poprawiony, z MA100) ---
 def ultra(symbol):
     try:
         tk = yf.Ticker(symbol)
@@ -107,14 +105,16 @@ def ultra(symbol):
         # MA / EMA
         ma20 = df["Close"].rolling(20).mean().iloc[-1]
         ma50 = df["Close"].rolling(50).mean().iloc[-1]
+        ma100 = df["Close"].rolling(100).mean().iloc[-1]
         ma200 = df["Close"].rolling(200).mean().iloc[-1]
         ema200 = df["Close"].ewm(span=200).mean().iloc[-1]
 
         # Trend score
         t1 = 1 if last > ma20 else -1
         t2 = 2 if last > ma50 else -2
-        t3 = 3 if last > ma200 else -3
-        score = t1 + t2 + t3
+        t3 = 2 if last > ma100 else -2
+        t4 = 3 if last > ma200 else -3
+        score = t1 + t2 + t3 + t4
 
         # RSI
         delta = df["Close"].diff()
@@ -147,21 +147,21 @@ def ultra(symbol):
         vol_rel = df["Volume"].iloc[-1] / df["Volume"].tail(20).mean()
 
         # Sygnał
-        if score >= 4 and rsi < 70:
+        if score >= 6 and rsi < 70:
             signal = "KUP"
-        elif score <= -3 and rsi > 30:
+        elif score <= -4 and rsi > 30:
             signal = "SPRZEDAJ"
         else:
             signal = "TRZYMAJ"
 
         # Heatmap trend
-        if score >= 5:
+        if score >= 7:
             trend_class = "trend-strong-up"
-        elif score >= 2:
+        elif score >= 3:
             trend_class = "trend-up"
-        elif score <= -5:
+        elif score <= -7:
             trend_class = "trend-strong-down"
-        elif score <= -2:
+        elif score <= -3:
             trend_class = "trend-down"
         else:
             trend_class = "trend-neutral"
@@ -171,7 +171,7 @@ def ultra(symbol):
             "price": last,
             "bid": tk.info.get("bid", "-"),
             "ask": tk.info.get("ask", "-"),
-            "ma20": ma20, "ma50": ma50, "ma200": ma200,
+            "ma20": ma20, "ma50": ma50, "ma100": ma100, "ma200": ma200,
             "ema200": ema200,
             "body_pct": body_pct,
             "direction": direction,
@@ -190,7 +190,6 @@ def ultra(symbol):
 
     except Exception:
         return None
-
 # --- SIDEBAR TICKERY (zapis w session_state) ---
 st.sidebar.title("📋 LISTA SPÓŁEK")
 tickers_text = st.sidebar.text_area(
@@ -269,7 +268,7 @@ for i, r in enumerate(results):
         <div class="price">{r['price']:.2f}</div>
         <span class="bid">B: {r['bid']}</span> | <span class="ask">A: {r['ask']}</span>
         <hr>
-        MA20: {r['ma20']:.2f} | MA50: {r['ma50']:.2f} | MA200: {r['ma200']:.2f}<br>
+        MA20: {r['ma20']:.2f} | MA50: {r['ma50']:.2f} | MA100: {r['ma100']:.2f} | MA200: {r['ma200']:.2f}<br>
         EMA200: {r['ema200']:.2f}
         <hr>
         Swing High: {r['swing_high']:.2f} | Swing Low: {r['swing_low']:.2f}<br>
@@ -284,26 +283,33 @@ for i, r in enumerate(results):
 
         st.markdown("</div>", unsafe_allow_html=True)
 
+        # --- AI DIAGNOZA ---
         if client and st.button(f"AI – {r['symbol']}", key=f"ai_{r['symbol']}"):
             with st.spinner("Analiza AI..."):
                 prompt = (
-                    f"Spółka {r['symbol']}. "
-                    f"Kurs: {r['price']:.2f}. "
-                    f"RSI: {r['rsi']:.1f}. ATR: {r['atr']:.2f}. "
-                    f"MA20: {r['ma20']:.2f}, MA50: {r['ma50']:.2f}, MA200: {r['ma200']:.2f}, EMA200: {r['ema200']:.2f}. "
-                    f"Swing High: {r['swing_high']:.2f}, Swing Low: {r['swing_low']:.2f}. "
-                    f"Pivot: {r['pivot']:.2f}, R1: {r['r1']:.2f}, S1: {r['s1']:.2f}. "
-                    f"Trend score: {r['score']}, sygnał: {r['signal']}, wolumen relatywny: {r['vol']:.2f}. "
-                    "Podaj krótko: 1) Ocena wejścia (konkret, bez definicji), "
-                    "2) Ryzyko (konkretne poziomy, nie ogólniki), "
-                    "3) Werdykt (KUP / OBSERWUJ / ODRZUĆ) – bez lania wody."
+                    f"Analiza techniczna spółki {r['symbol']}.\n"
+                    f"Kurs: {r['price']:.2f}\n"
+                    f"MA20/50/100/200: {r['ma20']:.2f} / {r['ma50']:.2f} / {r['ma100']:.2f} / {r['ma200']:.2f}\n"
+                    f"EMA200: {r['ema200']:.2f}\n"
+                    f"RSI: {r['rsi']:.1f}\n"
+                    f"ATR: {r['atr']:.2f}\n"
+                    f"Swing High / Low: {r['swing_high']:.2f} / {r['swing_low']:.2f}\n"
+                    f"Pivot: {r['pivot']:.2f}, R1: {r['r1']:.2f}, S1: {r['s1']:.2f}\n"
+                    f"Trend score: {r['score']}\n"
+                    f"Wolumen relatywny: {r['vol']:.2f}\n"
+                    f"Sygnał systemowy: {r['signal']}\n\n"
+                    "Podaj w 3 punktach:\n"
+                    "1) Ocena wejścia (konkretne poziomy, bez definicji)\n"
+                    "2) Ryzyko (SL, ATR, zagrożenia)\n"
+                    "3) Werdykt (KUP / OBSERWUJ / ODRZUĆ) — krótko, technicznie."
                 )
+
                 resp = client.chat.completions.create(
                     model="gpt-4o",
                     messages=[
                         {
                             "role": "system",
-                            "content": "Jesteś bezdusznym systemem tradingowym. Mówisz tylko w punktach, krótko, technicznie. Zero lania wody, zero definicji, zero edukacji."
+                            "content": "Jesteś bezdusznym systemem tradingowym. Mówisz krótko, technicznie, zero lania wody."
                         },
                         {"role": "user", "content": prompt}
                     ],
