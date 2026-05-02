@@ -94,7 +94,7 @@ def fetch_ultra_data(symbol):
 
 # --- UI GŁÓWNE ---
 st.sidebar.title("💠 Sterowanie")
-user_input = st.sidebar.text_area("Wklej tickery:", "CDR.WA PKO.WA ALE.WA AAPL NVDA TSLA BTC-USD", height=200)
+user_input = st.sidebar.text_area("Wklej tickery:", "HRT.WA,CFS.WA,PRT.WA,ATT.WA,STX.WA,PUR.WA,BCS.WA,KCH.WA,GTN.WALBW.WA,PGV.WA,HPE.WA,DNS.WA.ZUK.WA,VVD.WA,HIVE,MLN.WA,MER.WA,APS.WA,NVG.WA,IOVA,PLRX,HUMA,TCRX,GOSS,MREO,ADTX", height=200)
 tickers = [t.strip().upper() for t in user_input.replace(",", " ").split() if t.strip()]
 
 st.markdown("<h1 style='color:#39FF14; font-size:3rem;'>🚀 NEON KOMBAJN ULTRA AI</h1>", unsafe_allow_html=True)
