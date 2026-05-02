@@ -8,7 +8,11 @@ from streamlit_autorefresh import st_autorefresh
 # 1. KONFIG + NEON STYL
 # ============================================================
 
-st.set_page_config(layout="wide", page_title="NEON MEGA-KOMBAJN AI PRO", page_icon="🚀")
+st.set_page_config(
+    layout="wide",
+    page_title="NEON MEGA-KOMBAJN ULTRA AI PRO",
+    page_icon="🚀"
+)
 
 st.markdown("""
 <style>
@@ -124,7 +128,7 @@ body { background-color: #050510; color: #e0e0ff; }
 """, unsafe_allow_html=True)
 
 # ============================================================
-# 2. AI
+# 2. AI KLIENT + AUTOREFRESH
 # ============================================================
 
 client = None
@@ -150,7 +154,7 @@ if "ai_top10" not in st.session_state:
     st.session_state["ai_top10"] = None
 
 # ============================================================
-# 4. HEADER Z PRZYCISKAMI (NAPRAWIONE)
+# 4. HEADER Z ODSWIEŻ + ZAPISZ LISTĘ
 # ============================================================
 
 col1, col2, col3 = st.columns([4, 1, 1])
@@ -167,7 +171,7 @@ with col3:
         st.success("Lista spółek zapisana!")
 
 # ============================================================
-# 5. SIDEBAR — TICKERY (NAPRAWIONE)
+# 5. SIDEBAR — LISTA TICKERÓW
 # ============================================================
 
 st.sidebar.title("💠 KONTROLA")
@@ -178,18 +182,22 @@ tickers_text = st.sidebar.text_area(
     height=200
 )
 
-# aktualizacja session_state
+# aktualizacja session_state na bieżąco
 st.session_state["tickers_text"] = tickers_text
 
-tickers = [x.strip().upper() for x in tickers_text.replace(",", " ").split() if x.strip()]
-
+tickers = [
+    x.strip().upper()
+    for x in tickers_text.replace(",", " ").split()
+    if x.strip()
+]
 # ============================================================
 # 6. SILNIK ANALITYCZNY AI PRO
 # ============================================================
 
-def detect_candle_pattern(df):
+def detect_candle_pattern(df: pd.DataFrame) -> str:
     if len(df) < 3:
-        return "Brak wystarczającej liczby świec."
+        return "Brak wystarczającej liczby świec do analizy."
+
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
@@ -197,26 +205,35 @@ def detect_candle_pattern(df):
     po, ph, pl, pc = prev["Open"], prev["High"], prev["Low"], prev["Close"]
 
     body = abs(c - o)
+    rng = h - l
     upper = h - max(o, c)
     lower = min(o, c) - l
 
-    out = []
+    sygnaly = []
 
-    if lower > body * 2 and upper < body:
-        out.append("Młot (odbicie).")
+    # młot
+    if lower > body * 2 and upper < body and c > o:
+        sygnaly.append("Możliwy młot (bycze odbicie).")
 
-    if upper > body * 2 and lower < body:
-        out.append("Młot odwrotny (odwrócenie).")
+    # młot odwrotny
+    if upper > body * 2 and lower < body and c < o:
+        sygnaly.append("Możliwy młot odwrotny (potencjalne odwrócenie).")
 
+    # objęcie wzrostowe
     if pc < po and c > o and c > pc and o < po:
-        out.append("Objęcie wzrostowe.")
+        sygnaly.append("Możliwe objęcie wzrostowe (bycze odwrócenie).")
 
+    # objęcie spadkowe
     if pc > po and c < o and c < pc and o > po:
-        out.append("Objęcie spadkowe.")
+        sygnaly.append("Możliwe objęcie spadkowe (niedźwiedzie odwrócenie).")
 
-    return " ".join(out) if out else "Brak formacji świecowych."
+    if not sygnaly:
+        return "Brak wyraźnej klasycznej formacji świecowej."
 
-def ultra(symbol):
+    return " ".join(sygnaly)
+
+
+def ultra(symbol: str):
     try:
         tk = yf.Ticker(symbol)
         df = tk.history(period="1y")
@@ -228,30 +245,30 @@ def ultra(symbol):
         low = df["Low"]
         open_ = df["Open"]
 
-        last = close.iloc[-1]
+        last = float(close.iloc[-1])
 
-        # MA
-        ma20 = close.rolling(20).mean().iloc[-1]
-        ma50 = close.rolling(50).mean().iloc[-1]
-        ma100 = close.rolling(100).mean().iloc[-1]
-        ma200 = close.rolling(200).mean().iloc[-1]
-        ema200 = close.ewm(span=200).mean().iloc[-1]
+        # Średnie kroczące
+        ma20 = float(close.rolling(20).mean().iloc[-1])
+        ma50 = float(close.rolling(50).mean().iloc[-1])
+        ma100 = float(close.rolling(100).mean().iloc[-1])
+        ma200 = float(close.rolling(200).mean().iloc[-1])
+        ema200 = float(close.ewm(span=200).mean().iloc[-1])
 
         # MACD
         ema12 = close.ewm(span=12).mean()
         ema26 = close.ewm(span=26).mean()
         macd_line = ema12 - ema26
         macd_signal = macd_line.ewm(span=9).mean()
-        macd = macd_line.iloc[-1]
-        macd_sig = macd_signal.iloc[-1]
-        macd_hist = macd - macd_sig
+        macd = float(macd_line.iloc[-1])
+        macd_sig = float(macd_signal.iloc[-1])
+        macd_hist = float(macd - macd_sig)
 
         # RSI
         delta = close.diff()
         gain = delta.where(delta > 0, 0).rolling(14).mean().iloc[-1]
         loss = -delta.where(delta < 0, 0).rolling(14).mean().iloc[-1]
         rs = gain / loss if loss != 0 else 999
-        rsi = 100 - (100 / (1 + rs))
+        rsi = float(100 - (100 / (1 + rs)))
 
         # ATR
         tr = pd.concat([
@@ -259,31 +276,36 @@ def ultra(symbol):
             (high - close.shift()).abs(),
             (low - close.shift()).abs()
         ], axis=1).max(axis=1)
-        atr = tr.rolling(14).mean().iloc[-1]
+        atr = float(tr.rolling(14).mean().iloc[-1])
 
-        # Swing
-        swing_high = high.tail(10).max()
-        swing_low = low.tail(10).min()
+        # Swing high/low
+        swing_high = float(high.tail(10).max())
+        swing_low = float(low.tail(10).min())
 
+        # TP/SL dynamiczne
         tp = max(last + atr * 2, swing_high)
         sl = min(last - atr * 1.5, swing_low)
 
-        pivot = (high.iloc[-1] + low.iloc[-1] + last) / 3
-        r1 = 2 * pivot - low.iloc[-1]
-        s1 = 2 * pivot - high.iloc[-1]
+        # Pivoty
+        ph, pl, pc = float(high.iloc[-1]), float(low.iloc[-1]), last
+        pivot = (ph + pl + pc) / 3
+        r1 = 2 * pivot - pl
+        s1 = 2 * pivot - ph
 
-        vol_rel = df["Volume"].iloc[-1] / df["Volume"].tail(20).mean()
+        # Wolumen relatywny
+        vol_rel = float(df["Volume"].iloc[-1] / df["Volume"].tail(20).mean())
 
-        score = sum([
-            1 if last > ma20 else -1,
-            2 if last > ma50 else -2,
-            2 if last > ma100 else -2,
-            3 if last > ma200 else -3
-        ])
+        # Score trendu
+        score = 0
+        score += 1 if last > ma20 else -1
+        score += 2 if last > ma50 else -2
+        score += 2 if last > ma100 else -2
+        score += 3 if last > ma200 else -3
 
-        if score >= 6 and macd > macd_sig:
+        # Sygnał
+        if score >= 6 and macd > macd_sig and rsi < 70:
             signal = "KUP"
-        elif score <= -4 and macd < macd_sig:
+        elif score <= -4 and macd < macd_sig and rsi > 30:
             signal = "SPRZEDAJ"
         else:
             signal = "TRZYMAJ"
@@ -292,28 +314,37 @@ def ultra(symbol):
 
         return {
             "symbol": symbol,
-            "price": float(last),
+            "price": last,
             "bid": tk.info.get("bid", "-"),
             "ask": tk.info.get("ask", "-"),
-            "ma20": float(ma20), "ma50": float(ma50),
-            "ma100": float(ma100), "ma200": float(ma200),
-            "ema200": float(ema200),
-            "macd": float(macd), "macd_sig": float(macd_sig), "macd_hist": float(macd_hist),
-            "rsi": float(rsi), "atr": float(atr),
-            "swing_high": float(swing_high), "swing_low": float(swing_low),
-            "tp": float(tp), "sl": float(sl),
-            "pivot": float(pivot), "r1": float(r1), "s1": float(s1),
-            "vol": float(vol_rel),
+            "ma20": ma20,
+            "ma50": ma50,
+            "ma100": ma100,
+            "ma200": ma200,
+            "ema200": ema200,
+            "macd": macd,
+            "macd_sig": macd_sig,
+            "macd_hist": macd_hist,
+            "rsi": rsi,
+            "atr": atr,
+            "swing_high": swing_high,
+            "swing_low": swing_low,
+            "tp": tp,
+            "sl": sl,
+            "pivot": pivot,
+            "r1": r1,
+            "s1": s1,
+            "vol": vol_rel,
             "score": int(score),
             "signal": signal,
             "candle_comment": candle_comment,
             "df": df.tail(120)
         }
-    except:
+    except Exception:
         return None
 
 # ============================================================
-# 7. LICZENIE (NAPRAWIONE)
+# 7. LICZENIE WYNIKÓW (BEZ PODWÓJNEGO WYWOŁANIA)
 # ============================================================
 
 results = []
@@ -327,7 +358,7 @@ if not results:
     st.stop()
 
 # ============================================================
-# 8. TOP 10 + AI PORTFEL + AI TOP10
+# 8. DATAFRAME, TOP10, AI PORTFEL / AI TOP10
 # ============================================================
 
 df_res = pd.DataFrame([
@@ -354,31 +385,45 @@ with colp1:
     if client:
         if st.button("🤖 AI podsumowanie portfela"):
             with st.spinner("AI analizuje portfel..."):
+                opis = "\n".join(
+                    f"{r['symbol']}: cena {r['price']:.2f}, score {r['score']}, RSI {r['rsi']:.1f}, MACD {r['macd']:.2f}"
+                    for r in results
+                )
                 prompt = f"""
 Analiza portfela:
-{chr(10).join([f"{r['symbol']}: cena {r['price']}, score {r['score']}, RSI {r['rsi']}, MACD {r['macd']}" for r in results])}
+{opis}
 
 TOP10: {", ".join(top10_symbols)}
 
-Zrób analizę ryzyka, momentum, siły trendu i rekomendacje.
+Zrób surową analizę techniczną portfela:
+1. Ocena trendu i momentum.
+2. Ryzyko i zmienność.
+3. 3 najmocniejsze i 3 najsłabsze pozycje.
+4. Werdykt ogólny (bez lania wody).
 """
                 resp = client.chat.completions.create(
                     model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt}]
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1
                 )
                 st.session_state["ai_portfolio"] = resp.choices[0].message.content
 
         if st.button("🤖 AI analiza TOP 10"):
             with st.spinner("AI analizuje TOP 10..."):
                 prompt = f"""
-TOP10:
+TOP10 (po score + MACD):
 {chr(10).join(top10_symbols)}
 
-Zrób ranking, 3 najlepsze okazje i 3 ostrzeżenia.
+Zrób:
+1. Ranking siły trendu.
+2. 3 najlepsze okazje do wejścia.
+3. 3 ostrzeżenia (przegrzanie / słabość).
+4. Krótki werdykt.
 """
                 resp = client.chat.completions.create(
                     model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt}]
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1
                 )
                 st.session_state["ai_top10"] = resp.choices[0].message.content
 
@@ -393,13 +438,13 @@ Zrób ranking, 3 najlepsze okazje i 3 ostrzeżenia.
         st.markdown("</div>", unsafe_allow_html=True)
 
 with colp2:
-    st.markdown("### 🏆 TOP 10")
-    st.dataframe(df_sorted.head(10))
+    st.markdown("### 🏆 TOP 10 (score + MACD)")
+    st.dataframe(df_sorted.head(10), use_container_width=True)
 
 st.divider()
 
 # ============================================================
-# 9. RADAR WYBIĆ (VOL)
+# 9. RADAR WYBIĆ (WOLUMEN RELATYWNY)
 # ============================================================
 
 st.subheader("🔥 RADAR WYBIĆ (wolumen relatywny)")
@@ -408,9 +453,9 @@ top_vol = df_res.sort_values(by="vol", ascending=False).head(10)
 
 for i in range(0, len(top_vol), 5):
     cols = st.columns(5)
-    for j, (_, item) in enumerate(top_vol.iloc[i:i+5].iterrows()):
+    for j, (_, row) in enumerate(top_vol.iloc[i:i+5].iterrows()):
         with cols[j]:
-            r = next(x for x in results if x["symbol"] == item["symbol"])
+            r = next(x for x in results if x["symbol"] == row["symbol"])
             st.markdown(f"""
             <div class="top-card">
                 <div style="color:#39FF14; font-weight:bold; font-size:1.4rem;">{r['symbol']}</div>
@@ -424,9 +469,8 @@ for i in range(0, len(top_vol), 5):
             """, unsafe_allow_html=True)
 
 st.divider()
-
 # ============================================================
-# 10. KAFLE GŁÓWNE — SPÓŁKI
+# 10. KAFLE GŁÓWNE – SPÓŁKI + SZCZEGÓŁY PRO + AI PER SPÓŁKA
 # ============================================================
 
 st.subheader("📊 Analiza główna – spółki")
@@ -435,17 +479,106 @@ for r in results:
     with st.container():
         st.markdown("<div class='mega-card'>", unsafe_allow_html=True)
 
-        c1, c2, c3, c4 = st.columns([1.8, 1.5, 1.3, 2.5])
+        c1, c2, c3, c4 = st.columns([1.8, 1.5, 1.3, 2.4])
 
+        # --- LEWA: SYMBOL + CENA + BID/ASK ---
         with c1:
-            st.markdown(f"<div class='neon-title' style='font-size:3rem;'>{r['symbol']}</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='price-tag'>{r['price']:.2f}</div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='neon-title' style='font-size:3rem;'>{r['symbol']}</div>",
+                unsafe_allow_html=True
+            )
+            st.markdown(
+                f"<div class='price-tag'>{r['price']:.2f}</div>",
+                unsafe_allow_html=True
+            )
             st.markdown(
                 f"Bid: <span class='neon-bid'>{r['bid']}</span> | "
                 f"Ask: <span class='neon-ask'>{r['ask']}</span>",
                 unsafe_allow_html=True
             )
+            st.write(f"Wolumen relatywny: {r['vol']:.2f}x")
 
+        # --- ŚRODEK 1: TREND / RSI / ATR ---
         with c2:
-            st.write(f"MA20: **{r['ma20']:.2f}** | MA50: **{r['ma50']:.2f}**")
-            st
+            st.write(f"Score trendu: **{r['score']}**")
+            st.write(f"RSI: **{r['rsi']:.1f}**")
+            st.write(f"ATR: **{r['atr']:.2f}**")
+            st.write(f"Swing High: {r['swing_high']:.2f}")
+            st.write(f"Swing Low: {r['swing_low']:.2f}")
+
+        # --- ŚRODEK 2: TP/SL + PIVOTY ---
+        with c3:
+            st.markdown(
+                f"**TP: <span class='tp-val'>{r['tp']:.2f}</span>**",
+                unsafe_allow_html=True
+            )
+            st.markdown(
+                f"**SL: <span class='sl-val'>{r['sl']:.2f}</span>**",
+                unsafe_allow_html=True
+            )
+            st.write(f"Pivot: {r['pivot']:.2f}")
+            st.write(f"R1: {r['r1']:.2f}")
+            st.write(f"S1: {r['s1']:.2f}")
+
+        # --- PRAWO: SYGNAŁ + AI + SZCZEGÓŁY PRO ---
+        with c4:
+            st.markdown(
+                f"<div class='signal-{r['signal']}'>{r['signal']}</div>",
+                unsafe_allow_html=True
+            )
+
+            # AI per spółka
+            if client and st.button(f"🤖 DIAGNOZA AI – {r['symbol']}", key=f"ai_{r['symbol']}"):
+                with st.spinner("AI analizuje tę spółkę..."):
+                    prompt = f"""
+Analiza spółki {r['symbol']}:
+Cena: {r['price']:.2f}
+Score trendu: {r['score']}
+RSI: {r['rsi']:.1f}
+MACD: {r['macd']:.2f}, sygnał: {r['macd_sig']:.2f}, histogram: {r['macd_hist']:.2f}
+ATR: {r['atr']:.2f}
+Swing High / Low: {r['swing_high']:.2f} / {r['swing_low']:.2f}
+Pivot / R1 / S1: {r['pivot']:.2f} / {r['r1']:.2f} / {r['s1']:.2f}
+TP / SL: {r['tp']:.2f} / {r['sl']:.2f}
+Formacje świecowe: {r['candle_comment']}
+
+Zrób surową analizę techniczną:
+1. Ocena wejścia (krótko).
+2. Ryzyko (zmienność, poziomy obrony).
+3. Werdykt (KUP / TRZYMAJ / SPRZEDAJ) z jednym zdaniem uzasadnienia.
+Bez definicji, bez lania wody.
+"""
+                    resp = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "Jesteś bezdusznym systemem analitycznym. Mówisz krótko, konkretnie, tylko o faktach i liczbach."
+                            },
+                            {"role": "user", "content": prompt}
+                        ],
+                        temperature=0.1
+                    )
+                    st.session_state["ai_single"][r["symbol"]] = resp.choices[0].message.content
+
+            # Wyświetlenie ostatniej diagnozy AI dla tej spółki (jeśli jest)
+            if r["symbol"] in st.session_state["ai_single"]:
+                st.markdown("<div class='ai-box'>", unsafe_allow_html=True)
+                st.write(st.session_state["ai_single"][r["symbol"]])
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            # Szczegóły PRO w expanderze
+            with st.expander("📊 Szczegóły PRO"):
+                st.markdown("<div class='pro-box'>", unsafe_allow_html=True)
+                st.write(f"MA20: {r['ma20']:.2f}")
+                st.write(f"MA50: {r['ma50']:.2f}")
+                st.write(f"MA100: {r['ma100']:.2f}")
+                st.write(f"MA200: {r['ma200']:.2f}")
+                st.write(f"EMA200: {r['ema200']:.2f}")
+                st.write(f"MACD: {r['macd']:.2f}")
+                st.write(f"MACD sygnał: {r['macd_sig']:.2f}")
+                st.write(f"MACD histogram: {r['macd_hist']:.2f}")
+                st.write(f"Formacje świecowe: {r['candle_comment']}")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
