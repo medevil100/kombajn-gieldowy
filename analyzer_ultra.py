@@ -18,7 +18,7 @@ body { background:#050510; color:#e0e0ff; }
 .tile {
     border-radius:18px; padding:18px; text-align:center;
     border:1px solid #222; box-shadow:0 0 25px #39FF1422;
-    min-height:330px;
+    min-height:350px;
 }
 
 /* ALERTY */
@@ -153,97 +153,3 @@ def ultra(symbol):
         return {
             "symbol": symbol,
             "price": last,
-            "bid": tk.info.get("bid", "-"),
-            "ask": tk.info.get("ask", "-"),
-            "ma20": ma20, "ma50": ma50, "ma200": ma200,
-            "ema200": ema200,
-            "body_pct": body_pct,
-            "direction": direction,
-            "score": score,
-            "rsi": rsi,
-            "atr": atr,
-            "swing_high": swing_high,
-            "swing_low": swing_low,
-            "tp": tp, "sl": sl,
-            "pivot": pivot, "r1": r1, "s1": s1,
-            "vol": vol_rel,
-            "signal": signal,
-            "trend_class": trend_class,
-            "df": df.tail(60)  # do mini-wykresu
-        }
-
-    except:
-        return None
-
-# --- UI ---
-st.markdown("<h1 style='color:#39FF14; text-shadow:0 0 15px #39FF14;'>🚀 NEON ULTRA PRO MAX</h1>", unsafe_allow_html=True)
-
-st.sidebar.title("💠 KONTROLA")
-tickers_in = st.sidebar.text_area("Tickery:", "CDR.WA PKO.WA AAPL NVDA TSLA BTC-USD", height=200)
-tickers = [x.strip().upper() for x in tickers_in.replace(",", " ").split() if x.strip()]
-
-if not tickers:
-    st.info("Wklej tickery w sidebarze.")
-    st.stop()
-
-results = []
-for t in tickers:
-    r = ultra(t)
-    if r:
-        results.append(r)
-
-# --- KAFELKI ---
-cols = st.columns(3)
-
-for i, r in enumerate(results):
-    with cols[i % 3]:
-
-        # Mini wykres
-        fig, ax = plt.subplots(figsize=(3, 1.2))
-        ax.plot(r["df"]["Close"].values, color="#39FF14")
-        ax.set_axis_off()
-
-        st.markdown(
-            f"<div class='tile tile-{r['signal']} {r['trend_class']}'>",
-            unsafe_allow_html=True
-        )
-
-        st.pyplot(fig)
-
-        st.markdown(f"""
-        <div style="font-size:1.6rem; color:#39FF14; font-weight:bold;">{r['symbol']}</div>
-        <div class="price">{r['price']:.2f}</div>
-        <span class="bid">B: {r['bid']}</span> | <span class="ask">A: {r['ask']}</span>
-        <hr>
-        MA20: {r['ma20']:.2f}<br>
-        MA50: {r['ma50']:.2f}<br>
-        MA200: {r['ma200']:.2f}
-        <hr>
-        Swing High: {r['swing_high']:.2f}<br>
-        Swing Low: {r['swing_low']:.2f}
-        <hr>
-        <b>TP:</b> <span class="tp">{r['tp']:.2f}</span><br>
-        <b>SL:</b> <span class="sl">{r['sl']:.2f}</span>
-        <hr>
-        <div class="signal-{r['signal']}">{r['signal']}</div>
-        """, unsafe_allow_html=True)
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        if st.button(f"AI – {r['symbol']}", key=f"ai_{r['symbol']}"):
-            if client:
-                with st.spinner("Analiza AI..."):
-                    prompt = (
-                        f"Analiza {r['symbol']}: Kurs {r['price']}, Trend score {r['score']}, "
-                        f"RSI {r['rsi']:.1f}, ATR {r['atr']:.2f}, TP {r['tp']:.2f}, SL {r['sl']:.2f}. "
-                        "Podaj: 1. Ocena wejścia, 2. Ryzyko, 3. Werdykt. Zero lania wody."
-                    )
-                    resp = client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=[
-                            {"role": "system", "content": "Jesteś bezdusznym systemem operacyjnym. Mówisz tylko o faktach."},
-                            {"role": "user", "content": prompt}
-                        ],
-                        temperature=0.1
-                    )
-                    st.info(resp.choices[0].message.content)
