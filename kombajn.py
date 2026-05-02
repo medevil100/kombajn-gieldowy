@@ -7,7 +7,7 @@ import openai
 import os
 
 # --- 1. KONFIGURACJA I DESIGN (POWIĘKSZONY) ---
-st.set_page_config(layout="wide", page_title="Neon Ultra Terminal PRO")
+#st.set_page_config(layout="wide", page_title="Neon Ultra Terminal PRO")
 
 st.markdown("""
     <style>
