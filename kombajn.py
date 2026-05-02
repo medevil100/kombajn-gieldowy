@@ -69,7 +69,7 @@ def fetch_stock_data(symbol):
 
 # --- UI BOCZNY ---
 st.sidebar.title("💠 Sterowanie")
-user_input = st.sidebar.text_area("Wklej spółki:", "CDR.WA PKO.WA ALE.WA AAPL NVDA TSLA BTC-USD")
+user_input = st.sidebar.text_area("Wklej spółki:", "HRT.WA,CFS.WA,PRT.WA,ATT.WA,STX.WA,PUR.WA,BCS.WA,KCH.WA,GTN.WALBW.WA,PGV.WA,HPE.WA,DNS.WA.ZUK.WA,VVD.WA,HIVE,MLN.WA,MER.WA,APS.WA,NVG.WA,IOVA,PLRX,HUMA,TCRX,GOSS,MREO,ADTX")
 tickers = [t.strip().upper() for t in user_input.replace(",", " ").split() if t.strip()]
 
 # --- WIDOK GŁÓWNY ---
