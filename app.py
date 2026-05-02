@@ -373,9 +373,23 @@ with colp1:
                     f"{r['symbol']}: cena {r['price']:.2f}, score {r['score']}, RSI {r['rsi']:.1f}, MACD {r['macd']:.2f}"
                     for r in results
                 )
-              4. Krótki werdykt
-                prompt = f"""
+               prompt = f"""
 Analizujesz TOP10 spółek: {", ".join(top10_symbols)}.
+
+Zasady:
+- Zero lania wody.
+- Zero ogólników.
+- Zero porad typu „skonsultuj się z doradcą”.
+- Zero ostrzeżeń o ryzyku.
+- Tylko surowe fakty techniczne.
+- Styl: zimny, bezemocjonalny, precyzyjny.
+
+Wygeneruj:
+1. Ranking siły trendu (od najmocniejszego).
+2. 3 najlepsze okazje do wejścia — krótko, dlaczego.
+3. 3 słabe pozycje — krótko, dlaczego.
+4. Werdykt końcowy — jedno zdanie, bez żadnych porad i bez „uważaj”.
+"""
 
 Zasady:
 - Zero lania wody.
