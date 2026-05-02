@@ -292,11 +292,27 @@ def ultra(symbol):
 
 # --- SIDEBAR: TICKERY ---
 st.sidebar.title("💠 KONTROLA")
-tickers_text = st.sidebar.text_area("Wklej tickery:", st.session_state["tickers_text"], height=200)
-st.session_state["tickers_text"] = tickers_text
-tickers = [x.strip().upper() for x in tickers_text.replace(",", " ").split() if x.strip()]
 
-# --- LICZENIE ---
+# Pole tekstowe
+tickers_text = st.sidebar.text_area(
+    "Wklej tickery:",
+    st.session_state["tickers_text"],
+    height=200
+)
+
+# Zapis do session_state
+if st.sidebar.button("💾 ZAPISZ LISTĘ"):
+    st.session_state["tickers_text"] = tickers_text
+    st.sidebar.success("Lista zapisana!")
+
+# Odświeżanie
+if st.sidebar.button("🔄 ODSWIEŻ"):
+    st.experimental_rerun()
+
+# Finalna lista tickerów
+tickers = [x.strip().upper() for x in st.session_state["tickers_text"].replace(",", " ").split() if x.strip()]
+
+# --- LICZENIE (NAPRAWIONE) ---
 results = []
 for t in tickers:
     data = ultra(t)
@@ -304,8 +320,9 @@ for t in tickers:
         results.append(data)
 
 if not results:
-    st.info("Brak danych – sprawdź tickery.")
+    st.warning("Brak danych — sprawdź tickery.")
     st.stop()
+
 
 # --- TOP 10 (score + MACD) ---
 df_res = pd.DataFrame([
