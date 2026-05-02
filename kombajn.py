@@ -68,6 +68,10 @@ if "OPENAI_API_KEY" in st.secrets:
 # --- AUTOREFRESH ---
 st_autorefresh(interval=5 * 60 * 1000, key="mega_ultra_clean_v1")
 
+# --- PRZYCISK ODSWIEŻANIA ---
+if st.button("🔄 ODSWIEŻ DANE"):
+    st.experimental_rerun()
+
 # --- ULTRA ENGINE ---
 def ultra(symbol):
     try:
@@ -191,6 +195,41 @@ for t in tickers:
     if r:
         results.append(r)
 
+# --- TOP 10 WYBICIA ---
+st.subheader("🔥 TOP 10 – Największa możliwość wybicia")
+
+def breakout_score(r):
+    rsi_factor = max(0, 70 - abs(r["rsi"] - 60))
+    return r["vol"] * 2 + r["score"] * 3 + rsi_factor
+
+top10 = sorted(results, key=lambda x: breakout_score(x), reverse=True)[:10]
+
+cols_top = st.columns(5)
+
+for i, r in enumerate(top10):
+    with cols_top[i % 5]:
+        st.markdown(
+            f"<div class='tile tile-{r['signal']} {r['trend_class']}'>",
+            unsafe_allow_html=True
+        )
+
+        chart_df = pd.DataFrame({"Close": r["df"]["Close"].values})
+        st.line_chart(chart_df, height=70)
+
+        st.markdown(f"""
+        <div style="font-size:1.3rem; color:#39FF14; font-weight:bold;">{r['symbol']}</div>
+        <div class="price">{r['price']:.2f}</div>
+        <b>Score:</b> {r['score']}<br>
+        <b>RSI:</b> {r['rsi']:.1f}<br>
+        <b>Vol x:</b> {r['vol']:.2f}<br>
+        <div class="signal-{r['signal']}">{r['signal']}</div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+# --- KAFELKI GŁÓWNE ---
+st.subheader("📊 ANALIZA GŁÓWNA")
+
 cols = st.columns(3)
 
 for i, r in enumerate(results):
@@ -200,7 +239,6 @@ for i, r in enumerate(results):
             unsafe_allow_html=True
         )
 
-        # mini-wykres bez matplotlib – sparkline z line_chart
         chart_df = pd.DataFrame({"Close": r["df"]["Close"].values})
         st.line_chart(chart_df, height=80)
 
@@ -235,9 +273,4 @@ for i, r in enumerate(results):
                     resp = client.chat.completions.create(
                         model="gpt-4o",
                         messages=[
-                            {"role": "system", "content": "Jesteś bezdusznym systemem operacyjnym. Mówisz tylko o faktach."},
-                            {"role": "user", "content": prompt}
-                        ],
-                        temperature=0.1
-                    )
-                    st.info(resp.choices[0].message.content)
+                            {"role": "system", "content": "J
