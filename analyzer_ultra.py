@@ -218,16 +218,28 @@ symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
 @st.cache_data(show_spinner=False)
 def load_candles(symbol: str):
     data = yf.download(symbol, period="6mo", interval="1d").dropna()
+
+    def to_float(x):
+        # bezpieczna konwersja: scalar, numpy, Series
+        try:
+            return float(x)
+        except Exception:
+            try:
+                return float(x.item())
+            except Exception:
+                return float(x.astype(float))
+
     candles = []
     for _, r in data.iterrows():
         candles.append({
-            "open": float(r["Open"]),
-            "high": float(r["High"]),
-            "low": float(r["Low"]),
-            "close": float(r["Close"]),
-            "volume": float(r["Volume"]),
+            "open": to_float(r["Open"]),
+            "high": to_float(r["High"]),
+            "low": to_float(r["Low"]),
+            "close": to_float(r["Close"]),
+            "volume": to_float(r["Volume"]),
         })
     return candles
+
 
 if "run_id" not in st.session_state:
     st.session_state["run_id"] = 0
