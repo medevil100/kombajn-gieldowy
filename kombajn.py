@@ -5,124 +5,154 @@ import pandas_ta as ta
 from streamlit_autorefresh import st_autorefresh
 import openai
 import os
+import math
 
-# --- 1. KONFIGURACJA I DESIGN NEONOWY ---
-st.set_page_config(layout="wide", page_title="Neon AI Market Terminal")
+# =========================
+# SILNIK ULTRA — MATEMATYKA
+# =========================
+
+def calculate_rsi(closes, period=14):
+    if len(closes) <= period: return 50
+    delta = pd.Series(closes).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs.iloc[-1]))
+
+def calculate_atr(df, period=14):
+    high = df['High']
+    low = df['Low']
+    close = df['Close'].shift(1)
+    tr = pd.concat([high - low, abs(high - close), abs(low - close)], axis=1).max(axis=1)
+    return tr.rolling(period).mean().iloc[-1]
+
+# --- DESIGN I STYLE ---
+st.set_page_config(layout="wide", page_title="NEON ULTRA TERMINAL")
 
 st.markdown("""
     <style>
-    body { background-color: #000000; color: #FFFFFF; }
-    .stApp { background-color: #000000; }
-    .neon-text { text-shadow: 0 0 10px #39FF14, 0 0 20px #39FF14; color: #39FF14; font-weight: bold; }
-    .neon-buy { color: #39FF14; font-weight: bold; text-shadow: 0 0 10px #39FF14; border: 1px solid #39FF14; padding: 2px; border-radius: 3px; font-size: 0.8rem; }
-    .neon-sell { color: #FF3131; font-weight: bold; text-shadow: 0 0 10px #FF3131; border: 1px solid #FF3131; padding: 2px; border-radius: 3px; font-size: 0.8rem; }
-    .neon-bid { color: #00FF00; font-weight: bold; font-size: 0.8rem; }
-    .neon-ask { color: #FF0000; font-weight: bold; font-size: 0.8rem; }
-    .stButton>button { background-color: #1a1a1a; color: #39FF14; border: 1px solid #39FF14; box-shadow: 0 0 10px #39FF14; width: 100%; }
-    .top-card { border: 1px solid #333; padding: 10px; border-radius: 5px; background: #0a0a0a; margin-bottom: 10px; }
-    hr { border: 0.5px solid #333; }
+    body { background-color: #050510; color: #e0e0ff; }
+    .stApp { background-color: #050510; }
+    .neon-card { border: 1px solid #222; padding: 20px; border-radius: 12px; background: #0a0a18; box-shadow: 0 0 15px #39FF1422; margin-bottom: 20px; }
+    .neon-title { color: #39FF14; text-shadow: 0 0 10px #39FF14; font-weight: bold; font-size: 24px; }
+    .stat-label { color: #888; font-size: 0.9rem; }
+    .stat-value { color: #fff; font-weight: bold; font-size: 1.1rem; }
+    .signal-KUP { color: #39FF14; font-weight: bold; text-shadow: 0 0 10px #39FF14; border: 1px solid #39FF14; padding: 5px; border-radius: 5px; }
+    .signal-SPRZEDAJ { color: #FF3131; font-weight: bold; text-shadow: 0 0 10px #FF3131; border: 1px solid #FF3131; padding: 5px; border-radius: 5px; }
+    .neon-bid { color: #00FF00; font-weight: bold; }
+    .neon-ask { color: #FF0000; font-weight: bold; }
+    .stButton>button { background-color: #1a1a1a; color: #39FF14; border: 1px solid #39FF14; box-shadow: 0 0 10px #39FF14; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 8. ODŚWIEŻANIE ---
+# --- KONFIGURACJA ---
 refresh_min = st.sidebar.slider("Odświeżanie (min)", 1, 10, 5)
-st_autorefresh(interval=refresh_min * 60 * 1000, key="market_refresh")
+st_autorefresh(interval=refresh_min * 60 * 1000, key="ultra_refresh")
 
 if "OPENAI_API_KEY" in st.secrets:
     openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-# --- FUNKCJE ANALITYCZNE ---
-def fetch_stock_data(symbol):
+# --- FUNKCJA ANALIZY ULTRA ---
+def fetch_ultra_data(symbol):
     try:
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period="2y")
+        tk = yf.Ticker(symbol)
+        df = tk.history(period="1y")
         if df.empty: return None
-        info = ticker.info
-        last_price = df['Close'].iloc[-1]
         
-        bid = info.get('bid', 'N/A')
-        ask = info.get('ask', 'N/A')
+        info = tk.info
+        last = df['Close'].iloc[-1]
+        prev = df.iloc[-2]
         
-        sma20 = ta.sma(df['Close'], length=20).iloc[-1]
-        sma50 = ta.sma(df['Close'], length=50).iloc[-1]
-        sma200 = ta.sma(df['Close'], length=200).iloc[-1]
+        # Wskaźniki Ultra
+        ema10 = df['Close'].ewm(span=10).mean().iloc[-1]
+        ema50 = df['Close'].ewm(span=50).mean().iloc[-1]
+        ema200 = df['Close'].ewm(span=200).mean().iloc[-1]
+        rsi_val = calculate_rsi(df['Close'])
+        atr_val = calculate_atr(df)
         
-        t_short = "W" if last_price > sma20 else "S"
-        t_mid = "W" if last_price > sma50 else "S"
-        t_long = "W" if last_price > sma200 else "S"
+        # Trend Score (-6 do +6)
+        s = 1 if last > ema10 else -1
+        m = 2 if last > ema50 else -2
+        l = 3 if last > ema200 else -3
+        trend_score = s + m + l
         
-        if last_price > sma50 and sma20 > sma50: signal = ("KUP", "neon-buy")
-        elif last_price < sma50: signal = ("SPRZEDAJ", "neon-sell")
-        else: signal = ("TRZYMAJ", "neon-hold")
+        # Formacja świecowa
+        body = last - df['Open'].iloc[-1]
+        rng = df['High'].iloc[-1] - df['Low'].iloc[-1]
+        pattern = "BYCZA" if body > 0 and abs(body) > 0.6 * rng else "NIEDŹWIEDZIA" if body < 0 and abs(body) > 0.6 * rng else "NEUTRALNA"
         
-        h52 = df['High'].tail(252).max()
-        l52 = df['Low'].tail(252).min()
-        pivot = (df['High'].iloc[-1] + df['Low'].iloc[-1] + df['Close'].iloc[-1]) / 3
-        vol_score = df['Volume'].iloc[-1] / df['Volume'].tail(20).mean()
-        
+        # Sygnał
+        if trend_score >= 4 and rsi_val < 70: sig, s_class = "KUP", "signal-KUP"
+        elif trend_score <= -4: sig, s_class = "SPRZEDAJ", "signal-SPRZEDAJ"
+        else: sig, s_class = "TRZYMAJ", "neon-hold"
+
         return {
-            "symbol": symbol, "price": last_price, "bid": bid, "ask": ask,
-            "trends": (t_short, t_mid, t_long), "signal": signal,
-            "h52": h52, "l52": l52, "pivot": pivot, "score": vol_score
+            "symbol": symbol, "price": last, "bid": info.get('bid', 'N/A'), "ask": info.get('ask', 'N/A'),
+            "trend_score": trend_score, "rsi": rsi_val, "atr": atr_val,
+            "pattern": pattern, "signal": sig, "s_class": s_class,
+            "h52": df['High'].max(), "pivot": (df['High'].iloc[-1] + df['Low'].iloc[-1] + last) / 3,
+            "vol_rel": df['Volume'].iloc[-1] / df['Volume'].tail(20).mean()
         }
     except: return None
 
-# --- UI BOCZNY ---
+# --- UI ---
 st.sidebar.title("💠 Sterowanie")
-user_input = st.sidebar.text_area("Wklej spółki:", "HRT.WA,CFS.WA,PRT.WA,ATT.WA,STX.WA,PUR.WA,BCS.WA,KCH.WA,GTN.WALBW.WA,PGV.WA,HPE.WA,DNS.WA.ZUK.WA,VVD.WA,HIVE,MLN.WA,MER.WA,APS.WA,NVG.WA,IOVA,PLRX,HUMA,TCRX,GOSS,MREO,ADTX")
+user_input = st.sidebar.text_area("Wklej tickery:", "CDR.WA PKO.WA AAPL NVDA TSLA BTC-USD")
 tickers = [t.strip().upper() for t in user_input.replace(",", " ").split() if t.strip()]
 
-# --- WIDOK GŁÓWNY ---
-st.markdown("<h1 class='neon-text'>TERMINAL ANALIZY AI</h1>", unsafe_allow_html=True)
+st.markdown("<h1 class='neon-text'>🚀 NEON KOMBAJN ULTRA AI</h1>", unsafe_allow_html=True)
 
 if tickers:
-    results = [fetch_stock_data(t) for t in tickers if fetch_stock_data(t)]
+    results = [fetch_ultra_data(t) for t in tickers if fetch_ultra_data(t)]
     
-    # --- NOWA SEKCJA TOP 10 Z DANYMI ---
-    st.subheader("🔥 TOP 10 - RADAR WYBIĆ")
-    top_10 = sorted(results, key=lambda x: x['score'], reverse=True)[:10]
-    
-    # Wyświetlamy w dwóch rzędach po 5 dla czytelności
-    for i in range(0, len(top_10), 5):
-        cols = st.columns(5)
-        for j, item in enumerate(top_10[i:i+5]):
-            with cols[j]:
-                st.markdown(f"""
-                <div class="top-card">
-                    <h3 style="margin:0; color:#39FF14;">{item['symbol']}</h3>
-                    <div style="font-size:1.1rem; font-weight:bold;">{item['price']:.2f}</div>
-                    <div style="color:gray; font-size:0.8rem;">Vol: {item['score']:.1%}</div>
-                    <div class="neon-bid">B: {item['bid']}</div>
-                    <div class="neon-ask">A: {item['ask']}</div>
-                    <div style="font-size:0.8rem; margin-top:5px;">Trend: {item['trends'][0]}{item['trends'][1]}{item['trends'][2]}</div>
-                    <div class="{item['signal'][1]}" style="margin-top:5px;">{item['signal'][0]}</div>
-                </div>
-                """, unsafe_allow_html=True)
+    # TOP 10
+    st.subheader("🔥 RADAR WYBIĆ ULTRA")
+    top_10 = sorted(results, key=lambda x: x['vol_rel'], reverse=True)[:10]
+    cols = st.columns(min(len(top_10), 5))
+    for i, item in enumerate(top_10):
+        with cols[i % 5]:
+            st.markdown(f"""
+            <div style="border:1px solid #333; padding:10px; border-radius:10px; background:#0a0a18;">
+                <div style="color:#39FF14; font-weight:bold;">{item['symbol']}</div>
+                <div style="font-size:1.2rem;">{item['price']:.2f}</div>
+                <div style="font-size:0.8rem; color:#888;">Trend Score: {item['trend_score']}</div>
+                <div class="{item['s_class']}">{item['signal']}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
     st.divider()
 
-    # --- LISTA GŁÓWNA Z PRZYCISKIEM ANALIZY ---
+    # LISTA GŁÓWNA
     for data in results:
         with st.container():
-            c1, c2, c3, c4 = st.columns([1.5, 1, 1, 2])
+            st.markdown(f"<div class='neon-card'>", unsafe_allow_html=True)
+            c1, c2, c3, c4 = st.columns([1.5, 1.2, 1, 2])
+            
             with c1:
-                st.markdown(f"### {data['symbol']}")
-                st.write(f"Cena: **{data['price']:.2f}**")
+                st.markdown(f"<div class='neon-title'>{data['symbol']}</div>", unsafe_allow_html=True)
+                st.markdown(f"Cena: **{data['price']:.2f}**")
                 st.markdown(f"Bid: <span class='neon-bid'>{data['bid']}</span> | Ask: <span class='neon-ask'>{data['ask']}</span>", unsafe_allow_html=True)
+                st.write(f"Świeca: **{data['pattern']}**")
+
             with c2:
-                st.write("Trend (K/Ś/D):")
-                st.markdown(f"**{data['trends'][0]} | {data['trends'][1]} | {data['trends'][2]}**")
-                st.markdown(f"<div class='{data['signal'][1]}'>{data['signal'][0]}</div>", unsafe_allow_html=True)
+                st.write("Wskaźniki Ultra:")
+                st.write(f"Trend Score: **{data['trend_score']}**")
+                st.write(f"RSI (14): **{data['rsi']:.1f}**")
+                st.write(f"Zmienność (ATR): **{data['atr']:.2f}**")
+
             with c3:
-                st.markdown(f"TP: <span style='color:#39FF14'>{(data['price']*1.05):.2f}</span>", unsafe_allow_html=True)
-                st.markdown(f"SL: <span style='color:#FF3131'>{(data['price']*0.97):.2f}</span>", unsafe_allow_html=True)
-                st.write(f"Pivot: **{data['pivot']:.2f}**")
+                st.markdown(f"<div class='{data['s_class']}'>{data['signal']}</div>", unsafe_allow_html=True)
+                st.write(f"Pivot: {data['pivot']:.2f}")
+                st.write(f"Vol Rel: {data['vol_rel']:.2f}x")
+
             with c4:
-                if st.button(f"PEŁNA ANALIZA AI 🤖", key=f"ai_{data['symbol']}"):
-                    with st.spinner("Generowanie raportu..."):
-                        prompt = f"Analiza {data['symbol']}: Cena {data['price']}, Pivot {data['pivot']}, Trend {data['trends']}, Vol {data['score']:.2f}. Podaj konkretny raport: Trend, Wolumen, Zasięg do {data['h52']}, Rekomendacja."
+                if st.button(f"ANALIZA AI ULTRA 🤖", key=f"ai_{data['symbol']}"):
+                    with st.spinner("AI przetwarza dane Ultra..."):
+                        prompt = f"Analiza {data['symbol']}: Cena {data['price']}, Trend Score {data['trend_score']}, RSI {data['rsi']:.1f}, Świeca {data['pattern']}, Vol {data['vol_rel']:.2f}x. Wykonaj profesjonalny raport w 4 punktach: Trend, Momentum, Wolumen i Werdykt. Bądź techniczny i surowy."
                         try:
-                            resp = openai.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": "Jesteś analitykiem technicznym."}, {"role": "user", "content": prompt}])
-                            st.info(f"**RAPORT AI:**\n\n{resp.choices[0].message.content}")
-                        except Exception as e: st.error(f"Błąd: {e}")
-            st.divider()
+                            resp = openai.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": "Jesteś terminalem giełdowym Bloomberg AI."}, {"role": "user", "content": prompt}])
+                            st.info(f"**WERDYKT ULTRA AI:**\n\n{resp.choices[0].message.content}")
+                        except: st.error("Sprawdź OPENAI_API_KEY w Secrets.")
+            st.markdown("</div>", unsafe_allow_html=True)
+else:
+    st.info("Wklej symbole w panelu bocznym.")
