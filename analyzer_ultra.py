@@ -1,8 +1,3 @@
-Masz rację — zróbmy to porządnie, od zera, w jednym strzale.
-
-Poniżej **pełny, poprawiony plik** z AI (`gpt-4o-mini`), gotowy jako `kombajn_ultra.py`:
-
-```python
 import math
 import json
 import requests
@@ -447,7 +442,7 @@ for symbol in symbols:
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
-```
+
 
 To możesz 1:1 wkleić jako plik.  
 Jak będziesz chciał wersję „ultra PRO” (ranking, breakout top list, filtry GPW/NC, itd.) — zrobimy kolejną iterację, już na tym czystym fundamencie.
