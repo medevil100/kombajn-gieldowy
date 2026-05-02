@@ -1,300 +1,249 @@
-import math
-import json
-import requests
-import yfinance as yf
 import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from openai import OpenAI
+from streamlit_autorefresh import st_autorefresh
+import matplotlib.pyplot as plt
 
-# =========================
-# WSKAŹNIKI
-# =========================
+# --- KONFIG ---
+st.set_page_config(layout="wide", page_title="NEON ULTRA PRO MAX", page_icon="🚀")
 
-def ema(values, period):
-    if not values:
-        return math.nan
-    k = 2 / (period + 1)
-    e = values[0]
-    for v in values[1:]:
-        e = v * k + e * (1 - k)
-    return e
-
-def sma(values, period):
-    if len(values) < period:
-        return math.nan
-    return sum(values[-period:]) / period
-
-def rsi(values, period=14):
-    if len(values) <= period:
-        return math.nan
-    gains = 0
-    losses = 0
-    for i in range(len(values) - period, len(values)):
-        diff = values[i] - values[i - 1]
-        if diff > 0:
-            gains += diff
-        else:
-            losses -= diff
-    if losses == 0:
-        return 100
-    rs = (gains / period) / (losses / period)
-    return 100 - 100 / (1 + rs)
-
-def atr(candles, period=14):
-    trs = []
-    for i in range(1, len(candles)):
-        h = candles[i]["high"]
-        l = candles[i]["low"]
-        pc = candles[i - 1]["close"]
-        tr = max(h - l, abs(h - pc), abs(l - pc))
-        trs.append(tr)
-    return sma(trs, period)
-
-def macd_calc(values):
-    if len(values) < 26:
-        return math.nan, math.nan, math.nan
-    ema12 = ema(values, 12)
-    ema26 = ema(values, 26)
-    macd = ema12 - ema26
-    signal = ema([macd] * 9, 9)
-    hist = macd - signal
-    return macd, signal, hist
-
-# =========================
-# ANALIZA ULTRA
-# =========================
-
-def analyze_ultra(symbol, candles):
-    closes = [c["close"] for c in candles]
-    highs = [c["high"] for c in candles]
-    lows = [c["low"] for c in candles]
-    volumes = [c["volume"] for c in candles]
-
-    last = closes[-1]
-    prev = candles[-2]
-
-    ema10 = ema(closes, 10)
-    ema50 = ema(closes, 50)
-    ema200 = ema(closes, 200)
-    rsi14_v = rsi(closes, 14)
-    atr14_v = atr(candles, 14)
-    macd_v, macd_sig, macd_hist = macd_calc(closes)
-    vol20 = sma(volumes, 20)
-    vol_rel = volumes[-1] / vol20 if vol20 else 1
-
-    s = 1 if last > ema10 else -1
-    m = 1 if last > ema50 else -1
-    l = 1 if last > ema200 else -1
-    trend_score = s + 2*m + 3*l
-
-    P = (prev["high"] + prev["low"] + prev["close"]) / 3
-    R1 = 2 * P - prev["low"]
-    S1 = 2 * P - prev["high"]
-
-    high52 = max(highs)
-    low52 = min(lows)
-
-    tp = high52
-    sl = low52
-
-    dist = (last - high52) / high52 if high52 else 0
-    breakout = 3 * dist + 2 * vol_rel + (rsi14_v / 100)
-
-    pressure = "KUPUJĄCY DOMINUJĄ" if last > (prev["open"] + prev["close"]) / 2 else "SPRZEDAJĄCY DOMINUJĄ"
-
-    momentum = last - closes[-5]
-    volatility = max(highs[-10:]) - min(lows[-10:])
-
-    body = candles[-1]["close"] - candles[-1]["open"]
-    rng = candles[-1]["high"] - candles[-1]["low"]
-    if body > 0 and abs(body) > 0.6 * rng:
-        candle_pattern = "MOCNA BYCZA ŚWIECA"
-    elif body < 0 and abs(body) > 0.6 * rng:
-        candle_pattern = "MOCNA NIEDŹWIEDZIA ŚWIECA"
-    else:
-        candle_pattern = "BRAK"
-
-    if breakout > 5:
-        setup = "BREAKOUT LONG"
-    elif breakout < -2:
-        setup = "BREAKOUT SHORT"
-    else:
-        setup = "NEUTRAL"
-
-    if atr14_v < last * 0.01:
-        risk = "NISKIE"
-    elif atr14_v < last * 0.02:
-        risk = "ŚREDNIE"
-    else:
-        risk = "WYSOKIE"
-
-    if trend_score >= 4 and breakout > 3:
-        signal = "KUP"
-    elif trend_score <= -2:
-        signal = "SPRZEDAJ"
-    else:
-        signal = "TRZYMAJ"
-
-    return {
-        "symbol": symbol,
-        "last": last,
-        "trend_score": trend_score,
-        "ema10": ema10,
-        "ema50": ema50,
-        "ema200": ema200,
-        "rsi14": rsi14_v,
-        "atr14": atr14_v,
-        "macd": macd_v,
-        "macd_signal": macd_sig,
-        "macd_hist": macd_hist,
-        "volume_rel": vol_rel,
-        "breakout": breakout,
-        "pivot_P": P,
-        "pivot_R1": R1,
-        "pivot_S1": S1,
-        "tp": tp,
-        "sl": sl,
-        "pressure": pressure,
-        "momentum": momentum,
-        "volatility": volatility,
-        "candle_pattern": candle_pattern,
-        "setup": setup,
-        "risk": risk,
-        "signal": signal,
-        "raw_candles": candles[-100:],
-    }
-
-# =========================
-# AI — gpt‑4o‑mini
-# =========================
-
-def call_ai_gpt40mini(payload: dict) -> str:
-    url = "https://api.openai.com/v1/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {st.secrets['OPENAI_API_KEY']}",
-    }
-    body = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Jesteś profesjonalnym analitykiem giełdowym. "
-                    "Odpowiadasz po polsku. "
-                    "Tworzysz krótki komentarz inwestycyjny."
-                ),
-            },
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ],
-        "temperature": 0.25,
-        "max_tokens": 500,
-    }
-    r = requests.post(url, headers=headers, json=body, timeout=30)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
-
-# =========================
-# UI + KOLORY
-# =========================
-
-st.set_page_config(page_title="NEON KOMBAJN ULTRA", layout="wide")
-
+# --- CSS NEON + HEATMAP + ALERTY ---
 st.markdown("""
 <style>
-body { background-color: #050510; color: #e0e0ff; }
-.block { background: #0a0a18; padding: 20px; margin-bottom: 25px; border-radius: 12px;
-         border: 1px solid #222; box-shadow: 0 0 12px #00eaff33; }
-.title { font-size: 26px; font-weight: bold; color: #00eaff; }
-.section { font-size: 16px; margin-top: 10px; color: #9ad7ff; }
-.value { font-size: 18px; font-weight: bold; color: #ffffff; }
-.ai-block { background: #111122; padding: 15px; border-radius: 10px; margin-top: 10px; border: 1px solid #333; }
-.signal-KUP { color: #00ff88; font-weight: 700; }
-.signal-TRZYMAJ { color: #00aaff; font-weight: 700; }
-.signal-SPRZEDAJ { color: #ff0044; font-weight: 700; }
+body { background:#050510; color:#e0e0ff; }
+.stApp { background:#050510; }
+
+.tile {
+    border-radius:18px; padding:18px; text-align:center;
+    border:1px solid #222; box-shadow:0 0 25px #39FF1422;
+    min-height:330px;
+}
+
+/* ALERTY */
+.tile-KUP { background:#002000; box-shadow:0 0 25px #00FF0044; }
+.tile-SPRZEDAJ { background:#200000; box-shadow:0 0 25px #FF000044; }
+.tile-TRZYMAJ { background:#001820; box-shadow:0 0 25px #00FFFF44; }
+
+/* HEATMAP TRENDÓW */
+.trend-strong-up { border:2px solid #00FF00; }
+.trend-up { border:2px solid #39FF14; }
+.trend-neutral { border:2px solid #888; }
+.trend-down { border:2px solid #FF3131; }
+.trend-strong-down { border:2px solid #FF0000; }
+
+.price { font-size:2.2rem; font-weight:bold; color:white; }
+.bid { color:#00FF00; font-weight:bold; }
+.ask { color:#FF3131; font-weight:bold; }
+
+.tp { color:#00FF00; font-weight:bold; }
+.sl { color:#FF3131; font-weight:bold; }
+
+.signal-KUP {
+    color:#39FF14; border:2px solid #39FF14;
+    padding:6px; border-radius:10px; font-weight:bold;
+}
+.signal-SPRZEDAJ {
+    color:#FF3131; border:2px solid #FF3131;
+    padding:6px; border-radius:10px; font-weight:bold;
+}
+.signal-TRZYMAJ {
+    color:#00FFFF; border:2px solid #00FFFF;
+    padding:6px; border-radius:10px; font-weight:bold;
+}
+
+.stButton>button {
+    background:#111; border:2px solid #39FF14;
+    color:#39FF14; font-weight:bold; width:100%;
+    box-shadow:0 0 15px #39FF1444;
+}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("💹 NEON KOMBAJN ULTRA — z AI")
+# --- AI ---
+client = None
+if "OPENAI_API_KEY" in st.secrets:
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-symbols_input = st.text_input("Tickery:", "AAPL, MSFT, TSLA, NVDA")
-symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
+# --- AUTOREFRESH ---
+st_autorefresh(interval=5 * 60 * 1000, key="mega_ultra_v3")
 
-@st.cache_data(show_spinner=False)
-def load_candles(symbol: str):
-    data = yf.download(symbol, period="6mo", interval="1d").dropna()
-
-    def to_float(x):
-        try:
-            return float(x)
-        except Exception:
-            try:
-                return float(x.item())
-            except Exception:
-                return float(x.astype(float))
-
-    candles = []
-    for _, r in data.iterrows():
-        candles.append({
-            "open": to_float(r["Open"]),
-            "high": to_float(r["High"]),
-            "low": to_float(r["Low"]),
-            "close": to_float(r["Close"]),
-            "volume": to_float(r["Volume"]),
-        })
-    return candles
-
-if "run_id" not in st.session_state:
-    st.session_state["run_id"] = 0
-st.session_state["run_id"] += 1
-
-for symbol in symbols:
-    st.markdown(f"<div class='block'><div class='title'>{symbol}</div>", unsafe_allow_html=True)
-
+# --- ULTRA ENGINE ---
+def ultra(symbol):
     try:
-        candles = load_candles(symbol)
-        analysis = analyze_ultra(symbol, candles)
-    except Exception as e:
-        st.error(f"Błąd: {e}")
-        st.markdown("</div>", unsafe_allow_html=True)
-        continue
+        tk = yf.Ticker(symbol)
+        df = tk.history(period="1y")
+        if df.empty:
+            return None
 
-    def row(label, value):
-        st.markdown(f"<div class='section'>{label}:</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='value'>{value}</div>", unsafe_allow_html=True)
+        last = df["Close"].iloc[-1]
+        high = df["High"].iloc[-1]
+        low = df["Low"].iloc[-1]
+        open_ = df["Open"].iloc[-1]
 
-    row("Kurs", f"{analysis['last']:.2f}")
-    row("Trend (score)", analysis["trend_score"])
-    row("EMA10 / EMA50 / EMA200", f"{analysis['ema10']:.2f} / {analysis['ema50']:.2f} / {analysis['ema200']:.2f}")
-    row("RSI14 / ATR14", f"{analysis['rsi14']:.2f} / {analysis['atr14']:.2f}")
-    row("MACD / sygnał / histogram", f"{analysis['macd']:.2f} / {analysis['macd_signal']:.2f} / {analysis['macd_hist']:.2f}")
-    row("Wolumen relatywny", f"{analysis['volume_rel']:.2f}")
-    row("Breakout score", f"{analysis['breakout']:.2f}")
-    row("Pivot P / R1 / S1", f"{analysis['pivot_P']:.2f} / {analysis['pivot_R1']:.2f} / {analysis['pivot_S1']:.2f}")
-    row("TP / SL", f"{analysis['tp']:.2f} / {analysis['sl']:.2f}")
-    row("Presja rynku", analysis["pressure"])
-    row("Momentum / zmienność", f"{analysis['momentum']:.2f} / {analysis['volatility']:.2f}")
-    row("Formacja świecowa", analysis["candle_pattern"])
-    row("Setup", analysis["setup"])
-    row("Ryzyko", analysis["risk"])
+        # Świeca
+        body = abs(last - open_)
+        range_ = high - low
+        body_pct = (body / range_ * 100) if range_ != 0 else 0
+        direction = "BYCZA" if last > open_ else "NIEDŹWIEDZIA"
 
-    sig_class = f"signal-{analysis['signal']}"
-    st.markdown("<div class='section'>Sygnał końcowy:</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='value {sig_class}'>{analysis['signal']}</div>", unsafe_allow_html=True)
+        # MA / EMA
+        ma20 = df["Close"].rolling(20).mean().iloc[-1]
+        ma50 = df["Close"].rolling(50).mean().iloc[-1]
+        ma200 = df["Close"].rolling(200).mean().iloc[-1]
+        ema200 = df["Close"].ewm(span=200).mean().iloc[-1]
 
-    if st.button(f"🤖 Analiza AI dla {symbol}", key=f"ai_{symbol}_{st.session_state['run_id']}"):
-        payload = {
+        # Trend score
+        t1 = 1 if last > ma20 else -1
+        t2 = 2 if last > ma50 else -2
+        t3 = 3 if last > ma200 else -3
+        score = t1 + t2 + t3
+
+        # RSI
+        delta = df["Close"].diff()
+        gain = delta.where(delta > 0, 0).rolling(14).mean().iloc[-1]
+        loss = -delta.where(delta < 0, 0).rolling(14).mean().iloc[-1]
+        rsi = 100 - (100 / (1 + (gain/loss if loss != 0 else 0)))
+
+        # ATR
+        tr = pd.concat([
+            df["High"] - df["Low"],
+            abs(df["High"] - df["Close"].shift()),
+            abs(df["Low"] - df["Close"].shift())
+        ], axis=1).max(axis=1)
+        atr = tr.rolling(14).mean().iloc[-1]
+
+        # Swing
+        swing_high = df["High"].tail(10).max()
+        swing_low = df["Low"].tail(10).min()
+
+        # TP/SL
+        tp = max(last + atr * 2, swing_high)
+        sl = min(last - atr * 1.5, swing_low)
+
+        # Pivot
+        pivot = (high + low + last) / 3
+        r1 = 2 * pivot - low
+        s1 = 2 * pivot - high
+
+        # Wolumen
+        vol_rel = df["Volume"].iloc[-1] / df["Volume"].tail(20).mean()
+
+        # Sygnał
+        if score >= 4 and rsi < 70:
+            signal = "KUP"
+        elif score <= -3 and rsi > 30:
+            signal = "SPRZEDAJ"
+        else:
+            signal = "TRZYMAJ"
+
+        # Heatmap trend
+        if score >= 5:
+            trend_class = "trend-strong-up"
+        elif score >= 2:
+            trend_class = "trend-up"
+        elif score <= -5:
+            trend_class = "trend-strong-down"
+        elif score <= -2:
+            trend_class = "trend-down"
+        else:
+            trend_class = "trend-neutral"
+
+        return {
             "symbol": symbol,
-            "analysis": {k: v for k, v in analysis.items() if k != "raw_candles"},
-            "candles_tail": analysis["raw_candles"],
+            "price": last,
+            "bid": tk.info.get("bid", "-"),
+            "ask": tk.info.get("ask", "-"),
+            "ma20": ma20, "ma50": ma50, "ma200": ma200,
+            "ema200": ema200,
+            "body_pct": body_pct,
+            "direction": direction,
+            "score": score,
+            "rsi": rsi,
+            "atr": atr,
+            "swing_high": swing_high,
+            "swing_low": swing_low,
+            "tp": tp, "sl": sl,
+            "pivot": pivot, "r1": r1, "s1": s1,
+            "vol": vol_rel,
+            "signal": signal,
+            "trend_class": trend_class,
+            "df": df.tail(60)  # do mini-wykresu
         }
-        with st.spinner("AI analizuje..."):
-            try:
-                ai_text = call_ai_gpt40mini(payload)
-            except Exception as e:
-                ai_text = f"Błąd AI: {e}"
 
-        st.markdown("<div class='ai-block'>", unsafe_allow_html=True)
-        st.markdown("### 🤖 Wynik analizy AI:", unsafe_allow_html=True)
-        st.write(ai_text)
+    except:
+        return None
+
+# --- UI ---
+st.markdown("<h1 style='color:#39FF14; text-shadow:0 0 15px #39FF14;'>🚀 NEON ULTRA PRO MAX</h1>", unsafe_allow_html=True)
+
+st.sidebar.title("💠 KONTROLA")
+tickers_in = st.sidebar.text_area("Tickery:", "CDR.WA PKO.WA AAPL NVDA TSLA BTC-USD", height=200)
+tickers = [x.strip().upper() for x in tickers_in.replace(",", " ").split() if x.strip()]
+
+if not tickers:
+    st.info("Wklej tickery w sidebarze.")
+    st.stop()
+
+results = []
+for t in tickers:
+    r = ultra(t)
+    if r:
+        results.append(r)
+
+# --- KAFELKI ---
+cols = st.columns(3)
+
+for i, r in enumerate(results):
+    with cols[i % 3]:
+
+        # Mini wykres
+        fig, ax = plt.subplots(figsize=(3, 1.2))
+        ax.plot(r["df"]["Close"].values, color="#39FF14")
+        ax.set_axis_off()
+
+        st.markdown(
+            f"<div class='tile tile-{r['signal']} {r['trend_class']}'>",
+            unsafe_allow_html=True
+        )
+
+        st.pyplot(fig)
+
+        st.markdown(f"""
+        <div style="font-size:1.6rem; color:#39FF14; font-weight:bold;">{r['symbol']}</div>
+        <div class="price">{r['price']:.2f}</div>
+        <span class="bid">B: {r['bid']}</span> | <span class="ask">A: {r['ask']}</span>
+        <hr>
+        MA20: {r['ma20']:.2f}<br>
+        MA50: {r['ma50']:.2f}<br>
+        MA200: {r['ma200']:.2f}
+        <hr>
+        Swing High: {r['swing_high']:.2f}<br>
+        Swing Low: {r['swing_low']:.2f}
+        <hr>
+        <b>TP:</b> <span class="tp">{r['tp']:.2f}</span><br>
+        <b>SL:</b> <span class="sl">{r['sl']:.2f}</span>
+        <hr>
+        <div class="signal-{r['signal']}">{r['signal']}</div>
+        """, unsafe_allow_html=True)
+
         st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+        if st.button(f"AI – {r['symbol']}", key=f"ai_{r['symbol']}"):
+            if client:
+                with st.spinner("Analiza AI..."):
+                    prompt = (
+                        f"Analiza {r['symbol']}: Kurs {r['price']}, Trend score {r['score']}, "
+                        f"RSI {r['rsi']:.1f}, ATR {r['atr']:.2f}, TP {r['tp']:.2f}, SL {r['sl']:.2f}. "
+                        "Podaj: 1. Ocena wejścia, 2. Ryzyko, 3. Werdykt. Zero lania wody."
+                    )
+                    resp = client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[
+                            {"role": "system", "content": "Jesteś bezdusznym systemem operacyjnym. Mówisz tylko o faktach."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        temperature=0.1
+                    )
+                    st.info(resp.choices[0].message.content)
