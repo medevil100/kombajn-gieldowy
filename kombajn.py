@@ -1,171 +1,415 @@
-import streamlit as st
-from openai import OpenAI
-import yfinance as yf
-import pandas as pd
-import plotly.graph_objects as go
-from streamlit_autorefresh import st_autorefresh
-import json
-import os
 
-# --- 1. KONFIGURACJA ---
-st.set_page_config(page_title="NEON COMMANDER v102", page_icon="⚡", layout="wide")
+// neon_breakout_scanner_single_module.js
+// Jednomodułowy skaner: real-time, TOP10 wybicia, trendy S/M/L, 52W, pivot, TP/SL, AI analiza
 
-DB_FILE = "moje_spolki.txt"
-CAP_FILE = "kapital.txt"
+// =========================
+// KONFIGURACJA
+// =========================
+const CONFIG = {
+  api: {
+    baseRest: "https://your-broker-rest-endpoint",
+    baseWs: "wss://your-broker-ws-endpoint",
+    secretKeyHeader: "x-api-key"
+    // klucz trzymasz w secrecie na stimi / env, NIE w kodzie
+  },
+  refreshIntervalsMinutes: [1, 2, 3, 5, 10],
+  defaultRefreshMinutes: 1,
+  maxCandlesHistory: 200,
+  topBreakoutLimit: 10
+};
 
-def load_cap():
-    if os.path.exists(CAP_FILE):
-        try:
-            with open(CAP_FILE, "r") as f: return float(f.read())
-        except: return 40000.0
-    return 40000.0
+// =========================
+// STAN APLIKACJI
+// =========================
+const STATE = {
+  watchlist: [],          // lista symboli
+  tickers: {},            // symbol -> TickerData
+  ws: null,               // WebSocket
+  refreshTimer: null,
+  refreshMinutes: CONFIG.defaultRefreshMinutes,
+  aiSelected: new Set(),  // symbole wybrane do AI
+  lastTop10: []           // ostatnia lista TOP10
+};
 
-def save_cap(val):
-    with open(CAP_FILE, "w") as f: f.write(str(val))
+// =========================
+// TYPY / STRUKTURY
+// =========================
+/**
+ * @typedef {Object} TickerData
+ * @property {string} symbol
+ * @property {number} bid
+ * @property {number} ask
+ * @property {number} last
+ * @property {number} volume
+ * @property {string} time
+ * @property {number[]} closes
+ * @property {number[]} highs
+ * @property {number[]} lows
+ * @property {number[]} volumes
+ * @property {number} ema10
+ * @property {number} ema50
+ * @property {number} ema200
+ * @property {number} rsi14
+ * @property {number} high52w
+ * @property {number} low52w
+ * @property {{P:number,R1:number,S1:number}} pivot
+ * @property {{short:string,mid:string,long:string,score:number}} trend
+ * @property {{tp:number,sl:number}} tpSl
+ * @property {number} breakoutScore
+ * @property {{signal:string,tp:number,sl:number,notes:string[]}|null} ai
+ */
 
-if "risk_cap_pln" not in st.session_state: st.session_state.risk_cap_pln = load_cap()
-if "ai_memo" not in st.session_state: st.session_state.ai_memo = {}
+// =========================
+// FUNKCJE POMOCNICZE (MATH)
+// =========================
+function ema(values, period) {
+  if (!values || values.length === 0) return NaN;
+  const k = 2 / (period + 1);
+  let emaVal = values[0];
+  for (let i = 1; i < values.length; i++) {
+    emaVal = values[i] * k + emaVal * (1 - k);
+  }
+  return emaVal;
+}
 
-# Auto-odświeżanie cen co 60s
-st_autorefresh(interval=60 * 1000, key="price_refresh")
+function sma(values, period) {
+  if (!values || values.length < period) return NaN;
+  const slice = values.slice(-period);
+  const sum = slice.reduce((a, b) => a + b, 0);
+  return sum / period;
+}
 
-# --- 2. STYLE NEONOWE ---
-st.markdown("""
-<style>
-    .stApp { background-color: #020202; color: #e0e0e0; font-family: 'Courier New', monospace; }
-    .neon-card { background: #0d1117; border: 1px solid #30363d; padding: 20px; border-radius: 15px; margin-bottom: 20px; }
-    .neon-card-buy { border: 2px solid #00ff88 !important; box-shadow: 0 0 15px rgba(0,255,136,0.2); }
-    .top-tile { background: #161b22; border-radius: 12px; padding: 12px; text-align: center; min-height: 120px; border-bottom: 4px solid #58a6ff; }
-    .trend-tag { padding: 1px 4px; border-radius: 3px; font-size: 0.65rem; margin-right: 2px; border: 1px solid #444; }
-    .ai-full-box { background: rgba(88, 166, 255, 0.1); border-left: 4px solid #58a6ff; padding: 15px; margin-top: 10px; border-radius: 5px; font-size: 0.85rem; color: #accaff; }
-</style>
-""", unsafe_allow_html=True)
+function rsi(values, period = 14) {
+  if (!values || values.length <= period) return NaN;
+  let gains = 0;
+  let losses = 0;
+  for (let i = values.length - period; i < values.length; i++) {
+    const diff = values[i] - values[i - 1];
+    if (diff > 0) gains += diff;
+    else losses -= diff;
+  }
+  const avgGain = gains / period;
+  const avgLoss = losses / period;
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - 100 / (1 + rs);
+}
 
-# --- 3. SILNIK DANYCH ---
-def get_usdpln():
-    try: return float(yf.Ticker("USDPLN=X").fast_info['last_price'])
-    except: return 4.0
+// =========================
+// TREND / PIVOT / TP-SL / BREAKOUT
+// =========================
+function calcTrend(close, ema10, ema50, ema200) {
+  const s = Math.sign(close - ema10);
+  const m = Math.sign(close - ema50);
+  const l = Math.sign(close - ema200);
+  const score = 1 * s + 2 * m + 3 * l;
 
-def get_data(symbol):
-    try:
-        t = yf.Ticker(symbol.strip().upper())
-        df = t.history(period="1y", interval="1d")
-        if df.empty: return None
-        p = t.fast_info['last_price']
-        info = t.info
-        bid, ask = info.get('bid') or p*0.9998, info.get('ask') or p*1.0002
-        delta = df['Close'].diff()
-        rsi = float(100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / (delta.where(delta < 0, 0).abs().rolling(14).mean() + 1e-9)))).iloc[-1])
-        sma20, sma50, sma200 = df['Close'].rolling(20).mean().iloc[-1], df['Close'].rolling(50).mean().iloc[-1], df['Close'].rolling(200).mean().iloc[-1]
-        trends = {"K": "UP" if p > sma20 else "DN", "S": "UP" if p > sma50 else "DN", "D": "UP" if p > (sma200 if not pd.isna(sma200) else sma50) else "DN"}
-        return {"symbol": symbol.upper(), "price": p, "bid": bid, "ask": ask, "rsi": rsi, "trends": trends, "df": df.tail(45)}
-    except: return None
+  const toTrend = (x) => (x > 0 ? "UP" : x < 0 ? "DOWN" : "NEUTRAL");
 
-def get_ai_analysis(d, key):
-    try:
-        client = OpenAI(api_key=key)
-        prompt = (f"Analiza {d['symbol']} cena {d['price']}. RSI:{d['rsi']:.1f}, Trendy:{d['trends']}. "
-                  f"Odpowiedz po polsku. JSON: {{\"w\": \"KUP/CZEKAJ/SPRZEDAJ\", \"sl\": {round(d['price']*0.94, 2)}, \"tp\": {round(d['price']*1.12, 2)}, \"u\": \"Powody\"}}")
-        resp = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"})
-        return json.loads(resp.choices[0].message.content)
-    except: return {"w": "BŁĄD", "u": "API Error"}
+  return {
+    short: toTrend(s),
+    mid: toTrend(m),
+    long: toTrend(l),
+    score
+  };
+}
 
-# --- 4. PANEL BOCZNY ---
-usd_pln_rate = get_usdpln()
-with st.sidebar:
-    st.title("🚜 MONSTER v102")
-    api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI Key", type="password")
-    
-    st.session_state.risk_cap_pln = st.number_input("💵 Kapitał (PLN):", value=st.session_state.risk_cap_pln)
-    save_cap(st.session_state.risk_cap_pln)
-    
-    risk_pct = st.slider("🎯 Ryzyko na spółkę (%)", 1, 100, 10)
-    
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r") as f: default_tickers = f.read()
-    else: default_tickers = "NVDA, TSLA, AAPL"
-    
-    t_in = st.text_area("Twoje Spółki:", value=default_tickers, height=150)
-    
-    # PRZYCISKI AKCJI
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
-        if st.button("🚀 SKANUJ"):
-            with open(DB_FILE, "w") as f: f.write(t_in)
-            st.session_state.ai_memo = {}
-            st.rerun()
-    with col_btn2:
-        if st.button("🔄 REFRESH"):
-            st.rerun()
+function calcPivots(prevHigh, prevLow, prevClose) {
+  const P = (prevHigh + prevLow + prevClose) / 3;
+  const R1 = 2 * P - prevLow;
+  const S1 = 2 * P - prevHigh;
+  return { P, R1, S1 };
+}
 
-# --- 5. LOGIKA ---
-symbols = [s.strip().upper() for s in t_in.split(",") if s.strip()]
-data_list = [get_data(s) for s in symbols if get_data(s)]
+function calcTpSl(ticker) {
+  const tp = ticker.high52w || ticker.pivot.R1 || ticker.last * 1.05;
+  const sl = ticker.low52w || ticker.pivot.S1 || ticker.last * 0.95;
+  return { tp, sl };
+}
 
-if data_list:
-    st.subheader("🔥 RADAR RSI (TOP 10)")
-    sorted_top = sorted(data_list, key=lambda x: x['rsi'])[:10]
-    cols = st.columns(5); cols2 = st.columns(5); all_cols = cols + cols2
-    
-    for i, r in enumerate(sorted_top):
-        with all_cols[i]:
-            ai_data = st.session_state.ai_memo.get(r['symbol'], {"w": "---"})
-            v_col = "#00ff88" if "KUP" in str(ai_data['w']).upper() else "#ff4b4b" if "SPRZEDAJ" in str(ai_data['w']).upper() else "#58a6ff"
-            t_str = "".join([f'<span class="trend-tag" style="color:{"#00ff88" if v=="UP" else "#ff4b4b"}">{k}</span>' for k,v in r['trends'].items()])
-            
-            st.markdown(f"""
-                <div class="top-tile" style="border-bottom: 4px solid {v_col}">
-                    <b>{r["symbol"]}</b><br>
-                    <span style="color:{v_col}">{r["price"]:.2f} USD</span><br>
-                    {t_str}<br>
-                    <b style="color:{v_col}; font-size:0.7rem;">{ai_data['w']}</b><br>
-                    <small>RSI: {r['rsi']:.1f}</small>
-                </div>
-            """, unsafe_allow_html=True)
+function calcBreakoutScore(ticker) {
+  const dist52 = ticker.high52w
+    ? (ticker.last - ticker.high52w) / ticker.high52w
+    : 0;
+  const volSma20 = sma(ticker.volumes, 20);
+  const volRel = volSma20 ? ticker.volume / volSma20 : 1;
+  const mom = ticker.rsi14 ? ticker.rsi14 / 100 : 0.5;
+  return 3 * dist52 + 2 * volRel + 1 * mom;
+}
 
-    st.divider()
+function signalFromTrendScore(score) {
+  if (score >= 4) return "BUY";
+  if (score <= -2) return "SELL";
+  return "HOLD";
+}
 
-    for d in data_list:
-        ai = st.session_state.ai_memo.get(d['symbol'], {"w": "---", "u": "Kliknij przycisk poniżej."})
-        is_buy = "KUP" in str(ai.get('w','')).upper()
-        
-        st.markdown(f'<div class="neon-card {"neon-card-buy" if is_buy else ""}">', unsafe_allow_html=True)
-        c1, c2, c3 = st.columns([1.5, 3, 1.5])
-        with c1:
-            st.markdown(f"## {d['symbol']}")
-            t_html = "".join([f'<span class="trend-tag" style="color:{"#00ff88" if v=="UP" else "#ff4b4b"}">{k}:{v}</span>' for k,v in d['trends'].items()])
-            st.markdown(t_html, unsafe_allow_html=True)
-            st.markdown(f"<h3 style='color:{"#00ff88" if is_buy else "#ff4b4b"}'>{ai['w']}</h3>", unsafe_allow_html=True)
-            st.write(f"CENA: **{d['price']:.2f}**")
-            st.markdown(f"B: <span style='color:#00ff88'>{d['bid']:.2f}</span> | A: <span style='color:#ff4b4b'>{d['ask']:.2f}</span>", unsafe_allow_html=True)
-        with c2:
-            fig = go.Figure(data=[go.Candlestick(x=d['df'].index, open=d['df']['Open'], high=d['df']['High'], low=d['df']['Low'], close=d['df']['Close'])])
-            fig.update_layout(template="plotly_dark", height=200, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig, use_container_width=True, key=f"f_{d['symbol']}")
-            
-            if st.button(f"🧠 ANALIZA AI ({d['symbol']})", key=f"btn_{d['symbol']}"):
-                with st.spinner("Analizowanie..."):
-                    st.session_state.ai_memo[d['symbol']] = get_ai_analysis(d, api_key)
-                    st.rerun()
-            
-            if d['symbol'] in st.session_state.ai_memo:
-                st.markdown(f'<div class="ai-full-box"><b>ANALIZA TECHNICZNA (PL):</b><br>{st.session_state.ai_memo[d["symbol"]]["u"]}</div>', unsafe_allow_html=True)
+// =========================
+// REAL-TIME / REST
+// =========================
+async function fetchWatchlist() {
+  // TODO: podłącz do własnego źródła (plik, API, baza)
+  // Na razie przykładowo:
+  STATE.watchlist = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"];
+}
 
-        with c3:
-            price_pln = d['ask'] * usd_pln_rate
-            budget_pln = st.session_state.risk_cap_pln * (risk_pct / 100)
-            max_qty = int(budget_pln / price_pln) if price_pln > 0 else 0
-            
-            st.markdown("**SZTUKI:**")
-            buy_qty = st.slider("Wybierz", 0, max_qty, 0, key=f"sld_{d['symbol']}")
-            cost_now = buy_qty * price_pln
-            st.write(f"Koszt: {cost_now:.2f} PLN")
-            
-            if st.button(f"ZATWIERDŹ KUPNO", key=f"buy_{d['symbol']}"):
-                if buy_qty > 0:
-                    st.session_state.risk_cap_pln -= cost_now
-                    save_cap(st.session_state.risk_cap_pln)
-                    st.rerun()
-            
-            st.markdown(f"TP: <span style='color:#00ff88'>{ai.get('tp','-')}</span> | SL: <span style='color:#ff4b4b'>{ai.get('sl','-')}</span>", unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+async function fetchHistoryForSymbol(symbol) {
+  // TODO: REST history endpoint
+  // Zwróć przykładowe dane (mock) – do podmiany na realne
+  const candles = [];
+  const now = Date.now();
+  let price = 100;
+  for (let i = 0; i < CONFIG.maxCandlesHistory; i++) {
+    const high = price * (1 + Math.random() * 0.01);
+    const low = price * (1 - Math.random() * 0.01);
+    const close = low + Math.random() * (high - low);
+    const volume = 1000 + Math.random() * 5000;
+    candles.push({
+      time: new Date(now - (CONFIG.maxCandlesHistory - i) * 60000).toISOString(),
+      high,
+      low,
+      close,
+      volume
+    });
+    price = close;
+  }
+  return candles;
+}
+
+async function initTicker(symbol) {
+  const candles = await fetchHistoryForSymbol(symbol);
+  const closes = candles.map((c) => c.close);
+  const highs = candles.map((c) => c.high);
+  const lows = candles.map((c) => c.low);
+  const volumes = candles.map((c) => c.volume);
+
+  const ema10 = ema(closes, 10);
+  const ema50 = ema(closes, 50);
+  const ema200 = ema(closes, 200);
+  const rsi14 = rsi(closes, 14);
+
+  const lastClose = closes[closes.length - 1];
+  const prev = candles[candles.length - 2] || candles[candles.length - 1];
+  const pivot = calcPivots(prev.high, prev.low, prev.close);
+
+  const high52w = Math.max(...highs);
+  const low52w = Math.min(...lows);
+
+  const trend = calcTrend(lastClose, ema10, ema50, ema200);
+  const tpSl = calcTpSl({
+    last: lastClose,
+    high52w,
+    low52w,
+    pivot
+  });
+  const breakoutScore = calcBreakoutScore({
+    last: lastClose,
+    high52w,
+    volume: volumes[volumes.length - 1],
+    volumes,
+    rsi14
+  });
+
+  /** @type {TickerData} */
+  const ticker = {
+    symbol,
+    bid: lastClose * 0.999,
+    ask: lastClose * 1.001,
+    last: lastClose,
+    volume: volumes[volumes.length - 1],
+    time: new Date().toISOString(),
+    closes,
+    highs,
+    lows,
+    volumes,
+    ema10,
+    ema50,
+    ema200,
+    rsi14,
+    high52w,
+    low52w,
+    pivot,
+    trend,
+    tpSl,
+    breakoutScore,
+    ai: null
+  };
+
+  STATE.tickers[symbol] = ticker;
+}
+
+function connectWebSocket() {
+  // TODO: podłącz do realnego WS brokera
+  // Tu mock: co kilka sekund aktualizujemy last/bid/ask/volume
+  setInterval(() => {
+    STATE.watchlist.forEach((symbol) => {
+      const t = STATE.tickers[symbol];
+      if (!t) return;
+      const delta = (Math.random() - 0.5) * 0.5;
+      const newLast = Math.max(0.01, t.last + delta);
+      t.last = newLast;
+      t.bid = newLast * 0.999;
+      t.ask = newLast * 1.001;
+      t.volume = t.volume + Math.random() * 1000;
+      t.time = new Date().toISOString();
+
+      // aktualizacja wskaźników na podstawie nowej ceny
+      t.closes.push(newLast);
+      if (t.closes.length > CONFIG.maxCandlesHistory) t.closes.shift();
+      t.ema10 = ema(t.closes, 10);
+      t.ema50 = ema(t.closes, 50);
+      t.ema200 = ema(t.closes, 200);
+      t.rsi14 = rsi(t.closes, 14);
+      t.trend = calcTrend(t.last, t.ema10, t.ema50, t.ema200);
+      t.tpSl = calcTpSl(t);
+      t.breakoutScore = calcBreakoutScore(t);
+    });
+  }, 3000);
+}
+
+// =========================
+// AI ANALIZA
+// =========================
+async function analyzeWithAI(ticker) {
+  // TODO: podłącz do prawdziwego endpointu AI (klucz z secreta)
+  // Tu mock – szybka, konkretna odpowiedź
+  const signal = signalFromTrendScore(ticker.trend.score);
+  const tp = ticker.tpSl.tp;
+  const sl = ticker.tpSl.sl;
+  const notes = [
+    `Trend S/M/L: ${ticker.trend.short}/${ticker.trend.mid}/${ticker.trend.long}`,
+    `RSI14: ${ticker.rsi14.toFixed(1)}`,
+    `Cena vs 52W High: ${ticker.last.toFixed(2)} / ${ticker.high52w.toFixed(2)}`
+  ];
+  ticker.ai = { signal, tp, sl, notes };
+  return ticker.ai;
+}
+
+// =========================
+// LOGIKA TOP10 WYBICIA
+// =========================
+function computeTop10Breakouts() {
+  const list = Object.values(STATE.tickers);
+  const sorted = list
+    .slice()
+    .sort((a, b) => b.breakoutScore - a.breakoutScore)
+    .slice(0, CONFIG.topBreakoutLimit);
+  STATE.lastTop10 = sorted.map((t) => t.symbol);
+  return sorted;
+}
+
+// =========================
+// RENDER (NA RAZIE: KONSOLE / JSON)
+// =========================
+function renderTable() {
+  const rows = Object.values(STATE.tickers).map((t) => {
+    const signal = signalFromTrendScore(t.trend.score);
+    return {
+      symbol: t.symbol,
+      bidAsk: `${t.bid.toFixed(2)} / ${t.ask.toFixed(2)}`,
+      last: t.last.toFixed(2),
+      trendS: t.trend.short,
+      trendM: t.trend.mid,
+      trendL: t.trend.long,
+      signal,
+      high52w: t.high52w.toFixed(2),
+      low52w: t.low52w.toFixed(2),
+      pivotP: t.pivot.P.toFixed(2),
+      tp: t.tpSl.tp.toFixed(2),
+      sl: t.tpSl.sl.toFixed(2),
+      breakoutScore: t.breakoutScore.toFixed(2),
+      aiSignal: t.ai ? t.ai.signal : null
+    };
+  });
+
+  console.clear();
+  console.log("=== NEON BREAKOUT SCANNER (ALL) ===");
+  console.table(rows);
+
+  const top10 = computeTop10Breakouts().map((t) => t.symbol);
+  console.log("TOP10 BREAKOUT:", top10.join(", "));
+}
+
+// =========================
+// ODŚWIEŻANIE
+// =========================
+function setRefreshInterval(minutes) {
+  STATE.refreshMinutes = minutes;
+  if (STATE.refreshTimer) clearInterval(STATE.refreshTimer);
+  STATE.refreshTimer = setInterval(() => {
+    renderTable();
+  }, minutes * 60 * 1000);
+}
+
+function manualRefresh() {
+  renderTable();
+}
+
+// =========================
+// AI ANALIZA DLA WYBRANYCH
+// =========================
+async function runAiForSelected() {
+  const symbols = Array.from(STATE.aiSelected);
+  for (const symbol of symbols) {
+    const t = STATE.tickers[symbol];
+    if (!t) continue;
+    await analyzeWithAI(t);
+  }
+  renderTable();
+}
+
+// =========================
+// API DLA UI (PRZYCISKI, CHECKBOXY)
+// =========================
+function toggleAiForSymbol(symbol) {
+  if (STATE.aiSelected.has(symbol)) STATE.aiSelected.delete(symbol);
+  else STATE.aiSelected.add(symbol);
+}
+
+function getStateSnapshot() {
+  return {
+    watchlist: STATE.watchlist,
+    tickers: STATE.tickers,
+    top10: STATE.lastTop10,
+    aiSelected: Array.from(STATE.aiSelected),
+    refreshMinutes: STATE.refreshMinutes
+  };
+}
+
+// =========================
+// START
+// =========================
+async function startNeonScanner() {
+  await fetchWatchlist();
+  for (const symbol of STATE.watchlist) {
+    await initTicker(symbol);
+  }
+  connectWebSocket();
+  setRefreshInterval(CONFIG.defaultRefreshMinutes);
+  manualRefresh();
+}
+
+// Uruchomienie (jeśli plik odpalany bezpośrednio w Node)
+if (require.main === module) {
+  startNeonScanner().catch(console.error);
+
+  // przykładowo: po 10 sekundach włącz AI dla pierwszego symbolu
+  setTimeout(() => {
+    const first = STATE.watchlist[0];
+    if (first) {
+      toggleAiForSymbol(first);
+      runAiForSelected();
+    }
+  }, 10000);
+}
+
+// Eksport do użycia w UI (np. w NEON COMMANDER)
+module.exports = {
+  startNeonScanner,
+  manualRefresh,
+  setRefreshInterval,
+  toggleAiForSymbol,
+  runAiForSelected,
+  getStateSnapshot,
+  CONFIG,
+  STATE
+};
