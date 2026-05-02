@@ -1,422 +1,128 @@
-# kombajn.py – NEON BREAKOUT SCANNER (jednomodułowy)
-# Real-time (mock), TOP10 wybicia, trendy S/M/L, 52W, pivot, TP/SL, AI analiza, Streamlit UI
-
-import time
-import random
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional
 import streamlit as st
+import yfinance as yf
+import pandas as pd
+import pandas_ta as ta
+from streamlit_autorefresh import st_autorefresh
+import openai
+import os
 
-# =========================
-# KONFIGURACJA
-# =========================
-REFRESH_INTERVALS = [1, 2, 3, 5, 10]  # minuty
-DEFAULT_REFRESH = 1
-MAX_CANDLES = 200
-TOP_LIMIT = 10
+# --- 1. KONFIGURACJA STRONY I DESIGN NEONOWY ---
+st.set_page_config(layout="wide", page_title="Neon AI Market Terminal")
 
-# =========================
-# STRUKTURY DANYCH
-# =========================
-@dataclass
-class Pivot:
-    P: float = 0.0
-    R1: float = 0.0
-    S1: float = 0.0
-
-
-@dataclass
-class TrendInfo:
-    short: str = "NEUTRAL"
-    mid: str = "NEUTRAL"
-    long: str = "NEUTRAL"
-    score: int = 0
-
-
-@dataclass
-class TpSl:
-    tp: float = 0.0
-    sl: float = 0.0
-
-
-@dataclass
-class AiResult:
-    signal: str
-    tp: float
-    sl: float
-    notes: List[str]
-
-
-@dataclass
-class TickerData:
-    symbol: str
-    bid: float = 0.0
-    ask: float = 0.0
-    last: float = 0.0
-    volume: float = 0.0
-    time: float = 0.0
-    closes: List[float] = field(default_factory=list)
-    highs: List[float] = field(default_factory=list)
-    lows: List[float] = field(default_factory=list)
-    volumes: List[float] = field(default_factory=list)
-    ema10: float = 0.0
-    ema50: float = 0.0
-    ema200: float = 0.0
-    rsi14: float = 0.0
-    high52w: float = 0.0
-    low52w: float = 0.0
-    pivot: Pivot = field(default_factory=Pivot)
-    trend: TrendInfo = field(default_factory=TrendInfo)
-    tpsl: TpSl = field(default_factory=TpSl)
-    breakout_score: float = 0.0
-    ai: Optional[AiResult] = None
-
-
-# =========================
-# FUNKCJE MATEMATYCZNE
-# =========================
-def ema(values: List[float], period: int) -> float:
-    if not values:
-        return float("nan")
-    k = 2 / (period + 1)
-    ema_val = values[0]
-    for v in values[1:]:
-        ema_val = v * k + ema_val * (1 - k)
-    return ema_val
-
-
-def sma(values: List[float], period: int) -> float:
-    if len(values) < period:
-        return float("nan")
-    s = values[-period:]
-    return sum(s) / period
-
-
-def rsi(values: List[float], period: int = 14) -> float:
-    if len(values) <= period:
-        return float("nan")
-    gains = 0.0
-    losses = 0.0
-    for i in range(len(values) - period, len(values)):
-        diff = values[i] - values[i - 1]
-        if diff > 0:
-            gains += diff
-        else:
-            losses -= diff
-    avg_gain = gains / period
-    avg_loss = losses / period
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100 - 100 / (1 + rs)
-
-
-# =========================
-# LOGIKA WSKAŹNIKÓW
-# =========================
-def calc_trend(close: float, ema10_v: float, ema50_v: float, ema200_v: float) -> TrendInfo:
-    s = 1 if close > ema10_v else -1 if close < ema10_v else 0
-    m = 1 if close > ema50_v else -1 if close < ema50_v else 0
-    l = 1 if close > ema200_v else -1 if close < ema200_v else 0
-    score = 1 * s + 2 * m + 3 * l
-
-    def to_trend(x: int) -> str:
-        if x > 0:
-            return "UP"
-        if x < 0:
-            return "DOWN"
-        return "NEUTRAL"
-
-    return TrendInfo(short=to_trend(s), mid=to_trend(m), long=to_trend(l), score=score)
-
-
-def calc_pivots(prev_high: float, prev_low: float, prev_close: float) -> Pivot:
-    P = (prev_high + prev_low + prev_close) / 3
-    R1 = 2 * P - prev_low
-    S1 = 2 * P - prev_high
-    return Pivot(P=P, R1=R1, S1=S1)
-
-
-def calc_tpsl(t: TickerData) -> TpSl:
-    tp = t.high52w or t.pivot.R1 or t.last * 1.05
-    sl = t.low52w or t.pivot.S1 or t.last * 0.95
-    return TpSl(tp=tp, sl=sl)
-
-
-def calc_breakout_score(t: TickerData) -> float:
-    dist52 = (t.last - t.high52w) / t.high52w if t.high52w else 0.0
-    vol_sma20 = sma(t.volumes, 20)
-    vol_rel = t.volume / vol_sma20 if vol_sma20 and vol_sma20 == vol_sma20 else 1.0
-    mom = t.rsi14 / 100 if t.rsi14 == t.rsi14 else 0.5
-    return 3 * dist52 + 2 * vol_rel + 1 * mom
-
-
-def signal_from_trend_score(score: int) -> str:
-    if score >= 4:
-        return "BUY"
-    if score <= -2:
-        return "SELL"
-    return "HOLD"
-
-
-# =========================
-# MOCK DANYCH HISTORYCZNYCH (DO PODMIANY NA API)
-# =========================
-def mock_history(symbol: str) -> List[Dict]:
-    candles = []
-    now = time.time()
-    price = random.uniform(50, 150)
-    for i in range(MAX_CANDLES):
-        high = price * (1 + random.random() * 0.01)
-        low = price * (1 - random.random() * 0.01)
-        close = random.uniform(low, high)
-        volume = random.uniform(1000, 5000)
-        candles.append(
-            {
-                "time": now - (MAX_CANDLES - i) * 60,
-                "high": high,
-                "low": low,
-                "close": close,
-                "volume": volume,
-            }
-        )
-        price = close
-    return candles
-
-
-def init_ticker(symbol: str) -> TickerData:
-    candles = mock_history(symbol)
-    closes = [c["close"] for c in candles]
-    highs = [c["high"] for c in candles]
-    lows = [c["low"] for c in candles]
-    volumes = [c["volume"] for c in candles]
-
-    ema10_v = ema(closes, 10)
-    ema50_v = ema(closes, 50)
-    ema200_v = ema(closes, 200)
-    rsi14_v = rsi(closes, 14)
-
-    last_close = closes[-1]
-    prev = candles[-2] if len(candles) > 1 else candles[-1]
-    pivot = calc_pivots(prev["high"], prev["low"], prev["close"])
-
-    high52w = max(highs)
-    low52w = min(lows)
-
-    trend = calc_trend(last_close, ema10_v, ema50_v, ema200_v)
-    tpsl = calc_tpsl(
-        TickerData(
-            symbol=symbol,
-            last=last_close,
-            high52w=high52w,
-            low52w=low52w,
-            pivot=pivot,
-        )
-    )
-
-    tmp = TickerData(
-        symbol=symbol,
-        bid=last_close * 0.999,
-        ask=last_close * 1.001,
-        last=last_close,
-        volume=volumes[-1],
-        time=time.time(),
-        closes=closes,
-        highs=highs,
-        lows=lows,
-        volumes=volumes,
-        ema10=ema10_v,
-        ema50=ema50_v,
-        ema200=ema200_v,
-        rsi14=rsi14_v,
-        high52w=high52w,
-        low52w=low52w,
-        pivot=pivot,
-        trend=trend,
-        tpsl=tpsl,
-    )
-    tmp.breakout_score = calc_breakout_score(tmp)
-    return tmp
-
-
-# =========================
-# MOCK REAL-TIME (DO PODMIANY NA WEBSOCKET/API)
-# =========================
-def update_realtime(t: TickerData) -> None:
-    delta = (random.random() - 0.5) * 0.5
-    new_last = max(0.01, t.last + delta)
-    t.last = new_last
-    t.bid = new_last * 0.999
-    t.ask = new_last * 1.001
-    t.volume += random.uniform(100, 1000)
-    t.time = time.time()
-
-    t.closes.append(new_last)
-    if len(t.closes) > MAX_CANDLES:
-        t.closes.pop(0)
-
-    t.ema10 = ema(t.closes, 10)
-    t.ema50 = ema(t.closes, 50)
-    t.ema200 = ema(t.closes, 200)
-    t.rsi14 = rsi(t.closes, 14)
-    t.trend = calc_trend(t.last, t.ema10, t.ema50, t.ema200)
-    t.tpsl = calc_tpsl(t)
-    t.breakout_score = calc_breakout_score(t)
-
-
-# =========================
-# AI ANALIZA (MOCK – KRÓTKO, KONKRETNIE)
-# =========================
-def analyze_with_ai(t: TickerData) -> AiResult:
-    signal = signal_from_trend_score(t.trend.score)
-    tp = t.tpsl.tp
-    sl = t.tpsl.sl
-    notes = [
-        f"Trend S/M/L: {t.trend.short}/{t.trend.mid}/{t.trend.long}",
-        f"RSI14: {t.rsi14:.1f}",
-        f"Cena vs 52W High: {t.last:.2f} / {t.high52w:.2f}",
-    ]
-    return AiResult(signal=signal, tp=tp, sl=sl, notes=notes)
-
-
-# =========================
-# INICJALIZACJA STANU STREAMLIT
-# =========================
-if "watchlist" not in st.session_state:
-    st.session_state.watchlist = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"]
-
-if "tickers" not in st.session_state:
-    st.session_state.tickers: Dict[str, TickerData] = {
-        s: init_ticker(s) for s in st.session_state.watchlist
-    }
-
-if "ai_selected" not in st.session_state:
-    st.session_state.ai_selected = set()
-
-if "refresh_minutes" not in st.session_state:
-    st.session_state.refresh_minutes = DEFAULT_REFRESH
-
-# =========================
-# UI – NEON DASHBOARD
-# =========================
-st.set_page_config(page_title="NEON BREAKOUT SCANNER", layout="wide")
-
-st.markdown(
-    """
+st.markdown("""
     <style>
-    body { background-color: #050510; color: #e0e0ff; }
-    .neon-buy { color: #00ff88; font-weight: 700; }
-    .neon-hold { color: #00aaff; font-weight: 700; }
-    .neon-sell { color: #ff0044; font-weight: 700; }
-    .neon-tp { color: #00ff00; font-weight: 700; }
-    .neon-sl { color: #ff0000; font-weight: 700; }
+    body { background-color: #000000; color: #FFFFFF; }
+    .stApp { background-color: #000000; }
+    .neon-text { text-shadow: 0 0 10px #39FF14, 0 0 20px #39FF14; color: #39FF14; font-weight: bold; }
+    .neon-buy { color: #39FF14; font-weight: bold; text-shadow: 0 0 10px #39FF14; border: 1px solid #39FF14; padding: 5px; border-radius: 5px; }
+    .neon-sell { color: #FF3131; font-weight: bold; text-shadow: 0 0 10px #FF3131; border: 1px solid #FF3131; padding: 5px; border-radius: 5px; }
+    .neon-hold { color: #00FFFF; font-weight: bold; text-shadow: 0 0 10px #00FFFF; border: 1px solid #00FFFF; padding: 5px; border-radius: 5px; }
+    .tp-label { color: #39FF14; font-weight: bold; }
+    .sl-label { color: #FF3131; font-weight: bold; }
+    .stButton>button { background-color: #1a1a1a; color: #39FF14; border: 1px solid #39FF14; box-shadow: 0 0 5px #39FF14; }
     </style>
-    """,
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
-st.title("💹 NEON BREAKOUT SCANNER – kombajn.py")
+# --- 8. ODŚWIEŻANIE (1-10 MINUT) ---
+refresh_min = st.sidebar.slider("Interwał odświeżania (min)", 1, 10, 5)
+st_autorefresh(interval=refresh_min * 60 * 1000, key="market_refresh")
 
-col_left, col_mid, col_right = st.columns([2, 2, 2])
+# --- KONFIGURACJA KLUCZA (GITHUB SECRETS) ---
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-with col_left:
-    refresh = st.selectbox(
-        "Interwał odświeżania (minuty)",
-        REFRESH_INTERVALS,
-        index=REFRESH_INTERVALS.index(st.session_state.refresh_minutes),
-    )
-    st.session_state.refresh_minutes = refresh
+# --- FUNKCJE ANALITYCZNE ---
+def fetch_stock_data(symbol):
+    try:
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="2y")
+        if df.empty: return None
+        
+        info = ticker.info
+        last_price = df['Close'].iloc[-1]
+        
+        # 3. Realny Bid i Ask
+        bid = info.get('bid', 'N/A')
+        ask = info.get('ask', 'N/A')
+        
+        # 4. Trendy (Krótki/Średni/Długi) na bazie SMA
+        sma20 = ta.sma(df['Close'], length=20).iloc[-1]
+        sma50 = ta.sma(df['Close'], length=50).iloc[-1]
+        sma200 = ta.sma(df['Close'], length=200).iloc[-1]
+        
+        t_short = "↑" if last_price > sma20 else "↓"
+        t_mid = "↑" if last_price > sma50 else "↓"
+        t_long = "↑" if last_price > sma200 else "↓"
+        
+        # 9. Kup/Trzymaj/Sprzedaj
+        if last_price > sma50 and sma20 > sma50: signal = ("KUP", "neon-buy")
+        elif last_price < sma50: signal = ("SPRZEDAJ", "neon-sell")
+        else: signal = ("TRZYMAJ", "neon-hold")
+        
+        # 6. Szczyty/Dołki 52 tyg i Pivot
+        h52 = df['High'].tail(252).max()
+        l52 = df['Low'].tail(252).min()
+        pivot = (df['High'].iloc[-1] + df['Low'].iloc[-1] + df['Close'].iloc[-1]) / 3
+        
+        # 2. Szansa na wybicie (Wolumen > 1.5x średniej)
+        vol_avg = df['Volume'].tail(20).mean()
+        breakout_score = df['Volume'].iloc[-1] / vol_avg
+        
+        return {
+            "symbol": symbol, "price": last_price, "bid": bid, "ask": ask,
+            "trends": f"{t_short} | {t_mid} | {t_long}", "signal": signal,
+            "h52": h52, "l52": l52, "pivot": pivot, "score": breakout_score
+        }
+    except: return None
 
-with col_mid:
-    if st.button("🔄 ODSWIEŻ TERAZ"):
-        for t in st.session_state.tickers.values():
-            update_realtime(t)
+# --- UI - PANEL BOCZNY ---
+st.sidebar.title("💠 Sterowanie")
+user_input = st.sidebar.text_area("Wklej spółki (np. CDR.WA, AAPL, NVDA):", "CDR.WA, PKO.WA, ALE.WA, AAPL, NVDA, TSLA")
+tickers = [t.strip().upper() for t in user_input.replace(",", " ").split() if t.strip()]
 
-with col_right:
-    show_top10_only = st.checkbox("Pokaż tylko TOP 10 wybicia", value=False)
+# --- WIDOK GŁÓWNY ---
+st.markdown("<h1 class='neon-text'>TERMINAL ANALIZY RZECZYWISTEJ</h1>", unsafe_allow_html=True)
 
-# AI wybór
-st.subheader("AI – wybierz spółki do analizy")
-ai_cols = st.columns(len(st.session_state.watchlist))
-for i, symbol in enumerate(st.session_state.watchlist):
-    with ai_cols[i]:
-        checked = symbol in st.session_state.ai_selected
-        new_val = st.checkbox(symbol, value=checked, key=f"ai_{symbol}")
-        if new_val:
-            st.session_state.ai_selected.add(symbol)
-        else:
-            st.session_state.ai_selected.discard(symbol)
+if tickers:
+    results = [fetch_stock_data(t) for t in tickers if fetch_stock_data(t)]
+    
+    # 2. TOP 10 WYBICIE
+    st.subheader("🔥 Top 10 Spółek - Szansa na Wybicie")
+    top_10 = sorted(results, key=lambda x: x['score'], reverse=True)[:10]
+    cols = st.columns(len(top_10))
+    for i, item in enumerate(top_10):
+        cols[i].metric(item['symbol'], f"{item['price']:.2f}", f"{item['score']:.1%} Vol")
 
-if st.button("🤖 ANALIZUJ WYBRANE (AI)"):
-    for sym in st.session_state.ai_selected:
-        t = st.session_state.tickers.get(sym)
-        if t:
-            t.ai = analyze_with_ai(t)
+    st.divider()
 
-# Aktualizacja real-time przy każdym rerunie
-for t in st.session_state.tickers.values():
-    update_realtime(t)
+    # LISTA ANALIZY
+    for data in results:
+        with st.container():
+            c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+            
+            with c1:
+                st.markdown(f"### {data['symbol']}")
+                st.write(f"Cena: **{data['price']:.2f}**")
+                st.write(f"Bid: `{data['bid']}` | Ask: `{data['ask']}`")
+            
+            with c2:
+                st.write("Trend (K/Ś/D):")
+                st.write(f"**{data['trends']}**")
+                st.markdown(f"<span class='{data['signal'][1]}'>{data['signal'][0]}</span>", unsafe_allow_html=True)
+                
+            with c3:
+                # 5. TP i SL (TP +5%, SL -3%)
+                st.markdown(f"TP: <span class='tp-label'>{(data['price']*1.05):.2f}</span>", unsafe_allow_html=True)
+                st.markdown(f"SL: <span class='sl-label'>{(data['price']*0.97):.2f}</span>", unsafe_allow_html=True)
+                st.write(f"Pivot: **{data['pivot']:.2f}**")
+                
+            with c4:
+                # 7. AI ANALIZA (BEZ LANIA WODY)
+                if st.button(f"Analiza AI: {data['symbol']}", key=data['symbol']):
+                    prompt = f"Analiza {data['symbol']}: Cena {data['price']}, Pivot {data['pivot']}, Trend {data['trends']}. Czy wybicie realne? Max 2 zdania."
+                    try:
+                        resp = openai.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": prompt}])
+                        st.info(resp.choices[0].message.content)
+                    except: st.warning("Podepnij klucz OPENAI_API_KEY w Settings GitHub.")
 
-# TOP10
-all_tickers = list(st.session_state.tickers.values())
-sorted_by_breakout = sorted(all_tickers, key=lambda x: x.breakout_score, reverse=True)
-top10 = sorted_by_breakout[:TOP_LIMIT]
-symbols_top10 = [t.symbol for t in top10]
-
-st.markdown(f"**TOP10 wybicia:** {', '.join(symbols_top10)}")
-
-# Tabela
-st.subheader("Tabela spółek")
-
-def signal_badge(sig: str) -> str:
-    if sig == "BUY":
-        return '<span class="neon-buy">BUY</span>'
-    if sig == "SELL":
-        return '<span class="neon-sell">SELL</span>'
-    return '<span class="neon-hold">HOLD</span>'
-
-
-rows_html = []
-rows_html.append(
-    "<tr>"
-    "<th>TICKER</th><th>Bid / Ask</th><th>Last</th>"
-    "<th>Trend S</th><th>Trend M</th><th>Trend L</th>"
-    "<th>Signal</th><th>52W Low</th><th>52W High</th>"
-    "<th>Pivot P</th><th>TP</th><th>SL</th><th>Breakout</th><th>AI</th>"
-    "</tr>"
-)
-
-for t in (top10 if show_top10_only else all_tickers):
-    sig = signal_from_trend_score(t.trend.score)
-    ai_sig = t.ai.signal if t.ai else "-"
-    ai_color = (
-        "neon-buy" if ai_sig == "BUY" else "neon-sell" if ai_sig == "SELL" else "neon-hold"
-    )
-    rows_html.append(
-        "<tr>"
-        f"<td>{t.symbol}</td>"
-        f"<td>{t.bid:.2f} / {t.ask:.2f}</td>"
-        f"<td>{t.last:.2f}</td>"
-        f"<td>{t.trend.short}</td>"
-        f"<td>{t.trend.mid}</td>"
-        f"<td>{t.trend.long}</td>"
-        f"<td>{signal_badge(sig)}</td>"
-        f"<td>{t.low52w:.2f}</td>"
-        f"<td>{t.high52w:.2f}</td>"
-        f"<td>{t.pivot.P:.2f}</td>"
-        f"<td><span class='neon-tp'>{t.tpsl.tp:.2f}</span></td>"
-        f"<td><span class='neon-sl'>{t.tpsl.sl:.2f}</span></td>"
-        f"<td>{t.breakout_score:.2f}</td>"
-        f"<td><span class='{ai_color}'>{ai_sig}</span></td>"
-        "</tr>"
-    )
-
-table_html = (
-    "<table border='1' style='border-collapse:collapse;width:100%;font-size:13px;'>"
-    + "".join(rows_html)
-    + "</table>"
-)
-st.markdown(table_html, unsafe_allow_html=True)
-
-# Auto-refresh (prosty – użytkownik odświeża stronę / F5; można dodać st_autorefresh)
-st.caption(f"Odświeżanie logiczne co rerun, interwał docelowy: {st.session_state.refresh_minutes} min (manualne).")
+            st.write(f"H52: {data['h52']:.2f} | L52: {data['l52']:.2f}")
+            st.divider()
