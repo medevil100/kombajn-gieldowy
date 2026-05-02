@@ -1,6 +1,9 @@
+import requests
+import json
 import streamlit as st
 import yfinance as yf
 import math
+
 
 # =========================
 # SILNIK ULTRA — KOMBAJN DANYCH
@@ -61,6 +64,36 @@ def macd_calc(values):
 def analyze_ultra(symbol, candles):
     if len(candles) < 30:
         raise ValueError("Za mało świec do analizy")
+def call_ai_gpt40mini(payload):
+    url = "https://api.openai.com/v1/chat/completions"
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {st.secrets['OPENAI_API_KEY']}"
+    }
+
+    body = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Jesteś profesjonalnym analitykiem giełdowym. "
+                    "Analizujesz dane techniczne, momentum, wolumen, breakouty, ryzyko i trend. "
+                    "Generujesz precyzyjne, krótkie i konkretne wnioski inwestycyjne."
+                )
+            },
+            {
+                "role": "user",
+                "content": json.dumps(payload, ensure_ascii=False)
+            }
+        ],
+        "temperature": 0.2
+    }
+
+    r = requests.post(url, headers=headers, json=body)
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
 
     closes = [c["close"] for c in candles]
     highs = [c["high"] for c in candles]
@@ -342,14 +375,20 @@ for symbol in symbols:
 
     # AI — FIX key
     if st.button(f"🤖 Analiza AI dla {symbol}", key=f"ai_{symbol}_{st.session_state['run_id']}"):
-        st.markdown("<div class='ai-block'>", unsafe_allow_html=True)
-        st.markdown("🔍 **Payload do AI:**")
-        st.json({
-            "symbol": symbol,
-            "analysis": {k: v for k, v in analysis.items() if k != "raw_candles"},
-            "candles_tail": analysis["raw_candles"],
-        })
-        st.markdown("</div>", unsafe_allow_html=True)
+    payload = {
+        "symbol": symbol,
+        "analysis": {k: v for k, v in analysis.items() if k != "raw_candles"},
+        "candles_tail": analysis["raw_candles"],
+    }
+
+    with st.spinner("AI analizuje dane..."):
+        ai_text = call_ai_gpt40mini(payload)
+
+    st.markdown("<div class='ai-block'>", unsafe_allow_html=True)
+    st.markdown("### 🤖 Wynik analizy AI:")
+    st.write(ai_text)
+    st.markdown("</div>", unsafe_allow_html=True)
+
 
     st.markdown("</div>", unsafe_allow_html=True)
     # Kontynuacja bloku wyświetlania (od momentu urwania):
