@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -89,6 +88,12 @@ body { background-color: #030308; color: #d0d0ff; }
 ALPHA_KEY = st.secrets.get("ALPHAVANTAGE_API_KEY", "")
 OPENAI_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
+if not ALPHA_KEY:
+    st.warning("⚠️ Brak ALPHAVANTAGE_API_KEY w secrets. Dane rynkowe nie będą działać.")
+
+if not OPENAI_KEY:
+    st.info("ℹ️ Brak OPENAI_API_KEY w secrets. Funkcje AI (Genesis) będą ograniczone.")
+
 client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
 # ============================================================
@@ -128,7 +133,7 @@ def av_get_daily(symbol, outputsize="compact"):
         df = df.sort_values("time")
         df.set_index("time", inplace=True)
         return df
-    except:
+    except Exception:
         return pd.DataFrame()
 
 def av_get_intraday(symbol, interval="5min"):
@@ -164,7 +169,7 @@ def av_get_intraday(symbol, interval="5min"):
         df = df.sort_values("time")
         df.set_index("time", inplace=True)
         return df
-    except:
+    except Exception:
         return pd.DataFrame()
 
 # ============================================================
@@ -390,7 +395,7 @@ def swing_signal(ind):
         return "WATCH", score
 
 # ============================================================
-# BLACKLIST + FORMATIONS (proste, ale działające)
+# BLACKLIST + FORMATIONS
 # ============================================================
 
 def blacklist_engine(symbol, df):
@@ -462,7 +467,7 @@ def detect_formations(df):
     return score, ", ".join(desc)
 
 # ============================================================
-# ALERT ENGINE (email / webhook / discord / telegram)
+# ALERT ENGINE
 # ============================================================
 
 def alert_send_email(to_email, subject, body):
@@ -484,14 +489,14 @@ def alert_send_email(to_email, subject, body):
             server.login(smtp_user, smtp_pass)
             server.sendmail(smtp_user, [to_email], msg.as_string())
         return True
-    except:
+    except Exception:
         return False
 
 def alert_send_discord(webhook_url, message):
     try:
         requests.post(webhook_url, json={"content": message}, timeout=10)
         return True
-    except:
+    except Exception:
         return False
 
 def alert_send_telegram(bot_token, chat_id, message):
@@ -500,14 +505,14 @@ def alert_send_telegram(bot_token, chat_id, message):
         params = {"chat_id": chat_id, "text": message}
         requests.get(url, params=params, timeout=10)
         return True
-    except:
+    except Exception:
         return False
 
 def alert_send_webhook(url, payload):
     try:
         requests.post(url, json=payload, timeout=10)
         return True
-    except:
+    except Exception:
         return False
 
 def trigger_alert(symbol, signal, score, price, reason, channels):
@@ -641,7 +646,7 @@ if tab == "Dashboard":
     if symbol:
         df = av_get_daily(symbol, outputsize="compact")
         if df.empty:
-            st.error("Brak danych z API dla tego symbolu.")
+            st.error("Brak danych z API dla tego symbolu (sprawdź klucz ALPHAVANTAGE_API_KEY i limity API).")
         else:
             ind = calc_daily_indicators(df)
             bl_flag, bl_reason = blacklist_engine(symbol, df)
@@ -682,16 +687,19 @@ if tab == "Heatmapa":
     st.markdown("## 🔥 Heatmapa sektorowa (real data)")
 
     heat = build_heatmap_data()
-    cols = st.columns(3)
-    i = 0
-    for sector, val in heat.items():
-        color = heatmap_color(val)
-        cols[i].markdown(
-            f"<div class='top-card' style='border-color:{color}; color:{color};'>"
-            f"{sector}<br><br>{val:.2f}%</div>",
-            unsafe_allow_html=True
-        )
-        i = (i + 1) % 3
+    if not heat:
+        st.error("Brak danych do heatmapy (sprawdź ALPHAVANTAGE_API_KEY).")
+    else:
+        cols = st.columns(3)
+        i = 0
+        for sector, val in heat.items():
+            color = heatmap_color(val)
+            cols[i].markdown(
+                f"<div class='top-card' style='border-color:{color}; color:{color};'>"
+                f"{sector}<br><br>{val:.2f}%</div>",
+                unsafe_allow_html=True
+            )
+            i = (i + 1) % 3
 
 # ============================================================
 # UI — SCALPER
@@ -706,7 +714,7 @@ if tab == "Scalper":
     if symbol:
         df = av_get_intraday(symbol, interval=interval)
         if df.empty:
-            st.error("Brak intraday z API dla tego symbolu / interwału.")
+            st.error("Brak intraday z API dla tego symbolu / interwału (sprawdź ALPHAVANTAGE_API_KEY i limity).")
         else:
             ind = calc_fast_indicators(df)
             signal, score = scalper_signal(ind)
@@ -726,7 +734,7 @@ if tab == "Swing":
     if symbol:
         df = av_get_daily(symbol, outputsize="full")
         if df.empty:
-            st.error("Brak danych z API dla tego symbolu.")
+            st.error("Brak danych z API dla tego symbolu (sprawdź ALPHAVANTAGE_API_KEY).")
         else:
             ind = calc_swing_indicators(df)
             signal, score = swing_signal(ind)
@@ -753,7 +761,7 @@ if tab == "Genesis":
             cache[s] = calc_daily_indicators(df)
 
         if not cache:
-            st.error("Brak danych dla podanych symboli.")
+            st.error("Brak danych dla podanych symboli (sprawdź ALPHAVANTAGE_API_KEY).")
         else:
             result = genesis_build(syms, cache)
             st.markdown("### Wynik AI:")
@@ -792,4 +800,3 @@ if tab == "Alerts":
             }
         )
         st.success("Alert wysłany.")
-
