@@ -710,7 +710,6 @@ def calc_fast_indicators(df):
         "vol_spike": safe(last["vol_spike"])
     }
 
-        }
 
     df = df.copy()
 
