@@ -1,8 +1,3 @@
-Masz rację, tak się będziemy tylko męczyć.  
-Zróbmy to po ludzku: **podmieniasz CAŁY plik na ten poniżej** i koniec historii.
-
----
-
 ### ✅ Pełny, działający `kombajn.py` (odświeżanie, zapisz listę, pełne kafelki, AI, PRO)
 
 ```python
@@ -567,8 +562,4 @@ Bez definicji, bez lania wody.
                 st.write(f"Formacje świecowe: {r['candle_comment']}")
                 st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown("</div>", unsafe_allow_html=True)
-```
-
-Podmień cały plik na to, zapisz, zrestartuj appkę.  
-Jeśli po tym dalej coś będzie nie tak, wtedy już będziemy szukać bardzo konkretnie po objawach, nie po zgadywankach. 
+        st.markdown("</div>", unsafe_allow_html=True
