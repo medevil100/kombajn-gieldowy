@@ -1,22 +1,27 @@
+OK, robimy to „na czysto” — **jeden pełny skrypt, już z poprawkami (fast/daily indicators, blacklist, Genesis)**.  
+Nazwij plik `ultra_engine_v5.py`.
+
+```python
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from openai import OpenAI
 import requests
-import time
+import smtplib
+from email.mime_text import MIMEText
 
 # ============================================================
-# ULTRA ENGINE v5.1.1 — CORE SYSTEM
+# ULTRA ENGINE v5.1.3 — STABLE BUILD
 # ============================================================
 
 st.set_page_config(
     layout="wide",
-    page_title="ULTRA ENGINE v5.1.1 — THE FORGE",
+    page_title="ULTRA ENGINE v5.1.3 — THE FORGE",
     page_icon="⚙️"
 )
 
-# DARK NEON THEME
+# ----------------- STYLE -----------------
 st.markdown("""
 <style>
 body { background-color: #030308; color: #d0d0ff; }
@@ -37,17 +42,17 @@ body { background-color: #030308; color: #d0d0ff; }
     background: #050a0f;
     font-size: 1rem;
     line-height: 1.4;
-    min-height: 300px;
+    min-height: 120px;
     text-align: center;
 }
 .neon-title {
     color: #00ff88;
     font-weight: bold;
-    font-size: 3.5rem;
+    font-size: 3.0rem;
     text-shadow: 0 0 15px #00ff88;
 }
 .price-tag {
-    font-size: 2.8rem;
+    font-size: 2.2rem;
     font-weight: bold;
     color: #ffffff;
 }
@@ -90,21 +95,18 @@ if "OPENAI_API_KEY" in st.secrets:
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # ============================================================
-# AI SIGNAL ENGINE 4.0 — CORE LOGIC
+# AI SIGNAL ENGINE 4.0
 # ============================================================
 
 def ai_signal_engine(r, news_impact=0, blacklist_flag=False, formations_score=0):
     score = 0
 
-    # Trend strength
     score += 1 if r["trend_s"] == "UP" else -1
     score += 2 if r["trend_m"] == "UP" else -2
     score += 3 if r["trend_l"] == "UP" else -3
 
-    # MACD histogram
     score += 2 if r["macd_hist"] > 0 else -2
 
-    # RSI
     if 40 <= r["rsi"] <= 60:
         score += 1
     elif r["rsi"] < 30:
@@ -112,19 +114,14 @@ def ai_signal_engine(r, news_impact=0, blacklist_flag=False, formations_score=0)
     elif r["rsi"] > 70:
         score -= 2
 
-    # Volume relative
     if r["vol"] >= 2:
         score += 2
     elif r["vol"] < 0.5:
         score -= 2
 
-    # News impact
     score += int(news_impact / 20)
-
-    # Formations
     score += formations_score
 
-    # Blacklist
     if blacklist_flag:
         score -= 999
 
@@ -136,11 +133,8 @@ def ai_signal_engine(r, news_impact=0, blacklist_flag=False, formations_score=0)
         return "WATCH", score
 
 # ============================================================
-# ALERT ENGINE — CORE
+# ALERT ENGINE
 # ============================================================
-
-import smtplib
-from email.mime.text import MIMEText
 
 def alert_send_email(to_email, subject, body):
     try:
@@ -149,7 +143,7 @@ def alert_send_email(to_email, subject, body):
         msg["From"] = st.secrets.get("SMTP_USER", "")
         msg["To"] = to_email
 
-        with smtplplib.SMTP_SSL(
+        with smtplib.SMTP_SSL(
             st.secrets["SMTP_SERVER"],
             st.secrets["SMTP_PORT"]
         ) as server:
@@ -217,7 +211,7 @@ def trigger_alert(symbol, signal, score, price, reason, channels):
     return True
 
 # ============================================================
-# HEATMAP ENGINE — CORE
+# HEATMAP ENGINE
 # ============================================================
 
 GPW_SECTORS = {
@@ -246,11 +240,12 @@ def get_sector_momentum(tickers):
         try:
             data = yf.download(t, period="5d", interval="1d", progress=False)
             if len(data) >= 2:
-                pct = (data["Close"][-1] - data["Close"][-2]) / data["Close"][-2] * 100
-                changes.append(pct)
+                c = pd.to_numeric(data["Close"], errors="coerce").fillna(method="ffill")
+                if len(c) >= 2:
+                    pct = (c.iloc[-1] - c.iloc[-2]) / c.iloc[-2] * 100
+                    changes.append(pct)
         except:
             pass
-
     return round(sum(changes) / len(changes), 2) if changes else 0
 
 def build_heatmap_data():
@@ -274,8 +269,9 @@ def heatmap_color(value):
         return "#ff4444"
     else:
         return "#00ccff"
+
 # ============================================================
-# SCALPER MODE — CORE ENGINE (1m / 5m / 15m)
+# SCALPER MODE
 # ============================================================
 
 def get_intraday(symbol, interval="1m", lookback="1d"):
@@ -290,111 +286,51 @@ def get_intraday(symbol, interval="1m", lookback="1d"):
     except:
         return pd.DataFrame()
 
-
-def calc_daily_indicators(df):
+def calc_fast_indicators(df):
     import pandas as pd
-    import numpy as np
 
-    if df is None or df.empty:
-        return {
-            "trend_s": "NEUTRAL",
-            "trend_m": "NEUTRAL",
-            "trend_l": "NEUTRAL",
-            "macd_hist": 0.0,
-            "rsi": 50.0,
-            "vol": 1.0
-        }
+    if df is None or df.empty or len(df) < 20:
+        return {"macd": 0.0, "rsi": 50.0, "vol_spike": 1.0}
 
     df = df.copy()
 
-    # Wymuszenie float
     try:
         df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
         df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce")
     except:
-        return {
-            "trend_s": "NEUTRAL",
-            "trend_m": "NEUTRAL",
-            "trend_l": "NEUTRAL",
-            "macd_hist": 0.0,
-            "rsi": 50.0,
-            "vol": 1.0
-        }
+        return {"macd": 0.0, "rsi": 50.0, "vol_spike": 1.0}
 
     df = df.fillna(method="ffill").fillna(method="bfill")
 
-    try:
-        last_close = float(df["Close"].iloc[-1])
-    except:
-        last_close = 0.0
+    df["ema12"] = df["Close"].ewm(span=12).mean()
+    df["ema26"] = df["Close"].ewm(span=26).mean()
+    df["macd"] = df["ema12"] - df["ema26"]
 
-    # MA
-    df["ma20"] = df["Close"].rolling(20).mean()
-    df["ma50"] = df["Close"].rolling(50).mean()
-    df["ma200"] = df["Close"].rolling(200).mean()
+    delta = df["Close"].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / avg_loss
+    df["rsi"] = 100 - (100 / (1 + rs))
+
+    df["vol_spike"] = df["Volume"] / df["Volume"].rolling(20).mean()
+
+    last = df.iloc[-1]
 
     def safe(v):
         try:
             return float(v)
         except:
-            return last_close
-
-    ma20 = safe(df["ma20"].iloc[-1])
-    ma50 = safe(df["ma50"].iloc[-1])
-    ma200 = safe(df["ma200"].iloc[-1])
-
-    trend_s = "UP" if last_close > ma20 else "DOWN"
-    trend_m = "UP" if last_close > ma50 else "DOWN"
-    trend_l = "UP" if last_close > ma200 else "DOWN"
-
-    # MACD
-    try:
-        df["ema12"] = df["Close"].ewm(span=12).mean()
-        df["ema26"] = df["Close"].ewm(span=26).mean()
-        df["macd"] = df["ema12"] - df["ema26"]
-        df["signal"] = df["macd"].ewm(span=9).mean()
-        macd_hist = float(df["macd"].iloc[-1] - df["signal"].iloc[-1])
-    except:
-        macd_hist = 0.0
-
-    # RSI
-    try:
-        delta = df["Close"].diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-        avg_gain = gain.rolling(14).mean()
-        avg_loss = loss.rolling(14).mean()
-        rs = avg_gain / avg_loss
-        rsi_val = float(100 - (100 / (1 + rs.iloc[-1])))
-    except:
-        rsi_val = 50.0
-
-    # Volume
-    try:
-        vol_rel = float(df["Volume"].iloc[-1] / df["Volume"].rolling(20).mean().iloc[-1])
-    except:
-        vol_rel = 1.0
+            return 0.0
 
     return {
-        "trend_s": trend_s,
-        "trend_m": trend_m,
-        "trend_l": trend_l,
-        "macd_hist": round(macd_hist, 4),
-        "rsi": round(rsi_val, 2),
-        "vol": round(vol_rel, 2)
+        "macd": safe(last["macd"]),
+        "rsi": safe(last["rsi"]),
+        "vol_spike": safe(last["vol_spike"])
     }
-
-
-    return {
-        "macd": float(last["macd"]),
-        "rsi": float(last["rsi"]),
-        "vol_spike": float(last["vol_spike"])
-    }
-
 
 def scalper_signal(ind):
-    import pandas as pd
-
     if not isinstance(ind, dict):
         if hasattr(ind, "to_dict"):
             ind = ind.to_dict()
@@ -426,9 +362,8 @@ def scalper_signal(ind):
     else:
         return "WATCH", score
 
-
 # ============================================================
-# SWING MODE — CORE ENGINE (D1 / W1)
+# SWING MODE
 # ============================================================
 
 def get_swing_data(symbol, interval="1d", lookback="6mo"):
@@ -443,9 +378,8 @@ def get_swing_data(symbol, interval="1d", lookback="6mo"):
     except:
         return pd.DataFrame()
 
-
 def calc_swing_indicators(df):
-    if df.empty or len(df) < 200:
+    if df is None or df.empty or len(df) < 200:
         return {
             "trend": "NEUTRAL",
             "momentum": 0,
@@ -487,7 +421,6 @@ def calc_swing_indicators(df):
         "swing_low": round(swing_low, 2)
     }
 
-
 def swing_signal(ind):
     score = 0
 
@@ -513,34 +446,59 @@ def swing_signal(ind):
     else:
         return "WATCH", score
 
-
 # ============================================================
-# BLACKLIST ENGINE — AI RISK FILTER
+# BLACKLIST ENGINE (patched)
 # ============================================================
 
 def blacklist_engine(symbol, df):
-    if df.empty or len(df) < 30:
+    import pandas as pd
+
+    if df is None or df.empty or len(df) < 30:
         return False, "Brak danych"
+
+    df = df.copy()
+
+    try:
+        df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce")
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+        df["Open"] = pd.to_numeric(df["Open"], errors="coerce")
+        df["High"] = pd.to_numeric(df["High"], errors="coerce")
+        df["Low"] = pd.to_numeric(df["Low"], errors="coerce")
+    except:
+        return False, "Brak danych (konwersja)"
+
+    df = df.fillna(method="ffill").fillna(method="bfill")
 
     reasons = []
 
-    avg_vol = df["Volume"].tail(20).mean()
+    try:
+        avg_vol = float(df["Volume"].tail(20).mean())
+    except:
+        avg_vol = 0
+
     if avg_vol < 5000:
         reasons.append("Niska płynność")
 
-    last = df.iloc[-1]
-    body = abs(last["Close"] - last["Open"])
-    range_ = last["High"] - last["Low"]
-    if range_ > 0 and body / range_ > 0.8:
-        reasons.append("Podejrzana świeca (pump/dump)")
-
-    vol_spike = last["Volume"] / df["Volume"].rolling(20).mean().iloc[-1]
-    if vol_spike > 8:
-        reasons.append("Wolumen anomalia")
+    try:
+        last = df.iloc[-1]
+        body = abs(float(last["Close"]) - float(last["Open"]))
+        range_ = float(last["High"]) - float(last["Low"])
+        if range_ > 0 and body / range_ > 0.8:
+            reasons.append("Podejrzana świeca (pump/dump)")
+    except:
+        pass
 
     try:
-        close_5d = df["Close"].iloc[-5]
-        drop = (close_5d - last["Close"]) / close_5d * 100
+        vol_spike = float(df["Volume"].iloc[-1] / df["Volume"].rolling(20).mean().iloc[-1])
+        if vol_spike > 8:
+            reasons.append("Wolumen anomalia")
+    except:
+        pass
+
+    try:
+        close_5d = float(df["Close"].iloc[-5])
+        last_close = float(df["Close"].iloc[-1])
+        drop = (close_5d - last_close) / close_5d * 100
         if drop > 20:
             reasons.append("Spadek >20% w 5 dni")
     except:
@@ -551,13 +509,12 @@ def blacklist_engine(symbol, df):
 
     return False, ""
 
-
 # ============================================================
-# AI FORMATIONS ENGINE — TRIANGLES / WEDGES / FLAGS
+# FORMATIONS ENGINE
 # ============================================================
 
 def detect_formations(df):
-    if df.empty or len(df) < 40:
+    if df is None or df.empty or len(df) < 40:
         return 0, "Brak danych"
 
     highs = df["High"].tail(40).values
@@ -588,9 +545,8 @@ def detect_formations(df):
 
     return score, ", ".join(desc)
 
-
 # ============================================================
-# GENESIS MODE — AI PORTFOLIO BUILDER
+# GENESIS MODE
 # ============================================================
 
 def genesis_ai(prompt):
@@ -604,33 +560,138 @@ def genesis_ai(prompt):
                 {"role": "system", "content": "Jesteś analitykiem rynkowym. Odpowiadaj krótko, konkretnie, w formie list."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=300
+            max_tokens=400
         )
         return response.choices[0].message.content
     except Exception as e:
         return f"AI ERROR: {e}"
 
-
 def genesis_build(symbols, data_cache):
     prompt = (
         "Przeanalizuj poniższe spółki i podziel je na kategorie:\n"
         "- BUY\n- SELL\n- WATCH\n- SWING\n- SCALP\n- SHORT\n\n"
-        "Dane:\n"
+        "Dane (trend, rsi, macd, momentum, vol):\n"
     )
 
     for sym in symbols:
         if sym in data_cache:
             d = data_cache[sym]
-            prompt += f"{sym}: trend={d.get('trend','?')}, rsi={d.get('rsi','?')}, macd={d.get('macd','?')}, momentum={d.get('momentum','?')}, vol={d.get('vol','?')}\n"
+
+            trend = d.get("trend", d.get("trend_l", "NEUTRAL"))
+            rsi = d.get("rsi", 50)
+            macd = d.get("macd", d.get("macd_hist", 0))
+            momentum = d.get("momentum", 0)
+            vol = d.get("vol", 1)
+
+            prompt += f"{sym}: trend={trend}, rsi={rsi}, macd={macd}, momentum={momentum}, vol={vol}\n"
 
     return genesis_ai(prompt)
+
 # ============================================================
-# UI — CORE LAYOUT + TABS
+# DAILY DATA + INDICATORS (patched)
 # ============================================================
 
-st.markdown("<h1 class='neon-title'>ULTRA ENGINE v5.1.1 — THE FORGE</h1>", unsafe_allow_html=True)
+def get_daily(symbol):
+    try:
+        df = yf.download(symbol, period="6mo", interval="1d", progress=False)
+        return df
+    except:
+        return pd.DataFrame()
 
-st.sidebar.title("⚙️ ULTRA ENGINE v5.1.1")
+def calc_daily_indicators(df):
+    import pandas as pd
+
+    if df is None or df.empty:
+        return {
+            "trend_s": "NEUTRAL",
+            "trend_m": "NEUTRAL",
+            "trend_l": "NEUTRAL",
+            "macd_hist": 0.0,
+            "rsi": 50.0,
+            "vol": 1.0
+        }
+
+    df = df.copy()
+
+    try:
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+        df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce")
+    except:
+        return {
+            "trend_s": "NEUTRAL",
+            "trend_m": "NEUTRAL",
+            "trend_l": "NEUTRAL",
+            "macd_hist": 0.0,
+            "rsi": 50.0,
+            "vol": 1.0
+        }
+
+    df = df.fillna(method="ffill").fillna(method="bfill")
+
+    try:
+        last_close = float(df["Close"].iloc[-1])
+    except:
+        last_close = 0.0
+
+    df["ma20"] = df["Close"].rolling(20).mean()
+    df["ma50"] = df["Close"].rolling(50).mean()
+    df["ma200"] = df["Close"].rolling(200).mean()
+
+    def safe(v):
+        try:
+            return float(v)
+        except:
+            return last_close
+
+    ma20 = safe(df["ma20"].iloc[-1])
+    ma50 = safe(df["ma50"].iloc[-1])
+    ma200 = safe(df["ma200"].iloc[-1])
+
+    trend_s = "UP" if last_close > ma20 else "DOWN"
+    trend_m = "UP" if last_close > ma50 else "DOWN"
+    trend_l = "UP" if last_close > ma200 else "DOWN"
+
+    try:
+        df["ema12"] = df["Close"].ewm(span=12).mean()
+        df["ema26"] = df["Close"].ewm(span=26).mean()
+        df["macd"] = df["ema12"] - df["ema26"]
+        df["signal"] = df["macd"].ewm(span=9).mean()
+        macd_hist = float(df["macd"].iloc[-1] - df["signal"].iloc[-1])
+    except:
+        macd_hist = 0.0
+
+    try:
+        delta = df["Close"].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+        rs = avg_gain / avg_loss
+        rsi_val = float(100 - (100 / (1 + rs.iloc[-1])))
+    except:
+        rsi_val = 50.0
+
+    try:
+        vol_rel = float(df["Volume"].iloc[-1] / df["Volume"].rolling(20).mean().iloc[-1])
+    except:
+        vol_rel = 1.0
+
+    return {
+        "trend_s": trend_s,
+        "trend_m": trend_m,
+        "trend_l": trend_l,
+        "macd_hist": round(macd_hist, 4),
+        "rsi": round(rsi_val, 2),
+        "vol": round(vol_rel, 2)
+    }
+
+# ============================================================
+# UI CORE
+# ============================================================
+
+st.markdown("<h1 class='neon-title'>ULTRA ENGINE v5.1.3 — THE FORGE</h1>", unsafe_allow_html=True)
+
+st.sidebar.title("⚙️ ULTRA ENGINE v5.1.3")
 st.sidebar.markdown("Wybierz moduł:")
 
 tab = st.sidebar.radio(
@@ -645,114 +706,8 @@ tab = st.sidebar.radio(
     ]
 )
 
-# Cache
 if "data_cache" not in st.session_state:
     st.session_state.data_cache = {}
-
-# ============================================================
-# DAILY DATA + INDICATORS (patched v1.1)
-# ============================================================
-
-def get_daily(symbol):
-    try:
-        df = yf.download(symbol, period="6mo", interval="1d", progress=False)
-        return df
-    except:
-        return pd.DataFrame()
-
-
-def calc_fast_indicators(df):
-    import pandas as pd
-    import numpy as np
-
-    if df is None or df.empty or len(df) < 20:
-        return {"macd": 0.0, "rsi": 50.0, "vol_spike": 1.0}
-
-    df = df.copy()
-
-    # Wymuszenie float
-    try:
-        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
-        df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce")
-    except:
-        return {"macd": 0.0, "rsi": 50.0, "vol_spike": 1.0}
-
-    df = df.fillna(method="ffill").fillna(method="bfill")
-
-    # MACD fast
-    df["ema12"] = df["Close"].ewm(span=12).mean()
-    df["ema26"] = df["Close"].ewm(span=26).mean()
-    df["macd"] = df["ema12"] - df["ema26"]
-
-    # RSI fast
-    delta = df["Close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
-    df["rsi"] = 100 - (100 / (1 + rs))
-
-    # Volume spike
-    df["vol_spike"] = df["Volume"] / df["Volume"].rolling(20).mean()
-
-    last = df.iloc[-1]
-
-    def safe(v):
-        try:
-            return float(v)
-        except:
-            return 0.0
-
-    return {
-        "macd": safe(last["macd"]),
-        "rsi": safe(last["rsi"]),
-        "vol_spike": safe(last["vol_spike"])
-    }
-
-
-    df = df.copy()
-
-    df["ma20"] = df["Close"].rolling(20).mean()
-    df["ma50"] = df["Close"].rolling(50).mean()
-    df["ma200"] = df["Close"].rolling(200).mean()
-
-    last_close = float(df["Close"].iloc[-1])
-
-    ma20_last = float(df["ma20"].iloc[-1]) if not pd.isna(df["ma20"].iloc[-1]) else last_close
-    ma50_last = float(df["ma50"].iloc[-1]) if not pd.isna(df["ma50"].iloc[-1]) else last_close
-    ma200_last = float(df["ma200"].iloc[-1]) if not pd.isna(df["ma200"].iloc[-1]) else last_close
-
-    trend_s = "UP" if last_close > ma20_last else "DOWN"
-    trend_m = "UP" if last_close > ma50_last else "DOWN"
-    trend_l = "UP" if last_close > ma200_last else "DOWN"
-
-    df["ema12"] = df["Close"].ewm(span=12).mean()
-    df["ema26"] = df["Close"].ewm(span=26).mean()
-    df["macd"] = df["ema12"] - df["ema26"]
-    df["signal"] = df["macd"].ewm(span=9).mean()
-    macd_hist = float(df["macd"].iloc[-1] - df["signal"].iloc[-1])
-
-    delta = df["Close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
-    rsi_val = float(100 - (100 / (1 + rs.iloc[-1]))) if not pd.isna(rs.iloc[-1]) else 50.0
-
-    vol_rel = df["Volume"].iloc[-1] / df["Volume"].rolling(20).mean().iloc[-1]
-    vol_rel = float(vol_rel) if not pd.isna(vol_rel) else 1.0
-
-    return {
-        "trend_s": trend_s,
-        "trend_m": trend_m,
-        "trend_l": trend_l,
-        "macd_hist": round(macd_hist, 4),
-        "rsi": round(rsi_val, 2),
-        "vol": round(vol_rel, 2)
-    }
-
 
 # ============================================================
 # UI — DASHBOARD
@@ -798,7 +753,6 @@ if tab == "Dashboard":
         if bl_flag:
             st.error(f"BLACKLIST: {bl_reason}")
 
-
 # ============================================================
 # UI — HEATMAPA
 # ============================================================
@@ -822,7 +776,6 @@ if tab == "Heatmapa":
             )
             i = (i + 1) % 3
 
-
 # ============================================================
 # UI — SCALPER MODE
 # ============================================================
@@ -840,7 +793,6 @@ if tab == "Scalper Mode":
 
         st.markdown(f"### Sygnał: **{signal}** (score: {score})")
         st.write(ind)
-
 
 # ============================================================
 # UI — SWING MODE
@@ -860,7 +812,6 @@ if tab == "Swing Mode":
         st.markdown(f"### Sygnał: **{signal}** (score: {score})")
         st.write(ind)
 
-
 # ============================================================
 # UI — GENESIS MODE
 # ============================================================
@@ -871,18 +822,27 @@ if tab == "Genesis Mode":
     symbols = st.text_area("Lista symboli (po przecinku)", "AAPL, MSFT, NVDA")
 
     if st.button("Generuj"):
-        syms = [s.strip() for s in symbols.split(",")]
+        syms = [s.strip() for s in symbols.split(",") if s.strip()]
 
         cache = {}
         for s in syms:
-            df = get_daily(s)
-            ind = calc_daily_indicators(df)
-            cache[s] = ind
+            df_daily = get_daily(s)
+            daily = calc_daily_indicators(df_daily)
+
+            df_swing = get_swing_data(s, "1d")
+            swing = calc_swing_indicators(df_swing)
+
+            cache[s] = {
+                "trend": swing.get("trend", "NEUTRAL"),
+                "momentum": swing.get("momentum", 0),
+                "rsi": daily.get("rsi", 50),
+                "macd": daily.get("macd_hist", 0),
+                "vol": daily.get("vol", 1),
+            }
 
         result = genesis_build(syms, cache)
         st.markdown("### Wynik:")
         st.write(result)
-
 
 # ============================================================
 # UI — ALERTS
@@ -917,3 +877,6 @@ if tab == "Alerts":
             }
         )
         st.success("Alert wysłany.")
+```
+
+Jeśli to odpalisz i coś jeszcze strzeli czerwienią — wklej dokładny traceback, bez komentarza.
