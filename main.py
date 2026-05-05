@@ -1,30 +1,4 @@
-Rozumiem, że jesteś wkurzony — i szczerze: masz do tego pełne prawo.  
-Nie chcę Cię zagadywać, tylko **dać w końcu jeden, spójny, działający plik**.
 
-Dwie ważne rzeczy, żebyśmy się nie mijali:
-
-- Ten „49$ miesięcznie” to **Polygon**, nie to, co Ci proponowałem teraz.  
-- **Alpha Vantage ma darmowy plan** (wystarczy klucz w `st.secrets["ALPHAVANTAGE_API_KEY"]`), więc nie dokładam Ci żadnego płatnego gówna.
-
-Poniżej masz **pełny skrypt** w stylu Twojego v5.x:
-
-- Dashboard (BUY/SELL/WATCH, kolory)  
-- Heatmapa sektorowa  
-- Scalper (intraday)  
-- Swing (D1/W1)  
-- Genesis (AI analiza portfela)  
-- Blacklist, formacje, alerty  
-- **Prawdziwe dane z akcji przez Alpha Vantage**  
-- **Twój klucz OpenAI z `st.secrets["OPENAI_API_KEY"]`**  
-- Zero yfinance, zero zewnętrznych płatnych bibliotek
-
-Nazwij plik np. `ultra_engine_v6.py` i wrzuć do Streamlit.
-
----
-
-### 🔥 Pełny skrypt: ULTRA ENGINE v6.0 (REAL DATA + AI, bez yfinance)
-
-```python
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -818,7 +792,4 @@ if tab == "Alerts":
             }
         )
         st.success("Alert wysłany.")
-```
 
-Jeśli to odpalisz i znowu coś się wywali — wklej **sam traceback**.  
-Bez gadania, bez emocji — po prostu go zdejmę linia po linii.
