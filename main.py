@@ -560,4 +560,4 @@ Bez definicji, bez lania wody.
                 st.write(f"Formacje świecowe: {r['candle_comment']}")
                 st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown("</div>", unsafe_allow_html=True
+        st.markdown("</div>", unsafe_allow_html=True)
