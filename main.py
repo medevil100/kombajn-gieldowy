@@ -291,30 +291,99 @@ def get_intraday(symbol, interval="1m", lookback="1d"):
         return pd.DataFrame()
 
 
-def calc_fast_indicators(df):
-    if df.empty or len(df) < 20:
-        return {"macd": 0.0, "rsi": 50.0, "vol_spike": 1.0}
+def calc_daily_indicators(df):
+    import pandas as pd
+    import numpy as np
+
+    if df is None or df.empty:
+        return {
+            "trend_s": "NEUTRAL",
+            "trend_m": "NEUTRAL",
+            "trend_l": "NEUTRAL",
+            "macd_hist": 0.0,
+            "rsi": 50.0,
+            "vol": 1.0
+        }
 
     df = df.copy()
 
-    # MACD fast
-    df["ema12"] = df["Close"].ewm(span=12).mean()
-    df["ema26"] = df["Close"].ewm(span=26).mean()
-    df["macd"] = df["ema12"] - df["ema26"]
+    # Wymuszenie float
+    try:
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+        df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce")
+    except:
+        return {
+            "trend_s": "NEUTRAL",
+            "trend_m": "NEUTRAL",
+            "trend_l": "NEUTRAL",
+            "macd_hist": 0.0,
+            "rsi": 50.0,
+            "vol": 1.0
+        }
 
-    # RSI fast
-    delta = df["Close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
-    df["rsi"] = 100 - (100 / (1 + rs))
+    df = df.fillna(method="ffill").fillna(method="bfill")
 
-    # Volume spike
-    df["vol_spike"] = df["Volume"] / df["Volume"].rolling(20).mean()
+    try:
+        last_close = float(df["Close"].iloc[-1])
+    except:
+        last_close = 0.0
 
-    last = df.iloc[-1]
+    # MA
+    df["ma20"] = df["Close"].rolling(20).mean()
+    df["ma50"] = df["Close"].rolling(50).mean()
+    df["ma200"] = df["Close"].rolling(200).mean()
+
+    def safe(v):
+        try:
+            return float(v)
+        except:
+            return last_close
+
+    ma20 = safe(df["ma20"].iloc[-1])
+    ma50 = safe(df["ma50"].iloc[-1])
+    ma200 = safe(df["ma200"].iloc[-1])
+
+    trend_s = "UP" if last_close > ma20 else "DOWN"
+    trend_m = "UP" if last_close > ma50 else "DOWN"
+    trend_l = "UP" if last_close > ma200 else "DOWN"
+
+    # MACD
+    try:
+        df["ema12"] = df["Close"].ewm(span=12).mean()
+        df["ema26"] = df["Close"].ewm(span=26).mean()
+        df["macd"] = df["ema12"] - df["ema26"]
+        df["signal"] = df["macd"].ewm(span=9).mean()
+        macd_hist = float(df["macd"].iloc[-1] - df["signal"].iloc[-1])
+    except:
+        macd_hist = 0.0
+
+    # RSI
+    try:
+        delta = df["Close"].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+        rs = avg_gain / avg_loss
+        rsi_val = float(100 - (100 / (1 + rs.iloc[-1])))
+    except:
+        rsi_val = 50.0
+
+    # Volume
+    try:
+        vol_rel = float(df["Volume"].iloc[-1] / df["Volume"].rolling(20).mean().iloc[-1])
+    except:
+        vol_rel = 1.0
+
+    return {
+        "trend_s": trend_s,
+        "trend_m": trend_m,
+        "trend_l": trend_l,
+        "macd_hist": round(macd_hist, 4),
+        "rsi": round(rsi_val, 2),
+        "vol": round(vol_rel, 2)
+    }
+
 
     return {
         "macd": float(last["macd"]),
@@ -592,17 +661,55 @@ def get_daily(symbol):
         return pd.DataFrame()
 
 
-def calc_daily_indicators(df):
+def calc_fast_indicators(df):
     import pandas as pd
+    import numpy as np
 
-    if df is None or df.empty or len(df) < 50:
-        return {
-            "trend_s": "NEUTRAL",
-            "trend_m": "NEUTRAL",
-            "trend_l": "NEUTRAL",
-            "macd_hist": 0.0,
-            "rsi": 50.0,
-            "vol": 1.0
+    if df is None or df.empty or len(df) < 20:
+        return {"macd": 0.0, "rsi": 50.0, "vol_spike": 1.0}
+
+    df = df.copy()
+
+    # Wymuszenie float
+    try:
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+        df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce")
+    except:
+        return {"macd": 0.0, "rsi": 50.0, "vol_spike": 1.0}
+
+    df = df.fillna(method="ffill").fillna(method="bfill")
+
+    # MACD fast
+    df["ema12"] = df["Close"].ewm(span=12).mean()
+    df["ema26"] = df["Close"].ewm(span=26).mean()
+    df["macd"] = df["ema12"] - df["ema26"]
+
+    # RSI fast
+    delta = df["Close"].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / avg_loss
+    df["rsi"] = 100 - (100 / (1 + rs))
+
+    # Volume spike
+    df["vol_spike"] = df["Volume"] / df["Volume"].rolling(20).mean()
+
+    last = df.iloc[-1]
+
+    def safe(v):
+        try:
+            return float(v)
+        except:
+            return 0.0
+
+    return {
+        "macd": safe(last["macd"]),
+        "rsi": safe(last["rsi"]),
+        "vol_spike": safe(last["vol_spike"])
+    }
+
         }
 
     df = df.copy()
