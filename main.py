@@ -1,1129 +1,972 @@
-
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import numpy as np
 from openai import OpenAI
-from streamlit_autorefresh import st_autorefresh
 import requests
 import time
 import xml.etree.ElementTree as ET
 
 # ============================================================
-# 1. KONFIG + NEON STYL (ciemniejszy zielony)
+# ULTRA ENGINE v5.0 — CORE SYSTEM
 # ============================================================
 
 st.set_page_config(
     layout="wide",
-    page_title="NEON MEGA-KOMBAJN ULTRA AI PRO",
-    page_icon="🚀"
+    page_title="ULTRA ENGINE v5.0 — THE FORGE",
+    page_icon="⚙️"
 )
 
+# DARKER NEON THEME
 st.markdown("""
 <style>
-body { background-color: #050510; color: #e0e0ff; }
-.stApp { background-color: #050510; }
+body { background-color: #030308; color: #d0d0ff; }
+.stApp { background-color: #030308; }
 
 .mega-card {
-    border: 2px solid #222;
+    border: 2px solid #111;
     padding: 30px;
     border-radius: 20px;
-    background: #07140a;
-    box-shadow: 0 0 25px #0aff0a22;
+    background: #050a0f;
+    box-shadow: 0 0 25px #00ff8822;
     margin-bottom: 30px;
 }
 .top-card {
-    border: 1px solid #333;
+    border: 1px solid #222;
     padding: 15px;
     border-radius: 12px;
-    background: #07140a;
+    background: #050a0f;
     font-size: 1rem;
     line-height: 1.4;
     min-height: 300px;
     text-align: center;
 }
 .neon-title {
-    color: #0aff0a;
+    color: #00ff88;
     font-weight: bold;
     font-size: 3.5rem;
-    text-shadow: 0 0 15px #0aff0a;
+    text-shadow: 0 0 15px #00ff88;
 }
 .price-tag {
     font-size: 2.8rem;
     font-weight: bold;
     color: #ffffff;
 }
-.neon-bid {
-    color: #00FF00;
+.signal-BUY {
+    color: #00ff88;
     font-weight: bold;
-    font-size: 1.2rem;
-    text-shadow: 0 0 5px #00FF00;
-}
-.neon-ask {
-    color: #FF0000;
-    font-weight: bold;
-    font-size: 1.2rem;
-    text-shadow: 0 0 5px #FF0000;
-}
-.tp-val {
-    color: #00FF00;
-    font-weight: bold;
-    font-size: 1.3rem;
-}
-.sl-val {
-    color: #FF3131;
-    font-weight: bold;
-    font-size: 1.3rem;
-}
-.signal-KUP {
-    color: #39FF14;
-    font-weight: bold;
-    text-shadow: 0 0 10px #39FF14;
-    border: 2px solid #39FF14;
+    border: 2px solid #00ff88;
     padding: 10px;
     border-radius: 10px;
     font-size: 1.4rem;
+    text-shadow: 0 0 10px #00ff88;
 }
-.signal-SPRZEDAJ {
-    color: #FF3131;
+.signal-SELL {
+    color: #ff4444;
     font-weight: bold;
-    text-shadow: 0 0 10px #FF3131;
-    border: 2px solid #FF3131;
+    border: 2px solid #ff4444;
     padding: 10px;
     border-radius: 10px;
     font-size: 1.4rem;
+    text-shadow: 0 0 10px #ff4444;
 }
-.signal-TRZYMAJ {
-    color: #00FFFF;
+.signal-WATCH {
+    color: #00ccff;
     font-weight: bold;
-    border: 2px solid #00FFFF;
+    border: 2px solid #00ccff;
     padding: 10px;
     border-radius: 10px;
     font-size: 1.4rem;
-}
-.stButton>button {
-    background-color: #1a1a1a;
-    color: #39FF14;
-    border: 2px solid #39FF14;
-    width: 100%;
-    font-weight: bold;
-    height: 3.2rem;
-    font-size: 1.1rem;
-    box-shadow: 0 0 20px #39FF1444;
-}
-.ai-box {
-    margin-top:10px;
-    padding:10px;
-    border-radius:12px;
-    border:1px solid #303f9f;
-    background:rgba(10,15,35,0.9);
-    text-align:left;
-    font-size:0.9rem;
-}
-.pro-box {
-    margin-top:8px;
-    padding:8px;
-    border-radius:10px;
-    border:1px dashed #607d8b;
-    background:rgba(5,10,25,0.9);
-    text-align:left;
-    font-size:0.85rem;
+    text-shadow: 0 0 10px #00ccff;
 }
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================
-# 2. AI KLIENT + AUTOREFRESH
+# AI CLIENT
 # ============================================================
 
 client = None
 if "OPENAI_API_KEY" in st.secrets:
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-st_autorefresh(interval=5 * 60 * 1000, key="neon_ai_pro_v1")
-
 # ============================================================
-# 3. SESSION STATE
+# AI SIGNAL ENGINE 4.0 — CORE LOGIC
 # ============================================================
 
-if "tickers_text" not in st.session_state:
-    st.session_state["tickers_text"] = (
-        "HUMA, TCRX, GOSS, PLRX, TTOO, BNOX, IMUX, SLS, DRMA, BDRX, MREO, XLO, "
-        "TCON, VIRI, ACRS, AURA, KTRA, VINC, NRSN, ANIX, CRVS, ADVM, APM, SABS, "
-        "HILS, RNAZ, SLNO, IMNN, BCTX, ATHE, MNOV, BOLT, INFI, APLT, CLRB, ENLV, "
-        "EVGN, GRTS, HSTO, IMMP,ADV.WA, MDB.WA, ONO.WA, PUR.WA, NNG.WA, GX1.WA, "
-        "GMT.WA, RDG.WA, MAB.WA, SEL.WA, BIO.WA, BML.WA, BPC.WA, BRS.WA, COG.WA, "
-        "CRL.WA, CRP.WA, DCR.WA, DRP.WA, ENP.WA, EPC.WA, ERG.WA, FHD.WA, GRC.WA, "
-        "INC.WA, ITP.WA, KPL.WA, MNC.WA, MZN.WA, ONC.WA, PCF.WA, PGM.WA, PMG.WA, "
-        "PNT.WA, SNP.WA, SNT.WA, TXM.WA, URS.WA, VRC.WA, VRG.WA,"
+def ai_signal_engine(r, news_impact=0, blacklist_flag=False, formations_score=0):
+    """
+    FINAL SIGNAL = BUY / SELL / WATCH
+    Based on:
+    - Trend S/M/L
+    - MACD histogram
+    - RSI
+    - ATR
+    - Pivot levels
+    - Swing high/low
+    - Volume relative
+    - News impact
+    - Blacklist
+    - AI formations
+    """
+
+    score = 0
+
+    # Trend strength
+    if r["trend_s"] == "UP": score += 1
+    else: score -= 1
+    if r["trend_m"] == "UP": score += 2
+    else: score -= 2
+    if r["trend_l"] == "UP": score += 3
+    else: score -= 3
+
+    # MACD histogram
+    if r["macd_hist"] > 0: score += 2
+    else: score -= 2
+
+    # RSI
+    if 40 <= r["rsi"] <= 60:
+        score += 1
+    elif r["rsi"] < 30:
+        score += 2
+    elif r["rsi"] > 70:
+        score -= 2
+
+    # Volume relative
+    if r["vol"] >= 2:
+        score += 2
+    elif r["vol"] < 0.5:
+        score -= 2
+
+    # News impact
+    score += int(news_impact / 20)
+
+    # Formations
+    score += formations_score
+
+    # Blacklist
+    if blacklist_flag:
+        score -= 999
+
+    # Final decision
+    if score >= 6:
+        return "BUY", score
+    elif score <= -4:
+        return "SELL", score
+    else:
+        return "WATCH", score
+# ============================================================
+# ALERT ENGINE — CORE (mail / Discord / Telegram / webhook)
+# ============================================================
+
+import smtplib
+from email.mime.text import MIMEText
+
+def alert_send_email(to_email, subject, body):
+    """
+    Wysyła alert mailowy.
+    Wymaga:
+    st.secrets["SMTP_SERVER"]
+    st.secrets["SMTP_PORT"]
+    st.secrets["SMTP_USER"]
+    st.secrets["SMTP_PASS"]
+    """
+    try:
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = st.secrets.get("SMTP_USER", "")
+        msg["To"] = to_email
+
+        with smtplib.SMTP_SSL(
+            st.secrets["SMTP_SERVER"],
+            st.secrets["SMTP_PORT"]
+        ) as server:
+            server.login(
+                st.secrets["SMTP_USER"],
+                st.secrets["SMTP_PASS"]
+            )
+            server.sendmail(
+                st.secrets["SMTP_USER"],
+                [to_email],
+                msg.as_string()
+            )
+        return True
+    except Exception as e:
+        return False
+
+
+def alert_send_discord(webhook_url, message):
+    """
+    Wysyła alert na Discord webhook.
+    """
+    try:
+        requests.post(webhook_url, json={"content": message}, timeout=10)
+        return True
+    except:
+        return False
+
+
+def alert_send_telegram(bot_token, chat_id, message):
+    """
+    Wysyła alert Telegram.
+    """
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        params = {"chat_id": chat_id, "text": message}
+        requests.get(url, params=params, timeout=10)
+        return True
+    except:
+        return False
+
+
+def alert_send_webhook(url, payload):
+    """
+    Wysyła alert na dowolny webhook.
+    """
+    try:
+        requests.post(url, json=payload, timeout=10)
+        return True
+    except:
+        return False
+
+
+# ============================================================
+# ALERT ENGINE — DECISION LAYER
+# ============================================================
+
+def trigger_alert(symbol, signal, score, price, reason, channels):
+    """
+    Wywołuje alert na podstawie sygnału końcowego.
+    channels = dict:
+        {
+            "email": "...",
+            "discord": "...",
+            "telegram_token": "...",
+            "telegram_chat": "...",
+            "webhook": "..."
+        }
+    """
+
+    msg = (
+        f"ALERT — {symbol}\n"
+        f"Sygnał: {signal}\n"
+        f"Score: {score}\n"
+        f"Cena: {price}\n"
+        f"Powód: {reason}\n"
     )
 
-if "ai_single" not in st.session_state:
-    st.session_state["ai_single"] = {}
+    # MAIL
+    if channels.get("email"):
+        alert_send_email(
+            channels["email"],
+            f"ALERT — {symbol} ({signal})",
+            msg
+        )
 
-if "ai_portfolio" not in st.session_state:
-    st.session_state["ai_portfolio"] = None
+    # DISCORD
+    if channels.get("discord"):
+        alert_send_discord(channels["discord"], msg)
 
-if "ai_top10" not in st.session_state:
-    st.session_state["ai_top10"] = None
+    # TELEGRAM
+    if channels.get("telegram_token") and channels.get("telegram_chat"):
+        alert_send_telegram(
+            channels["telegram_token"],
+            channels["telegram_chat"],
+            msg
+        )
 
-if "ai_smart_filter" not in st.session_state:
-    st.session_state["ai_smart_filter"] = None
+    # WEBHOOK
+    if channels.get("webhook"):
+        alert_send_webhook(channels["webhook"], {"alert": msg})
 
-if "news_auto_mode" not in st.session_state:
-    st.session_state["news_auto_mode"] = False
-
-if "news_last_run" not in st.session_state:
-    st.session_state["news_last_run"] = None
-
+    return True
 # ============================================================
-# 4. HEADER Z ODSWIEŻ + ZAPISZ LISTĘ
-# ============================================================
-
-col1, col2, col3 = st.columns([4, 1, 1])
-with col1:
-    st.markdown("<h1 class='neon-title'>🚀 MEGA-KOMBAJN ULTRA AI PRO</h1>", unsafe_allow_html=True)
-
-with col2:
-    if st.button("🔄 ODSWIEŻ"):
-        st.rerun()
-
-with col3:
-    if st.button("💾 ZAPISZ LISTĘ"):
-        st.session_state["tickers_text"] = st.session_state["tickers_text"]
-        st.success("Lista spółek zapisana!")
-
-# ============================================================
-# 5. SIDEBAR — LISTA TICKERÓW + NEWS STEROWANIE
+# HEATMAP ENGINE — CORE
 # ============================================================
 
-st.sidebar.title("💠 KONTROLA")
+# Sektory GPW (przykładowe, można rozszerzyć)
+GPW_SECTORS = {
+    "WIG-CHEMIA": ["ATT.WA", "CIE.WA"],
+    "WIG-ENERGIA": ["PGE.WA", "TAU.WA"],
+    "WIG-GAMES": ["CDR.WA", "TEN.WA", "PLW.WA"],
+    "WIG-BANKI": ["PKO.WA", "PEO.WA", "ING.WA"],
+}
 
-tickers_text = st.sidebar.text_area(
-    "Wklej tickery:",
-    value=st.session_state["tickers_text"],
-    height=200
-)
+# Sektory NC (przykładowe)
+NC_SECTORS = {
+    "NC-BIOTECH": ["MAB.WA", "BIO.WA"],
+    "NC-TECH": ["QUB.WA", "MBR.WA"],
+}
 
-st.session_state["tickers_text"] = tickers_text
+# Sektory USA (GICS)
+US_SECTORS = {
+    "TECH": ["AAPL", "MSFT", "NVDA", "AMD"],
+    "SEMICONDUCTORS": ["TSM", "AVGO", "QCOM"],
+    "BIOTECH": ["AMGN", "GILD", "VRTX"],
+    "FINANCIALS": ["JPM", "BAC", "GS"],
+    "ENERGY": ["XOM", "CVX", "SLB"],
+}
 
-tickers = [
-    x.strip().upper()
-    for x in tickers_text.replace(",", " ").split()
-    if x.strip()
-]
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("📰 NEWS IMPACT ENGINE 3.0")
+def get_sector_momentum(tickers):
+    """
+    Liczy momentum sektora na podstawie średniej zmiany %.
+    """
+    changes = []
+    for t in tickers:
+        try:
+            data = yf.download(t, period="5d", interval="1d", progress=False)
+            if len(data) >= 2:
+                pct = (data["Close"][-1] - data["Close"][-2]) / data["Close"][-2] * 100
+                changes.append(pct)
+        except:
+            pass
 
-news_auto = st.sidebar.checkbox("Auto monitoring newsów", value=st.session_state["news_auto_mode"])
-st.session_state["news_auto_mode"] = news_auto
-news_manual_scan = st.sidebar.button("Ręczne skanowanie newsów")
-news_restart = st.sidebar.button("Restart cyklu newsów")
+    if len(changes) == 0:
+        return 0
 
-if news_restart:
-    st.session_state["news_last_run"] = None
+    return round(sum(changes) / len(changes), 2)
 
+
+def build_heatmap_data():
+    """
+    Tworzy strukturę danych dla heatmapy sektorowej.
+    Zwraca:
+    {
+        "GPW": { sektor: momentum },
+        "NC": { sektor: momentum },
+        "US": { sektor: momentum }
+    }
+    """
+
+    heatmap = {"GPW": {}, "NC": {}, "US": {}}
+
+    # GPW
+    for sector, tickers in GPW_SECTORS.items():
+        heatmap["GPW"][sector] = get_sector_momentum(tickers)
+
+    # NC
+    for sector, tickers in NC_SECTORS.items():
+        heatmap["NC"][sector] = get_sector_momentum(tickers)
+
+    # USA
+    for sector, tickers in US_SECTORS.items():
+        heatmap["US"][sector] = get_sector_momentum(tickers)
+
+    return heatmap
+
+
+def heatmap_color(value):
+    """
+    Zwraca kolor neon-dark w zależności od momentum.
+    """
+    if value > 1:
+        return "#00ff88"   # mocny zielony
+    elif value < -1:
+        return "#ff4444"   # mocny czerwony
+    else:
+        return "#00ccff"   # neutralny niebieski
 # ============================================================
-# 6. SILNIK ANALITYCZNY AI PRO (z TREND S/M/L)
+# SCALPER MODE — CORE ENGINE (1m / 5m / 15m)
 # ============================================================
 
-def detect_candle_pattern(df: pd.DataFrame) -> str:
-    if len(df) < 3:
-        return "Brak wystarczającej liczby świec do analizy."
+def get_intraday(symbol, interval="1m", lookback="1d"):
+    """
+    Pobiera dane intraday dla scalpingu.
+    interval: "1m", "5m", "15m"
+    lookback: "1d", "5d"
+    """
+    try:
+        data = yf.download(
+            symbol,
+            period=lookback,
+            interval=interval,
+            progress=False
+        )
+        return data
+    except:
+        return pd.DataFrame()
+
+
+def calc_fast_indicators(df):
+    """
+    Szybkie wskaźniki do scalpingu:
+    - MACD fast
+    - RSI fast
+    - Volume spike
+    """
+
+    if df.empty or len(df) < 20:
+        return {"macd": 0, "rsi": 50, "vol_spike": 1}
+
+    # MACD fast
+    df["ema12"] = df["Close"].ewm(span=12).mean()
+    df["ema26"] = df["Close"].ewm(span=26).mean()
+    df["macd"] = df["ema12"] - df["ema26"]
+
+    # RSI fast
+    delta = df["Close"].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / avg_loss
+    df["rsi"] = 100 - (100 / (1 + rs))
+
+    # Volume spike
+    df["vol_spike"] = df["Volume"] / df["Volume"].rolling(20).mean()
 
     last = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    o, h, l, c = last["Open"], last["High"], last["Low"], last["Close"]
-    po, ph, pl, pc = prev["Open"], prev["High"], prev["Low"], prev["Close"]
-
-    body = abs(c - o)
-    upper = h - max(o, c)
-    lower = min(o, c) - l
-
-    sygnaly = []
-
-    if lower > body * 2 and upper < body and c > o:
-        sygnaly.append("Możliwy młot (bycze odbicie).")
-
-    if upper > body * 2 and lower < body and c < o:
-        sygnaly.append("Możliwy młot odwrotny (potencjalne odwrócenie).")
-
-    if pc < po and c > o and c > pc and o < po:
-        sygnaly.append("Możliwe objęcie wzrostowe (bycze odwrócenie).")
-
-    if pc > po and c < o and c < pc and o > po:
-        sygnaly.append("Możliwe objęcie spadkowe (niedźwiedzie odwrócenie).")
-
-    if not sygnaly:
-        return "Brak wyraźnej klasycznej formacji świecowej."
-
-    return " ".join(sygnaly)
-
-
-def ultra(symbol: str):
-    try:
-        tk = yf.Ticker(symbol)
-        df = tk.history(period="1y")
-        if df.empty:
-            return None
-
-        close = df["Close"]
-        high = df["High"]
-        low = df["Low"]
-
-        last = float(close.iloc[-1])
-
-        ma20 = float(close.rolling(20).mean().iloc[-1])
-        ma50 = float(close.rolling(50).mean().iloc[-1])
-        ma100 = float(close.rolling(100).mean().iloc[-1])
-        ma200 = float(close.rolling(200).mean().iloc[-1])
-        ema200 = float(close.ewm(span=200).mean().iloc[-1])
-
-        ema12 = close.ewm(span=12).mean()
-        ema26 = close.ewm(span=26).mean()
-        macd_line = ema12 - ema26
-        macd_signal = macd_line.ewm(span=9).mean()
-        macd = float(macd_line.iloc[-1])
-        macd_sig = float(macd_signal.iloc[-1])
-        macd_hist = float(macd - macd_sig)
-
-        delta = close.diff()
-        gain = delta.where(delta > 0, 0).rolling(14).mean().iloc[-1]
-        loss = -delta.where(delta < 0, 0).rolling(14).mean().iloc[-1]
-        rs = gain / loss if loss != 0 else 999
-        rsi = float(100 - (100 / (1 + rs)))
-
-        tr = pd.concat([
-            high - low,
-            (high - close.shift()).abs(),
-            (low - close.shift()).abs()
-        ], axis=1).max(axis=1)
-        atr = float(tr.rolling(14).mean().iloc[-1])
-
-        swing_high = float(high.tail(10).max())
-        swing_low = float(low.tail(10).min())
-
-        tp = max(last + atr * 2, swing_high)
-        sl = min(last - atr * 1.5, swing_low)
-
-        ph, pl, pc = float(high.iloc[-1]), float(low.iloc[-1]), last
-        pivot = (ph + pl + pc) / 3
-        r1 = 2 * pivot - pl
-        s1 = 2 * pivot - ph
-
-        vol_rel = float(df["Volume"].iloc[-1] / df["Volume"].tail(20).mean())
-
-        score = 0
-        score += 1 if last > ma20 else -1
-        score += 2 if last > ma50 else -2
-        score += 2 if last > ma100 else -2
-        score += 3 if last > ma200 else -3
-
-        if score >= 6 and macd > macd_sig and rsi < 70:
-            signal = "KUP"
-        elif score <= -4 and macd < macd_sig and rsi > 30:
-            signal = "SPRZEDAJ"
-        else:
-            signal = "TRZYMAJ"
-
-        candle_comment = detect_candle_pattern(df.tail(30))
-
-        trend_s = "UP" if last > ma20 else "DOWN"
-        trend_m = "UP" if last > ma50 else "DOWN"
-        trend_l = "UP" if last > ma200 else "DOWN"
-
-        return {
-            "symbol": symbol,
-            "price": last,
-            "bid": tk.info.get("bid", "-"),
-            "ask": tk.info.get("ask", "-"),
-            "ma20": ma20,
-            "ma50": ma50,
-            "ma100": ma100,
-            "ma200": ma200,
-            "ema200": ema200,
-            "macd": macd,
-            "macd_sig": macd_sig,
-            "macd_hist": macd_hist,
-            "rsi": rsi,
-            "atr": atr,
-            "swing_high": swing_high,
-            "swing_low": swing_low,
-            "tp": tp,
-            "sl": sl,
-            "pivot": pivot,
-            "r1": r1,
-            "s1": s1,
-            "vol": vol_rel,
-            "score": int(score),
-            "signal": signal,
-            "candle_comment": candle_comment,
-            "trend_s": trend_s,
-            "trend_m": trend_m,
-            "trend_l": trend_l,
-            "df": df.tail(120)
-        }
-    except Exception:
-        return None
-
-# ============================================================
-# NEWS IMPACT ENGINE 3.0 — FUNKCJE
-# ============================================================
-
-RSS_SOURCES = [
-    "https://www.bankier.pl/rss/wiadomosci.xml",
-    "https://stooq.pl/rss/news.xml",
-    "https://www.money.pl/rss/wiadomosci.xml",
-    "https://www.parkiet.com/rss",
-    "https://biznes.interia.pl/feed",
-]
-
-GPW_ESPI = [
-    "https://www.gpw.pl/rss/komunikaty_espi",
-    "https://www.gpw.pl/rss/komunikaty_ebi",
-]
-
-MACRO_SOURCES = [
-    "https://www.forexfactory.com/ffcal_week_this.xml",
-]
-
-NEWS_API_KEY = st.secrets.get("NEWS_API_KEY", None)
-TWITTER_BEARER = st.secrets.get("TWITTER_BEARER", None)
-
-def parse_rss(url):
-    items = []
-    try:
-        r = requests.get(url, timeout=10)
-        if r.status_code != 200:
-            return items
-        root = ET.fromstring(r.content)
-        for item in root.iter("item"):
-            title = item.findtext("title", default="").strip()
-            link = item.findtext("link", default="").strip()
-            pub = item.findtext("pubDate", default="").strip()
-            desc = item.findtext("description", default="").strip()
-            items.append(
-                {
-                    "source": url,
-                    "title": title,
-                    "link": link,
-                    "published": pub,
-                    "summary": desc,
-                }
-            )
-    except Exception:
-        pass
-    return items
-
-def fetch_newsapi_for_ticker(ticker):
-    if not NEWS_API_KEY:
-        return []
-    url = "https://newsapi.org/v2/everything"
-    params = {
-        "q": ticker,
-        "language": "en",
-        "sortBy": "publishedAt",
-        "pageSize": 20,
-        "apiKey": NEWS_API_KEY,
-    }
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code != 200:
-            return []
-        data = r.json()
-        out = []
-        for a in data.get("articles", []):
-            out.append(
-                {
-                    "source": a.get("source", {}).get("name", ""),
-                    "title": a.get("title", ""),
-                    "link": a.get("url", ""),
-                    "published": a.get("publishedAt", ""),
-                    "summary": a.get("description", "") or "",
-                }
-            )
-        return out
-    except Exception:
-        return []
-
-def fetch_twitter_for_ticker(ticker):
-    if not TWITTER_BEARER:
-        return []
-    url = "https://api.twitter.com/2/tweets/search/recent"
-    query = f"{ticker} lang:en -is:retweet"
-    headers = {"Authorization": f"Bearer {TWITTER_BEARER}"}
-    params = {
-        "query": query,
-        "max_results": 20,
-        "tweet.fields": "created_at,text",
-    }
-    try:
-        r = requests.get(url, headers=headers, params=params, timeout=10)
-        if r.status_code != 200:
-            return []
-        data = r.json()
-        out = []
-        for t in data.get("data", []):
-            out.append(
-                {
-                    "source": "Twitter",
-                    "title": t.get("text", "")[:120],
-                    "link": f"https://twitter.com/i/web/status/{t.get('id')}",
-                    "published": t.get("created_at", ""),
-                    "summary": t.get("text", ""),
-                }
-            )
-        return out
-    except Exception:
-        return []
-
-POSITIVE_WORDS = [
-    "profit", "zysk", "record", "rekord", "upgrade", "podwyższa", "raise",
-    "contract", "kontrakt", "acquisition", "przejęcie", "buyback", "skup akcji",
-    "dividend", "dywidenda", "beats", "powyżej oczekiwań",
-]
-
-NEGATIVE_WORDS = [
-    "loss", "strata", "downgrade", "obniża", "lawsuit", "pozew", "emission",
-    "emisja akcji", "warning", "profit warning", "bankruptcy", "upadłość",
-    "suspension", "zawieszenie", "problem", "awaria",
-]
-
-HIGH_IMPACT_WORDS = [
-    "emisja akcji", "profit warning", "upadłość", "bankruptcy", "wezwanie",
-    "tender offer", "acquisition", "przejęcie", "merger", "fuzja",
-    "results", "wyniki finansowe", "dywidenda", "dividend",
-]
-
-def classify_impact(text):
-    t = text.lower()
-    score = 0
-    pos = sum(1 for w in POSITIVE_WORDS if w in t)
-    neg = sum(1 for w in NEGATIVE_WORDS if w in t)
-    high = sum(1 for w in HIGH_IMPACT_WORDS if w in t)
-
-    score += pos * 10
-    score -= neg * 10
-    score += high * 15
-
-    sentiment = "neutral"
-    if pos > neg:
-        sentiment = "positive"
-    elif neg > pos:
-        sentiment = "negative"
-
-    direction = "neutral"
-    if sentiment == "positive":
-        direction = "bullish"
-    elif sentiment == "negative":
-        direction = "bearish"
-
-    impact_abs = abs(score)
-    if impact_abs >= 70:
-        impact_level = "HIGH"
-        color = "red"
-    elif impact_abs >= 40:
-        impact_level = "MEDIUM"
-        color = "orange"
-    elif impact_abs >= 15:
-        impact_level = "LOW"
-        color = "green"
-    else:
-        impact_level = "NONE"
-        color = "gray"
-
-    impact_score = max(0, min(100, impact_abs))
 
     return {
-        "sentiment": sentiment,
-        "direction": direction,
-        "impact_level": impact_level,
-        "impact_color": color,
-        "impact_score": impact_score,
+        "macd": round(last["macd"], 4),
+        "rsi": round(last["rsi"], 2),
+        "vol_spike": round(last["vol_spike"], 2)
     }
 
-def detect_market(ticker):
-    t = ticker.upper().strip()
-    if t.endswith(".WA") or t.endswith(".PL"):
-        return "GPW"
-    if t in ["SPY", "VOO", "IVV"]:
-        return "S&P500"
-    if t in ["QQQ", "NDX", "IXIC"]:
-        return "NASDAQ"
-    return "UNKNOWN"
 
-def filter_items_for_tickers(items, tickers):
-    out = []
-    for it in items:
-        text = (it.get("title", "") + " " + it.get("summary", "")).upper()
-        for tk in tickers:
-            if tk and tk.upper() in text:
-                c = classify_impact(it.get("title", "") + " " + it.get("summary", ""))
-                market = detect_market(tk)
-                it2 = it.copy()
-                it2["ticker"] = tk.upper()
-                it2["market"] = market
-                it2.update(c)
-                out.append(it2)
-                break
-    return out
+def scalper_signal(ind):
+    """
+    Sygnał scalpingu:
+    BUY / SELL / WATCH
+    """
 
-def run_news_scan(tickers):
-    all_items = []
-    for url in RSS_SOURCES + GPW_ESPI + MACRO_SOURCES:
-        all_items.extend(parse_rss(url))
-    for tk in tickers:
-        all_items.extend(fetch_newsapi_for_ticker(tk))
-        all_items.extend(fetch_twitter_for_ticker(tk))
-    alerts = filter_items_for_tickers(all_items, tickers)
-    alerts_sorted = sorted(alerts, key=lambda x: x.get("impact_score", 0), reverse=True)
-    return alerts_sorted
+    score = 0
 
+    # MACD
+    if ind["macd"] > 0:
+        score += 2
+    else:
+        score -= 2
+
+    # RSI
+    if ind["rsi"] < 30:
+        score += 2
+    elif ind["rsi"] > 70:
+        score -= 2
+
+    # Volume spike
+    if ind["vol_spike"] >= 2:
+        score += 2
+    elif ind["vol_spike"] < 0.5:
+        score -= 2
+
+    if score >= 3:
+        return "BUY", score
+    elif score <= -3:
+        return "SELL", score
+    else:
+        return "WATCH", score
 # ============================================================
-# 7. LICZENIE WYNIKÓW
+# SWING MODE — CORE ENGINE (D1 / W1)
 # ============================================================
 
-results = []
-for t in tickers:
-    data = ultra(t)
-    if data:
-        results.append(data)
+def get_swing_data(symbol, interval="1d", lookback="6mo"):
+    """
+    Pobiera dane dla swing tradingu.
+    interval: "1d" lub "1wk"
+    lookback: "6mo", "1y"
+    """
+    try:
+        data = yf.download(
+            symbol,
+            period=lookback,
+            interval=interval,
+            progress=False
+        )
+        return data
+    except:
+        return pd.DataFrame()
 
-if not results:
-    st.warning("Brak danych — sprawdź tickery.")
-    st.stop()
 
-# GPW/NC subset
-results_gpw = [r for r in results if r["symbol"].endswith(".WA") or r["symbol"].endswith(".PL")]
+def calc_swing_indicators(df):
+    """
+    Wskaźniki swingowe:
+    - Trend (MA20 / MA50 / MA200)
+    - Pivot levels
+    - Swing high/low
+    - Momentum
+    """
+
+    if df.empty or len(df) < 200:
+        return {
+            "trend": "NEUTRAL",
+            "momentum": 0,
+            "pivot_r1": 0,
+            "pivot_s1": 0,
+            "swing_high": 0,
+            "swing_low": 0
+        }
+
+    # Moving averages
+    df["ma20"] = df["Close"].rolling(20).mean()
+    df["ma50"] = df["Close"].rolling(50).mean()
+    df["ma200"] = df["Close"].rolling(200).mean()
+
+    # Trend logic
+    if df["ma20"].iloc[-1] > df["ma50"].iloc[-1] > df["ma200"].iloc[-1]:
+        trend = "UP"
+    elif df["ma20"].iloc[-1] < df["ma50"].iloc[-1] < df["ma200"].iloc[-1]:
+        trend = "DOWN"
+    else:
+        trend = "NEUTRAL"
+
+    # Pivot levels (ostatnia świeca)
+    last = df.iloc[-1]
+    pivot = (last["High"] + last["Low"] + last["Close"]) / 3
+    r1 = 2 * pivot - last["Low"]
+    s1 = 2 * pivot - last["High"]
+
+    # Swing high/low (ostatnie 20 świec)
+    swing_high = df["High"].tail(20).max()
+    swing_low = df["Low"].tail(20).min()
+
+    # Momentum (Close vs MA50)
+    momentum = round((last["Close"] - df["ma50"].iloc[-1]) / df["ma50"].iloc[-1] * 100, 2)
+
+    return {
+        "trend": trend,
+        "momentum": momentum,
+        "pivot_r1": round(r1, 2),
+        "pivot_s1": round(s1, 2),
+        "swing_high": round(swing_high, 2),
+        "swing_low": round(swing_low, 2)
+    }
+
+
+def swing_signal(ind):
+    """
+    Sygnał swingowy:
+    BUY / SELL / WATCH
+    """
+
+    score = 0
+
+    # Trend
+    if ind["trend"] == "UP":
+        score += 3
+    elif ind["trend"] == "DOWN":
+        score -= 3
+
+    # Momentum
+    if ind["momentum"] > 2:
+        score += 2
+    elif ind["momentum"] < -2:
+        score -= 2
+
+    # Price vs swing levels
+    if ind["pivot_s1"] > ind["swing_low"]:
+        score += 1
+    if ind["pivot_r1"] < ind["swing_high"]:
+        score -= 1
+
+    if score >= 4:
+        return "BUY", score
+    elif score <= -3:
+        return "SELL", score
+    else:
+        return "WATCH", score
+# ============================================================
+# BLACKLIST ENGINE — AI RISK FILTER
+# ============================================================
+
+def blacklist_engine(symbol, df):
+    """
+    Wykrywa ryzykowne spółki:
+    - emisje
+    - bankructwo
+    - pump & dump
+    - niska płynność
+    - anomalie wolumenowe
+    """
+
+    if df.empty or len(df) < 30:
+        return False, "Brak danych"
+
+    reasons = []
+
+    # Niska płynność
+    avg_vol = df["Volume"].tail(20).mean()
+    if avg_vol < 5000:
+        reasons.append("Niska płynność")
+
+    # Pump & dump (duże świece)
+    last = df.iloc[-1]
+    body = abs(last["Close"] - last["Open"])
+    range_ = last["High"] - last["Low"]
+    if range_ > 0 and body / range_ > 0.8:
+        reasons.append("Podejrzana świeca (pump/dump)")
+
+    # Wolumen anomalia
+    vol_spike = last["Volume"] / df["Volume"].rolling(20).mean().iloc[-1]
+    if vol_spike > 8:
+        reasons.append("Wolumen anomalia")
+
+    # Spadek > 20% w 5 dni
+    try:
+        close_5d = df["Close"].iloc[-5]
+        drop = (close_5d - last["Close"]) / close_5d * 100
+        if drop > 20:
+            reasons.append("Spadek >20% w 5 dni")
+    except:
+        pass
+
+    if len(reasons) > 0:
+        return True, ", ".join(reasons)
+
+    return False, ""
+
 
 # ============================================================
-# 8. TABS: ANALIZA / GPW / DARK OPS / NEWS / MANUAL
+# AI FORMATIONS ENGINE — TRIANGLES / WEDGES / FLAGS
 # ============================================================
 
-tab_analiza, tab_gpw, tab_darkops, tab_news, tab_manual = st.tabs(
-    ["📊 Analiza techniczna", "🇵🇱 GPW / NC", "🕶 DARK OPS", "📰 News impact", "📝 Manual impact"]
+def detect_formations(df):
+    """
+    Wykrywa formacje:
+    - triangle
+    - wedge
+    - flag
+
+    Zwraca:
+    (score, description)
+    """
+
+    if df.empty or len(df) < 40:
+        return 0, "Brak danych"
+
+    highs = df["High"].tail(40).values
+    lows = df["Low"].tail(40).values
+
+    score = 0
+    desc = []
+
+    # TRIANGLE — zbieżne high i low
+    if (highs.max() - highs.min()) < (lows.max() - lows.min()) * 1.2:
+        score += 2
+        desc.append("Triangle")
+
+    # WEDGE — oba kierunki w jedną stronę
+    if highs[-1] < highs[0] and lows[-1] > lows[0]:
+        score += 2
+        desc.append("Wedge (up)")
+    if highs[-1] > highs[0] and lows[-1] < lows[0]:
+        score += 2
+        desc.append("Wedge (down)")
+
+    # FLAG — mały kanał po dużym ruchu
+    last_move = abs(df["Close"].iloc[-20] - df["Close"].iloc[-1])
+    flag_range = highs.max() - lows.min()
+    if last_move > flag_range * 1.5:
+        score += 1
+        desc.append("Flag")
+
+    if score == 0:
+        return 0, "Brak formacji"
+
+    return score, ", ".join(desc)
+# ============================================================
+# GENESIS MODE — AI PORTFOLIO BUILDER
+# ============================================================
+
+def genesis_ai(prompt):
+    """
+    Wrapper na AI — generuje listy spółek, portfele, strategie.
+    """
+    if client is None:
+        return "Brak API KEY"
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Jesteś analitykiem rynkowym. Odpowiadaj krótko, konkretnie, w formie list."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=300
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"AI ERROR: {e}"
+
+
+def genesis_build(symbols, data_cache):
+    """
+    Tworzy:
+    - listę BUY
+    - listę SELL
+    - listę WATCH
+    - listę SWING
+    - listę SCALP
+    - listę SHORT
+    """
+
+    prompt = (
+        "Przeanalizuj poniższe spółki i podziel je na kategorie:\n"
+        "- BUY (silny trend, dobre momentum)\n"
+        "- SELL (słaby trend, ryzyko spadków)\n"
+        "- WATCH (neutralne)\n"
+        "- SWING (dobre do swing tradingu)\n"
+        "- SCALP (dobre do scalpingu)\n"
+        "- SHORT (kandydaci do shortowania)\n\n"
+        "Dane:\n"
+    )
+
+    for sym in symbols:
+        if sym in data_cache:
+            d = data_cache[sym]
+            prompt += f"{sym}: trend={d.get('trend','?')}, rsi={d.get('rsi','?')}, macd={d.get('macd','?')}, momentum={d.get('momentum','?')}, vol={d.get('vol','?')}\n"
+
+    return genesis_ai(prompt)
+# ============================================================
+# ULTRA ENGINE v5.0 — UI CORE + TABS
+# ============================================================
+
+st.markdown("<h1 class='neon-title'>ULTRA ENGINE v5.0 — THE FORGE</h1>", unsafe_allow_html=True)
+
+# Sidebar
+st.sidebar.title("⚙️ ULTRA ENGINE v5.0")
+st.sidebar.markdown("Wybierz moduł:")
+
+tab = st.sidebar.radio(
+    "",
+    [
+        "Dashboard",
+        "Heatmapa",
+        "Scalper Mode",
+        "Swing Mode",
+        "Genesis Mode",
+        "Alerts"
+    ]
 )
 
-# ============================================================
-# 8A. ANALIZA TECHNICZNA — PORTFEL, TOP10, RADAR, KAFELKI, AI SMART FILTER
-# ============================================================
+# Cache na dane
+if "data_cache" not in st.session_state:
+    st.session_state.data_cache = {}
 
-def trend_icon(t):
-    if t == "UP":
-        return "🟢▲"
-    elif t == "DOWN":
-        return "🔴▼"
-    return "🔵●"
+# Funkcja pobierająca dane dzienne
+def get_daily(symbol):
+    try:
+        df = yf.download(symbol, period="6mo", interval="1d", progress=False)
+        return df
+    except:
+        return pd.DataFrame()
 
-with tab_analiza:
-    df_res = pd.DataFrame([
-        {
-            "symbol": r["symbol"],
-            "price": r["price"],
-            "score": r["score"],
-            "signal": r["signal"],
-            "rsi": r["rsi"],
-            "macd": r["macd"],
-            "vol": r["vol"],
+# Funkcja licząca podstawowe wskaźniki
+def calc_daily_indicators(df):
+    if df.empty or len(df) < 50:
+        return {
+            "trend_s": "NEUTRAL",
+            "trend_m": "NEUTRAL",
+            "trend_l": "NEUTRAL",
+            "macd_hist": 0,
+            "rsi": 50,
+            "vol": 1
         }
-        for r in results
-    ])
 
-    df_sorted = df_res.sort_values(by=["score", "macd"], ascending=[False, False])
-    top10_symbols = df_sorted.head(10)["symbol"].tolist()
+    # Trend S/M/L
+    df["ma20"] = df["Close"].rolling(20).mean()
+    df["ma50"] = df["Close"].rolling(50).mean()
+    df["ma200"] = df["Close"].rolling(200).mean()
 
-    st.subheader("🧠 AI – portfel i TOP 10")
+    trend_s = "UP" if df["Close"].iloc[-1] > df["ma20"].iloc[-1] else "DOWN"
+    trend_m = "UP" if df["Close"].iloc[-1] > df["ma50"].iloc[-1] else "DOWN"
+    trend_l = "UP" if df["Close"].iloc[-1] > df["ma200"].iloc[-1] else "DOWN"
 
-    colp1, colp2 = st.columns([3, 1])
+    # MACD histogram
+    df["ema12"] = df["Close"].ewm(span=12).mean()
+    df["ema26"] = df["Close"].ewm(span=26).mean()
+    df["macd"] = df["ema12"] - df["ema26"]
+    df["signal"] = df["macd"].ewm(span=9).mean()
+    macd_hist = df["macd"].iloc[-1] - df["signal"].iloc[-1]
 
-    with colp1:
-        if client:
-            if st.button("🤖 AI podsumowanie portfela"):
-                with st.spinner("AI analizuje portfel..."):
-                    opis = "\n".join(
-                        f"{r['symbol']}: cena {r['price']:.2f}, score {r['score']}, RSI {r['rsi']:.1f}, MACD {r['macd']:.2f}"
-                        for r in results
-                    )
-                    prompt = f"""
-Analiza portfela:
-{opis}
+    # RSI
+    delta = df["Close"].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs.iloc[-1]))
 
-TOP10: {", ".join(top10_symbols)}
+    # Volume relative
+    vol = df["Volume"].iloc[-1] / df["Volume"].rolling(20).mean().iloc[-1]
 
-Zrób surową analizę techniczną portfela:
-1. Ocena trendu i momentum.
-2. Ryzyko i zmienność.
-3. 3 najmocniejsze i 3 najsłabsze pozycje.
-4. Werdykt ogólny (bez lania wody).
-"""
-                    resp = client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.1
-                    )
-                    st.session_state["ai_portfolio"] = resp.choices[0].message.content
-
-            if st.button("🤖 AI analiza TOP 10"):
-                with st.spinner("AI analizuje TOP 10..."):
-                    prompt = f"""
-TOP10 (po score + MACD):
-{chr(10).join(top10_symbols)}
-
-Zrób:
-1. Ranking siły trendu.
-2. 3 najlepsze okazje do wejścia.
-3. 3 ostrzeżenia (przegrzanie / słabość).
-4. Krótki werdykt.
-"""
-                    resp = client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.1
-                    )
-                    st.session_state["ai_top10"] = resp.choices[0].message.content
-
-            if st.button("🤖 AI SMART FILTER – wybierz 5 najlepszych spółek"):
-                with st.spinner("AI wybiera 5 najlepszych spółek..."):
-                    opis = "\n".join(
-                        f"{r['symbol']}: cena {r['price']:.2f}, score {r['score']}, RSI {r['rsi']:.1f}, MACD {r['macd']:.2f}, vol {r['vol']:.2f}"
-                        for r in results
-                    )
-                    prompt = f"""
-Masz listę spółek z parametrami:
-{opis}
-
-Wybierz 5 najlepszych spółek pod kątem:
-- siły trendu,
-- momentum,
-- rozsądnego ryzyka (RSI nie skrajne),
-- wolumenu (nie martwe, ale nie totalne pompy).
-
-Zwróć:
-1. Listę 5 tickerów (w kolejności od najlepszej).
-2. Po jednym krótkim zdaniu uzasadnienia dla każdej.
-Bez lania wody, bez definicji.
-"""
-                    resp = client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.1
-                    )
-                    st.session_state["ai_smart_filter"] = resp.choices[0].message.content
-
-        if st.session_state["ai_portfolio"]:
-            st.markdown("<div class='ai-box'>", unsafe_allow_html=True)
-            st.write(st.session_state["ai_portfolio"])
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        if st.session_state["ai_top10"]:
-            st.markdown("<div class='ai-box'>", unsafe_allow_html=True)
-            st.write(st.session_state["ai_top10"])
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        if st.session_state["ai_smart_filter"]:
-            st.markdown("<div class='ai-box'>", unsafe_allow_html=True)
-            st.markdown("### 🤖 AI SMART FILTER – 5 najlepszych spółek")
-            st.write(st.session_state["ai_smart_filter"])
-            st.markdown("</div>", unsafe_allow_html=True)
-
-    with colp2:
-        st.markdown("### 🏆 TOP 10 (score + MACD)")
-        st.dataframe(df_sorted.head(10), use_container_width=True)
-
-    st.divider()
-
-    st.subheader("🔥 RADAR WYBIĆ (wolumen relatywny)")
-
-    top_vol = df_res.sort_values(by="vol", ascending=False).head(10)
-
-    for i in range(0, len(top_vol), 5):
-        cols = st.columns(5)
-        for j, (_, row) in enumerate(top_vol.iloc[i:i+5].iterrows()):
-            with cols[j]:
-                r = next(x for x in results if x["symbol"] == row["symbol"])
-                st.markdown(f"""
-                <div class="top-card">
-                    <div style="color:#39FF14; font-weight:bold; font-size:1.4rem;">{r['symbol']}</div>
-                    <div style="font-size:1.6rem; font-weight:bold;">{r['price']:.2f}</div>
-                    <span class="neon-bid">B: {r['bid']}</span> | <span class="neon-ask">A: {r['ask']}</span><hr>
-                    <b>TP: <span class="tp-val">{r['tp']:.2f}</span></b><br>
-                    <b>SL: <span class="sl-val">{r['sl']:.2f}</span></b><hr>
-                    <b>Score:</b> {r['score']} | <b>RSI:</b> {r['rsi']:.1f}<br>
-                    <div class="signal-{r['signal']}" style="margin-top:10px; font-size:1rem;">{r['signal']}</div>
-                    <div style="margin-top:6px;">
-                        <b>Trend S:</b> {trend_icon(r['trend_s'])}
-                        &nbsp;&nbsp;<b>M:</b> {trend_icon(r['trend_m'])}
-                        &nbsp;&nbsp;<b>L:</b> {trend_icon(r['trend_l'])}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-    st.divider()
-
-    st.subheader("📊 Analiza główna – spółki")
-
-    for r in results:
-        with st.container():
-            st.markdown("<div class='mega-card'>", unsafe_allow_html=True)
-
-            c1, c2, c3, c4 = st.columns([1.8, 1.5, 1.3, 2.4])
-
-            with c1:
-                st.markdown(
-                    f"<div class='neon-title' style='font-size:3rem;'>{r['symbol']}</div>",
-                    unsafe_allow_html=True
-                )
-                st.markdown(
-                    f"<div class='price-tag'>{r['price']:.2f}</div>",
-                    unsafe_allow_html=True
-                )
-                st.markdown(
-                    f"Bid: <span class='neon-bid'>{r['bid']}</span> | "
-                    f"Ask: <span class='neon-ask'>{r['ask']}</span>",
-                    unsafe_allow_html=True
-                )
-                st.write(f"Wolumen relatywny: {r['vol']:.2f}x")
-
-                # MINI SPARKLINE
-                try:
-                    close_series = r["df"]["Close"]
-                    st.line_chart(close_series, height=80)
-                except Exception:
-                    pass
-
-            with c2:
-                st.write(f"Score trendu: **{r['score']}**")
-                st.write(f"RSI: **{r['rsi']:.1f}**")
-                st.write(f"ATR: **{r['atr']:.2f}**")
-                st.write(f"Swing High: {r['swing_high']:.2f}")
-                st.write(f"Swing Low: {r['swing_low']:.2f}")
-
-            with c3:
-                st.markdown(
-                    f"**TP: <span class='tp-val'>{r['tp']:.2f}</span>**",
-                    unsafe_allow_html=True
-                )
-                st.markdown(
-                    f"**SL: <span class='sl-val'>{r['sl']:.2f}</span>**",
-                    unsafe_allow_html=True
-                )
-                st.write(f"Pivot: {r['pivot']:.2f}")
-                st.write(f"R1: {r['r1']:.2f}")
-                st.write(f"S1: {r['s1']:.2f}")
-
-            with c4:
-                st.markdown(
-                    f"<div class='signal-{r['signal']}'>{r['signal']}</div>",
-                    unsafe_allow_html=True
-                )
-
-                st.markdown(
-                    f"<div style='margin-top:8px; font-size:0.95rem;'>"
-                    f"<b>Trend S:</b> {trend_icon(r['trend_s'])} &nbsp;&nbsp;"
-                    f"<b>M:</b> {trend_icon(r['trend_m'])} &nbsp;&nbsp;"
-                    f"<b>L:</b> {trend_icon(r['trend_l'])}"
-                    f"</div>",
-                    unsafe_allow_html=True
-                )
-
-                if client and st.button(f"🤖 DIAGNOZA AI – {r['symbol']}", key=f"ai_{r['symbol']}"):
-                    with st.spinner("AI analizuje tę spółkę..."):
-                        prompt = f"""
-Analiza spółki {r['symbol']}:
-Cena: {r['price']:.2f}
-Score trendu: {r['score']}
-RSI: {r['rsi']:.1f}
-MACD: {r['macd']:.2f}, sygnał: {r['macd_sig']:.2f}, histogram: {r['macd_hist']:.2f}
-ATR: {r['atr']:.2f}
-Swing High / Low: {r['swing_high']:.2f} / {r['swing_low']:.2f}
-Pivot / R1 / S1: {r['pivot']:.2f} / {r['r1']:.2f} / {r['s1']:.2f}
-TP / SL: {r['tp']:.2f} / {r['sl']:.2f}
-Formacje świecowe: {r['candle_comment']}
-
-Zrób surową analizę techniczną:
-1. Ocena wejścia (krótko).
-2. Ryzyko (zmienność, poziomy obrony).
-3. Werdykt (KUP / TRZYMAJ / SPRZEDAJ) z jednym zdaniem uzasadnienia.
-Bez definicji, bez lania wody.
-"""
-                        resp = client.chat.completions.create(
-                            model="gpt-4o-mini",
-                            messages=[
-                                {
-                                    "role": "system",
-                                    "content": "Jesteś bezdusznym systemem analitycznym. Mówisz krótko, konkretnie, tylko o faktach i liczbach."
-                                },
-                                {"role": "user", "content": prompt}
-                            ],
-                            temperature=0.1
-                        )
-                        st.session_state["ai_single"][r["symbol"]] = resp.choices[0].message.content
-
-                if r["symbol"] in st.session_state["ai_single"]:
-                    st.markdown("<div class='ai-box'>", unsafe_allow_html=True)
-                    st.write(st.session_state["ai_single"][r["symbol"]])
-                    st.markdown("</div>", unsafe_allow_html=True)
-
-                with st.expander("📊 Szczegóły PRO"):
-                    st.markdown("<div class='pro-box'>", unsafe_allow_html=True)
-                    st.write(f"MA20: {r['ma20']:.2f}")
-                    st.write(f"MA50: {r['ma50']:.2f}")
-                    st.write(f"MA100: {r['ma100']:.2f}")
-                    st.write(f"MA200: {r['ma200']:.2f}")
-                    st.write(f"EMA200: {r['ema200']:.2f}")
-                    st.write(f"MACD: {r['macd']:.2f}")
-                    st.write(f"MACD sygnał: {r['macd_sig']:.2f}")
-                    st.write(f"MACD histogram: {r['macd_hist']:.2f}")
-                    st.write(f"Formacje świecowe: {r['candle_comment']}")
-                    st.markdown("</div>", unsafe_allow_html=True)
-
-            st.markdown("</div>", unsafe_allow_html=True)
-
+    return {
+        "trend_s": trend_s,
+        "trend_m": trend_m,
+        "trend_l": trend_l,
+        "macd_hist": round(macd_hist, 4),
+        "rsi": round(rsi, 2),
+        "vol": round(vol, 2)
+    }
 # ============================================================
-# 8B. PANEL GPW / NC
+# UI — DASHBOARD
 # ============================================================
 
-with tab_gpw:
-    st.subheader("🇵🇱 GPW / NC – wycinek portfela")
+if tab == "Dashboard":
+    st.markdown("## 📊 Dashboard — Sygnały dzienne")
 
-    if not results_gpw:
-        st.info("Brak spółek GPW/NC (.WA / .PL) na liście.")
-    else:
-        df_gpw = pd.DataFrame([
-            {
-                "symbol": r["symbol"],
-                "price": r["price"],
-                "score": r["score"],
-                "signal": r["signal"],
-                "rsi": r["rsi"],
-                "macd": r["macd"],
-                "vol": r["vol"],
-            }
-            for r in results_gpw
-        ]).sort_values(by=["score", "macd"], ascending=[False, False])
+    symbol = st.text_input("Symbol", "AAPL")
 
-        st.dataframe(df_gpw, use_container_width=True)
+    if symbol:
+        df = get_daily(symbol)
+        ind = calc_daily_indicators(df)
 
-        st.markdown("---")
-        st.subheader("📊 Kafelki GPW / NC")
+        # Blacklist
+        bl_flag, bl_reason = blacklist_engine(symbol, df)
 
-        for r in results_gpw:
-            with st.container():
-                st.markdown("<div class='mega-card'>", unsafe_allow_html=True)
-                c1, c2 = st.columns([2, 3])
+        # Formations
+        form_score, form_desc = detect_formations(df)
 
-                with c1:
-                    st.markdown(
-                        f"<div class='neon-title' style='font-size:2.4rem;'>{r['symbol']}</div>",
-                        unsafe_allow_html=True
-                    )
-                    st.markdown(
-                        f"<div class='price-tag'>{r['price']:.2f}</div>",
-                        unsafe_allow_html=True
-                    )
-                    st.write(f"Score: {r['score']} | RSI: {r['rsi']:.1f}")
-                    st.write(f"Wolumen relatywny: {r['vol']:.2f}x")
-                    try:
-                        st.line_chart(r["df"]["Close"], height=80)
-                    except Exception:
-                        pass
+        # Final signal
+        signal, score = ai_signal_engine(
+            ind,
+            news_impact=0,
+            blacklist_flag=bl_flag,
+            formations_score=form_score
+        )
 
-                with c2:
-                    st.markdown(
-                        f"<div class='signal-{r['signal']}'>{r['signal']}</div>",
-                        unsafe_allow_html=True
-                    )
-                    st.markdown(
-                        f"<div style='margin-top:8px; font-size:0.95rem;'>"
-                        f"<b>Trend S:</b> {trend_icon(r['trend_s'])} &nbsp;&nbsp;"
-                        f"<b>M:</b> {trend_icon(r['trend_m'])} &nbsp;&nbsp;"
-                        f"<b>L:</b> {trend_icon(r['trend_l'])}"
-                        f"</div>",
-                        unsafe_allow_html=True
-                    )
-                    st.write(f"TP: {r['tp']:.2f} | SL: {r['sl']:.2f}")
-                    st.write(f"Pivot: {r['pivot']:.2f} | R1: {r['r1']:.2f} | S1: {r['s1']:.2f}")
+        col1, col2, col3 = st.columns(3)
 
-                st.markdown("</div>", unsafe_allow_html=True)
+        with col1:
+            st.markdown(f"<div class='top-card'><div class='price-tag'>{symbol}</div></div>", unsafe_allow_html=True)
+
+        with col2:
+            st.markdown(f"<div class='top-card'><div class='signal-{signal}'>{signal}</div></div>", unsafe_allow_html=True)
+
+        with col3:
+            st.markdown(f"<div class='top-card'>Score: {score}</div>", unsafe_allow_html=True)
+
+        st.markdown("### 📌 Szczegóły")
+
+        st.write(f"Trend S/M/L: {ind['trend_s']} / {ind['trend_m']} / {ind['trend_l']}")
+        st.write(f"MACD hist: {ind['macd_hist']}")
+        st.write(f"RSI: {ind['rsi']}")
+        st.write(f"Volume rel: {ind['vol']}")
+
+        st.write(f"Formacje: {form_desc}")
+        if bl_flag:
+            st.error(f"BLACKLIST: {bl_reason}")
+
 
 # ============================================================
-# 8C. DARK OPS – niska płynność + wysoki wolumen relatywny + skrajny RSI
+# UI — HEATMAPA
 # ============================================================
 
-with tab_darkops:
-    st.subheader("🕶 DARK OPS – ukryte, agresywne setupy")
+if tab == "Heatmapa":
+    st.markdown("## 🔥 Heatmapa sektorowa")
 
-    # prosta definicja: wysoki wolumen relatywny + skrajny RSI
-    dark_candidates = [
-        r for r in results
-        if r["vol"] >= 3 and (r["rsi"] <= 30 or r["rsi"] >= 70)
-    ]
+    heat = build_heatmap_data()
 
-    if not dark_candidates:
-        st.info("Brak aktualnych DARK OPS (brak kombinacji: wysoki wolumen relatywny + skrajny RSI).")
-    else:
-        st.markdown("**Filtr:** vol ≥ 3x oraz RSI ≤ 30 lub RSI ≥ 70")
+    for market in heat:
+        st.markdown(f"### {market}")
 
-        for r in dark_candidates:
-            with st.container():
-                st.markdown("<div class='mega-card'>", unsafe_allow_html=True)
-                c1, c2, c3 = st.columns([2, 2, 2])
+        cols = st.columns(3)
+        i = 0
 
-                with c1:
-                    st.markdown(
-                        f"<div class='neon-title' style='font-size:2.6rem;'>{r['symbol']}</div>",
-                        unsafe_allow_html=True
-                    )
-                    st.markdown(
-                        f"<div class='price-tag'>{r['price']:.2f}</div>",
-                        unsafe_allow_html=True
-                    )
-                    st.write(f"Score: {r['score']} | Sygnał: {r['signal']}")
-                    st.write(f"Wolumen relatywny: {r['vol']:.2f}x")
-                    try:
-                        st.line_chart(r["df"]["Close"], height=80)
-                    except Exception:
-                        pass
-
-                with c2:
-                    st.write(f"RSI: **{r['rsi']:.1f}**")
-                    st.write(f"ATR: {r['atr']:.2f}")
-                    st.write(f"Swing High: {r['swing_high']:.2f}")
-                    st.write(f"Swing Low: {r['swing_low']:.2f}")
-                    st.write(f"TP: {r['tp']:.2f} | SL: {r['sl']:.2f}")
-
-                with c3:
-                    st.markdown(
-                        f"<div class='signal-{r['signal']}'>{r['signal']}</div>",
-                        unsafe_allow_html=True
-                    )
-                    st.markdown(
-                        f"<div style='margin-top:8px; font-size:0.95rem;'>"
-                        f"<b>Trend S:</b> {trend_icon(r['trend_s'])} &nbsp;&nbsp;"
-                        f"<b>M:</b> {trend_icon(r['trend_m'])} &nbsp;&nbsp;"
-                        f"<b>L:</b> {trend_icon(r['trend_l'])}"
-                        f"</div>",
-                        unsafe_allow_html=True
-                    )
-                    st.write(f"Pivot: {r['pivot']:.2f}")
-                    st.write(f"R1: {r['r1']:.2f} | S1: {r['s1']:.2f}")
-                    st.write(f"Formacje świecowe: {r['candle_comment']}")
-
-                st.markdown("</div>", unsafe_allow_html=True)
-
-# ============================================================
-# 8D. NEWS IMPACT ENGINE — AUTO + MANUAL SCAN
-# ============================================================
-
-with tab_news:
-    st.subheader("📰 NEWS IMPACT ENGINE 3.0 — akcja / reakcja GPW / NASDAQ / S&P500")
-
-    run_scan = False
-    if news_manual_scan:
-        run_scan = True
-    if st.session_state["news_auto_mode"]:
-        if st.session_state["news_last_run"] is None or (
-            time.time() - st.session_state["news_last_run"] > 60
-        ):
-            run_scan = True
-
-    if run_scan and tickers:
-        st.session_state["news_last_run"] = time.time()
-        with st.spinner("Skanuję źródła newsów..."):
-            alerts = run_news_scan(tickers)
-        if alerts:
-            for a in alerts:
-                color = a.get("impact_color", "gray")
-                if color == "red":
-                    bg = "#ff4b4b22"
-                    badge = "🟥 HIGH"
-                elif color == "orange":
-                    bg = "#ffa50022"
-                    badge = "🟧 MEDIUM"
-                elif color == "green":
-                    bg = "#00c85322"
-                    badge = "🟩 LOW"
-                else:
-                    bg = "#cccccc22"
-                    badge = "⬜ NONE"
-
-                ticker = a.get("ticker", "")
-                market = a.get("market", "UNKNOWN")
-                title = a.get("title", "")
-                link = a.get("link", "")
-                published = a.get("published", "")
-                source = a.get("source", "")
-                sentiment = a.get("sentiment", "")
-                direction = a.get("direction", "")
-                impact_score = a.get("impact_score", 0)
-
-                st.markdown(
-                    f"""
-<div style="background-color:{bg}; padding:10px; border-radius:8px; margin-bottom:8px;">
-<b>{badge}</b> — <b>{ticker}</b> ({market}) — impact score: <b>{impact_score}</b><br>
-<b>Źródło:</b> {source} | <b>Czas:</b> {published}<br>
-<b>Tytuł:</b> {title}<br>
-<b>Sentyment:</b> {sentiment} | <b>Kierunek:</b> {direction}<br>
-<a href="{link}" target="_blank">🔗 Link</a>
-</div>
-""",
-                    unsafe_allow_html=True,
-                )
-        else:
-            st.info("Brak nowych istotnych newsów dla podanych tickerów.")
-    else:
-        st.write("Użyj przycisku w sidebarze lub włącz auto monitoring, aby rozpocząć skanowanie newsów.")
-
-    st.markdown("---")
-    st.markdown(
-        """
-**Legenda kolorów:**
-
-- 🟥 **Czerwony** — HIGH IMPACT (silna akcja/reakcja)
-- 🟧 **Pomarańczowy** — MEDIUM IMPACT
-- 🟩 **Zielony** — LOW IMPACT
-- ⬜ Szary — brak istotnego wpływu
-        """
-    )
-
-# ============================================================
-# 8E. MANUAL IMPACT ANALYZER
-# ============================================================
-
-with tab_manual:
-    st.subheader("📝 Manual impact analyzer — wklej dowolną informację")
-
-    manual_text = st.text_area(
-        "Wklej treść komunikatu / newsa / plotki / opisu wydarzenia:",
-        height=200,
-    )
-
-    if st.button("Analizuj wpływ na cenę"):
-        if manual_text.strip():
-            res = classify_impact(manual_text)
-            color = res["impact_color"]
-            if color == "red":
-                badge = "🟥 HIGH"
-                bg = "#ff4b4b22"
-            elif color == "orange":
-                badge = "🟧 MEDIUM"
-                bg = "#ffa50022"
-            elif color == "green":
-                badge = "🟩 LOW"
-                bg = "#00c85322"
-            else:
-                badge = "⬜ NONE"
-                bg = "#cccccc22"
-
-            st.markdown(
-                f"""
-<div style="background-color:{bg}; padding:10px; border-radius:8px;">
-<b>{badge}</b> — impact score: <b>{res['impact_score']}</b><br>
-<b>Sentyment:</b> {res['sentiment']} | <b>Kierunek:</b> {res['direction']}
-</div>
-""",
-                unsafe_allow_html=True,
+        for sector, val in heat[market].items():
+            color = heatmap_color(val)
+            cols[i].markdown(
+                f"<div class='top-card' style='border-color:{color}; color:{color};'>{sector}<br><br>{val}%</div>",
+                unsafe_allow_html=True
             )
-        else:
-            st.warning("Wklej najpierw jakiś tekst do analizy.")
+            i = (i + 1) % 3
+
+
+# ============================================================
+# UI — SCALPER MODE
+# ============================================================
+
+if tab == "Scalper Mode":
+    st.markdown("## ⚡ Scalper Mode (1m / 5m / 15m)")
+
+    symbol = st.text_input("Symbol", "AAPL")
+
+    interval = st.selectbox("Interwał", ["1m", "5m", "15m"])
+
+    if symbol:
+        df = get_intraday(symbol, interval)
+        ind = calc_fast_indicators(df)
+        signal, score = scalper_signal(ind)
+
+        st.markdown(f"### Sygnał: **{signal}** (score: {score})")
+        st.write(ind)
+
+
+# ============================================================
+# UI — SWING MODE
+# ============================================================
+
+if tab == "Swing Mode":
+    st.markdown("## 🌀 Swing Mode (D1 / W1)")
+
+    symbol = st.text_input("Symbol", "AAPL")
+    interval = st.selectbox("Interwał", ["1d", "1wk"])
+
+    if symbol:
+        df = get_swing_data(symbol, interval)
+        ind = calc_swing_indicators(df)
+        signal, score = swing_signal(ind)
+
+        st.markdown(f"### Sygnał: **{signal}** (score: {score})")
+        st.write(ind)
+
+
+# ============================================================
+# UI — GENESIS MODE
+# ============================================================
+
+if tab == "Genesis Mode":
+    st.markdown("## 🌱 GENESIS — AI Portfolio Builder")
+
+    symbols = st.text_area("Lista symboli (po przecinku)", "AAPL, MSFT, NVDA")
+
+    if st.button("Generuj"):
+        syms = [s.strip() for s in symbols.split(",")]
+
+        # Cache danych
+        cache = {}
+        for s in syms:
+            df = get_daily(s)
+            ind = calc_daily_indicators(df)
+            cache[s] = ind
+
+        result = genesis_build(syms, cache)
+        st.markdown("### Wynik:")
+        st.write(result)
+
+
+# ============================================================
+# UI — ALERTS
+# ============================================================
+
+if tab == "Alerts":
+    st.markdown("## 🚨 Alert Engine")
+
+    st.write("Skonfiguruj kanały alertów:")
+
+    email = st.text_input("Email")
+    discord = st.text_input("Discord webhook")
+    tg_token = st.text_input("Telegram token")
+    tg_chat = st.text_input("Telegram chat ID")
+    webhook = st.text_input("Dowolny webhook")
+
+    symbol = st.text_input("Symbol do testu alertu", "AAPL")
+
+    if st.button("Wyślij test alertu"):
+        trigger_alert(
+            symbol,
+            "TEST",
+            0,
+            0,
+            "Test alertu",
+            {
+                "email": email,
+                "discord": discord,
+                "telegram_token": tg_token,
+                "telegram_chat": tg_chat,
+                "webhook": webhook
+            }
+        )
+        st.success("Alert wysłany.")
