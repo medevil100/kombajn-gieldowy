@@ -143,7 +143,7 @@ st_autorefresh(interval=5 * 60 * 1000, key="neon_ai_pro_v1")
 # ============================================================
 
 if "tickers_text" not in st.session_state:
-    st.session_state["tickers_text"] = "EMT.WA, ENE.WA, EON.WA, ETL.WA, FAS.WA, FTE.WA, GTC.WA, HBP.WA, HLD.WA, IFE.WA, ING.WA, KRU.WA, LPP.WA, LWB.WA, MAB.WA, MCI.WA, MEX.WA, MLP.WA, MSO.WA, VGO.WA,UNI.WA, UPM.WA, URS.WA, UST.WA, VAB.WA, VGO.WA, VIT.WA, VRC.WA, VRG.WA, VST.WA, VTL.WA, WAT.WA, WDX.WA, WLT.WA, WOD.WA, WPR.WA, WSE.WA, WTG.WA, WTT.WA, XTB.WA,"
+    st.session_state["tickers_text"] = "HUMA, TCRX, GOSS, PLRX, TTOO, BNOX, IMUX, SLS, DRMA, BDRX, MREO, XLO, TCON, VIRI, ACRS, AURA, KTRA, VINC, NRSN, ANIX, CRVS, ADVM, APM, SABS, HILS, RNAZ, SLNO, IMNN, BCTX, ATHE, MNOV, BOLT, INFI, APLT, CLRB, ENLV, EVGN, GRTS, HSTO, IMMP,ADV.WA, MDB.WA, ONO.WA, PUR.WA, NNG.WA, GX1.WA, GMT.WA, RDG.WA, MAB.WA, SEL.WA, BIO.WA, BML.WA, BPC.WA, BRS.WA, COG.WA, CRL.WA, CRP.WA, DCR.WA, DRP.WA, ENP.WA, EPC.WA, ERG.WA, FHD.WA, GRC.WA, INC.WA, ITP.WA, KPL.WA, MNC.WA, MZN.WA, ONC.WA, PCF.WA, PGM.WA, PMG.WA, PNT.WA, SNP.WA, SNT.WA, TXM.WA, URS.WA, VRC.WA, VRG.WA,"
 
 if "ai_single" not in st.session_state:
     st.session_state["ai_single"] = {}
