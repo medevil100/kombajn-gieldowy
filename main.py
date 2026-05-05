@@ -1,4 +1,11 @@
+- tryb **DARK OPS**  
+- osobny panel **GPW/NC**  
+- **mini‑sparklines** w kafelkach  
+- **AI SMART FILTER** (wybiera 5 najlepszych spółek z listy)
 
+Wklej całość jako `kombajn.py`:
+
+```python
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -6,7 +13,6 @@ from openai import OpenAI
 from streamlit_autorefresh import st_autorefresh
 import requests
 import time
-import datetime
 import xml.etree.ElementTree as ET
 
 # ============================================================
@@ -147,7 +153,16 @@ st_autorefresh(interval=5 * 60 * 1000, key="neon_ai_pro_v1")
 # ============================================================
 
 if "tickers_text" not in st.session_state:
-    st.session_state["tickers_text"] = "HUMA, TCRX, GOSS, PLRX, TTOO, BNOX, IMUX, SLS, DRMA, BDRX, MREO, XLO, TCON, VIRI, ACRS, AURA, KTRA, VINC, NRSN, ANIX, CRVS, ADVM, APM, SABS, HILS, RNAZ, SLNO, IMNN, BCTX, ATHE, MNOV, BOLT, INFI, APLT, CLRB, ENLV, EVGN, GRTS, HSTO, IMMP,ADV.WA, MDB.WA, ONO.WA, PUR.WA, NNG.WA, GX1.WA, GMT.WA, RDG.WA, MAB.WA, SEL.WA, BIO.WA, BML.WA, BPC.WA, BRS.WA, COG.WA, CRL.WA, CRP.WA, DCR.WA, DRP.WA, ENP.WA, EPC.WA, ERG.WA, FHD.WA, GRC.WA, INC.WA, ITP.WA, KPL.WA, MNC.WA, MZN.WA, ONC.WA, PCF.WA, PGM.WA, PMG.WA, PNT.WA, SNP.WA, SNT.WA, TXM.WA, URS.WA, VRC.WA, VRG.WA,"
+    st.session_state["tickers_text"] = (
+        "HUMA, TCRX, GOSS, PLRX, TTOO, BNOX, IMUX, SLS, DRMA, BDRX, MREO, XLO, "
+        "TCON, VIRI, ACRS, AURA, KTRA, VINC, NRSN, ANIX, CRVS, ADVM, APM, SABS, "
+        "HILS, RNAZ, SLNO, IMNN, BCTX, ATHE, MNOV, BOLT, INFI, APLT, CLRB, ENLV, "
+        "EVGN, GRTS, HSTO, IMMP,ADV.WA, MDB.WA, ONO.WA, PUR.WA, NNG.WA, GX1.WA, "
+        "GMT.WA, RDG.WA, MAB.WA, SEL.WA, BIO.WA, BML.WA, BPC.WA, BRS.WA, COG.WA, "
+        "CRL.WA, CRP.WA, DCR.WA, DRP.WA, ENP.WA, EPC.WA, ERG.WA, FHD.WA, GRC.WA, "
+        "INC.WA, ITP.WA, KPL.WA, MNC.WA, MZN.WA, ONC.WA, PCF.WA, PGM.WA, PMG.WA, "
+        "PNT.WA, SNP.WA, SNT.WA, TXM.WA, URS.WA, VRC.WA, VRG.WA,"
+    )
 
 if "ai_single" not in st.session_state:
     st.session_state["ai_single"] = {}
@@ -157,6 +172,9 @@ if "ai_portfolio" not in st.session_state:
 
 if "ai_top10" not in st.session_state:
     st.session_state["ai_top10"] = None
+
+if "ai_smart_filter" not in st.session_state:
+    st.session_state["ai_smart_filter"] = None
 
 if "news_auto_mode" not in st.session_state:
     st.session_state["news_auto_mode"] = False
@@ -213,7 +231,7 @@ if news_restart:
     st.session_state["news_last_run"] = None
 
 # ============================================================
-# 6. SILNIK ANALITYCZNY AI PRO (NIETKNIĘTY + TREND S/M/L)
+# 6. SILNIK ANALITYCZNY AI PRO (z TREND S/M/L)
 # ============================================================
 
 def detect_candle_pattern(df: pd.DataFrame) -> str:
@@ -318,7 +336,6 @@ def ultra(symbol: str):
 
         candle_comment = detect_candle_pattern(df.tail(30))
 
-        # TREND S/M/L
         trend_s = "UP" if last > ma20 else "DOWN"
         trend_m = "UP" if last > ma50 else "DOWN"
         trend_l = "UP" if last > ma200 else "DOWN"
@@ -571,7 +588,7 @@ def run_news_scan(tickers):
     return alerts_sorted
 
 # ============================================================
-# 7. LICZENIE WYNIKÓW (NIETKNIĘTE)
+# 7. LICZENIE WYNIKÓW
 # ============================================================
 
 results = []
@@ -584,16 +601,19 @@ if not results:
     st.warning("Brak danych — sprawdź tickery.")
     st.stop()
 
+# GPW/NC subset
+results_gpw = [r for r in results if r["symbol"].endswith(".WA") or r["symbol"].endswith(".PL")]
+
 # ============================================================
-# 8. TABS: ANALIZA / NEWS / MANUAL
+# 8. TABS: ANALIZA / GPW / DARK OPS / NEWS / MANUAL
 # ============================================================
 
-tab_analiza, tab_news, tab_manual = st.tabs(
-    ["📊 Analiza techniczna", "📰 News impact", "📝 Manual impact"]
+tab_analiza, tab_gpw, tab_darkops, tab_news, tab_manual = st.tabs(
+    ["📊 Analiza techniczna", "🇵🇱 GPW / NC", "🕶 DARK OPS", "📰 News impact", "📝 Manual impact"]
 )
 
 # ============================================================
-# 8A. ANALIZA TECHNICZNA — PORTFEL, TOP10, RADAR, KAFELKI
+# 8A. ANALIZA TECHNICZNA — PORTFEL, TOP10, RADAR, KAFELKI, AI SMART FILTER
 # ============================================================
 
 def trend_icon(t):
@@ -670,6 +690,34 @@ Zrób:
                     )
                     st.session_state["ai_top10"] = resp.choices[0].message.content
 
+            if st.button("🤖 AI SMART FILTER – wybierz 5 najlepszych spółek"):
+                with st.spinner("AI wybiera 5 najlepszych spółek..."):
+                    opis = "\n".join(
+                        f"{r['symbol']}: cena {r['price']:.2f}, score {r['score']}, RSI {r['rsi']:.1f}, MACD {r['macd']:.2f}, vol {r['vol']:.2f}"
+                        for r in results
+                    )
+                    prompt = f"""
+Masz listę spółek z parametrami:
+{opis}
+
+Wybierz 5 najlepszych spółek pod kątem:
+- siły trendu,
+- momentum,
+- rozsądnego ryzyka (RSI nie skrajne),
+- wolumenu (nie martwe, ale nie totalne pompy).
+
+Zwróć:
+1. Listę 5 tickerów (w kolejności od najlepszej).
+2. Po jednym krótkim zdaniu uzasadnienia dla każdej.
+Bez lania wody, bez definicji.
+"""
+                    resp = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.1
+                    )
+                    st.session_state["ai_smart_filter"] = resp.choices[0].message.content
+
         if st.session_state["ai_portfolio"]:
             st.markdown("<div class='ai-box'>", unsafe_allow_html=True)
             st.write(st.session_state["ai_portfolio"])
@@ -678,6 +726,12 @@ Zrób:
         if st.session_state["ai_top10"]:
             st.markdown("<div class='ai-box'>", unsafe_allow_html=True)
             st.write(st.session_state["ai_top10"])
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        if st.session_state["ai_smart_filter"]:
+            st.markdown("<div class='ai-box'>", unsafe_allow_html=True)
+            st.markdown("### 🤖 AI SMART FILTER – 5 najlepszych spółek")
+            st.write(st.session_state["ai_smart_filter"])
             st.markdown("</div>", unsafe_allow_html=True)
 
     with colp2:
@@ -737,6 +791,13 @@ Zrób:
                     unsafe_allow_html=True
                 )
                 st.write(f"Wolumen relatywny: {r['vol']:.2f}x")
+
+                # MINI SPARKLINE
+                try:
+                    close_series = r["df"]["Close"]
+                    st.line_chart(close_series, height=80)
+                except Exception:
+                    pass
 
             with c2:
                 st.write(f"Score trendu: **{r['score']}**")
@@ -827,7 +888,139 @@ Bez definicji, bez lania wody.
             st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================================================
-# 8B. NEWS IMPACT ENGINE — AUTO + MANUAL SCAN
+# 8B. PANEL GPW / NC
+# ============================================================
+
+with tab_gpw:
+    st.subheader("🇵🇱 GPW / NC – wycinek portfela")
+
+    if not results_gpw:
+        st.info("Brak spółek GPW/NC (.WA / .PL) na liście.")
+    else:
+        df_gpw = pd.DataFrame([
+            {
+                "symbol": r["symbol"],
+                "price": r["price"],
+                "score": r["score"],
+                "signal": r["signal"],
+                "rsi": r["rsi"],
+                "macd": r["macd"],
+                "vol": r["vol"],
+            }
+            for r in results_gpw
+        ]).sort_values(by=["score", "macd"], ascending=[False, False])
+
+        st.dataframe(df_gpw, use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("📊 Kafelki GPW / NC")
+
+        for r in results_gpw:
+            with st.container():
+                st.markdown("<div class='mega-card'>", unsafe_allow_html=True)
+                c1, c2 = st.columns([2, 3])
+
+                with c1:
+                    st.markdown(
+                        f"<div class='neon-title' style='font-size:2.4rem;'>{r['symbol']}</div>",
+                        unsafe_allow_html=True
+                    )
+                    st.markdown(
+                        f"<div class='price-tag'>{r['price']:.2f}</div>",
+                        unsafe_allow_html=True
+                    )
+                    st.write(f"Score: {r['score']} | RSI: {r['rsi']:.1f}")
+                    st.write(f"Wolumen relatywny: {r['vol']:.2f}x")
+                    try:
+                        st.line_chart(r["df"]["Close"], height=80)
+                    except Exception:
+                        pass
+
+                with c2:
+                    st.markdown(
+                        f"<div class='signal-{r['signal']}'>{r['signal']}</div>",
+                        unsafe_allow_html=True
+                    )
+                    st.markdown(
+                        f"<div style='margin-top:8px; font-size:0.95rem;'>"
+                        f"<b>Trend S:</b> {trend_icon(r['trend_s'])} &nbsp;&nbsp;"
+                        f"<b>M:</b> {trend_icon(r['trend_m'])} &nbsp;&nbsp;"
+                        f"<b>L:</b> {trend_icon(r['trend_l'])}"
+                        f"</div>",
+                        unsafe_allow_html=True
+                    )
+                    st.write(f"TP: {r['tp']:.2f} | SL: {r['sl']:.2f}")
+                    st.write(f"Pivot: {r['pivot']:.2f} | R1: {r['r1']:.2f} | S1: {r['s1']:.2f}")
+
+                st.markdown("</div>", unsafe_allow_html=True)
+
+# ============================================================
+# 8C. DARK OPS – niska płynność + wysoki wolumen relatywny + skrajny RSI
+# ============================================================
+
+with tab_darkops:
+    st.subheader("🕶 DARK OPS – ukryte, agresywne setupy")
+
+    # prosta definicja: wysoki wolumen relatywny + skrajny RSI
+    dark_candidates = [
+        r for r in results
+        if r["vol"] >= 3 and (r["rsi"] <= 30 or r["rsi"] >= 70)
+    ]
+
+    if not dark_candidates:
+        st.info("Brak aktualnych DARK OPS (brak kombinacji: wysoki wolumen relatywny + skrajny RSI).")
+    else:
+        st.markdown("**Filtr:** vol ≥ 3x oraz RSI ≤ 30 lub RSI ≥ 70")
+
+        for r in dark_candidates:
+            with st.container():
+                st.markdown("<div class='mega-card'>", unsafe_allow_html=True)
+                c1, c2, c3 = st.columns([2, 2, 2])
+
+                with c1:
+                    st.markdown(
+                        f"<div class='neon-title' style='font-size:2.6rem;'>{r['symbol']}</div>",
+                        unsafe_allow_html=True
+                    )
+                    st.markdown(
+                        f"<div class='price-tag'>{r['price']:.2f}</div>",
+                        unsafe_allow_html=True
+                    )
+                    st.write(f"Score: {r['score']} | Sygnał: {r['signal']}")
+                    st.write(f"Wolumen relatywny: {r['vol']:.2f}x")
+                    try:
+                        st.line_chart(r["df"]["Close"], height=80)
+                    except Exception:
+                        pass
+
+                with c2:
+                    st.write(f"RSI: **{r['rsi']:.1f}**")
+                    st.write(f"ATR: {r['atr']:.2f}")
+                    st.write(f"Swing High: {r['swing_high']:.2f}")
+                    st.write(f"Swing Low: {r['swing_low']:.2f}")
+                    st.write(f"TP: {r['tp']:.2f} | SL: {r['sl']:.2f}")
+
+                with c3:
+                    st.markdown(
+                        f"<div class='signal-{r['signal']}'>{r['signal']}</div>",
+                        unsafe_allow_html=True
+                    )
+                    st.markdown(
+                        f"<div style='margin-top:8px; font-size:0.95rem;'>"
+                        f"<b>Trend S:</b> {trend_icon(r['trend_s'])} &nbsp;&nbsp;"
+                        f"<b>M:</b> {trend_icon(r['trend_m'])} &nbsp;&nbsp;"
+                        f"<b>L:</b> {trend_icon(r['trend_l'])}"
+                        f"</div>",
+                        unsafe_allow_html=True
+                    )
+                    st.write(f"Pivot: {r['pivot']:.2f}")
+                    st.write(f"R1: {r['r1']:.2f} | S1: {r['s1']:.2f}")
+                    st.write(f"Formacje świecowe: {r['candle_comment']}")
+
+                st.markdown("</div>", unsafe_allow_html=True)
+
+# ============================================================
+# 8D. NEWS IMPACT ENGINE — AUTO + MANUAL SCAN
 # ============================================================
 
 with tab_news:
@@ -902,7 +1095,7 @@ with tab_news:
     )
 
 # ============================================================
-# 8C. MANUAL IMPACT ANALYZER
+# 8E. MANUAL IMPACT ANALYZER
 # ============================================================
 
 with tab_manual:
@@ -941,5 +1134,3 @@ with tab_manual:
             )
         else:
             st.warning("Wklej najpierw jakiś tekst do analizy.")
-
-
