@@ -6,7 +6,7 @@ import numpy as np
 from openai import OpenAI
 import requests
 import smtplib
-from email.mime_text import MIMEText
+from email.mime.text import MIMEText
 
 # ============================================================
 # ULTRA ENGINE v5.1.3 — STABLE BUILD
