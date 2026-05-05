@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -912,4 +911,4 @@ with tab_manual:
             )
         else:
             st.warning("Wklej najpierw jakiś tekst do analizy.")
-```
+
