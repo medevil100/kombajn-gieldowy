@@ -143,7 +143,7 @@ st_autorefresh(interval=5 * 60 * 1000, key="neon_ai_pro_v1")
 # ============================================================
 
 if "tickers_text" not in st.session_state:
-    st.session_state["tickers_text"] = "CDR.WA PKO.WA AAPL NVDA TSLA BTC-USD"
+    st.session_state["tickers_text"] = "EMT.WA, ENE.WA, EON.WA, ETL.WA, FAS.WA, FTE.WA, GTC.WA, HBP.WA, HLD.WA, IFE.WA, ING.WA, KRU.WA, LPP.WA, LWB.WA, MAB.WA, MCI.WA, MEX.WA, MLP.WA, MSO.WA, VGO.WA,UNI.WA, UPM.WA, URS.WA, UST.WA, VAB.WA, VGO.WA, VIT.WA, VRC.WA, VRG.WA, VST.WA, VTL.WA, WAT.WA, WDX.WA, WLT.WA, WOD.WA, WPR.WA, WSE.WA, WTG.WA, WTT.WA, XTB.WA,"
 
 if "ai_single" not in st.session_state:
     st.session_state["ai_single"] = {}
