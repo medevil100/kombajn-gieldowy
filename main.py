@@ -1,7 +1,4 @@
-OK, robimy to „na czysto” — **jeden pełny skrypt, już z poprawkami (fast/daily indicators, blacklist, Genesis)**.  
-Nazwij plik `ultra_engine_v5.py`.
 
-```python
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -876,7 +873,4 @@ if tab == "Alerts":
                 "webhook": webhook
             }
         )
-        st.success("Alert wysłany.")
-```
-
-Jeśli to odpalisz i coś jeszcze strzeli czerwienią — wklej dokładny traceback, bez komentarza.
+        st.success("Alert wysłany")
