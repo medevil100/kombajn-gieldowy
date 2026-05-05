@@ -511,36 +511,71 @@ def blacklist_engine(symbol, df):
 # ============================================================
 
 def detect_formations(df):
+    import numpy as np
+
+    # Brak danych → brak formacji
     if df is None or df.empty or len(df) < 40:
         return 0, "Brak danych"
 
+    df = df.copy()
+
+    # Wymuszenie float
+    try:
+        df["High"] = pd.to_numeric(df["High"], errors="coerce")
+        df["Low"] = pd.to_numeric(df["Low"], errors="coerce")
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+    except:
+        return 0, "Brak danych"
+
+    df = df.fillna(method="ffill").fillna(method="bfill")
+
     highs = df["High"].tail(40).values
     lows = df["Low"].tail(40).values
+    closes = df["Close"].values
+
+    # Jeśli nadal są NaN → brak formacji
+    if np.isnan(highs).any() or np.isnan(lows).any():
+        return 0, "Brak danych"
 
     score = 0
     desc = []
 
-    if (highs.max() - highs.min()) < (lows.max() - lows.min()) * 1.2:
-        score += 2
-        desc.append("Triangle")
+    # --- TRIANGLE ---
+    try:
+        if (highs.max() - highs.min()) < (lows.max() - lows.min()) * 1.2:
+            score += 2
+            desc.append("Triangle")
+    except:
+        pass
 
-    if highs[-1] < highs[0] and lows[-1] > lows[0]:
-        score += 2
-        desc.append("Wedge (up)")
-    if highs[-1] > highs[0] and lows[-1] < lows[0]:
-        score += 2
-        desc.append("Wedge (down)")
+    # --- WEDGE ---
+    try:
+        if highs[-1] < highs[0] and lows[-1] > lows[0]:
+            score += 2
+            desc.append("Wedge (up)")
+        if highs[-1] > highs[0] and lows[-1] < lows[0]:
+            score += 2
+            desc.append("Wedge (down)")
+    except:
+        pass
 
-    last_move = abs(df["Close"].iloc[-20] - df["Close"].iloc[-1])
-    flag_range = highs.max() - lows.min()
-    if last_move > flag_range * 1.5:
-        score += 1
-        desc.append("Flag")
+    # --- FLAG ---
+    try:
+        last_move = abs(float(closes[-20]) - float(closes[-1]))
+        flag_range = float(highs.max() - lows.min())
+
+        if flag_range > 0:
+            if last_move > flag_range * 1.5:
+                score += 1
+                desc.append("Flag")
+    except:
+        pass
 
     if score == 0:
         return 0, "Brak formacji"
 
     return score, ", ".join(desc)
+
 
 # ============================================================
 # GENESIS MODE
