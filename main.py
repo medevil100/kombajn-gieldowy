@@ -1,6 +1,4 @@
 ### ✅ Pełny, działający `kombajn.py` (odświeżanie, zapisz listę, pełne kafelki, AI, PRO)
-
-```python
 import streamlit as st
 import yfinance as yf
 import pandas as pd
