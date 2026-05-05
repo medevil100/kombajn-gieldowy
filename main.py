@@ -1,11 +1,4 @@
-- tryb **DARK OPS**  
-- osobny panel **GPW/NC**  
-- **mini‑sparklines** w kafelkach  
-- **AI SMART FILTER** (wybiera 5 najlepszych spółek z listy)
 
-Wklej całość jako `kombajn.py`:
-
-```python
 import streamlit as st
 import yfinance as yf
 import pandas as pd
