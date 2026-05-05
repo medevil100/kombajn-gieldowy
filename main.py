@@ -1,3 +1,4 @@
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -212,7 +213,7 @@ if news_restart:
     st.session_state["news_last_run"] = None
 
 # ============================================================
-# 6. SILNIK ANALITYCZNY AI PRO (NIETKNIĘTY)
+# 6. SILNIK ANALITYCZNY AI PRO (NIETKNIĘTY + TREND S/M/L)
 # ============================================================
 
 def detect_candle_pattern(df: pd.DataFrame) -> str:
@@ -317,6 +318,11 @@ def ultra(symbol: str):
 
         candle_comment = detect_candle_pattern(df.tail(30))
 
+        # TREND S/M/L
+        trend_s = "UP" if last > ma20 else "DOWN"
+        trend_m = "UP" if last > ma50 else "DOWN"
+        trend_l = "UP" if last > ma200 else "DOWN"
+
         return {
             "symbol": symbol,
             "price": last,
@@ -343,6 +349,9 @@ def ultra(symbol: str):
             "score": int(score),
             "signal": signal,
             "candle_comment": candle_comment,
+            "trend_s": trend_s,
+            "trend_m": trend_m,
+            "trend_l": trend_l,
             "df": df.tail(120)
         }
     except Exception:
@@ -587,6 +596,13 @@ tab_analiza, tab_news, tab_manual = st.tabs(
 # 8A. ANALIZA TECHNICZNA — PORTFEL, TOP10, RADAR, KAFELKI
 # ============================================================
 
+def trend_icon(t):
+    if t == "UP":
+        return "🟢▲"
+    elif t == "DOWN":
+        return "🔴▼"
+    return "🔵●"
+
 with tab_analiza:
     df_res = pd.DataFrame([
         {
@@ -688,6 +704,11 @@ Zrób:
                     <b>SL: <span class="sl-val">{r['sl']:.2f}</span></b><hr>
                     <b>Score:</b> {r['score']} | <b>RSI:</b> {r['rsi']:.1f}<br>
                     <div class="signal-{r['signal']}" style="margin-top:10px; font-size:1rem;">{r['signal']}</div>
+                    <div style="margin-top:6px;">
+                        <b>Trend S:</b> {trend_icon(r['trend_s'])}
+                        &nbsp;&nbsp;<b>M:</b> {trend_icon(r['trend_m'])}
+                        &nbsp;&nbsp;<b>L:</b> {trend_icon(r['trend_l'])}
+                    </div>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -740,6 +761,15 @@ Zrób:
             with c4:
                 st.markdown(
                     f"<div class='signal-{r['signal']}'>{r['signal']}</div>",
+                    unsafe_allow_html=True
+                )
+
+                st.markdown(
+                    f"<div style='margin-top:8px; font-size:0.95rem;'>"
+                    f"<b>Trend S:</b> {trend_icon(r['trend_s'])} &nbsp;&nbsp;"
+                    f"<b>M:</b> {trend_icon(r['trend_m'])} &nbsp;&nbsp;"
+                    f"<b>L:</b> {trend_icon(r['trend_l'])}"
+                    f"</div>",
                     unsafe_allow_html=True
                 )
 
@@ -911,4 +941,5 @@ with tab_manual:
             )
         else:
             st.warning("Wklej najpierw jakiś tekst do analizy.")
+
 
