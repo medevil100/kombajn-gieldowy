@@ -3,5 +3,6 @@ yfinance
 pandas
 openai
 numpy
-streamlit-autorefresh
 plotly
+feedparser
+streamlit-autorefresh
