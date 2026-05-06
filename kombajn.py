@@ -129,7 +129,18 @@ def highlight_row_rsi(row):
         return [""] * len(row)
 
 def gradient_rsi(val):
-    pct = min(max(val, 0), 100) / 100
+    if pd.isna(val):
+        return ""  # brak stylu dla NaN
+
+    # bezpieczne obcięcie zakresu
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return ""
+
+    v = max(0, min(v, 100))
+    pct = v / 100.0
+
     r = int(180 * pct)
     g = int(180 * (1 - pct))
     return f"background-color: rgba({r},{g},40,0.25)"
