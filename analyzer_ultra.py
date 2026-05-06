@@ -8,10 +8,10 @@ import feedparser
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# ULTRA ENGINE v9.2 — THE HARD TRUTH (FIXED DATA INJECTION)
+# ULTRA ENGINE v10.0 — THE COMMAND CENTER
 # ============================================================
 
-st.set_page_config(layout="wide", page_title="TERMINAL v9.2", page_icon="⚔️")
+st.set_page_config(layout="wide", page_title="TERMINAL v10.0", page_icon="⚔️")
 
 # --- AUTO REFRESH ---
 refresh_minutes = st.sidebar.slider("Interwał odświeżania (minuty)", 1, 15, 5)
@@ -19,96 +19,106 @@ st_autorefresh(interval=refresh_minutes * 60 * 1000, key="datarefresh")
 
 st.markdown("<style>.stApp { background-color: #030305; color: #e0e0e0; }</style>", unsafe_allow_html=True)
 
+# --- SECRETS & CLIENT ---
 OPENAI_KEY = st.secrets.get("OPENAI_API_KEY", "")
 client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
-# --- BAZA WIEDZY SPECJALISTYCZNEJ (Fakty wymuszone) ---
-SPECIAL_DATA = {
-    "IOVA": {"event": "🔥 WYNIKI: 07.05 (BMO)", "info": "Raport Q1 przed sesją USA. Gra pod Amtagvi."},
-    "STX.WA": {"event": "💰 DYWIDENDA: 0.73 PLN", "info": "Rekordowa wypłata. Stopa >20%. Akumulacja pod dochód."},
-    "PGV.WA": {"event": "🚀 POMPA VOL", "info": "Potężny Vol Shock 6x. Agresywne zbieranie z rynku."},
-    "HUMA": {"event": "⚠️ PRZEGRZANIE", "info": "RSI > 75 bez wolumenu. Klasyczna pułapka."}
-}
+# --- KONWERTER WALUT (USD -> PLN) ---
+def get_usd_pln():
+    try:
+        return yf.Ticker("USDPLN=X").history(period="1d")['Close'].iloc[-1]
+    except: return 4.0 # Fallback
 
+USD_PLN = get_usd_pln()
+
+# --- MODUŁ NEWSÓW ---
 def get_beast_news(symbol):
     try:
         t = yf.Ticker(symbol)
-        news_text = [n.get('title', '') for n in t.news[:2]]
-        clean_sym = symbol.split('.')[0]
-        feed = feedparser.parse(f"https://google.com{clean_sym}+stock+news&hl=en-US")
+        news_text = [n.get('title', '') for n in t.news[:3]]
+        google_url = f"https://google.com{symbol}+stock+news&hl=en-US"
+        feed = feedparser.parse(google_url)
         news_text.extend([e.title for e in feed.entries[:3]])
-        news_text = list(set([n for n in news_text if n]))
-        
-        if not news_text: return "Brak świeżych depesz."
-        
-        if client:
-            prompt = f"Oceń sentyment dla {symbol}: {news_text[:4]}. Krótko: TYP: OPIS (max 8 słów)."
-            res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], max_tokens=50)
-            return res.choices[0].message.content
-        return "AI Offline"
-    except: return "Lokalny szum informacyjny."
+        return " | ".join(list(set(news_text)))[:500]
+    except: return "Brak danych."
 
-def get_full_analysis(symbol):
+# --- UI SIDEBAR: PORTFOLIO TRACKER ---
+st.sidebar.header("💰 PORTFOLIO TRACKER (PLN)")
+portfolio_input = st.sidebar.text_area("Format: SYMBOL,ILOŚĆ,CENA (np. NVDA,10,800)", "NVDA,1,900\nSTX.WA,100,5.0")
+
+def calculate_portfolio(input_text):
+    data = []
+    for line in input_text.split('\n'):
+        if not line: continue
+        try:
+            sym, qty, buy_price = line.split(',')
+            qty, buy_price = float(qty), float(buy_price)
+            t = yf.Ticker(sym.strip())
+            curr_price = t.history(period="1d")['Close'].iloc[-1]
+            
+            # Przeliczanie na PLN
+            is_usd = ".WA" not in sym.upper()
+            val_pln = (curr_price * qty * USD_PLN) if is_usd else (curr_price * qty)
+            cost_pln = (buy_price * qty * USD_PLN) if is_usd else (buy_price * qty)
+            profit = val_pln - cost_pln
+            
+            data.append({"Symbol": sym, "Ilość": qty, "Wartość PLN": round(val_pln, 2), "Zysk PLN": round(profit, 2)})
+        except: continue
+    return pd.DataFrame(data)
+
+# --- ANALIZA KORELACJI Z NVDA ---
+def get_nvda_correlation(symbol):
     try:
-        t = yf.Ticker(symbol)
+        data = yf.download([symbol, "NVDA"], period="1mo", interval="1d")['Close']
+        corr = data.pct_change().corr().iloc[0, 1]
+        return round(corr, 2)
+    except: return 0.0
+
+# --- UI MAIN ---
+st.title("⚔️ TERMINAL v10.0 — COMMAND CENTER")
+
+# 1. WYKRES PORTFOLIO
+port_df = calculate_portfolio(portfolio_input)
+if not port_df.empty:
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        st.metric("ŁĄCZNY ZYSK/STRATA", f"{port_df['Zysk PLN'].sum()} PLN")
+    with col2:
+        st.dataframe(port_df, use_container_width=True)
+
+# 2. CHAT AI "DEEP PROBE"
+st.divider()
+query_sym = st.text_input("🔍 ZAPYTAJ AI O SPÓŁKĘ (np. ATT.WA lub IOVA)", "")
+if query_sym and st.button("ANALIZUJ PRZEZ AI"):
+    with st.spinner("AI analizuje fundamenty i newsy..."):
+        news = get_beast_news(query_sym)
+        t = yf.Ticker(query_sym)
+        hist = t.history(period="1mo").to_string()
+        prompt = f"Zanalizuj spółkę {query_sym}. Newsy: {news}. Historia cen: {hist}. Czy widzisz tu okazję czy pułapkę? Bądź konkretny."
+        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
+        st.info(res.choices[0].message.content)
+
+# 3. GŁÓWNY SKANER
+st.divider()
+default_list = "IOVA, STX.WA, PGV.WA, HUMA, ATT.WA, NVDA, AAPL"
+symbols = [s.strip() for s in st.sidebar.text_area("Lista Skanera", default_list).split(",") if s.strip()]
+
+results = []
+for s in symbols:
+    try:
+        t = yf.Ticker(s)
         df = t.history(period="1y")
-        if df.empty or len(df) < 30: return None
-        df.columns = [c.lower() for c in df.columns]
-        last_close = df['close'].iloc[-1]
-        
-        # Wskaźniki
-        delta = df['close'].diff()
-        rsi = 100 - (100 / (1 + (delta.clip(lower=0).rolling(14).mean() / -delta.clip(upper=0).rolling(14).mean()))).iloc[-1]
-        vol_ratio = df['volume'].iloc[-1] / df['volume'].tail(20).mean() if df['volume'].tail(20).mean() != 0 else 1
-        mom = ((last_close - df['close'].iloc[-10]) / df['close'].iloc[-10]) * 100
-
-        # Wstrzykiwanie danych specjalnych
-        spec = SPECIAL_DATA.get(symbol.upper(), {"event": "N/A", "info": "Brak danych krytycznych"})
-
-        score = 0
-        if rsi < 40: score += 2
-        if vol_ratio > 2.5: score += 3 
-        if mom > 10: score += 1
-        sig = "🔥 MOCNE KUP" if score >= 5 else "KUP" if score >= 3 else "SPRZEDAJ" if rsi > 72 else "CZEKAJ"
-
-        return {
-            "Symbol": symbol, "Cena": round(last_close, 3), "Sygnał": sig,
-            "RSI": round(rsi, 1), "Vol Shock": f"{round(vol_ratio,1)}x",
-            "Wydarzenie": spec["event"], "Kontekst": spec["info"],
-            "AI Verdict": get_beast_news(symbol)
-        }
-    except: return None
-
-# --- UI ---
-st.title("⚡ TERMINAL v9.2 — THE HARD TRUTH")
-
-default_list = "IOVA, STX.WA, PGV.WA, HUMA, HRT.WA, CFS.WA, PRT.WA, ATT.WA, PUR.WA, BCS.WA, KCH.WA, HPE.WA, VVD.WA, HIVE, APS.WA, NVG.WA, PLRX, TCRX, GOSS, MREO, ADTX"
-symbols = [s.strip() for s in st.sidebar.text_area("Lista", default_list).split(",") if s.strip()]
-
-results = [get_full_analysis(s) for s in symbols if get_full_analysis(s)]
+        last_c = df['Close'].iloc[-1]
+        corr = get_nvda_correlation(s)
+        results.append({
+            "Symbol": s, 
+            "Cena": round(last_c, 2), 
+            "NVDA Corr": corr,
+            "RSI": round(100 - (100 / (1 + (df['Close'].diff().clip(lower=0).rolling(14).mean() / -df['Close'].diff().clip(upper=0).rolling(14).mean()))).iloc[-1], 2),
+            "Sygnał": "KUP" if corr > 0.7 and last_c < df['Close'].rolling(50).mean().iloc[-1] else "CZEKAJ"
+        })
+    except: continue
 
 if results:
-    df_res = pd.DataFrame(results)
-    
-    def style_table(row):
-        color = ''
-        if "MOCNE" in str(row['Sygnał']): color = 'color: #00ff88; font-weight: bold'
-        elif "SPRZEDAJ" in str(row['Sygnał']): color = 'color: #ff4444'
-        return [color] * len(row)
-
-    st.dataframe(df_res.style.apply(style_table, axis=1), use_container_width=True)
-
-    if client:
-        st.subheader("🤖 GENESIS AI: Brutalny Wyrok")
-        prompt = f"""
-        DANE: {df_res.to_string()}
-        
-        ZADANIA:
-        1. STX.WA: Skomentuj dywidendę 0.73 zł. Czy przy obecnym RSI to 'Darmowy pieniądz' czy pułapka?
-        2. IOVA: Jutro wyniki. Na podstawie Vol Shock i Mom%, oceń czy insiderzy już wiedzą, że będzie dobrze?
-        3. PGV.WA: Vol Shock 6x - czy to jest Peak (koniec) czy Breakout (początek)?
-        
-        Bądź brutalny. Zakaz lania wody. Pisz jak trader, nie jak doradca.
-        """
-        res_ai = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "system", "content": "Jesteś bezlitosnym selekcjonerem akcji. Mówisz tylko o konkretach."}, {"role": "user", "content": prompt}])
-        st.info(res_ai.choices[0].message.content)
+    st.subheader("📊 Skaner Rynkowy & Korelacja z AI Liderem (NVDA)")
+    st.table(pd.DataFrame(results))
