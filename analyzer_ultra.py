@@ -66,8 +66,8 @@ def calculate_portfolio(input_text):
         except: continue
     return pd.DataFrame(data)
 
-# --- ANALIZA KORELACJI Z NVDA ---
-def get_nvda_correlation(symbol):
+# --- ANALIZA KORELACJI Z IOVA ---
+def get_iova_correlation(symbol):
     try:
         data = yf.download([symbol, "NVDA"], period="1mo", interval="1d")['Close']
         corr = data.pct_change().corr().iloc[0, 1]
@@ -86,17 +86,52 @@ if not port_df.empty:
     with col2:
         st.dataframe(port_df, use_container_width=True)
 
-# 2. CHAT AI "DEEP PROBE"
+# 2. CHAT AI "DEEP PROBE" v10.1 (KONKRETY)
 st.divider()
-query_sym = st.text_input("🔍 ZAPYTAJ AI O SPÓŁKĘ (np. ATT.WA lub IOVA)", "")
-if query_sym and st.button("ANALIZUJ PRZEZ AI"):
-    with st.spinner("AI analizuje fundamenty i newsy..."):
-        news = get_beast_news(query_sym)
+query_sym = st.text_input("🔍 ANALIZA EKSPERCKA (wpisz np. ATT.WA, STX.WA, NVDA)", "").upper()
+
+if query_sym and st.button("URUCHOM ANALIZĘ"):
+    with st.spinner(f"Prześwietlam {query_sym}..."):
         t = yf.Ticker(query_sym)
-        hist = t.history(period="1mo").to_string()
-        prompt = f"Zanalizuj spółkę {query_sym}. Newsy: {news}. Historia cen: {hist}. Czy widzisz tu okazję czy pułapkę? Bądź konkretny."
-        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-        st.info(res.choices[0].message.content)
+        info = t.info
+        news = get_beast_news(query_sym)
+        
+        # Wyciągamy twarde dane finansowe
+        fin_data = {
+            "C/Z (P/E)": info.get('forwardPE', 'Brak'),
+            "Dług do Kapitału": info.get('debtToEquity', 'Brak'),
+            "Dywidenda %": info.get('dividendYield', 0) * 100 if info.get('dividendYield') else "Brak",
+            "Cena/Wartość Księgowa": info.get('priceToBook', 'Brak'),
+            "Zysk na akcję (EPS)": info.get('trailingEps', 'Brak')
+        }
+
+        prompt = f"""
+        ANALIZUJ SPÓŁKĘ: {query_sym}
+        DANE FINANSOWE: {fin_data}
+        OSTATNIE NEWSY: {news}
+        
+        ZADANIE:
+        1. Oceń fundamenty. Jeśli Dług/Kapitał > 100, ostrzeż o ryzyku.
+        2. Czy wskaźnik P/E sugeruje, że jest tanio czy drogo na tle branży?
+        3. Na podstawie newsów wydaj werdykt: OKAZJA czy PUŁAPKA.
+        
+        ZASADA: Nie lej wody. Nie pisz 'warto obserwować'. Pisz jak zarządzający funduszem, który musi podjąć decyzję w 30 sekund.
+        """
+        
+        try:
+            res = client.chat.completions.create(
+                model="gpt-4o-mini", 
+                messages=[
+                    {"role": "system", "content": "Jesteś brutalnym analitykiem fundamentalnym. Twój raport musi być krótki, techniczny i decyzyjny."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2 # Niska temperatura = zero lania wody, same fakty
+            )
+            st.warning(f"WYROK DLA {query_sym}:")
+            st.write(res.choices[0].message.content)
+        except Exception as e:
+            st.error(f"Błąd AI: {e}")
+
 
 # 3. GŁÓWNY SKANER
 st.divider()
