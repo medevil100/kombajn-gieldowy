@@ -1,4 +1,4 @@
-
+### ⚔️ TERMINAL v14 ULTRA — pełny plik
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -9,10 +9,10 @@ import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# TERMINAL v13 ULTRA — CYBERPUNK EDITION
+# TERMINAL v14 ULTRA — DARK PRO + NEON
 # ============================================================
 
-st.set_page_config(layout="wide", page_title="TERMINAL v13 ULTRA", page_icon="⚔️")
+st.set_page_config(layout="wide", page_title="TERMINAL v14 ULTRA", page_icon="⚔️")
 
 # --- DARK PRO + NEONY ---
 st.markdown("""
@@ -70,6 +70,14 @@ model_choice = st.sidebar.selectbox(
     index=0
 )
 
+# --- STYL TABELI ---
+st.sidebar.header("🎨 Styl tabeli")
+table_style = st.sidebar.radio(
+    "Wybierz styl:",
+    ["Kolor wiersza (RSI)", "Gradient RSI", "Ikony ↑↓"],
+    index=0
+)
+
 # --- OPENAI ---
 OPENAI_KEY = st.secrets["OPENAI_API_KEY"]
 client = OpenAI(api_key=OPENAI_KEY)
@@ -105,7 +113,36 @@ symbols_input = st.sidebar.text_area("Lista do analizy", default_list)
 symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
 
 # --- MAIN ---
-st.title(f"⚔️ TERMINAL v13 ULTRA — REFRESH: {refresh_val} MIN")
+st.title(f"⚔️ TERMINAL v14 ULTRA — REFRESH: {refresh_val} MIN")
+
+# ============================================================
+# FUNKCJE STYLIZACJI TABELI
+# ============================================================
+
+def highlight_row_rsi(row):
+    rsi = row["RSI"]
+    if rsi < 30:
+        return ["background-color: rgba(0, 120, 0, 0.25)"] * len(row)  # ciemna zieleń
+    elif rsi > 70:
+        return ["background-color: rgba(120, 0, 0, 0.25)"] * len(row)  # ciemna czerwień
+    else:
+        return [""] * len(row)
+
+def gradient_rsi(val):
+    pct = min(max(val, 0), 100) / 100
+    r = int(180 * pct)
+    g = int(180 * (1 - pct))
+    return f"background-color: rgba({r},{g},40,0.25)"
+
+def add_icons(df):
+    df = df.copy()
+    df["RSI"] = df["RSI"].apply(
+        lambda x: f"{x} 🔻" if x < 30 else (f"{x} 🔺" if x > 70 else f"{x} ➖")
+    )
+    df["Mom% 10d"] = df["Mom% 10d"].apply(
+        lambda x: f"{x}% 📈" if x > 0 else f"{x}% 📉"
+    )
+    return df
 
 # ============================================================
 # AGRESYWNY SKAN — TURBO THREADPOOL
@@ -156,21 +193,20 @@ if st.button("🚀 URUCHOM AGRESYWNY SKAN CAŁEJ LISTY"):
     if results:
         df_res = pd.DataFrame(results)
 
-        def color_rsi(val):
-            if val < 30: return "color: #00ff00"
-            if val > 70: return "color: #ff4444"
-            return ""
-
-        def color_mom(val):
-            if val > 5: return "color: #00ff00"
-            if val < -5: return "color: #ff4444"
-            return ""
-
         st.subheader("📊 Dane techniczne i Sentyment")
-        st.dataframe(
-            df_res.style.applymap(color_rsi, subset=["RSI"])
-                        .applymap(color_mom, subset=["Mom% 10d"])
-        )
+
+        # --- PRZEŁĄCZNIK STYLU TABELI ---
+        if table_style == "Kolor wiersza (RSI)":
+            styled_df = df_res.style.apply(highlight_row_rsi, axis=1)
+            st.dataframe(styled_df, use_container_width=True)
+
+        elif table_style == "Gradient RSI":
+            styled_df = df_res.style.applymap(gradient_rsi, subset=["RSI"])
+            st.dataframe(styled_df, use_container_width=True)
+
+        elif table_style == "Ikony ↑↓":
+            df_icon = add_icons(df_res)
+            st.dataframe(df_icon, use_container_width=True)
 
         # --- AI WYROK ---
         st.divider()
@@ -194,10 +230,7 @@ if st.button("🚀 URUCHOM AGRESYWNY SKAN CAŁEJ LISTY"):
             st.warning("RAPORT STRATEGICZNY:")
             st.write(res_ai.choices[0].message.content)
 
-        # ============================================================
-        # RANKING AI
-        # ============================================================
-
+        # --- RANKING AI ---
         st.subheader("🏆 Ranking AI (RSI + Momentum + News)")
 
         ranking_prompt = {
@@ -233,23 +266,23 @@ selected_symbol = st.selectbox("Wybierz ticker do wykresu", symbols)
 
 if selected_symbol:
     t = yf.Ticker(selected_symbol)
-    df = t.history(period="3mo")
+    df_chart = t.history(period="3mo")
 
-    if not df.empty:
+    if not df_chart.empty:
         fig = go.Figure()
 
         fig.add_trace(go.Candlestick(
-            x=df.index,
-            open=df['Open'],
-            high=df['High'],
-            low=df['Low'],
-            close=df['Close'],
+            x=df_chart.index,
+            open=df_chart['Open'],
+            high=df_chart['High'],
+            low=df_chart['Low'],
+            close=df_chart['Close'],
             name="Cena"
         ))
 
         fig.add_trace(go.Bar(
-            x=df.index,
-            y=df['Volume'],
+            x=df_chart.index,
+            y=df_chart['Volume'],
             name="Wolumen",
             marker_color="#4444ff",
             opacity=0.3,
@@ -289,11 +322,11 @@ try:
 
     for sym in tickers:
         t = yf.Ticker(sym)
-        df = t.history(period="1d")
-        if df.empty:
+        df_p = t.history(period="1d")
+        if df_p.empty:
             continue
 
-        price = float(df["Close"].iloc[-1])
+        price = float(df_p["Close"].iloc[-1])
         qty = tickers[sym]["qty"]
         buy = tickers[sym]["buy"]
 
