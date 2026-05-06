@@ -1,11 +1,5 @@
 
 # ⚔️ **TERMINAL v13 ULTRA — PEŁNY PLIK**
-
-> **Uwaga:** Nie zawiera żadnych rekomendacji inwestycyjnych — to narzędzie analityczne.
-
----
-
-```python
 import streamlit as st
 import pandas as pd
 import yfinance as yf
