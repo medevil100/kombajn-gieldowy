@@ -105,13 +105,29 @@ if results:
     st.plotly_chart(fig, use_container_width=True)
 
     # --- AI ---
+        # --- POPRAWIONE AI (AGRESYWNE KONKRETY) ---
     if client:
         try:
+            prompt = f"""
+            Jesteś bezlitosnym traderem spekulacyjnym. Masz przed sobą dane rynkowe:
+            {df_res.to_string()}
+
+            ZADANIE:
+            1. Wybierz MAX 2 spółki do natychmiastowej obserwacji.
+            2. Zakaz używania fraz: 'może przynieść korzyści', 'warto monitorować', 'sugeruje sytuację'.
+            3. Pisz konkretnie: 'Symbol X - wejście, bo [technika + sentyment]'.
+            4. Jeśli w danych jest śmieć, napisz 'Wszystko to trupy, nie dotykać'.
+            5. Krótko: punkt, punkt, koniec.
+            """
+            
             res_ai = client.chat.completions.create(
                 model="gpt-4o-mini", 
-                messages=[{"role": "user", "content": f"Analiza: {df_res.to_string()}. Wybierz 2 okazje."}]
+                messages=[
+                    {"role": "system", "content": "Jesteś brutalnym analitykiem giełdowym. Mówisz krótko i technicznie."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7 # Większa kreatywność w ocenie
             )
             st.info(res_ai.choices[0].message.content)
-        except: st.error("AI Error")
-else:
-    st.warning("Pobieranie...")
+        except Exception as e: 
+            st.error(f"AI Error: {e}")
