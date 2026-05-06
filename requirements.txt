@@ -3,3 +3,4 @@ yfinance
 pandas
 openai
 numpy
+streamlit-autorefresh
