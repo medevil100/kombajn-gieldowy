@@ -105,28 +105,30 @@ if results:
     st.plotly_chart(fig, use_container_width=True)
 
     # --- AI ---
-        # --- POPRAWIONE AI (AGRESYWNE KONKRETY) ---
+         # --- ULTRA AI INTERPRETER v7.8 ---
     if client:
         try:
+            # Tworzymy bogatszy kontekst dla AI, żeby wiedziało co analizuje
             prompt = f"""
-            Jesteś bezlitosnym traderem spekulacyjnym. Masz przed sobą dane rynkowe:
+            Jesteś starszym analitykiem ds. strategii ilościowych. Przeanalizuj poniższe dane:
             {df_res.to_string()}
 
-            ZADANIE:
-            1. Wybierz MAX 2 spółki do natychmiastowej obserwacji.
-            2. Zakaz używania fraz: 'może przynieść korzyści', 'warto monitorować', 'sugeruje sytuację'.
-            3. Pisz konkretnie: 'Symbol X - wejście, bo [technika + sentyment]'.
-            4. Jeśli w danych jest śmieć, napisz 'Wszystko to trupy, nie dotykać'.
-            5. Krótko: punkt, punkt, koniec.
+            Dla 2 wybranych spółek przygotuj raport według schematu:
+            1. **Symbol i Kierunek**: [KUP/OBSERWUJ]
+            2. **Analiza Techniczna**: Wyjaśnij korelację między RSI a SMA50 (np. 'Cena nad SMA50 przy zdrowym RSI sugeruje stabilny trend wzrostowy').
+            3. **Analiza Impetu (Momentum)**: Co oznacza obecny Vol x i Momentum %? (np. 'Wysoki Vol x potwierdza, że ruch ceny jest wspierany przez kapitał, a nie jest błędem arkusza').
+            4. **Ryzyko**: Krótka uwaga o płynności lub sentymencie.
+            
+            Używaj profesjonalnego języka (np. akumulacja, dywergencja, breakout). Zakaz lania wody.
             """
             
             res_ai = client.chat.completions.create(
                 model="gpt-4o-mini", 
                 messages=[
-                    {"role": "system", "content": "Jesteś brutalnym analitykiem giełdowym. Mówisz krótko i technicznie."},
+                    {"role": "system", "content": "Jesteś ekspertem analizy technicznej i fundamentalnej. Twoim celem jest edukacja i precyzyjna selekcja walorów."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.7 # Większa kreatywność w ocenie
+                temperature=0.5 # Niższa temperatura = bardziej logiczne, mniej "poetyckie" odpowiedzi
             )
             st.info(res_ai.choices[0].message.content)
         except Exception as e: 
