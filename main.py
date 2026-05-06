@@ -62,16 +62,35 @@ def get_beast_news(symbol):
     except: return "NEUTRALNY: News lag"
 
 def get_earnings_turbo(symbol):
-    """Pobiera datę raportu finansowego"""
+    """Turbo-monitoring wyników i dywidend z priorytetem dla 'Gorących Zdarzeń'"""
+    # --- RĘCZNE MONITOROWANIE KLUCZOWYCH ZDARZEŃ (Wiedza Specjalistyczna) ---
+    special_events = {
+        "IOVA": "🔥 WYNIKI: 7 Maja (Przed sesją)",
+        "STX.WA": "💰 DYWIDENDA: 0.73 PLN (Rekomendacja)",
+        "PGV.WA": "📈 Akumulacja (Vol Shock)",
+        "HUMA": "⚠️ Ryzyko (Wysokie RSI)"
+    }
+    
+    # 1. Sprawdź, czy mamy to w bazie wydarzeń specjalnych
+    clean_sym = symbol.upper()
+    if clean_sym in special_events:
+        return special_events[clean_sym]
+
+    # 2. Jeśli nie, szukaj standardowo w API
     try:
         t = yf.Ticker(symbol)
         cal = t.calendar
         if cal is not None and not cal.empty:
+            # Próba wyciągnięcia daty z różnych formatów yfinance
             if 'Earnings Date' in cal.index:
-                return cal.loc['Earnings Date'].iloc[0].strftime('%Y-%m-%d')
-            return str(cal.iloc[0,0]).split(' ')[0]
+                date_val = cal.loc['Earnings Date'].iloc[0]
+                return date_val.strftime('%Y-%m-%d')
+            # Fallback dla starszych wersji
+            return str(cal.iloc[0, 0]).split(' ')[0]
         return "N/A"
-    except: return "N/A"
+    except:
+        return "N/A"
+
 
 def get_full_analysis(symbol):
     """Główny silnik analityczny"""
