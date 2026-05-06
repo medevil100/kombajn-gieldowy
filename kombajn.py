@@ -1,5 +1,4 @@
 
-# ⚔️ **TERMINAL v13 ULTRA — PEŁNY PLIK**
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -316,7 +315,4 @@ try:
         st.metric("SUMA ZYSKU (PLN)", f"{round(sum(d['Zysk PLN'] for d in port_data), 2)} PLN")
 
 except:
-    st.info("Oczekiwanie na poprawne dane portfolio... (Format: SYMBOL,ILOŚĆ,CENA)
-
-
-Powiedz tylko, co budujemy dalej.
+    st.info("Oczekiwanie na poprawne dane portfolio... (Format: SYMBOL,ILOŚĆ,CENA)")
