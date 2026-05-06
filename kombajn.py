@@ -289,7 +289,11 @@ if st.button("🚀 URUCHOM AGRESYWNY SKAN CAŁEJ LISTY"):
             st.dataframe(styled_df, use_container_width=True)
 
         elif table_style == "Gradient RSI":
-            styled_df = df_res.style.applymap(gradient_rsi, subset=["RSI"])
+            styled_df = df_res.style.background_gradient(
+    cmap="viridis",
+    subset=["RSI"]
+)
+
             st.dataframe(styled_df, use_container_width=True)
 
         elif table_style == "Ikony ↑↓":
