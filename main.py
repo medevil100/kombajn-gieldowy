@@ -4,37 +4,62 @@ import yfinance as yf
 from openai import OpenAI
 import numpy as np
 import plotly.express as px
+import feedparser
 from streamlit_autorefresh import st_autorefresh
+from datetime import datetime
 
 # ============================================================
-# ULTRA ENGINE v8.0 — PROFESSIONAL ANALYTICS (BOLLINGER + ATR + AI)
+# ULTRA ENGINE v8.2 — THE ORACLE (NEWS + EARNINGS)
 # ============================================================
 
-st.set_page_config(layout="wide", page_title="TERMINAL v8.0", page_icon="⚔️")
+st.set_page_config(layout="wide", page_title="TERMINAL v8.2", page_icon="⚔️")
 
-# --- AUTO REFRESH ---
+# --- AUTO REFRESH (1-10 MIN) ---
 refresh_minutes = st.sidebar.slider("Interwał odświeżania (minuty)", 1, 10, 5)
 st_autorefresh(interval=refresh_minutes * 60 * 1000, key="datarefresh")
 
 st.markdown("<style>.stApp { background-color: #050505; color: #e0e0e0; }</style>", unsafe_allow_html=True)
 
+# --- CLIENT ---
 OPENAI_KEY = st.secrets.get("OPENAI_API_KEY", "")
 client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
 def play_sound():
     st.components.v1.html("""<audio autoplay><source src="https://soundjay.com"></audio>""", height=0)
 
-def get_news_sentiment(symbol):
-    if not client: return "NEUTRALNY: Brak AI"
+def get_investing_news(symbol):
+    """Pobiera newsy z Investing.com przez RSS i analizuje sentyment"""
+    if not client: return "Brak AI"
     try:
-        t = yf.Ticker(symbol)
-        news = t.news[:2]
-        if not news: return "NEUTRALNY: Brak nowych wieści"
-        headlines = [n.get('title', '') for n in news]
-        prompt = f"Oceń sentyment: {headlines}. Odpowiedz TYLKO: 'BYCZY', 'NIEDŹWIEDZI' lub 'NEUTRALNY' + krótki opis."
+        # Ogólny kanał wiadomości giełdowych Investing.com
+        feed = feedparser.parse("https://investing.com")
+        # Szukamy nagłówków zawierających ticker
+        relevant = [e.title for e in feed.entries if symbol.split('.')[0].upper() in e.title.upper()]
+        
+        if not relevant:
+            # Fallback do Yahoo Finance News przez yfinance
+            t = yf.Ticker(symbol)
+            relevant = [n.get('title', '') for n in t.news[:2]]
+        
+        if not relevant: return "NEUTRALNY: Brak wieści"
+        
+        prompt = f"Oceń sentyment dla {symbol}: {relevant}. Odpowiedz krótko: 'TYP: OPIS'."
         res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], max_tokens=50)
         return res.choices[0].message.content
-    except: return "NEUTRALNY: Błąd analizy"
+    except: return "NEUTRALNY: Błąd RSS"
+
+def get_earnings_date(symbol):
+    """Pobiera datę najbliższych wyników finansowych"""
+    try:
+        t = yf.Ticker(symbol)
+        calendar = t.calendar
+        if calendar is not None and not calendar.empty:
+            # Pobieramy datę z kalendarza (Earnings Date)
+            e_date = calendar.iloc[0, 0]
+            if isinstance(e_date, datetime):
+                return e_date.strftime('%Y-%m-%d')
+        return "N/A"
+    except: return "N/A"
 
 def get_full_analysis(symbol):
     try:
@@ -44,55 +69,42 @@ def get_full_analysis(symbol):
         df.columns = [c.lower() for c in df.columns]
         last_close = df['close'].iloc[-1]
         
-        # --- ROZBUDOWANA TECHNIKA ---
-        # 1. RSI
+        # TECHNIKA
         delta = df['close'].diff()
         rsi = 100 - (100 / (1 + (delta.clip(lower=0).rolling(14).mean() / -delta.clip(upper=0).rolling(14).mean()))).iloc[-1]
-        
-        # 2. Wstęgi Bollingera
         ma20 = df['close'].rolling(20).mean()
         std20 = df['close'].rolling(20).std()
         upper_b = ma20 + (std20 * 2)
-        dist_upper = ((upper_b.iloc[-1] - last_close) / last_close) * 100
-
-        # 3. ATR (Zmienność)
-        tr = pd.concat([df['high']-df['low'], np.abs(df['high']-df['close'].shift()), np.abs(df['low']-df['close'].shift())], axis=1).max(axis=1)
-        atr = tr.rolling(14).mean().iloc[-1]
-
-        # 4. Trend (SMA Cross)
-        sma50 = df['close'].rolling(50).mean().iloc[-1]
-        sma200 = df['close'].rolling(200).mean().iloc[-1] if len(df) >= 200 else sma50
         
-        # 5. Wolumen i Momentum
         vol_ratio = df['volume'].iloc[-1] / df['volume'].rolling(20).mean().iloc[-1] if df['volume'].rolling(20).mean().iloc[-1] != 0 else 1
         momentum = ((last_close - df['close'].iloc[-10]) / df['close'].iloc[-10]) * 100
 
-        # --- LOGIKA SYGNAŁU ---
+        # EARNINGS
+        earnings_date = get_earnings_date(symbol)
+
+        # SYGNAŁ
         score = 0
         if rsi < 35: score += 2
-        if last_close > sma50: score += 1
-        if last_close > upper_b.iloc[-1]: score += 2  # Wybicie górą (siła)
+        if last_close > upper_b.iloc[-1]: score += 2  # Wybicie
         if vol_ratio > 2.0: score += 2
-        
         sig = "MOCNE KUP" if score >= 5 else "KUP" if score >= 3 else "SPRZEDAJ" if rsi > 75 else "CZEKAJ"
 
         return {
             "Symbol": symbol, "Cena": round(last_close, 3), "Sygnał": sig,
             "RSI": round(rsi, 2), "Vol x": round(vol_ratio, 2),
-            "Trend": "ZŁOTY KRZYŻ" if sma50 > sma200 and df['close'].rolling(50).mean().iloc[-2] <= df['close'].rolling(200).mean().iloc[-2] else ("↑ Byk" if last_close > sma200 else "↓ Miś"),
-            "Do Wstęgi %": round(dist_upper, 2), "ATR": round(atr, 3),
-            "AI Sentiment": get_news_sentiment(symbol), "Momentum %": round(momentum, 2)
+            "Momentum %": round(momentum, 2), "Earnings": earnings_date,
+            "AI Sentiment": get_investing_news(symbol)
         }
     except: return None
 
 # --- UI ---
-st.title(f"⚔️ TERMINAL v8.0 — ADVANCED MONITOR")
+st.title(f"⚔️ TERMINAL v8.2 — THE ORACLE")
 
-default_list = "HRT.WA, CFS.WA, PRT.WA, ATT.WA, STX.WA, PUR.WA, BCS.WA, KCH.WA, PGV.WA, HPE.WA, VVD.WA, HIVE, MER.WA, APS.WA, NVG.WA, IOVA, PLRX, HUMA, TCRX, GOSS, MREO, ADTX"
+default_list = "IOVA, HRT.WA, CFS.WA, PRT.WA, ATT.WA, STX.WA, PUR.WA, BCS.WA, KCH.WA, PGV.WA, HPE.WA, VVD.WA, HIVE, MER.WA, APS.WA, NVG.WA, PLRX, HUMA, TCRX, GOSS, MREO, ADTX"
 symbols = [s.strip() for s in st.sidebar.text_area("Symbole", default_list).split(",") if s.strip()]
 
 results = []
-with st.spinner("Przetwarzanie wskaźników pro..."):
+with st.spinner("Skanowanie rynków i kalendarza wyników..."):
     for s in symbols:
         data = get_full_analysis(s)
         if data: results.append(data)
@@ -114,24 +126,20 @@ if results:
 
     # --- WYKRES MOMENTUM ---
     st.divider()
-    fig = px.bar(df_res, x='Symbol', y='Momentum %', color='Momentum %', color_continuous_scale='RdYlGn', title="Siła Relatywna (Momentum)")
+    fig = px.bar(df_res, x='Symbol', y='Momentum %', color='Momentum %', color_continuous_scale='RdYlGn', title="Siła Relatywna")
     fig.update_layout(template="plotly_dark")
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- GENESIS AI v8.0 (PROFESSIONAL DEEP DIVE) ---
+    # --- GENESIS AI v8.2 ---
     if client:
         st.subheader("🤖 GENESIS AI: Raport Strategiczny")
         prompt = f"""
-        Jesteś głównym strategiem funduszu hedge. Przeanalizuj dane:
-        {df_res.to_string()}
-
-        WYMOGI RAPORTU:
-        1. Wytypuj 'Lidera Wybicia' (szukaj ujemnego 'Do Wstęgi %' i wysokiego 'Vol x').
-        2. Wytypuj 'Okazję z Dna' (niskie RSI + stabilizacja ceny).
-        3. Wyjaśnij jak ATR wpływa na ryzyko wybranych spółek.
-        4. Oceń, czy 'Złoty Krzyż' (jeśli występuje) jest wiarygodny przy obecnym sentymencie AI.
+        Przeanalizuj dane: {df_res.to_string()}
         
-        Mów konkretami: 'Breakout', 'Overbought', 'Mean Reversion', 'Volatility Crush'.
+        1. Czy zbliżające się daty 'Earnings' (wyniki) korelują z obecnym skokiem Momentum lub Vol x?
+        2. Wybierz 2 najciekawsze setupy.
+        3. Oceń newsy i sentyment. Czy dzisiejsze ruchy to plotki przed wynikami?
+        Używaj: 'Insider buying', 'Gap up', 'Earnings play'.
         """
         try:
             res_ai = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
