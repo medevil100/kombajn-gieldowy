@@ -169,10 +169,10 @@ def get_beast_news(symbol):
 # --- SIDEBAR INPUTS ---
 st.sidebar.divider()
 st.sidebar.header("💰 PORTFOLIO (PLN)")
-portfolio_input = st.sidebar.text_area("SYMBOL,ILOŚĆ,CENA", "NVDA,1,900\nSTX.WA,100,5.0")
+portfolio_input = st.sidebar.text_area("SYMBOL,ILOŚĆ,CENA", "")
 
 st.sidebar.header("📡 SKANER MASOWY")
-default_list = "IOVA, STX.WA, PGV.WA, ATT.WA, NVDA, AAPL, TSLA, AMD"
+default_list = "HRT.WA,CFS.WA,PRT.WA,ATT.WA,STX.WA,PUR.WA,BCS.WA,KCH.WA,GTN.WALBW.WA,PGV.WA,HPE.WA,DNS.WA.ZUK.WA,VVD.WA,HIVE,MLN.WA,MER.WA,APS.WA,NVG.WA,IOVA,PLRX,HUMA,TCRX,GOSS,MREO,ADTX"
 symbols_input = st.sidebar.text_area("Lista do analizy", default_list)
 symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
 
