@@ -288,8 +288,8 @@ def analyze_symbol(symbol):
             score += 10
         if not np.isnan(dist_high20) and dist_high20 > -5:
             score -= 10
-
-        # Normalizacja
+         # Normalizacja
+    
         score = max(0, min(100, score))
 
         # ============================================================
