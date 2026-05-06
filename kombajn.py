@@ -1,4 +1,6 @@
-### ⚔️ TERMINAL v14 ULTRA — pełny plik
+
+### ⚔️ TERMINAL v14 ULTRA — FULL SCRIPT
+
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -7,43 +9,91 @@ import numpy as np
 import concurrent.futures
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
+import ta  # TA-Lib style indicators
 
 # ============================================================
-# TERMINAL v14 ULTRA — DARK PRO + NEON
+# TERMINAL v14 ULTRA — DARK PRO + NEON + GLASS
 # ============================================================
 
 st.set_page_config(layout="wide", page_title="TERMINAL v14 ULTRA", page_icon="⚔️")
 
-# --- DARK PRO + NEONY ---
+# --- DARK PRO + NEON + GLASSMORPHISM ---
 st.markdown("""
 <style>
 .stApp {
-    background-color: #020204;
+    background: radial-gradient(circle at top, #101020 0%, #020204 45%, #000000 100%);
     color: #e0e0e0;
-    font-family: 'Segoe UI', sans-serif;
+    font-family: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
-/* Neon headers */
+/* Główne kontenery (glassmorphism) */
+section.main > div {
+    background: rgba(5, 10, 25, 0.72);
+    border-radius: 18px;
+    border: 1px solid rgba(0, 234, 255, 0.18);
+    box-shadow:
+        0 0 25px rgba(0, 234, 255, 0.18),
+        0 0 60px rgba(0, 0, 0, 0.9);
+    backdrop-filter: blur(18px);
+    padding: 12px 18px;
+}
+
+/* Sidebar glass */
+[data-testid="stSidebar"] {
+    background: linear-gradient(160deg, rgba(5, 10, 25, 0.95), rgba(0, 0, 0, 0.98));
+    border-right: 1px solid rgba(0, 234, 255, 0.25);
+    box-shadow: 10px 0 30px rgba(0, 0, 0, 0.9);
+}
+
+/* Nagłówki neon */
 h1, h2, h3, h4 {
     color: #00eaff !important;
-    text-shadow: 0 0 10px #00eaff, 0 0 20px #00eaff;
+    text-shadow:
+        0 0 8px rgba(0, 234, 255, 0.9),
+        0 0 18px rgba(0, 120, 255, 0.8),
+        0 0 32px rgba(0, 234, 255, 0.7);
 }
 
-/* Neon metrics */
+/* Metric cards */
 div[data-testid="stMetric"] {
-    background: rgba(0, 20, 40, 0.6);
-    border: 1px solid #00eaff;
-    border-radius: 10px;
+    background: radial-gradient(circle at top, rgba(0, 234, 255, 0.18), rgba(0, 10, 30, 0.9));
+    border: 1px solid rgba(0, 234, 255, 0.6);
+    border-radius: 14px;
     padding: 10px;
-    box-shadow: 0 0 15px #00eaff;
+    box-shadow:
+        0 0 18px rgba(0, 234, 255, 0.7),
+        0 0 40px rgba(0, 0, 0, 1);
 }
 
-/* Neon buttons */
-button[kind="primary"] {
-    background: linear-gradient(90deg, #00eaff, #0077ff);
-    color: black !important;
-    border-radius: 8px;
-    box-shadow: 0 0 15px #00eaff;
+/* Przyciski primary (neon) */
+button[kind="primary"], .stButton > button {
+    background: linear-gradient(120deg, #00eaff, #0077ff);
+    color: #020204 !important;
+    border-radius: 999px;
+    border: 1px solid rgba(0, 234, 255, 0.9);
+    box-shadow:
+        0 0 12px rgba(0, 234, 255, 0.9),
+        0 0 30px rgba(0, 120, 255, 0.9);
+    font-weight: 600;
+    letter-spacing: 0.03em;
+}
+
+/* Hover na przyciskach */
+button[kind="primary"]:hover, .stButton > button:hover {
+    transform: translateY(-1px) scale(1.01);
+    box-shadow:
+        0 0 18px rgba(0, 234, 255, 1),
+        0 0 40px rgba(0, 120, 255, 1);
+}
+
+/* Tabele (glass) */
+[data-testid="stDataFrame"] {
+    background: rgba(5, 10, 25, 0.85);
+    border-radius: 14px;
+    border: 1px solid rgba(0, 234, 255, 0.25);
+    box-shadow:
+        0 0 20px rgba(0, 234, 255, 0.25),
+        0 0 40px rgba(0, 0, 0, 1);
 }
 
 /* Scrollbar */
@@ -51,8 +101,23 @@ button[kind="primary"] {
     width: 8px;
 }
 ::-webkit-scrollbar-thumb {
-    background: #00eaff;
+    background: linear-gradient(180deg, #00eaff, #0077ff);
     border-radius: 10px;
+}
+
+/* Selectbox, slider, inputy */
+[data-baseweb="select"], .stSlider, .stTextArea, .stTextInput {
+    background: rgba(5, 10, 25, 0.9) !important;
+    border-radius: 10px !important;
+    border: 1px solid rgba(0, 234, 255, 0.35) !important;
+}
+
+/* Divider glow */
+hr {
+    border: none;
+    height: 1px;
+    background: radial-gradient(circle, rgba(0, 234, 255, 0.9), transparent);
+    box-shadow: 0 0 18px rgba(0, 234, 255, 0.8);
 }
 </style>
 """, unsafe_allow_html=True)
@@ -121,28 +186,35 @@ st.title(f"⚔️ TERMINAL v14 ULTRA — REFRESH: {refresh_val} MIN")
 
 def highlight_row_rsi(row):
     rsi = row["RSI"]
+
+    if pd.isna(rsi):
+        return [""] * len(row)
+
     if rsi < 30:
-        return ["background-color: rgba(0, 120, 0, 0.25)"] * len(row)  # ciemna zieleń
+        return ["background-color: rgba(0, 120, 0, 0.25)"] * len(row)
     elif rsi > 70:
-        return ["background-color: rgba(120, 0, 0, 0.25)"] * len(row)  # ciemna czerwień
+        return ["background-color: rgba(120, 0, 0, 0.25)"] * len(row)
     else:
         return [""] * len(row)
 
 def gradient_rsi(val):
+    # brak wartości → brak stylu
     if pd.isna(val):
-        return ""  # brak stylu dla NaN
-
-    # bezpieczne obcięcie zakresu
-    try:
-        v = float(val)
-    except (TypeError, ValueError):
         return ""
 
+    # bezpieczna konwersja
+    try:
+        v = float(val)
+    except:
+        return ""
+
+    # obcięcie zakresu
     v = max(0, min(v, 100))
     pct = v / 100.0
 
     r = int(180 * pct)
     g = int(180 * (1 - pct))
+
     return f"background-color: rgba({r},{g},40,0.25)"
 
 def add_icons(df):
@@ -168,21 +240,24 @@ def analyze_symbol(symbol):
             return None
 
         last_p = df['Close'].iloc[-1]
-        delta = df['Close'].diff()
 
-        up = delta.clip(lower=0).rolling(14).mean()
-        down = -delta.clip(upper=0).rolling(14).mean()
-        rsi = 100 - (100 / (1 + (up / down)))
+        # RSI w stylu TA-Lib (Wilder) przez bibliotekę `ta`
+        rsi_series = ta.momentum.RSIIndicator(close=df['Close'], window=14).rsi()
+        rsi_value = float(rsi_series.iloc[-1])
 
-        mom = ((last_p - df['Close'].iloc[-10]) / df['Close'].iloc[-10]) * 100
+        # Momentum 10d
+        if len(df) > 10:
+            mom = ((last_p - df['Close'].iloc[-10]) / df['Close'].iloc[-10]) * 100
+        else:
+            mom = np.nan
 
         news = get_beast_news(symbol)
 
         return {
             "Symbol": symbol,
             "Cena": round(last_p, 2),
-            "RSI": round(rsi.iloc[-1], 1),
-            "Mom% 10d": round(mom, 2),
+            "RSI": round(rsi_value, 1),
+            "Mom% 10d": round(mom, 2) if not np.isnan(mom) else np.nan,
             "News": news
         }
     except:
@@ -203,6 +278,9 @@ if st.button("🚀 URUCHOM AGRESYWNY SKAN CAŁEJ LISTY"):
 
     if results:
         df_res = pd.DataFrame(results)
+
+        # opcjonalnie: wyrzuć wiersze bez RSI
+        df_res = df_res.dropna(subset=["RSI"])
 
         st.subheader("📊 Dane techniczne i Sentyment")
 
