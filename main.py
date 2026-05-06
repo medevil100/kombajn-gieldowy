@@ -1,10 +1,4 @@
 
-# ⚔️ **TERMINAL v15 ULTRA — CZĘŚĆ 1/3**
-## **UI + konfiguracja + sidebar + podstawowe funkcje**
-
-Wklej to jako **początek pliku**:
-
-````python
 ### ⚔️ TERMINAL v15 ULTRA — CZĘŚĆ 1/3
 ### UI + konfiguracja + sidebar + podstawowe funkcje
 
