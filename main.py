@@ -1,188 +1,578 @@
+
+# ⚔️ **TERMINAL v15 ULTRA — CZĘŚĆ 1/3**
+## **UI + konfiguracja + sidebar + podstawowe funkcje**
+
+Wklej to jako **początek pliku**:
+
+````python
+### ⚔️ TERMINAL v15 ULTRA — CZĘŚĆ 1/3
+### UI + konfiguracja + sidebar + podstawowe funkcje
+
 import streamlit as st
 import pandas as pd
 import yfinance as yf
 from openai import OpenAI
 import numpy as np
-import plotly.express as px
-import feedparser
+import concurrent.futures
+import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
-from datetime import datetime
+import ta  # TA-Lib style indicators
 
 # ============================================================
-# ULTRA ENGINE v9.0 — TOTAL ORACLE (FINAL CONSOLIDATED)
+# KONFIGURACJA APLIKACJI
 # ============================================================
 
-st.set_page_config(layout="wide", page_title="TERMINAL v9.0 ORACLE", page_icon="⚔️")
+st.set_page_config(layout="wide", page_title="TERMINAL v15 ULTRA", page_icon="⚔️")
 
-# --- AUTO REFRESH (Co 5 minut domyślnie) ---
-refresh_minutes = st.sidebar.slider("Interwał odświeżania (minuty)", 1, 15, 5)
-st_autorefresh(interval=refresh_minutes * 60 * 1000, key="datarefresh")
+# ============================================================
+# UI — NEON + GLASSMORPHISM
+# ============================================================
 
-# --- STYLIZACJA TERMINALA ---
 st.markdown("""
 <style>
-    .stApp { background-color: #030305; color: #e0e0e0; }
-    thead tr th { background-color: #111 !important; color: #00ff88 !important; }
-    .status-kup { color: #00ff88; font-weight: bold; }
-    .stDataFrame { border: 1px solid #222; border-radius: 10px; }
+.stApp {
+    background: radial-gradient(circle at top, #101020 0%, #020204 45%, #000000 100%);
+    color: #e0e0e0;
+    font-family: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+section.main > div {
+    background: rgba(5, 10, 25, 0.72);
+    border-radius: 18px;
+    border: 1px solid rgba(0, 234, 255, 0.18);
+    box-shadow:
+        0 0 25px rgba(0, 234, 255, 0.18),
+        0 0 60px rgba(0, 0, 0, 0.9);
+    backdrop-filter: blur(18px);
+    padding: 12px 18px;
+}
+
+[data-testid="stSidebar"] {
+    background: linear-gradient(160deg, rgba(5, 10, 25, 0.95), rgba(0, 0, 0, 0.98));
+    border-right: 1px solid rgba(0, 234, 255, 0.25);
+    box-shadow: 10px 0 30px rgba(0, 0, 0, 0.9);
+}
+
+h1, h2, h3, h4 {
+    color: #00eaff !important;
+    text-shadow:
+        0 0 8px rgba(0, 234, 255, 0.9),
+        0 0 18px rgba(0, 120, 255, 0.8),
+        0 0 32px rgba(0, 234, 255, 0.7);
+}
+
+div[data-testid="stMetric"] {
+    background: radial-gradient(circle at top, rgba(0, 234, 255, 0.18), rgba(0, 10, 30, 0.9));
+    border: 1px solid rgba(0, 234, 255, 0.6);
+    border-radius: 14px;
+    padding: 10px;
+    box-shadow:
+        0 0 18px rgba(0, 234, 255, 0.7),
+        0 0 40px rgba(0, 0, 0, 1);
+}
+
+button[kind="primary"], .stButton > button {
+    background: linear-gradient(120deg, #00eaff, #0077ff);
+    color: #020204 !important;
+    border-radius: 999px;
+    border: 1px solid rgba(0, 234, 255, 0.9);
+    box-shadow:
+        0 0 12px rgba(0, 234, 255, 0.9),
+        0 0 30px rgba(0, 120, 255, 0.9);
+    font-weight: 600;
+    letter-spacing: 0.03em;
+}
+
+button[kind="primary"]:hover, .stButton > button:hover {
+    transform: translateY(-1px) scale(1.01);
+    box-shadow:
+        0 0 18px rgba(0, 234, 255, 1),
+        0 0 40px rgba(0, 120, 255, 1);
+}
+
+[data-testid="stDataFrame"] {
+    background: rgba(5, 10, 25, 0.85);
+    border-radius: 14px;
+    border: 1px solid rgba(0, 234, 255, 0.25);
+    box-shadow:
+        0 0 20px rgba(0, 234, 255, 0.25),
+        0 0 40px rgba(0, 0, 0, 1);
+}
+
+::-webkit-scrollbar {
+    width: 8px;
+}
+::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, #00eaff, #0077ff);
+    border-radius: 10px;
+}
+
+[data-baseweb="select"], .stSlider, .stTextArea, .stTextInput {
+    background: rgba(5, 10, 25, 0.9) !important;
+    border-radius: 10px !important;
+    border: 1px solid rgba(0, 234, 255, 0.35) !important;
+}
+
+hr {
+    border: none;
+    height: 1px;
+    background: radial-gradient(circle, rgba(0, 234, 255, 0.9), transparent);
+    box-shadow: 0 0 18px rgba(0, 234, 255, 0.8);
+}
 </style>
 """, unsafe_allow_html=True)
 
-# --- SECRETS & AI CLIENT ---
-OPENAI_KEY = st.secrets.get("OPENAI_API_KEY", "")
-client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
+# ============================================================
+# SIDEBAR
+# ============================================================
 
-def play_sound():
-    """Alert dźwiękowy dla sygnałów KUP"""
-    st.components.v1.html("""<audio autoplay><source src="https://soundjay.com"></audio>""", height=0)
+st.sidebar.header("⚙️ USTAWIENIA SYSTEMU")
+refresh_val = st.sidebar.slider("Auto-odświeżanie (minuty)", 1, 15, 10)
+st_autorefresh(interval=refresh_val * 60 * 1000, key="datarefresh")
+
+st.sidebar.header("🤖 MODEL AI")
+model_choice = st.sidebar.selectbox(
+    "Wybierz model",
+    ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-4.1-mini"],
+    index=0
+)
+
+st.sidebar.header("🎨 Styl tabeli")
+table_style = st.sidebar.radio(
+    "Wybierz styl:",
+    ["Kolor wiersza (RSI)", "Gradient RSI", "Ikony ↑↓"],
+    index=0
+)
+
+OPENAI_KEY = st.secrets["OPENAI_API_KEY"]
+client = OpenAI(api_key=OPENAI_KEY)
+
+# ============================================================
+# FUNKCJE PODSTAWOWE
+# ============================================================
+
+@st.cache_data(ttl=3600)
+def get_usd_pln():
+    try:
+        data = yf.Ticker("USDPLN=X").history(period="1d")
+        return float(data['Close'].iloc[-1])
+    except:
+        return 4.0
+
+USD_PLN = get_usd_pln()
 
 def get_beast_news(symbol):
-    """Najmocniejszy silnik newsów: Yahoo + Google News RSS"""
-    news_text = []
     try:
         t = yf.Ticker(symbol)
-        # 1. Yahoo Finance News
-        news_text.extend([n.get('title', '') for n in t.news[:3]])
-
-        # 2. Agresywne Google News (szukanie po nazwie lub tickerze)
-        clean_sym = symbol.split('.')[0]
-        google_url = f"https://google.com{clean_sym}+stock+news&hl=en-US&gl=US&ceid=US:en"
-        feed = feedparser.parse(google_url)
-        news_text.extend([e.title for e in feed.entries[:5]])
-        
-        news_text = list(set([n for n in news_text if n])) # Usuń duplikaty
-        
-        if not news_text: return "NEUTRALNY: System szuka wieści..."
-        
-        if client:
-            prompt = f"Analizuj newsy dla {symbol}: {news_text[:5]}. Wydaj wyrok: BYCZY/NIEDŹWIEDZI/NEUTRALNY + krótki powód (max 10 słów)."
-            res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], max_tokens=60)
-            return res.choices[0].message.content
-        return "AI Offline"
-    except: return "NEUTRALNY: News lag"
-
-def get_earnings_turbo(symbol):
-    """Turbo-monitoring wyników i dywidend z priorytetem dla 'Gorących Zdarzeń'"""
-    # --- RĘCZNE MONITOROWANIE KLUCZOWYCH ZDARZEŃ (Wiedza Specjalistyczna) ---
-    special_events = {
-        "IOVA": "🔥 WYNIKI: 7 Maja (Przed sesją)",
-        "STX.WA": "💰 DYWIDENDA: 0.73 PLN (Rekomendacja)",
-        "PGV.WA": "📈 Akumulacja (Vol Shock)",
-        "HUMA": "⚠️ Ryzyko (Wysokie RSI)"
-    }
-    
-    # 1. Sprawdź, czy mamy to w bazie wydarzeń specjalnych
-    clean_sym = symbol.upper()
-    if clean_sym in special_events:
-        return special_events[clean_sym]
-
-    # 2. Jeśli nie, szukaj standardowo w API
-    try:
-        t = yf.Ticker(symbol)
-        cal = t.calendar
-        if cal is not None and not cal.empty:
-            # Próba wyciągnięcia daty z różnych formatów yfinance
-            if 'Earnings Date' in cal.index:
-                date_val = cal.loc['Earnings Date'].iloc[0]
-                return date_val.strftime('%Y-%m-%d')
-            # Fallback dla starszych wersji
-            return str(cal.iloc[0, 0]).split(' ')[0]
-        return "N/A"
+        news = [n.get('title', '') for n in t.news[:2]]
+        return " | ".join(news) if news else "Brak newsów."
     except:
-        return "N/A"
+        return "Lagg."
 
+# INPUTY
+st.sidebar.header("💰 PORTFOLIO (PLN)")
+portfolio_input = st.sidebar.text_area("SYMBOL,ILOŚĆ,CENA", "NVDA,1,900\nSTX.WA,100,5.0")
 
-def get_full_analysis(symbol):
-    """Główny silnik analityczny"""
+st.sidebar.header("📡 SKANER MASOWY")
+default_list = "IOVA, STX.WA, PGV.WA, ATT.WA, NVDA, AAPL, TSLA, AMD"
+symbols_input = st.sidebar.text_area("Lista do analizy", default_list)
+symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
+
+st.title(f"⚔️ TERMINAL v15 ULTRA — REFRESH: {refresh_val} MIN")
+# ============================================================
+# CZĘŚĆ 2/3 — ANALIZA SYMBOLI: WSKAŹNIKI + SCORING + SYGNAŁY
+# ============================================================
+
+def analyze_symbol(symbol):
     try:
         t = yf.Ticker(symbol)
-        df = t.history(period="1y")
-        if df.empty or len(df) < 30: return None
-        df.columns = [c.lower() for c in df.columns]
-        last_close = df['close'].iloc[-1]
-        
-        # Wskaźniki techniczne
-        delta = df['close'].diff()
-        rsi = 100 - (100 / (1 + (delta.clip(lower=0).rolling(14).mean() / -delta.clip(upper=0).rolling(14).mean()))).iloc[-1]
-        sma50 = df['close'].rolling(50).mean().iloc[-1]
-        
-        # Vol Shock & Momentum
-        avg_vol = df['volume'].tail(20).mean()
-        vol_ratio = df['volume'].iloc[-1] / avg_vol if avg_vol != 0 else 1
-        momentum_10d = ((last_close - df['close'].iloc[-10]) / df['close'].iloc[-10]) * 100
+        df = t.history(period="3mo")
 
-        # Logika sygnału (Turbo Score)
+        if df.empty or len(df) < 20:
+            return None
+
+        last_p = df['Close'].iloc[-1]
+
+        # ============================
+        # RSI (TA-Lib style via ta)
+        # ============================
+        rsi_series = ta.momentum.RSIIndicator(close=df['Close'], window=14).rsi()
+        rsi_value = float(rsi_series.iloc[-1])
+
+        # ============================
+        # Momentum 10d
+        # ============================
+        if len(df) > 10:
+            mom = ((last_p - df['Close'].iloc[-10]) / df['Close'].iloc[-10]) * 100
+        else:
+            mom = np.nan
+
+        # ============================
+        # EMA 20 / EMA 50
+        # ============================
+        ema20 = df['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
+        ema50 = df['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
+        ema_trend = int(ema20 > ema50)
+
+        # ============================
+        # MACD
+        # ============================
+        ema12 = df['Close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+        macd = ema12 - ema26
+        signal = macd.ewm(span=9, adjust=False).mean()
+
+        macd_last = float(macd.iloc[-1])
+        signal_last = float(signal.iloc[-1])
+        macd_trend = int(macd_last > signal_last)
+
+        # ============================
+        # Volatility 10d
+        # ============================
+        vol10 = df['Close'].pct_change().rolling(10).std().iloc[-1] * 100
+
+        # ============================
+        # Volume Surge
+        # ============================
+        vol_avg = df['Volume'].rolling(20).mean().iloc[-1]
+        vol_now = df['Volume'].iloc[-1]
+        vol_surge = round((vol_now / vol_avg) * 100, 1) if vol_avg > 0 else np.nan
+
+        # ============================
+        # Distance from High/Low 20d
+        # ============================
+        high20 = df['High'].rolling(20).max().iloc[-1]
+        low20 = df['Low'].rolling(20).min().iloc[-1]
+
+        dist_high20 = round((last_p / high20 - 1) * 100, 2) if high20 > 0 else np.nan
+        dist_low20 = round((last_p / low20 - 1) * 100, 2) if low20 > 0 else np.nan
+
+        # ============================
+        # NEWS
+        # ============================
+        news = get_beast_news(symbol)
+
+        # ============================================================
+        # SCORING 0–100
+        # ============================================================
         score = 0
-        if rsi < 38: score += 2
-        if last_close > sma50: score += 1
-        if vol_ratio > 2.5: score += 3 
-        if momentum_10d > 10: score += 1
-        
-        sig = "🔥 MOCNE KUP" if score >= 5 else "KUP" if score >= 3 else "SPRZEDAJ" if rsi > 72 else "CZEKAJ"
 
+        # RSI
+        if rsi_value < 30:
+            score += 25
+        elif rsi_value < 40:
+            score += 15
+        elif rsi_value > 70:
+            score -= 20
+
+        # Momentum
+        if not np.isnan(mom):
+            if mom > 5:
+                score += 15
+            elif mom < -5:
+                score += 10
+
+        # EMA trend
+        if ema_trend == 1:
+            score += 15
+        else:
+            score -= 5
+
+        # MACD
+        if macd_trend == 1:
+            score += 15
+
+        # Volume surge
+        if not np.isnan(vol_surge):
+            if vol_surge > 150:
+                score += 15
+            elif vol_surge > 100:
+                score += 8
+
+        # Pozycja względem low/high
+        if not np.isnan(dist_low20) and dist_low20 < 5:
+            score += 10
+        if not np.isnan(dist_high20) and dist_high20 > -5:
+            score -= 10
+
+        # Normalizacja
+        score = max(0, min(100, score))
+
+        # ============================================================
+        # SYGNAŁ BUY / SELL / NEUTRAL
+        # ============================================================
+        if score >= 70:
+            signal_tag = "BUY"
+        elif score <= 30:
+            signal_tag = "SELL"
+        else:
+            signal_tag = "NEUTRAL"
+
+        # ============================================================
+        # ZWROT DANYCH
+        # ============================================================
         return {
-            "Symbol": symbol, "Cena": round(last_close, 3), "Sygnał": sig,
-            "RSI": round(rsi, 1), "Vol Shock": f"{round(vol_ratio,1)}x",
-            "Mom% (10d)": round(momentum_10d, 2), "Earnings": get_earnings_turbo(symbol),
-            "AI Verdict": get_beast_news(symbol)
+            "Symbol": symbol,
+            "Cena": round(last_p, 2),
+            "RSI": round(rsi_value, 1),
+            "Mom% 10d": round(mom, 2) if not np.isnan(mom) else np.nan,
+            "EMA20>EMA50": ema_trend,
+            "MACD>Signal": macd_trend,
+            "Volatility10d": round(vol10, 2),
+            "VolumeSurge%": vol_surge,
+            "DistHigh20%": dist_high20,
+            "DistLow20%": dist_low20,
+            "Score": int(score),
+            "Signal": signal_tag,
+            "News": news
         }
-    except: return None
 
-# --- UI INTERFACE ---
-st.title("⚡ TERMINAL v9.0 — TOTAL ORACLE")
+    except Exception as e:
+        return None
+# ============================================================
+# CZĘŚĆ 3/3 — TABELA + HEATMAPA + AI + WYKRESY + PORTFOLIO
+# ============================================================
 
-default_list = "IOVA, HRT.WA, CFS.WA, PRT.WA, ATT.WA, STX.WA, PUR.WA, BCS.WA, KCH.WA, PGV.WA, HPE.WA, VVD.WA, HIVE, MER.WA, APS.WA, NVG.WA, PLRX, HUMA, TCRX, GOSS, MREO, ADTX"
-symbols_input = st.sidebar.text_area("Lista Symboli", default_list)
-symbols = [s.strip() for s in symbols_input.split(",") if s.strip()]
+# Stylizacja RSI
+def highlight_row_rsi(row):
+    rsi = row["RSI"]
+    if pd.isna(rsi):
+        return [""] * len(row)
+    if rsi < 30:
+        return ["background-color: rgba(0, 120, 0, 0.25)"] * len(row)
+    elif rsi > 70:
+        return ["background-color: rgba(120, 0, 0, 0.25)"] * len(row)
+    else:
+        return [""] * len(row)
 
-if st.button("WYMUŚ SKANOWANIE"): st.rerun()
+def gradient_rsi(val):
+    if pd.isna(val):
+        return ""
+    try:
+        v = float(val)
+    except:
+        return ""
+    v = max(0, min(v, 100))
+    pct = v / 100.0
+    r = int(180 * pct)
+    g = int(180 * (1 - pct))
+    return f"background-color: rgba({r},{g},40,0.25)"
+
+def add_icons(df):
+    df = df.copy()
+    df["RSI"] = df["RSI"].apply(
+        lambda x: f"{x} 🔻" if x < 30 else (f"{x} 🔺" if x > 70 else f"{x} ➖")
+    )
+    df["Mom% 10d"] = df["Mom% 10d"].apply(
+        lambda x: f"{x}% 📈" if x > 0 else f"{x}% 📉"
+    )
+    return df
+
+# ============================================================
+# SKANOWANIE SYMBOLI
+# ============================================================
 
 results = []
-with st.spinner("Skanowanie rynków i analizowanie newsów przez AI..."):
-    for s in symbols:
-        data = get_full_analysis(s)
-        if data: results.append(data)
 
-if results:
-    df_res = pd.DataFrame(results)
-    
-    # Stylizacja kolorystyczna tabeli
-    def style_table(row):
-        color = ''
-        sent = str(row['AI Verdict']).upper()
-        if "MOCNE" in str(row['Sygnał']) or "BYCZY" in sent: color = 'color: #00ff88; font-weight: bold'
-        elif "SPRZEDAJ" in str(row['Sygnał']) or "NIEDŹWIEDZI" in sent: color = 'color: #ff4444'
-        elif "NEUTRALNY" in sent: color = 'color: #ffa500'
-        return [color] * len(row)
+if st.button("🚀 URUCHOM AGRESYWNY SKAN CAŁEJ LISTY"):
+    progress = st.progress(0)
 
-    if any("KUP" in str(s) for s in df_res['Sygnał']): play_sound()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+        futures = {executor.submit(analyze_symbol, s): s for s in symbols}
+        for i, f in enumerate(concurrent.futures.as_completed(futures)):
+            res = f.result()
+            if res:
+                results.append(res)
+            progress.progress((i + 1) / len(symbols))
 
-    st.dataframe(df_res.style.apply(style_table, axis=1), use_container_width=True)
+    if results:
+        df_res = pd.DataFrame(results)
+        df_res = df_res.dropna(subset=["RSI"])
 
-    # --- RANKING SIŁY ---
-    st.divider()
-    st.subheader("🏆 Ranking Momentum (Ostatnie 10 sesji)")
-    df_sorted = df_res.sort_values(by="Mom% (10d)", ascending=True)
-    fig = px.bar(df_sorted, x="Mom% (10d)", y="Symbol", orientation='h',
-                 color="Mom% (10d)", color_continuous_scale='RdYlGn', text="Sygnał")
-    fig.update_layout(template="plotly_dark", height=500)
-    st.plotly_chart(fig, use_container_width=True)
+        st.subheader("📊 Dane techniczne + Scoring + Sygnały")
 
-    # --- GENESIS AI: RAPORT SPEKULACYJNY ---
-    if client:
-        st.subheader("🤖 GENESIS AI: Wyrok Terminala")
-        summary = df_res.to_string()
-        prompt = f"""
-        Jesteś bezlitosnym analitykiem portfela. Przeanalizuj: {summary}
-        
-        1. Wskaż lidera sesji i oceń czy Vol Shock potwierdza rajd.
-        2. Czy data Earnings dla spółek (szczególnie IOVA) sugeruje akumulację pod wyniki?
-        3. Wydaj 2 konkretne rekomendacje KUP/SPRZEDAJ z uzasadnieniem technicznym.
-        Pisz krótko, agresywnie, po tradersku.
-        """
-        try:
-            res_ai = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-            st.info(res_ai.choices[0].message.content)
-        except Exception as e: st.error(f"AI Error: {e}")
-else:
-    st.warning("Oczekiwanie na dane z serwerów giełdowych...")
+        # Styl tabeli
+        if table_style == "Kolor wiersza (RSI)":
+            styled_df = df_res.style.apply(highlight_row_rsi, axis=1)
+            st.dataframe(styled_df, use_container_width=True)
+
+        elif table_style == "Gradient RSI":
+            styled_df = df_res.style.applymap(gradient_rsi, subset=["RSI"])
+            st.dataframe(styled_df, use_container_width=True)
+
+        elif table_style == "Ikony ↑↓":
+            df_icon = add_icons(df_res)
+            st.dataframe(df_icon, use_container_width=True)
+
+        # ============================================================
+        # HEATMAPA WSKAŹNIKÓW
+        # ============================================================
+
+        st.subheader("🔥 Heatmapa wskaźników i scoringu")
+
+        heat_cols = [
+            "RSI",
+            "Mom% 10d",
+            "Volatility10d",
+            "VolumeSurge%",
+            "DistHigh20%",
+            "DistLow20%",
+            "Score"
+        ]
+
+        heat_cols = [c for c in heat_cols if c in df_res.columns]
+
+        if heat_cols:
+            styled_heat = df_res.set_index("Symbol")[heat_cols].style.background_gradient(
+                cmap="viridis"
+            )
+            st.dataframe(styled_heat, use_container_width=True)
+
+        # ============================================================
+        # AI — WYROK ZBIORCZY
+        # ============================================================
+
+        st.divider()
+        st.subheader(f"🤖 GENESIS AI ({model_choice}) — WYROK ZBIORCZY")
+
+        prompt = {
+            "data": results,
+            "usd_pln": USD_PLN,
+            "task": "Przeanalizuj Score, RSI, Momentum, Trend EMA, MACD, Volume Surge i News. Wybierz Top 3 okazje oraz 3 zagrożenia. Podaj SYMBOL - POWÓD."
+        }
+
+        with st.spinner("AI analizuje rynek..."):
+            res_ai = client.chat.completions.create(
+                model=model_choice,
+                messages=[
+                    {"role": "system", "content": "Jesteś brutalnym zarządzającym funduszem hedgingowym."},
+                    {"role": "user", "content": str(prompt)}
+                ],
+                temperature=0.2
+            )
+            st.warning("RAPORT STRATEGICZNY:")
+            st.write(res_ai.choices[0].message.content)
+
+        # ============================================================
+        # AI — RANKING 1–10
+        # ============================================================
+
+        st.subheader("🏆 Ranking AI (Score + Trend + Momentum + News)")
+
+        ranking_prompt = {
+            "data": results,
+            "weights": {
+                "score": 0.50,
+                "trend": 0.20,
+                "momentum": 0.20,
+                "news_sentiment": 0.10
+            },
+            "task": "Zbuduj ranking 1–10. Nadaj punkty. Zwróć JSON: [{symbol, score, reason}]."
+        }
+
+        with st.spinner("AI liczy ranking..."):
+            rank_res = client.chat.completions.create(
+                model=model_choice,
+                messages=[
+                    {"role": "system", "content": "Jesteś analitykiem kwantowym funduszu hedgingowego."},
+                    {"role": "user", "content": str(ranking_prompt)}
+                ],
+                temperature=0.1
+            )
+
+        st.success("Ranking AI:")
+        st.write(rank_res.choices[0].message.content)
+
+# ============================================================
+# WYKRESY ŚWIECOWE
+# ============================================================
+
+st.subheader("📉 Wykresy świecowe + wolumen")
+
+selected_symbol = st.selectbox("Wybierz ticker do wykresu", symbols)
+
+if selected_symbol:
+    t = yf.Ticker(selected_symbol)
+    df_chart = t.history(period="3mo")
+
+    if not df_chart.empty:
+        fig = go.Figure()
+
+        fig.add_trace(go.Candlestick(
+            x=df_chart.index,
+            open=df_chart['Open'],
+            high=df_chart['High'],
+            low=df_chart['Low'],
+            close=df_chart['Close'],
+            name="Cena"
+        ))
+
+        fig.add_trace(go.Bar(
+            x=df_chart.index,
+            y=df_chart['Volume'],
+            name="Wolumen",
+            marker_color="#4444ff",
+            opacity=0.3,
+            yaxis="y2"
+        ))
+
+        fig.update_layout(
+            template="plotly_dark",
+            height=600,
+            xaxis_rangeslider_visible=False,
+            yaxis=dict(title="Cena"),
+            yaxis2=dict(title="Wolumen", overlaying="y", side="right")
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+# ============================================================
+# PORTFOLIO
+# ============================================================
+
+st.divider()
+st.subheader(f"📈 Twoje Pozycje (Kurs USD/PLN: {round(USD_PLN, 2)})")
+
+try:
+    port_data = []
+    tickers = {}
+
+    for line in portfolio_input.split("\n"):
+        if not line or "," not in line:
+            continue
+        sym, qty, b_p = line.split(",")
+        sym = sym.strip().upper()
+        tickers[sym] = {
+            "qty": float(qty),
+            "buy": float(b_p)
+        }
+
+    for sym in tickers:
+        t = yf.Ticker(sym)
+        df_p = t.history(period="1d")
+        if df_p.empty:
+            continue
+
+        price = float(df_p["Close"].iloc[-1])
+        qty = tickers[sym]["qty"]
+        buy = tickers[sym]["buy"]
+
+        is_usd = ".WA" not in sym
+
+        cur_val = price * qty * (USD_PLN if is_usd else 1)
+        buy_val = buy * qty * (USD_PLN if is_usd else 1)
+
+        port_data.append({
+            "Symbol": sym,
+            "Cena (waluta)": price,
+            "Wartość PLN": round(cur_val, 2),
+            "Zysk PLN": round(cur_val - buy_val, 2)
+        })
+
+    if port_data:
+        dfp = pd.DataFrame(port_data)
+        st.table(dfp)
+        st.metric("SUMA ZYSKU (PLN)", f"{round(sum(d['Zysk PLN'] for d in port_data), 2)} PLN")
+
+except:
+    st.info("Oczekiwanie na poprawne dane portfolio... (Format: SYMBOL,ILOŚĆ,CENA)")
