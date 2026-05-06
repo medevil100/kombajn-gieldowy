@@ -102,18 +102,54 @@ if st.button("🚀 URUCHOM AGRESYWNY SKAN CAŁEJ LISTY"):
                 st.warning("RAPORT STRATEGICZNY:")
                 st.write(res.choices[0].message.content)
 
-# --- PORTFOLIO LOGIC (Zredukowane dla stabilności) ---
+@st.cache_data(ttl=3600)
+def get_usd_pln():
+    try: 
+        # Pobieramy dane i wyciągamy tylko ostatnią wartość jako float
+        data = yf.Ticker("USDPLN=X").history(period="1d")
+        if not data.empty:
+            return float(data['Close'].iloc[-1])
+        return 4.0 # Fallback jeśli puste
+    except: 
+        return 4.0
+USD_PLN = get_usd_pln()
+
+# ... (reszta kodu bez zmian) ...
+
+# --- PORTFOLIO LOGIC (NAPRAWIONA DLA GOSS I INNYCH USA) ---
 st.divider()
-st.subheader("📈 Twoje Pozycje (Szybki Podgląd)")
+st.subheader(f"📈 Twoje Pozycje (Kurs USD/PLN: {round(USD_PLN, 2)})")
 try:
     port_data = []
     for line in portfolio_input.split('\n'):
         if not line or ',' not in line: continue
-        sym, qty, b_p = line.split(',')
-        t_p = yf.Ticker(sym.strip()).history(period="1d")['Close'].iloc[-1]
-        mult = USD_PLN if ".WA" not in sym.upper() else 1
-        profit = (t_p - float(b_p)) * float(qty) * mult
-        port_data.append({"Symbol": sym, "Profit PLN": round(profit, 2)})
-    st.table(pd.DataFrame(port_data))
-except:
-    st.write("Wpisz dane portfolio w boczny panel.")
+        parts = line.split(',')
+        sym = parts[0].strip().upper()
+        qty = float(parts[1])
+        b_p = float(parts[2])
+        
+        # Pobieramy aktualną cenę spółki
+        t_ticker = yf.Ticker(sym)
+        t_hist = t_ticker.history(period="1d")
+        if t_hist.empty: continue
+        t_p = float(t_hist['Close'].iloc[-1])
+        
+        # Logika waluty: jeśli brak ".WA", traktuj jako USD
+        is_usd = ".WA" not in sym
+        current_val_pln = (t_p * qty * USD_PLN) if is_usd else (t_p * qty)
+        cost_val_pln = (b_p * qty * USD_PLN) if is_usd else (b_p * qty)
+        profit = current_val_pln - cost_val_pln
+        
+        port_data.append({
+            "Symbol": sym, 
+            "Cena (waluta)": t_p,
+            "Wartość PLN": round(current_val_pln, 2),
+            "Zysk PLN": round(profit, 2)
+        })
+    
+    if port_data:
+        st.table(pd.DataFrame(port_data))
+        st.metric("SUMA ZYSKU (PLN)", f"{round(sum(d['Zysk PLN'] for d in port_data), 2)} PLN")
+except Exception as e:
+    st.info("Oczekiwanie na poprawne dane portfolio... (Format: SYMBOL,ILOŚĆ,CENA)")
+
