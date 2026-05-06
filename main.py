@@ -394,6 +394,7 @@ if st.button("🚀 URUCHOM AGRESYWNY SKAN CAŁEJ LISTY"):
     )
     st.dataframe(styled_df, use_container_width=True)
 
+
 )
 
 
