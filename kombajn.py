@@ -10,7 +10,6 @@ import concurrent.futures
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 import ta  # TA-Lib style indicators
-
 # ============================================================
 # TERMINAL v14 ULTRA — DARK PRO + NEON + GLASS
 # ============================================================
