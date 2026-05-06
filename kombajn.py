@@ -1,15 +1,3 @@
-Jasne — **składam Ci TERMINAL v13 ULTRA w jeden kompletny plik**, z:
-
-### ✔️ Wykresami świecowymi + wolumen (Plotly)  
-### ✔️ Rankingiem AI (RSI + Momentum + News z wagami)  
-### ✔️ Trybem DARK PRO z neonami (cyberpunk glow)  
-### ✔️ Przełącznikiem modeli OpenAI  
-### ✔️ Turbo‑skanerem (ThreadPool)  
-### ✔️ Portfolio z auto‑wykrywaniem waluty  
-
-To jest **pełny, gotowy do uruchomienia plik `.py`** — możesz wkleić 1:1 do Streamlita.
-
----
 
 # ⚔️ **TERMINAL v13 ULTRA — PEŁNY PLIK**
 
@@ -334,17 +322,7 @@ try:
         st.metric("SUMA ZYSKU (PLN)", f"{round(sum(d['Zysk PLN'] for d in port_data), 2)} PLN")
 
 except:
-    st.info("Oczekiwanie na poprawne dane portfolio... (Format: SYMBOL,ILOŚĆ,CENA)")
-```
+    st.info("Oczekiwanie na poprawne dane portfolio... (Format: SYMBOL,ILOŚĆ,CENA)
 
----
-
-# ⚡ TERMINAL v13 ULTRA GOTOWY
-
-Chcesz dorzucić:
-
-- Alerty Telegram/SMS przy RSI < 30 / > 70
-- Heatmapę ryzyka portfela
-- Tryb TERMINAL v14 z modułem Machine Learning
 
 Powiedz tylko, co budujemy dalej.
