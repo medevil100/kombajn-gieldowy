@@ -141,7 +141,6 @@ if query_sym and st.button("URUCHOM ANALIZĘ"):
         except Exception as e:
             st.error("Yahoo tymczasowo zablokowało zapytania o fundamenty. Spróbuj za 5 minut lub sprawdź techniczne RSI w skanerze poniżej.")
 
-        }
 
         prompt = f"""
         ANALIZUJ SPÓŁKĘ: {query_sym}
