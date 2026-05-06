@@ -387,13 +387,13 @@ if st.button("🚀 URUCHOM AGRESYWNY SKAN CAŁEJ LISTY"):
 
         # Styl tabeli
         if table_style == "Kolor wiersza (RSI)":
-            styled_df = df_res.style.apply(highlight_row_rsi, axis=1)
-            st.dataframe(styled_df, use_container_width=True)
+           elif table_style == "Gradient RSI":
+    styled_df = df_res.style.background_gradient(
+        cmap="viridis",
+        subset=["RSI"]
+    )
+    st.dataframe(styled_df, use_container_width=True)
 
-        elif table_style == "Gradient RSI":
-            styled_df = df_res.style.apply(
-    lambda col: col.map(gradient_rsi),
-    subset=["RSI"]
 )
 
 
