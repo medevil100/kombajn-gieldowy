@@ -86,23 +86,61 @@ if not port_df.empty:
     with col2:
         st.dataframe(port_df, use_container_width=True)
 
-# 2. CHAT AI "DEEP PROBE" v10.1 (KONKRETY)
+# 2. CHAT AI "DEEP PROBE" v10.2 (ANTI-BLOCK EDITION)
 st.divider()
-query_sym = st.text_input("🔍 ANALIZA EKSPERCKA (wpisz np. ATT.WA, STX.WA, NVDA)", "").upper()
+query_sym = st.text_input("🔍 ANALIZA EKSPERCKA (np. ATT.WA, STX.WA, NVDA)", "").upper().strip()
 
 if query_sym and st.button("URUCHOM ANALIZĘ"):
-    with st.spinner(f"Prześwietlam {query_sym}..."):
-        t = yf.Ticker(query_sym)
-        info = t.info
-        news = get_beast_news(query_sym)
-        
-        # Wyciągamy twarde dane finansowe
-        fin_data = {
-            "C/Z (P/E)": info.get('forwardPE', 'Brak'),
-            "Dług do Kapitału": info.get('debtToEquity', 'Brak'),
-            "Dywidenda %": info.get('dividendYield', 0) * 100 if info.get('dividendYield') else "Brak",
-            "Cena/Wartość Księgowa": info.get('priceToBook', 'Brak'),
-            "Zysk na akcję (EPS)": info.get('trailingEps', 'Brak')
+    with st.spinner(f"Przeszukuję dane dla {query_sym}..."):
+        try:
+            t = yf.Ticker(query_sym)
+            # Używamy lżejszych metod pobierania danych, aby uniknąć Rate Limit
+            history = t.history(period="1mo")
+            
+            # Pobieramy newsy bez t.info (bezpieczniejsze)
+            news = get_beast_news(query_sym)
+            
+            # Tworzymy uproszczony profil finansowy z tego, co mamy w historii
+            last_price = history['Close'].iloc[-1] if not history.empty else "Brak"
+            month_ago = history['Close'].iloc[0] if not history.empty else "Brak"
+            perf = round(((last_close - month_ago) / month_ago) * 100, 2) if isinstance(last_price, float) else "N/A"
+            
+            # Finanse - próbujemy pobrać, ale jeśli wywali błąd, nie przerywamy skryptu
+            fin_context = "Brak szczegółowych danych fundamentalnych (Yahoo Blocked)."
+            try:
+                # Pobieramy tylko to, co niezbędne
+                fast = t.fast_info
+                fin_context = f"Cena: {last_price}, Kapitalizacja: {round(fast.get('market_cap', 0)/1e6, 2)}M, Waluta: {fast.get('currency')}"
+            except:
+                pass
+
+            prompt = f"""
+            ANALIZUJ SPÓŁKĘ: {query_sym}
+            STATUS RYNKOWY: {fin_context}
+            PERFORMANS 30 DNI: {perf}%
+            NEWSY: {news}
+            
+            ZADANIE:
+            1. Wykryj na podstawie newsów, czy spółka ma realne problemy czy to szum.
+            2. Wydaj werdykt: OKAZJA czy PUŁAPKA.
+            3. Napisz w 3 punktach, co teraz zrobić.
+            ZASADA: Bądź brutalny, krótki i konkretny.
+            """
+            
+            res = client.chat.completions.create(
+                model="gpt-4o-mini", 
+                messages=[
+                    {"role": "system", "content": "Jesteś bezlitosnym analitykiem. Twoim celem jest ochrona kapitału. Nie lej wody."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2
+            )
+            st.warning(f"WYROK DLA {query_sym}:")
+            st.write(res.choices[0].message.content)
+            
+        except Exception as e:
+            st.error("Yahoo tymczasowo zablokowało zapytania o fundamenty. Spróbuj za 5 minut lub sprawdź techniczne RSI w skanerze poniżej.")
+
         }
 
         prompt = f"""
