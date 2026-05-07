@@ -363,17 +363,17 @@ lambda x: f"{x}% 📈" if x > 0 else f"{x}% 📉"
     return df
 # ============================================================
         # --- LINIA 366 (Początek sekcji wyświetlania) ---
-        st.subheader("📊 Wyniki Skanowania")
+st.subheader("📊 Wyniki Skanowania")
         
         # Sprawdź czy zmienna nazywa się table_style czy tabele
-        if table_style == "Standard":
-            st.dataframe(results)
+if table_style == "Standard":
+    st.dataframe(results)
             
-        elif table_style == "Gradient RSI":
+elif table_style == "Gradient RSI":
             # Stylizacja gradientowa dla kolumny RSI
-            st.dataframe(results.style.map(gradient_rsi, subset=['RSI']))
+     st.dataframe(results.style.map(gradient_rsi, subset=['RSI']))
 
-        elif table_style == "Ikony i Kolory":
+ elif table_style == "Ikony i Kolory":
             # Wykorzystuje Twoje funkcje add_icons i highlight_row_rsi
             df_with_icons = add_icons(results)
             st.dataframe(df_with_icons.style.apply(highlight_row_rsi, axis=1))
