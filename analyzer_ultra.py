@@ -6,12 +6,14 @@ import numpy as np
 from streamlit_autorefresh import st_autorefresh
 import ta
 import plotly.graph_objects as go
+from datetime import datetime
 
 # ============================================================
-# ULTRA ENGINE v13 — PROP-TRADER MODE + CYBERPUNK UI + DEEP DIVE
+# ULTRA ENGINE v13+ — PROP-TRADER MODE + CYBERPUNK UI + DEEP DIVE
+# Trend Strength, Risk Index, Pattern Recognition, Volume Heatmap, Pre-Market Radar
 # ============================================================
 
-st.set_page_config(layout="wide", page_title="ULTRA ENGINE v13", page_icon="⚔️")
+st.set_page_config(layout="wide", page_title="ULTRA ENGINE v13+", page_icon="⚔️")
 
 # --- CYBERPUNK UI / STYL ---
 st.markdown("""
@@ -61,6 +63,7 @@ st.sidebar.header("🧠 TRYBY")
 ai_only_mode = st.sidebar.checkbox("Tryb tylko AI (bez skanowania)", value=False)
 prop_trader_mode = st.sidebar.checkbox("Prop‑Trader Mode (styl odpowiedzi)", value=True)
 gpw_focus_mode = st.sidebar.checkbox("GPW focus (uwzględnia specyfikę GPW)", value=True)
+premarket_mode = st.sidebar.checkbox("Pre‑Market Radar (USA)", value=True)
 
 # --- CLIENT & SECRETS ---
 OPENAI_KEY = st.secrets.get("OPENAI_API_KEY", "")
@@ -182,7 +185,7 @@ def build_system_prompt():
 # ============================================================
 
 if ai_only_mode:
-    st.title("🤖 ULTRA ENGINE v13 — TRYB TYLKO AI")
+    st.title("🤖 ULTRA ENGINE v13+ — TRYB TYLKO AI")
     st.markdown(f'<span class="neon-label">Model:</span> {model_choice}', unsafe_allow_html=True)
 
     user_prompt = st.text_area("Wpisz dowolne pytanie do AI:", "")
@@ -209,11 +212,32 @@ if ai_only_mode:
 # MAIN HEADER
 # ============================================================
 
-st.title(f"⚔️ ULTRA ENGINE v13 — REFRESH: {refresh_val} MIN")
+st.title(f"⚔️ ULTRA ENGINE v13+ — REFRESH: {refresh_val} MIN")
 
 # ============================================================
 # ANALIZA POJEDYNCZEGO SYMBOLU (SKANER)
 # ============================================================
+
+def detect_pattern(df):
+    # bardzo prosty pattern recognition: breakout / squeeze / range
+    if len(df) < 30:
+        return "Brak danych"
+    closes = df["Close"]
+    recent = closes[-5:]
+    last = recent.iloc[-1]
+    max_20 = closes[-20:].max()
+    min_20 = closes[-20:].min()
+    vol = closes.pct_change().rolling(20).std().iloc[-1] * 100
+
+    pattern = []
+    if last > max_20 * 1.01:
+        pattern.append("Breakout")
+    if vol < 2:
+        pattern.append("Volatility squeeze")
+    if (max_20 - min_20) / min_20 < 0.05:
+        pattern.append("Range")
+
+    return ", ".join(pattern) if pattern else "Brak wyraźnego patternu"
 
 def analyze_symbol(symbol: str):
     try:
@@ -235,8 +259,10 @@ def analyze_symbol(symbol: str):
             mom = np.nan
 
         # EMA TREND
-        ema20 = df["Close"].ewm(span=20, adjust=False).mean().iloc[-1]
-        ema50 = df["Close"].ewm(span=50, adjust=False).mean().iloc[-1]
+        ema20_series = df["Close"].ewm(span=20, adjust=False).mean()
+        ema50_series = df["Close"].ewm(span=50, adjust=False).mean()
+        ema20 = ema20_series.iloc[-1]
+        ema50 = ema50_series.iloc[-1]
         ema_trend = int(ema20 > ema50)   # 1 = UP
 
         # MACD
@@ -255,28 +281,59 @@ def analyze_symbol(symbol: str):
         # News
         news = get_beast_news(symbol)
 
-        # SCORING
-        score = 0
+        # Trend Strength Score (0–100)
+        trend_score = 0
+        if ema_trend == 1:
+            trend_score += 35
+        if macd_trend == 1:
+            trend_score += 35
+        if not np.isnan(mom):
+            if mom > 5:
+                trend_score += 20
+            elif mom > 0:
+                trend_score += 10
+        if not np.isnan(vol10) and vol10 > 1:
+            trend_score += 10
+        trend_score = max(0, min(100, trend_score))
 
-        # RSI
+        # Risk Index (0–100)
+        risk_index = 0
+        if not np.isnan(vol10):
+            if vol10 > 10:
+                risk_index += 40
+            elif vol10 > 5:
+                risk_index += 25
+            else:
+                risk_index += 10
+        if not np.isnan(rsi):
+            if rsi > 70 or rsi < 30:
+                risk_index += 25
+            else:
+                risk_index += 10
+        if not np.isnan(volume):
+            risk_index += 15
+        risk_index += 10  # spekuła baseline
+        risk_index = max(0, min(100, risk_index))
+
+        # Pattern
+        pattern = detect_pattern(df)
+
+        # SCORING (ogólny)
+        score = 0
         if rsi < 30: score += 30
         elif rsi < 40: score += 15
         elif rsi > 70: score -= 25
 
-        # Momentum
         if not np.isnan(mom):
             if mom > 5: score += 20
             elif mom < -5: score -= 10
 
-        # EMA trend
         if ema_trend == 1: score += 20
         else: score -= 10
 
-        # MACD trend
         if macd_trend == 1: score += 20
         else: score -= 10
 
-        # Volatility
         if not np.isnan(vol10):
             if vol10 > 8:
                 score += 5
@@ -295,6 +352,9 @@ def analyze_symbol(symbol: str):
             "Volatility10d": round(vol10, 2),
             "Volume": int(volume) if not np.isnan(volume) else None,
             "Score": int(score),
+            "TrendStrength": int(trend_score),
+            "RiskIndex": int(risk_index),
+            "Pattern": pattern,
             "News": news
         }
     except:
@@ -338,6 +398,9 @@ EMA Trend: {row['EMA Trend']}
 MACD Trend: {row['MACD Trend']}
 Volatility10d: {row['Volatility10d']}
 Volume: {row['Volume']}
+TrendStrength: {row['TrendStrength']}
+RiskIndex: {row['RiskIndex']}
+Pattern: {row['Pattern']}
 News: {row['News']}
 Score: {row['Score']}
 """
@@ -349,11 +412,11 @@ DANE TECHNICZNE I SENTYMENT (POJEDYNCZY TICKER):
 ZADANIE:
 1. Oceń sygnały techniczne wyłącznie na podstawie powyższych danych.
 2. Opisz:
-   - TREND: wzrostowy / spadkowy / boczny (na podstawie EMA, MACD, Momentum).
+   - TREND: wzrostowy / spadkowy / boczny (na podstawie EMA, MACD, Momentum, TrendStrength).
    - STAN RYNKU: wykupienie / wyprzedanie / neutralny (na podstawie RSI).
    - CHARAKTER SYGNAŁÓW: bycze / mieszane / niedźwiedzie.
-   - RYZYKO: niskie / średnie / wysokie (na podstawie Volatility, Volume, Score, News).
-3. Używaj pojęć typu: trend wzrostowy/spadkowy, sygnał byczy/niedźwiedzi, momentum rośnie/gaśnie, wykupienie/wyprzedanie.
+   - RYZYKO: niskie / średnie / wysokie (na podstawie RiskIndex, Volatility, Volume, Pattern, News).
+3. Używaj pojęć typu: trend wzrostowy/spadkowy, sygnał byczy/niedźwiedzi, momentum rośnie/gaśnie, wykupienie/wyprzedanie, pattern breakout/squeeze/range.
 4. Mów jak trader techniczny: krótko, konkretnie, bez ogólników.
 """
     return prompt
@@ -396,17 +459,69 @@ if run_scan:
                 return "background-color: #4a0000; color: #ffb3b3;"
             return ""
 
-        def highlight_rsi(s):
-    return [color_rsi(v) for v in s]
-styled = (
-    results_df.style
-    .background_gradient(subset=["Score"], cmap="plasma")
-    .apply(highlight_rsi, subset=["RSI"])
-)
-
+        styled = (
+            results_df.style
+            .background_gradient(subset=["Score"], cmap="plasma")
+            .background_gradient(subset=["TrendStrength"], cmap="Greens")
+            .background_gradient(subset=["RiskIndex"], cmap="Reds")
+            .apply(lambda s: [color_rsi(v) for v in s], subset=["RSI"])
+        )
         st.dataframe(styled, use_container_width=True)
     else:
         st.warning("Brak wyników — sprawdź listę tickerów lub dane z Yahoo Finance.")
+
+# ============================================================
+# HEATMAPA WOLUMENU
+# ============================================================
+
+if "last_scan" in st.session_state:
+    st.divider()
+    st.subheader("🔥 Heatmapa wolumenu (ostatnia świeca)")
+
+    vol_df = st.session_state["last_scan"][["Symbol", "Volume"]].copy()
+    vol_df = vol_df.sort_values("Volume", ascending=False)
+    st.dataframe(
+        vol_df.style.background_gradient(subset=["Volume"], cmap="magma"),
+        use_container_width=True
+    )
+
+# ============================================================
+# PRE-MARKET RADAR (USA)
+# ============================================================
+
+if premarket_mode and "last_scan" in st.session_state:
+    st.divider()
+    st.subheader("🌅 Pre‑Market Radar (USA)")
+
+    radar_rows = []
+    for sym in st.session_state["last_scan"]["Symbol"]:
+        if ".WA" in sym:
+            continue
+        try:
+            t = yf.Ticker(sym)
+            info = t.fast_info if hasattr(t, "fast_info") else {}
+            pre = getattr(info, "last_price", None)
+            # fallback: użyj history intraday, jeśli chcesz rozbudować
+            # tutaj uproszczenie: tylko aktualna cena vs wczorajsze close
+            hist = t.history(period="2d")
+            if len(hist) >= 2:
+                prev_close = hist["Close"].iloc[-2]
+                last_close = hist["Close"].iloc[-1]
+                change = (last_close - prev_close) / prev_close * 100
+            else:
+                change = np.nan
+            radar_rows.append({"Symbol": sym, "Zmiana vs wczoraj (%)": round(change, 2)})
+        except:
+            continue
+
+    if radar_rows:
+        radar_df = pd.DataFrame(radar_rows).sort_values("Zmiana vs wczoraj (%)", ascending=False)
+        st.dataframe(
+            radar_df.style.background_gradient(subset=["Zmiana vs wczoraj (%)"], cmap="coolwarm"),
+            use_container_width=True
+        )
+    else:
+        st.info("Brak danych pre‑market / dziennych dla obecnych tickerów USA.")
 
 # ============================================================
 # AI: GLOBALNY RAPORT + TOP OKAZJE
@@ -428,13 +543,13 @@ DANE TECHNICZNE I SENTYMENT:
 KURS USD/PLN: {USD_PLN}
 
 ZADANIE:
-1. Oceń każdą spółkę wyłącznie na podstawie powyższych danych (RSI, Momentum, EMA Trend, MACD, Volatility, Score, Volume, News).
+1. Oceń każdą spółkę wyłącznie na podstawie powyższych danych (RSI, Momentum, EMA Trend, MACD, Volatility, Score, TrendStrength, RiskIndex, Volume, Pattern, News).
 2. Wybierz:
-   - TOP 3 z najsilniejszymi sygnałami wzrostowymi,
-   - TOP 3 z najsłabszymi sygnałami (przewaga ryzyka spadku).
+   - TOP 3 z najsilniejszymi sygnałami wzrostowymi (wysoki TrendStrength, sensowny Score, akceptowalne RiskIndex),
+   - TOP 3 z najsłabszymi sygnałami (przewaga ryzyka spadku, wysoki RiskIndex, słaby TrendStrength).
 3. Dla każdej spółki podaj:
    SYMBOL – OCENA (silne sygnały wzrostowe / mieszane / przewaga ryzyka spadku) – POWÓD (konkretnie, z parametrami).
-4. Używaj pojęć: trend wzrostowy/spadkowy, wykupienie/wyprzedanie, sygnał byczy/niedźwiedzi, momentum rośnie/gaśnie.
+4. Używaj pojęć: trend wzrostowy/spadkowy, wykupienie/wyprzedanie, sygnał byczy/niedźwiedzi, momentum rośnie/gaśnie, pattern breakout/squeeze/range.
 5. Mów jak trader techniczny: krótko, konkretnie, bez ogólników.
 """
 
@@ -485,9 +600,9 @@ DANE Z OSTATNIEGO SKANU:
 Pytanie użytkownika:
 {user_msg}
 
-Odpowiadaj konkretnie, używaj symboli i parametrów (RSI, Score, EMA Trend, MACD Trend, Volatility, Volume, News).
+Odpowiadaj konkretnie, używaj symboli i parametrów (RSI, Score, TrendStrength, RiskIndex, EMA Trend, MACD Trend, Volatility, Volume, Pattern, News).
 Opisuj sygnały jako: silne / mieszane / słabe, ryzyko: niskie / średnie / wysokie.
-Używaj pojęć: trend wzrostowy/spadkowy, wykupienie/wyprzedanie, sygnał byczy/niedźwiedzi, momentum rośnie/gaśnie.
+Używaj pojęć: trend wzrostowy/spadkowy, wykupienie/wyprzedanie, sygnał byczy/niedźwiedzi, momentum rośnie/gaśnie, pattern breakout/squeeze/range.
 """
 
             with st.spinner("AI analizuje dane..."):
@@ -539,8 +654,8 @@ else:
         if chart_df is None:
             st.warning("Brak danych wykresowych dla tego tickera.")
         else:
-            # ŚWIECOWY
-            st.markdown("### 📈 Mini‑wykres świecowy (6m)")
+            # ŚWIECOWY + EMA
+            st.markdown("### 📈 Mini‑wykres świecowy (6m) + EMA20/EMA50")
 
             fig = go.Figure(data=[
                 go.Candlestick(
