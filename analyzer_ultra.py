@@ -7,37 +7,37 @@ from streamlit_autorefresh import st_autorefresh
 import ta
 
 # ============================================================
-# ULTRA ENGINE v12 — FULL AI PIPELINE + CHAT
+# ULTRA ENGINE v12.1 — FULL AI PIPELINE + CHAT + PRESETY
 # ============================================================
 
-st.set_page_config(layout="wide", page_title="TERMINAL v12", page_icon="⚔️")
+st.set_page_config(layout="wide", page_title="TERMINAL v12.1", page_icon="⚔️")
 
-# --- STYL / NEONY ---
+# --- STYL / NEONY / KOLORY ---
 st.markdown("""
 <style>
 .stApp {
-    background-color: #030305;
+    background-color: #050510;
     color: #e0e0e0;
 }
 .neon-button {
     background: linear-gradient(90deg, #ff00cc, #3333ff);
-    padding: 12px 24px;
+    padding: 10px 20px;
     border-radius: 8px;
     color: white !important;
     font-weight: bold;
     font-size: 18px;
-    border: 2px solid #ff00cc;
-    box-shadow: 0 0 15px #ff00cc;
-    transition: 0.2s;
+    border: 1px solid #ff00cc;
+    box-shadow: 0 0 12px #ff00cc;
+    display: inline-block;
 }
-.neon-button:hover {
-    box-shadow: 0 0 25px #ff00cc, 0 0 25px #3333ff;
-    transform: scale(1.03);
+.neon-label {
+    color: #ff66ff;
+    font-weight: bold;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# --- SIDEBAR: REFRESH + MODEL + LISTY ---
+# --- SIDEBAR: USTAWIENIA ---
 st.sidebar.header("⚙️ USTAWIENIA SYSTEMU")
 refresh_val = st.sidebar.slider("Auto-odświeżanie (minuty)", 1, 15, 10)
 st_autorefresh(interval=refresh_val * 60 * 1000, key="datarefresh")
@@ -48,6 +48,9 @@ model_choice = st.sidebar.selectbox(
     ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"],
     index=0
 )
+
+st.sidebar.header("🧠 TRYBY PRACY")
+ai_only_mode = st.sidebar.checkbox("Tryb tylko AI (bez skanowania)", value=False)
 
 # --- CLIENT & SECRETS ---
 OPENAI_KEY = st.secrets.get("OPENAI_API_KEY", "")
@@ -73,24 +76,67 @@ def get_beast_news(symbol):
     except:
         return "Lagg."
 
-# --- SIDEBAR: PORTFOLIO + LISTA ---
-st.sidebar.divider()
+# --- SIDEBAR: PRESETY + LISTA + PORTFOLIO ---
+st.sidebar.header("🇵🇱 PRESETY LIST")
+preset = st.sidebar.selectbox(
+    "Wybierz preset:",
+    ["Brak", "Polska spekuła", "USA growth", "Mega-cap tech"],
+    index=0
+)
+
+st.sidebar.header("📡 SKANER MASOWY")
+default_list = "IOVA, STX.WA, PGV.WA, ATT.WA, NVDA, AAPL, TSLA, AMD"
+symbols_input = st.sidebar.text_area("Lista do analizy (nadpisywana przez preset)", default_list)
+
+symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
+
+if preset == "Polska spekuła":
+    symbols = [
+        "BBT.WA", "BIOM.WA", "MAB.WA", "CRL.WA", "BML.WA",
+        "VRC.WA", "CNT.WA", "STS.WA", "PLW.WA", "TEN.WA",
+        "CDR.WA", "11B.WA"
+    ]
+elif preset == "USA growth":
+    symbols = ["NVDA", "TSLA", "AMD", "PLTR", "SMCI", "META", "AAPL"]
+elif preset == "Mega-cap tech":
+    symbols = ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA"]
+
 st.sidebar.header("💰 PORTFOLIO (PLN)")
 portfolio_input = st.sidebar.text_area(
     "SYMBOL,ILOŚĆ,CENA",
     "NVDA,1,900\nSTX.WA,100,5.0"
 )
 
-st.sidebar.header("📡 SKANER MASOWY")
-default_list = "IOVA, STX.WA, PGV.WA, ATT.WA, NVDA, AAPL, TSLA, AMD"
-symbols_input = st.sidebar.text_area("Lista do analizy", default_list)
-symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
+# --- TRYB TYLKO AI ---
+if ai_only_mode:
+    st.title("🤖 ULTRA ENGINE v12.1 — TRYB TYLKO AI")
+    st.markdown('<span class="neon-label">Model:</span> ' + model_choice, unsafe_allow_html=True)
+
+    user_prompt = st.text_area("Wpisz dowolne pytanie do AI:", "")
+
+    if st.button("Wyślij do AI"):
+        if not client:
+            st.error("Brak klucza API — AI wyłączone.")
+        elif not user_prompt.strip():
+            st.info("Najpierw wpisz pytanie.")
+        else:
+            with st.spinner("AI analizuje..."):
+                res = client.chat.completions.create(
+                    model=model_choice,
+                    messages=[
+                        {"role": "system", "content": "Jesteś brutalnym zarządzającym funduszem hedgingowym."},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.25
+                )
+            st.write(res.choices[0].message.content)
+    st.stop()
 
 # --- MAIN HEADER ---
-st.title(f"⚔️ ULTRA ENGINE v12 — REFRESH: {refresh_val} MIN")
+st.title(f"⚔️ ULTRA ENGINE v12.1 — REFRESH: {refresh_val} MIN")
 
 # ============================================================
-# FUNKCJA ANALIZUJĄCA POJEDYNCZY SYMBOL
+# ANALIZA POJEDYNCZEGO SYMBOLU
 # ============================================================
 
 def analyze_symbol(symbol: str):
@@ -187,12 +233,15 @@ if run_scan:
         r = analyze_symbol(s)
         if r:
             results.append(r)
-        progress.progress((i + 1) / len(symbols))
+        progress.progress((i + 1) / max(len(symbols), 1))
 
     if results:
         results_df = pd.DataFrame(results).sort_values("Score", ascending=False)
+        st.session_state["last_scan"] = results_df.copy()
+
         st.subheader("📊 Wyniki skanowania — pełny widok")
-        st.dataframe(results_df, use_container_width=True)
+        styled = results_df.style.background_gradient(subset=["Score"], cmap="viridis")
+        st.dataframe(styled, use_container_width=True)
     else:
         st.warning("Brak wyników — sprawdź listę tickerów lub dane z Yahoo Finance.")
 
@@ -200,13 +249,16 @@ if run_scan:
 # AI: GLOBALNY RAPORT + TOP OKAZJE
 # ============================================================
 
-if results_df is not None and not results_df.empty and client:
-    st.divider()
-    st.subheader("🤖 GENESIS AI — RAPORT GLOBALNY")
+if "last_scan" in st.session_state and client:
+    results_df = st.session_state["last_scan"]
 
-    summary = results_df.to_string(index=False)
+    if not results_df.empty:
+        st.divider()
+        st.subheader("🤖 GENESIS AI — RAPORT GLOBALNY")
 
-    prompt_global = f"""
+        summary = results_df.to_string(index=False)
+
+        prompt_global = f"""
 Jesteś brutalnym zarządzającym funduszem hedgingowym.
 
 DANE:
@@ -224,71 +276,70 @@ ZADANIE:
 Odpowiedz w formie listy punktów.
 """
 
-    with st.spinner("AI analizuje cały rynek..."):
-        res_global = client.chat.completions.create(
-            model=model_choice,
-            messages=[
-                {"role": "system", "content": "Jesteś brutalnym, bezlitosnym zarządzającym funduszem hedgingowym. Nienawidzisz ogólników."},
-                {"role": "user", "content": prompt_global}
-            ],
-            temperature=0.2
-        )
-        st.warning("RAPORT STRATEGICZNY:")
-        st.write(res_global.choices[0].message.content)
+        with st.spinner("AI analizuje cały rynek..."):
+            res_global = client.chat.completions.create(
+                model=model_choice,
+                messages=[
+                    {"role": "system", "content": "Jesteś brutalnym, bezlitosnym zarządzającym funduszem hedgingowym. Nienawidzisz ogólników."},
+                    {"role": "user", "content": prompt_global}
+                ],
+                temperature=0.2
+            )
+            st.warning("RAPORT STRATEGICZNY:")
+            st.write(res_global.choices[0].message.content)
 
-    # TOP OKAZJE
-    st.subheader("🔥 TOP 5 wg Score")
-    top_df = results_df.sort_values("Score", ascending=False).head(5)
-    st.table(top_df)
+        st.subheader("🔥 TOP 5 wg Score")
+        top_df = results_df.sort_values("Score", ascending=False).head(5)
+        st.table(top_df)
 
 # ============================================================
-# CZAT Z AI NAD AKTUALNYMI DANYMI
+# CZAT Z AI NAD OSTATNIM SKANEM
 # ============================================================
 
 st.divider()
-st.subheader("💬 Czat z AI (na bazie aktualnego skanu)")
+st.subheader("💬 Czat z AI (synchronizowany z ostatnim skanem)")
 
 if "chat_history" not in st.session_state:
     st.session_state["chat_history"] = []
 
-if results_df is None or results_df.empty:
-    st.info("Najpierw uruchom skanowanie listy, żeby AI miało dane do analizy.")
+if "last_scan" not in st.session_state:
+    st.info("Najpierw uruchom skanowanie listy, żeby AI miało dane.")
 else:
-    user_msg = st.text_input("Twoje pytanie do AI (np. 'Które spółki są najbardziej ryzykowne?'):")
+    scan_data = st.session_state["last_scan"]
+    user_msg = st.text_input("Twoje pytanie do AI:")
 
-    if user_msg and client:
-        # budujemy kontekst z aktualnych danych
-        data_context = results_df.to_string(index=False)
+    if st.button("Wyślij pytanie do AI"):
+        if not client:
+            st.error("Brak klucza API.")
+        elif not user_msg.strip():
+            st.info("Najpierw wpisz pytanie.")
+        else:
+            context = scan_data.to_string(index=False)
 
-        chat_prompt = f"""
-DANE RYNKOWE (ostatni skan):
-{data_context}
+            prompt_chat = f"""
+DANE Z OSTATNIEGO SKANU:
+{context}
 
 Pytanie użytkownika:
 {user_msg}
 
-Odpowiadaj konkretnie, odwołując się do SYMBOLI i ich parametrów (RSI, Score, EMA Trend, MACD Trend, Volatility).
+Odpowiadaj konkretnie, używaj symboli i parametrów (RSI, Score, EMA Trend, MACD Trend, Volatility).
 """
 
-        messages = [
-            {"role": "system", "content": "Jesteś analitykiem hedge fund, który odpowiada krótko, konkretnie i brutalnie szczerze."},
-            {"role": "user", "content": chat_prompt}
-        ]
+            with st.spinner("AI analizuje dane..."):
+                res_chat = client.chat.completions.create(
+                    model=model_choice,
+                    messages=[
+                        {"role": "system", "content": "Jesteś brutalnym analitykiem hedge fund."},
+                        {"role": "user", "content": prompt_chat}
+                    ],
+                    temperature=0.25
+                )
+                answer = res_chat.choices[0].message.content
 
-        with st.spinner("AI myśli..."):
-            res_chat = client.chat.completions.create(
-                model=model_choice,
-                messages=messages,
-                temperature=0.25
-            )
-            answer = res_chat.choices[0].message.content
             st.session_state["chat_history"].append(("Ty", user_msg))
             st.session_state["chat_history"].append(("AI", answer))
 
-    if not client:
-        st.info("Brak klucza OPENAI_API_KEY w st.secrets — czat i AI są wyłączone.")
-
-    # Historia czatu
     if st.session_state["chat_history"]:
         st.markdown("### Historia rozmowy")
         for speaker, text in st.session_state["chat_history"]:
