@@ -405,7 +405,6 @@ styled = (
     .apply(highlight_rsi, subset=["RSI"])
 )
 
-        )
         st.dataframe(styled, use_container_width=True)
     else:
         st.warning("Brak wyników — sprawdź listę tickerów lub dane z Yahoo Finance.")
