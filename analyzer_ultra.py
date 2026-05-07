@@ -5,9 +5,10 @@ from openai import OpenAI
 import numpy as np
 from streamlit_autorefresh import st_autorefresh
 import ta
+import plotly.graph_objects as go
 
 # ============================================================
-# ULTRA ENGINE v13 — PROP-TRADER MODE + CYBERPUNK UI
+# ULTRA ENGINE v13 — PROP-TRADER MODE + CYBERPUNK UI + DEEP DIVE
 # ============================================================
 
 st.set_page_config(layout="wide", page_title="ULTRA ENGINE v13", page_icon="⚔️")
@@ -143,7 +144,7 @@ portfolio_input = st.sidebar.text_area(
 )
 
 # ============================================================
-# TRYB TYLKO AI
+# SYSTEM PROMPT BUILDER
 # ============================================================
 
 def build_system_prompt():
@@ -170,10 +171,15 @@ def build_system_prompt():
     )
 
     base.append(
-        "Zawsze odwołuj się do konkretnych parametrów: RSI, Momentum, EMA Trend, MACD, Volatility, Score, Volume, News/komunikaty."
+        "Zawsze odwołuj się do konkretnych parametrów: RSI, Momentum, EMA Trend, MACD, Volatility, Score, Volume, News/komunikaty. "
+        "Używaj pojęć typu: trend wzrostowy/spadkowy/boczny, wykupienie/wyprzedanie, sygnał byczy/niedźwiedzi, momentum rośnie/gaśnie."
     )
 
     return "\n".join(base)
+
+# ============================================================
+# TRYB TYLKO AI
+# ============================================================
 
 if ai_only_mode:
     st.title("🤖 ULTRA ENGINE v13 — TRYB TYLKO AI")
@@ -206,7 +212,7 @@ if ai_only_mode:
 st.title(f"⚔️ ULTRA ENGINE v13 — REFRESH: {refresh_val} MIN")
 
 # ============================================================
-# ANALIZA POJEDYNCZEGO SYMBOLU
+# ANALIZA POJEDYNCZEGO SYMBOLU (SKANER)
 # ============================================================
 
 def analyze_symbol(symbol: str):
@@ -270,12 +276,12 @@ def analyze_symbol(symbol: str):
         if macd_trend == 1: score += 20
         else: score -= 10
 
-        # Volatility (wysoka zmienność = wyższe ryzyko, ale też potencjał)
+        # Volatility
         if not np.isnan(vol10):
             if vol10 > 8:
-                score += 5  # spekuła
+                score += 5
             elif vol10 < 2:
-                score -= 5  # flauta
+                score -= 5
 
         score = max(0, min(100, score))
 
@@ -293,6 +299,64 @@ def analyze_symbol(symbol: str):
         }
     except:
         return None
+
+# ============================================================
+# FUNKCJE DO DEEP DIVE (WYKRESY)
+# ============================================================
+
+def get_chart_data(symbol):
+    t = yf.Ticker(symbol)
+    df = t.history(period="6mo", interval="1d")
+    if df.empty:
+        return None
+
+    # RSI
+    df["RSI"] = ta.momentum.RSIIndicator(df["Close"], window=14).rsi()
+
+    # MACD
+    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
+    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
+    df["MACD"] = ema12 - ema26
+    df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
+
+    # Momentum 10d
+    df["Momentum10d"] = df["Close"].pct_change(10) * 100
+
+    # EMA20/EMA50
+    df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
+    df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
+
+    return df
+
+def build_single_ticker_prompt(row):
+    data_block = f"""
+SYMBOL: {row['Symbol']}
+Cena: {row['Cena']}
+RSI: {row['RSI']}
+Momentum 10d: {row['Mom% 10d']}
+EMA Trend: {row['EMA Trend']}
+MACD Trend: {row['MACD Trend']}
+Volatility10d: {row['Volatility10d']}
+Volume: {row['Volume']}
+News: {row['News']}
+Score: {row['Score']}
+"""
+
+    prompt = f"""
+DANE TECHNICZNE I SENTYMENT (POJEDYNCZY TICKER):
+{data_block}
+
+ZADANIE:
+1. Oceń sygnały techniczne wyłącznie na podstawie powyższych danych.
+2. Opisz:
+   - TREND: wzrostowy / spadkowy / boczny (na podstawie EMA, MACD, Momentum).
+   - STAN RYNKU: wykupienie / wyprzedanie / neutralny (na podstawie RSI).
+   - CHARAKTER SYGNAŁÓW: bycze / mieszane / niedźwiedzie.
+   - RYZYKO: niskie / średnie / wysokie (na podstawie Volatility, Volume, Score, News).
+3. Używaj pojęć typu: trend wzrostowy/spadkowy, sygnał byczy/niedźwiedzi, momentum rośnie/gaśnie, wykupienie/wyprzedanie.
+4. Mów jak trader techniczny: krótko, konkretnie, bez ogólników.
+"""
+    return prompt
 
 # ============================================================
 # SKANER + GŁÓWNY PIPELINE
@@ -327,9 +391,9 @@ if run_scan:
             if pd.isna(val):
                 return ""
             if val < 30:
-                return "background-color: #004d40; color: #a5ffea;"  # wyprzedanie
+                return "background-color: #004d40; color: #a5ffea;"
             if val > 70:
-                return "background-color: #4a0000; color: #ffb3b3;"  # przegrzanie
+                return "background-color: #4a0000; color: #ffb3b3;"
             return ""
 
         styled = (
@@ -367,7 +431,8 @@ ZADANIE:
    - TOP 3 z najsłabszymi sygnałami (przewaga ryzyka spadku).
 3. Dla każdej spółki podaj:
    SYMBOL – OCENA (silne sygnały wzrostowe / mieszane / przewaga ryzyka spadku) – POWÓD (konkretnie, z parametrami).
-4. Mów jak trader techniczny: krótko, konkretnie, bez ogólników.
+4. Używaj pojęć: trend wzrostowy/spadkowy, wykupienie/wyprzedanie, sygnał byczy/niedźwiedzi, momentum rośnie/gaśnie.
+5. Mów jak trader techniczny: krótko, konkretnie, bez ogólników.
 """
 
         with st.spinner("AI analizuje cały skan..."):
@@ -419,6 +484,7 @@ Pytanie użytkownika:
 
 Odpowiadaj konkretnie, używaj symboli i parametrów (RSI, Score, EMA Trend, MACD Trend, Volatility, Volume, News).
 Opisuj sygnały jako: silne / mieszane / słabe, ryzyko: niskie / średnie / wysokie.
+Używaj pojęć: trend wzrostowy/spadkowy, wykupienie/wyprzedanie, sygnał byczy/niedźwiedzi, momentum rośnie/gaśnie.
 """
 
             with st.spinner("AI analizuje dane..."):
@@ -442,6 +508,168 @@ Opisuj sygnały jako: silne / mieszane / słabe, ryzyko: niskie / średnie / wys
                 st.markdown(f"**Ty:** {text}")
             else:
                 st.markdown(f"**AI:** {text}")
+
+# ============================================================
+# DEEP DIVE: POJEDYNCZY TICKER (WYKRESY + AI)
+# ============================================================
+
+st.divider()
+st.subheader("🎯 Deep Dive — pojedynczy ticker")
+
+if "last_scan" not in st.session_state:
+    st.info("Najpierw uruchom skanowanie listy, żeby mieć dane do analizy.")
+else:
+    scan_data = st.session_state["last_scan"]
+    tickers_available = list(scan_data["Symbol"].unique())
+
+    selected_ticker = st.selectbox(
+        "Wybierz ticker z ostatniego skanu:",
+        tickers_available
+    )
+
+    if st.button("Przeprowadź Deep Dive"):
+        row = scan_data[scan_data["Symbol"] == selected_ticker].iloc[0]
+
+        # Wykresy
+        chart_df = get_chart_data(selected_ticker)
+
+        if chart_df is None:
+            st.warning("Brak danych wykresowych dla tego tickera.")
+        else:
+            # ŚWIECOWY
+            st.markdown("### 📈 Mini‑wykres świecowy (6m)")
+
+            fig = go.Figure(data=[
+                go.Candlestick(
+                    x=chart_df.index,
+                    open=chart_df["Open"],
+                    high=chart_df["High"],
+                    low=chart_df["Low"],
+                    close=chart_df["Close"],
+                    increasing_line_color="#00ff99",
+                    decreasing_line_color="#ff0066",
+                    name="Cena"
+                )
+            ])
+
+            fig.add_trace(go.Scatter(
+                x=chart_df.index,
+                y=chart_df["EMA20"],
+                mode="lines",
+                line=dict(color="#00ccff", width=1.5),
+                name="EMA20"
+            ))
+            fig.add_trace(go.Scatter(
+                x=chart_df.index,
+                y=chart_df["EMA50"],
+                mode="lines",
+                line=dict(color="#ffcc00", width=1.5),
+                name="EMA50"
+            ))
+
+            fig.update_layout(
+                height=350,
+                margin=dict(l=0, r=0, t=20, b=0),
+                paper_bgcolor="#050510",
+                plot_bgcolor="#050510",
+                font=dict(color="#ffcc00"),
+                xaxis_rangeslider_visible=False
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            # RSI
+            st.markdown("### 📉 RSI (14) — historia")
+
+            fig_rsi = go.Figure()
+            fig_rsi.add_trace(go.Scatter(
+                x=chart_df.index,
+                y=chart_df["RSI"],
+                mode="lines",
+                line=dict(color="#ff0099", width=2),
+                name="RSI"
+            ))
+
+            fig_rsi.add_hline(y=70, line=dict(color="#ff0066", dash="dot"))
+            fig_rsi.add_hline(y=30, line=dict(color="#00ff99", dash="dot"))
+
+            fig_rsi.update_layout(
+                height=200,
+                margin=dict(l=0, r=0, t=20, b=0),
+                paper_bgcolor="#050510",
+                plot_bgcolor="#050510",
+                font=dict(color="#ffcc00")
+            )
+
+            st.plotly_chart(fig_rsi, use_container_width=True)
+
+            # MACD
+            st.markdown("### 📊 MACD — historia")
+
+            fig_macd = go.Figure()
+            fig_macd.add_trace(go.Scatter(
+                x=chart_df.index,
+                y=chart_df["MACD"],
+                mode="lines",
+                line=dict(color="#ffcc00", width=2),
+                name="MACD"
+            ))
+            fig_macd.add_trace(go.Scatter(
+                x=chart_df.index,
+                y=chart_df["Signal"],
+                mode="lines",
+                line=dict(color="#00ccff", width=2),
+                name="Signal"
+            ))
+
+            fig_macd.update_layout(
+                height=200,
+                margin=dict(l=0, r=0, t=20, b=0),
+                paper_bgcolor="#050510",
+                plot_bgcolor="#050510",
+                font=dict(color="#ffcc00")
+            )
+
+            st.plotly_chart(fig_macd, use_container_width=True)
+
+            # MOMENTUM
+            st.markdown("### ⚡ Momentum 10d — historia")
+
+            fig_mom = go.Figure()
+            fig_mom.add_trace(go.Bar(
+                x=chart_df.index,
+                y=chart_df["Momentum10d"],
+                marker_color="#ffcc00",
+                name="Momentum 10d (%)"
+            ))
+
+            fig_mom.update_layout(
+                height=200,
+                margin=dict(l=0, r=0, t=20, b=0),
+                paper_bgcolor="#050510",
+                plot_bgcolor="#050510",
+                font=dict(color="#ffcc00")
+            )
+
+            st.plotly_chart(fig_mom, use_container_width=True)
+
+        # AI Deep Dive
+        if client:
+            single_prompt = build_single_ticker_prompt(row)
+
+            with st.spinner(f"AI analizuje {selected_ticker} (Deep Dive)..."):
+                res_single = client.chat.completions.create(
+                    model=model_choice,
+                    messages=[
+                        {"role": "system", "content": build_system_prompt()},
+                        {"role": "user", "content": single_prompt}
+                    ],
+                    temperature=0.25
+                )
+                st.markdown(f"### 🤖 Analiza techniczna — {selected_ticker}")
+                st.write(res_single.choices[0].message.content)
+        else:
+            st.info("Brak klucza API — analiza AI dla tickera wyłączona.")
 
 # ============================================================
 # PORTFOLIO
