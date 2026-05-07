@@ -361,7 +361,6 @@ def add_icons(df):
 lambda x: f"{x}% 📈" if x > 0 else f"{x}% 📉"
     )
     return df
-
 # ============================================================
         # --- LINIA 366 (Początek sekcji wyświetlania) ---
         st.subheader("📊 Wyniki Skanowania")
