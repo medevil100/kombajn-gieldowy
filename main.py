@@ -397,7 +397,6 @@ if st.button("🚀 URUCHOM AGRESYWNY SKAN CAŁEJ LISTY"):
 
 )
 
-
         elif table_style == "Ikony ↑↓":
             df_icon = add_icons(df_res)
             st.dataframe(df_icon, use_container_width=True)
