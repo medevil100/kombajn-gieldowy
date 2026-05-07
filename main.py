@@ -363,20 +363,24 @@ lambda x: f"{x}% 📈" if x > 0 else f"{x}% 📉"
     return df
 # ============================================================
         # --- LINIA 366 (Początek sekcji wyświetlania) ---
+# ============================================================
+# --- LINIA 366 (Początek sekcji wyświetlania) ---
 st.subheader("📊 Wyniki Skanowania")
-        
-        # Sprawdź czy zmienna nazywa się table_style czy tabele
+
 if table_style == "Standard":
     st.dataframe(results)
-            
-elif table_style == "Gradient RSI":
-            # Stylizacja gradientowa dla kolumny RSI
-     st.dataframe(results.style.map(gradient_rsi, subset=['RSI']))
 
- elif table_style == "Ikony i Kolory":
-            # Wykorzystuje Twoje funkcje add_icons i highlight_row_rsi
-            df_with_icons = add_icons(results)
-            st.dataframe(df_with_icons.style.apply(highlight_row_rsi, axis=1))
+elif table_style == "Gradient RSI":
+    st.dataframe(results.style.map(gradient_rsi, subset=['RSI']))
+
+elif table_style == "Ikony i Kolory":
+    df_with_icons = add_icons(results)
+    st.dataframe(df_with_icons.style.apply(highlight_row_rsi, axis=1))
+
+# --- SEKCJA AI ---
+st.divider()
+st.subheader(f"🤖 GENESIS AI ({model_choice}) — WYROK ZBIORCZY")
+
 
         # --- SEKCJA AI (Linia ok. 400+) ---
         st.divider()
