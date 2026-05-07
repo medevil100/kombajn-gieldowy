@@ -383,7 +383,7 @@ st.subheader(f"🤖 GENESIS AI ({model_choice}) — WYROK ZBIORCZY")
 
 
 # --- SEKCJA AI (Linia ok. 400+) ---
- st.divider()
+st.divider()
 st.subheader(f"🤖 GENESIS AI ({model_choice}) — WYROK ZBIORCZY")
 
 prompt = {
