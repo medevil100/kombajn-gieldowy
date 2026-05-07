@@ -110,7 +110,7 @@ preset = st.sidebar.selectbox(
 )
 
 st.sidebar.header("📡 SKANER MASOWY")
-default_list = "IOVA, STX.WA, PGV.WA, ATT.WA, NVDA, AAPL, TSLA, AMD"
+default_list = "EMT.WA, ENE.WA, EON.WA, ETL.WA, FAS.WA, FTE.WA, GTC.WA, HBP.WA, HLD.WA, IFE.WA, ING.WA, KRU.WA, LPP.WA, LWB.WA, MAB.WA, MCI.WA, MEX.WA, MLP.WA, MSO.WA, VGO.WA,HRT.WA,CFS.WA,PRT.WA,ATT.WA,STX.WA,PUR.WA,BCS.WA,KCH.WA,GTN.WALBW.WA,PGV.WA,HPE.WA,DNS.WA.ZUK.WA,VVD.WA,HIVE,MLN.WA,MER.WA,AP"
 symbols_input = st.sidebar.text_area("Lista do analizy (nadpisywana przez preset)", default_list)
 symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
 
