@@ -363,71 +363,49 @@ def add_icons(df):
     return df
 
 # ============================================================
-File "/mount/src/kombajn-gieldowy/main.py", line 390
-             elif table_style == "Gradient RSI":
-    
+        # --- LINIA 366 (Początek sekcji wyświetlania) ---
+        st.subheader("📊 Wyniki Skanowania")
+        
+        # Sprawdź czy zmienna nazywa się table_style czy tabele
+        if table_style == "Standard":
+            st.dataframe(results)
+            
+        elif table_style == "Gradient RSI":
+            # Stylizacja gradientowa dla kolumny RSI
+            st.dataframe(results.style.map(gradient_rsi, subset=['RSI']))
 
+        elif table_style == "Ikony i Kolory":
+            # Wykorzystuje Twoje funkcje add_icons i highlight_row_rsi
+            df_with_icons = add_icons(results)
+            st.dataframe(df_with_icons.style.apply(highlight_row_rsi, axis=1))
+
+        # --- SEKCJA AI (Linia ok. 400+) ---
         st.divider()
         st.subheader(f"🤖 GENESIS AI ({model_choice}) — WYROK ZBIORCZY")
 
         prompt = {
-            "data": results,
+            "data": results.to_dict(orient='records'),
             "usd_pln": USD_PLN,
             "task": "Przeanalizuj Score, RSI, Momentum, Trend EMA, MACD, Volume Surge i News. Wybierz Top 3 okazje oraz 3 zagrożenia. Podaj SYMBOL - POWÓD."
         }
 
         with st.spinner("AI analizuje rynek..."):
-            res_ai = client.chat.completions.create(
-                model=model_choice,
-                messages=[
-                    {"role": "system", "content": "Jesteś brutalnym zarządzającym funduszem hedgingowym."},
-                    {"role": "user", "content": str(prompt)}
-                ],
-                temperature=0.2
-            )
-            st.warning("RAPORT STRATEGICZNY:")
-            st.write(res_ai.choices[0].message.content)
-        # Tutaj musi być najpierw warunek IF
-        if table_style == "Standard":
-            st.dataframe(results)
-            
-        elif table_style == "Gradient RSI":
-            # Tutaj Twój kod dla stylu Gradientowego
-            st.dataframe(results.style.applymap(gradient_rsi, subset=['RSI']))
+            try:
+                res_ai = client.chat.completions.create(
+                    model=model_choice,
+                    messages=[
+                        {"role": "system", "content": "Jesteś brutalnym zarządzającym funduszem hedgingowym."},
+                        {"role": "user", "content": str(prompt)}
+                    ],
+                    temperature=0.2
+                )
+                st.warning("RAPORT STRATEGICZNY:")
+                st.write(res_ai.choices[0].message.content)
+            except Exception as e:
+                st.error(f"Błąd AI: {e}")
 
+        st.subheader("🏆 Ranking AI")
         # Dalsza część Twojego kodu...
-        st.divider()
-        st.subheader(f"🤖 GENESIS AI ({model_choice}) — WYROK ZBIORCZY")
-
-        # ============================================================
-        # AI — RANKING 1–10
-        # ============================================================
-
-        st.subheader("🏆 Ranking AI (Score + Trend + Momentum + News)")
-
-        ranking_prompt = {
-            "data": results,
-            "weights": {
-                "score": 0.50,
-                "trend": 0.20,
-                "momentum": 0.20,
-                "news_sentiment": 0.10
-            },
-            "task": "Zbuduj ranking 1–10. Nadaj punkty. Zwróć JSON: [{symbol, score, reason}]."
-        }
-
-        with st.spinner("AI liczy ranking..."):
-            rank_res = client.chat.completions.create(
-                model=model_choice,
-                messages=[
-                    {"role": "system", "content": "Jesteś analitykiem kwantowym funduszu hedgingowego."},
-                    {"role": "user", "content": str(ranking_prompt)}
-                ],
-                temperature=0.1
-            )
-
-        st.success("Ranking AI:")
-        st.write(rank_res.choices[0].message.content)
 
 # ============================================================
 # WYKRESY ŚWIECOWE
