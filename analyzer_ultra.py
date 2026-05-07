@@ -7,37 +7,44 @@ from streamlit_autorefresh import st_autorefresh
 import ta
 
 # ============================================================
-# ULTRA ENGINE v12.1 — FULL AI PIPELINE + CHAT + PRESETY
+# ULTRA ENGINE v13 — PROP-TRADER MODE + CYBERPUNK UI
 # ============================================================
 
-st.set_page_config(layout="wide", page_title="TERMINAL v12.1", page_icon="⚔️")
+st.set_page_config(layout="wide", page_title="ULTRA ENGINE v13", page_icon="⚔️")
 
-# --- STYL / NEONY / KOLORY ---
+# --- CYBERPUNK UI / STYL ---
 st.markdown("""
 <style>
 .stApp {
-    background-color: #050510;
-    color: #e0e0e0;
+    background: radial-gradient(circle at top, #2b0040 0, #050510 45%, #000000 100%);
+    color: #f0f0f0;
+    font-family: "Roboto", sans-serif;
+}
+.sidebar .sidebar-content {
+    background-color: #050510 !important;
 }
 .neon-button {
-    background: linear-gradient(90deg, #ff00cc, #3333ff);
-    padding: 10px 20px;
-    border-radius: 8px;
-    color: white !important;
-    font-weight: bold;
+    background: linear-gradient(90deg, #ff0099, #ffcc00);
+    padding: 10px 22px;
+    border-radius: 10px;
+    color: #000000 !important;
+    font-weight: 800;
     font-size: 18px;
-    border: 1px solid #ff00cc;
-    box-shadow: 0 0 12px #ff00cc;
+    border: 1px solid #ffcc00;
+    box-shadow: 0 0 18px #ff0099;
     display: inline-block;
 }
 .neon-label {
-    color: #ff66ff;
+    color: #ffcc00;
     font-weight: bold;
+}
+h1, h2, h3, h4 {
+    color: #ffcc00;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# --- SIDEBAR: USTAWIENIA ---
+# --- SIDEBAR: USTAWIENIA SYSTEMU ---
 st.sidebar.header("⚙️ USTAWIENIA SYSTEMU")
 refresh_val = st.sidebar.slider("Auto-odświeżanie (minuty)", 1, 15, 10)
 st_autorefresh(interval=refresh_val * 60 * 1000, key="datarefresh")
@@ -49,8 +56,10 @@ model_choice = st.sidebar.selectbox(
     index=0
 )
 
-st.sidebar.header("🧠 TRYBY PRACY")
+st.sidebar.header("🧠 TRYBY")
 ai_only_mode = st.sidebar.checkbox("Tryb tylko AI (bez skanowania)", value=False)
+prop_trader_mode = st.sidebar.checkbox("Prop‑Trader Mode (styl odpowiedzi)", value=True)
+gpw_focus_mode = st.sidebar.checkbox("GPW focus (uwzględnia specyfikę GPW)", value=True)
 
 # --- CLIENT & SECRETS ---
 OPENAI_KEY = st.secrets.get("OPENAI_API_KEY", "")
@@ -77,19 +86,31 @@ def get_beast_news(symbol):
         return "Lagg."
 
 # --- SIDEBAR: PRESETY + LISTA + PORTFOLIO ---
-st.sidebar.header("🇵🇱 PRESETY LIST")
+st.sidebar.header("📡 PRESETY LIST")
 preset = st.sidebar.selectbox(
     "Wybierz preset:",
-    ["Brak", "Polska spekuła", "USA growth", "Mega-cap tech"],
+    [
+        "Brak",
+        "Polska spekuła",
+        "USA growth",
+        "Mega-cap tech",
+        "Biotech USA",
+        "Crypto miners",
+        "AI small-caps",
+        "GPW gaming",
+        "GPW mid-caps",
+        "GPW śmieciówki",
+        "Semiconductors"
+    ],
     index=0
 )
 
 st.sidebar.header("📡 SKANER MASOWY")
 default_list = "IOVA, STX.WA, PGV.WA, ATT.WA, NVDA, AAPL, TSLA, AMD"
 symbols_input = st.sidebar.text_area("Lista do analizy (nadpisywana przez preset)", default_list)
-
 symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
 
+# Presety
 if preset == "Polska spekuła":
     symbols = [
         "BBT.WA", "BIOM.WA", "MAB.WA", "CRL.WA", "BML.WA",
@@ -100,6 +121,20 @@ elif preset == "USA growth":
     symbols = ["NVDA", "TSLA", "AMD", "PLTR", "SMCI", "META", "AAPL"]
 elif preset == "Mega-cap tech":
     symbols = ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA"]
+elif preset == "Biotech USA":
+    symbols = ["IOVA", "IMGN", "SAVA", "NVAX", "BLUE", "BMRN", "VRTX"]
+elif preset == "Crypto miners":
+    symbols = ["MARA", "RIOT", "HUT", "BITF", "CIFR"]
+elif preset == "AI small-caps":
+    symbols = ["PLTR", "SOFI", "AI", "UPST", "PATH"]
+elif preset == "GPW gaming":
+    symbols = ["CDR.WA", "TEN.WA", "PLW.WA", "11B.WA", "CIG.WA"]
+elif preset == "GPW mid-caps":
+    symbols = ["ALR.WA", "PKP.WA", "MRC.WA", "PKP.WA"]
+elif preset == "GPW śmieciówki":
+    symbols = ["BBT.WA", "VRC.WA", "CNT.WA", "BML.WA", "MAB.WA"]
+elif preset == "Semiconductors":
+    symbols = ["NVDA", "AMD", "AVGO", "ASML", "TSM", "INTC"]
 
 st.sidebar.header("💰 PORTFOLIO (PLN)")
 portfolio_input = st.sidebar.text_area(
@@ -107,10 +142,42 @@ portfolio_input = st.sidebar.text_area(
     "NVDA,1,900\nSTX.WA,100,5.0"
 )
 
-# --- TRYB TYLKO AI ---
+# ============================================================
+# TRYB TYLKO AI
+# ============================================================
+
+def build_system_prompt():
+    base = []
+    if prop_trader_mode:
+        base.append(
+            "Jesteś technicznym traderem z prop‑tradingu. Mówisz krótko, konkretnie, bez dyplomacji. "
+            "Analizujesz wyłącznie dane techniczne i informacje, które dostajesz."
+        )
+    else:
+        base.append(
+            "Jesteś analitykiem technicznym rynku akcji. Oceniasz sygnały na podstawie wskaźników i danych."
+        )
+
+    if gpw_focus_mode:
+        base.append(
+            "Uwzględniasz specyfikę GPW: płytki rynek, możliwe zrzuty, znaczenie wolumenu, spekulacyjny charakter wielu spółek."
+        )
+
+    base.append(
+        "Zakazy: nie pisz, że nie możesz przewidywać przyszłości, nie pisz ogólników o ryzyku inwestowania, "
+        "nie odsyłaj do 'dokładnej analizy fundamentalnej'. "
+        "Zamiast tego opisuj sygnały techniczne jako: silne / mieszane / słabe, ryzyko: niskie / średnie / wysokie."
+    )
+
+    base.append(
+        "Zawsze odwołuj się do konkretnych parametrów: RSI, Momentum, EMA Trend, MACD, Volatility, Score, Volume, News/komunikaty."
+    )
+
+    return "\n".join(base)
+
 if ai_only_mode:
-    st.title("🤖 ULTRA ENGINE v12.1 — TRYB TYLKO AI")
-    st.markdown('<span class="neon-label">Model:</span> ' + model_choice, unsafe_allow_html=True)
+    st.title("🤖 ULTRA ENGINE v13 — TRYB TYLKO AI")
+    st.markdown(f'<span class="neon-label">Model:</span> {model_choice}', unsafe_allow_html=True)
 
     user_prompt = st.text_area("Wpisz dowolne pytanie do AI:", "")
 
@@ -124,7 +191,7 @@ if ai_only_mode:
                 res = client.chat.completions.create(
                     model=model_choice,
                     messages=[
-                        {"role": "system", "content": "Jesteś brutalnym zarządzającym funduszem hedgingowym."},
+                        {"role": "system", "content": build_system_prompt()},
                         {"role": "user", "content": user_prompt}
                     ],
                     temperature=0.25
@@ -132,8 +199,11 @@ if ai_only_mode:
             st.write(res.choices[0].message.content)
     st.stop()
 
-# --- MAIN HEADER ---
-st.title(f"⚔️ ULTRA ENGINE v12.1 — REFRESH: {refresh_val} MIN")
+# ============================================================
+# MAIN HEADER
+# ============================================================
+
+st.title(f"⚔️ ULTRA ENGINE v13 — REFRESH: {refresh_val} MIN")
 
 # ============================================================
 # ANALIZA POJEDYNCZEGO SYMBOLU
@@ -173,6 +243,9 @@ def analyze_symbol(symbol: str):
         # Volatility (10d)
         vol10 = df["Close"].pct_change().rolling(10).std().iloc[-1] * 100
 
+        # Volume (ostatnia świeca)
+        volume = float(df["Volume"].iloc[-1]) if "Volume" in df.columns else np.nan
+
         # News
         news = get_beast_news(symbol)
 
@@ -197,6 +270,13 @@ def analyze_symbol(symbol: str):
         if macd_trend == 1: score += 20
         else: score -= 10
 
+        # Volatility (wysoka zmienność = wyższe ryzyko, ale też potencjał)
+        if not np.isnan(vol10):
+            if vol10 > 8:
+                score += 5  # spekuła
+            elif vol10 < 2:
+                score -= 5  # flauta
+
         score = max(0, min(100, score))
 
         return {
@@ -207,6 +287,7 @@ def analyze_symbol(symbol: str):
             "EMA Trend": "UP" if ema_trend else "DOWN",
             "MACD Trend": "UP" if macd_trend else "DOWN",
             "Volatility10d": round(vol10, 2),
+            "Volume": int(volume) if not np.isnan(volume) else None,
             "Score": int(score),
             "News": news
         }
@@ -229,18 +310,33 @@ if run_scan:
     results = []
     progress = st.progress(0)
 
+    total = max(len(symbols), 1)
     for i, s in enumerate(symbols):
         r = analyze_symbol(s)
         if r:
             results.append(r)
-        progress.progress((i + 1) / max(len(symbols), 1))
+        progress.progress((i + 1) / total)
 
     if results:
         results_df = pd.DataFrame(results).sort_values("Score", ascending=False)
         st.session_state["last_scan"] = results_df.copy()
 
         st.subheader("📊 Wyniki skanowania — pełny widok")
-        styled = results_df.style.background_gradient(subset=["Score"], cmap="viridis")
+
+        def color_rsi(val):
+            if pd.isna(val):
+                return ""
+            if val < 30:
+                return "background-color: #004d40; color: #a5ffea;"  # wyprzedanie
+            if val > 70:
+                return "background-color: #4a0000; color: #ffb3b3;"  # przegrzanie
+            return ""
+
+        styled = (
+            results_df.style
+            .background_gradient(subset=["Score"], cmap="plasma")
+            .applymap(color_rsi, subset=["RSI"])
+        )
         st.dataframe(styled, use_container_width=True)
     else:
         st.warning("Brak wyników — sprawdź listę tickerów lub dane z Yahoo Finance.")
@@ -254,38 +350,36 @@ if "last_scan" in st.session_state and client:
 
     if not results_df.empty:
         st.divider()
-        st.subheader("🤖 GENESIS AI — RAPORT GLOBALNY")
+        st.subheader("🤖 RAPORT TECHNICZNY — PROP‑TRADER VIEW")
 
         summary = results_df.to_string(index=False)
 
-        prompt_global = f"""
-Jesteś brutalnym zarządzającym funduszem hedgingowym.
-
-DANE:
+        user_prompt_global = f"""
+DANE TECHNICZNE I SENTYMENT:
 {summary}
 
 KURS USD/PLN: {USD_PLN}
 
 ZADANIE:
-1. Wybierz TOP 3 OKAZJE (wysoki Score, niskie RSI, sensowny trend).
-2. Wskaż 3 NAJWIĘKSZE PUŁAPKI (wysokie RSI, słaby trend, ryzykowne newsy).
-3. Dla każdej pozycji podaj:
-   - SYMBOL
-   - WERDYKT: KUP / OBSERWUJ / UCIEKAJ
-   - KRÓTKI POWÓD (konkretnie, bez lania wody).
-Odpowiedz w formie listy punktów.
+1. Oceń każdą spółkę wyłącznie na podstawie powyższych danych (RSI, Momentum, EMA Trend, MACD, Volatility, Score, Volume, News).
+2. Wybierz:
+   - TOP 3 z najsilniejszymi sygnałami wzrostowymi,
+   - TOP 3 z najsłabszymi sygnałami (przewaga ryzyka spadku).
+3. Dla każdej spółki podaj:
+   SYMBOL – OCENA (silne sygnały wzrostowe / mieszane / przewaga ryzyka spadku) – POWÓD (konkretnie, z parametrami).
+4. Mów jak trader techniczny: krótko, konkretnie, bez ogólników.
 """
 
-        with st.spinner("AI analizuje cały rynek..."):
+        with st.spinner("AI analizuje cały skan..."):
             res_global = client.chat.completions.create(
                 model=model_choice,
                 messages=[
-                    {"role": "system", "content": "Jesteś brutalnym, bezlitosnym zarządzającym funduszem hedgingowym. Nienawidzisz ogólników."},
-                    {"role": "user", "content": prompt_global}
+                    {"role": "system", "content": build_system_prompt()},
+                    {"role": "user", "content": user_prompt_global}
                 ],
-                temperature=0.2
+                temperature=0.25
             )
-            st.warning("RAPORT STRATEGICZNY:")
+            st.warning("RAPORT TECHNICZNY:")
             st.write(res_global.choices[0].message.content)
 
         st.subheader("🔥 TOP 5 wg Score")
@@ -306,7 +400,7 @@ if "last_scan" not in st.session_state:
     st.info("Najpierw uruchom skanowanie listy, żeby AI miało dane.")
 else:
     scan_data = st.session_state["last_scan"]
-    user_msg = st.text_input("Twoje pytanie do AI:")
+    user_msg = st.text_input("Twoje pytanie do AI (np. 'Które spółki mają najsilniejsze momentum?'):")
 
     if st.button("Wyślij pytanie do AI"):
         if not client:
@@ -323,14 +417,15 @@ DANE Z OSTATNIEGO SKANU:
 Pytanie użytkownika:
 {user_msg}
 
-Odpowiadaj konkretnie, używaj symboli i parametrów (RSI, Score, EMA Trend, MACD Trend, Volatility).
+Odpowiadaj konkretnie, używaj symboli i parametrów (RSI, Score, EMA Trend, MACD Trend, Volatility, Volume, News).
+Opisuj sygnały jako: silne / mieszane / słabe, ryzyko: niskie / średnie / wysokie.
 """
 
             with st.spinner("AI analizuje dane..."):
                 res_chat = client.chat.completions.create(
                     model=model_choice,
                     messages=[
-                        {"role": "system", "content": "Jesteś brutalnym analitykiem hedge fund."},
+                        {"role": "system", "content": build_system_prompt()},
                         {"role": "user", "content": prompt_chat}
                     ],
                     temperature=0.25
