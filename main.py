@@ -363,69 +363,9 @@ def add_icons(df):
     return df
 
 # ============================================================
-# SKANOWANIE SYMBOLI
-# ============================================================
-
-results = []
-
-if st.button("🚀 URUCHOM AGRESYWNY SKAN CAŁEJ LISTY"):
-    progress = st.progress(0)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
-        futures = {executor.submit(analyze_symbol, s): s for s in symbols}
-        for i, f in enumerate(concurrent.futures.as_completed(futures)):
-            res = f.result()
-            if res:
-                results.append(res)
-            progress.progress((i + 1) / len(symbols))
-
-    if results:
-        df_res = pd.DataFrame(results)
-        df_res = df_res.dropna(subset=["RSI"])
-
-        st.subheader("📊 Dane techniczne + Scoring + Sygnały")
-
-        # Styl tabeli
-        if table_style == "Kolor wiersza (RSI)":
-           elif table_style == "Gradient RSI":
-    styled_df = df_res.style.background_gradient(
-        cmap="viridis",
-        subset=["RSI"]
-    )
-    st.dataframe(styled_df, use_container_width=True)
-
-
-        elif table_style == "Ikony ↑↓":
-            df_icon = add_icons(df_res)
-            st.dataframe(df_icon, use_container_width=True)
-
-        # ============================================================
-        # HEATMAPA WSKAŹNIKÓW
-        # ============================================================
-
-        st.subheader("🔥 Heatmapa wskaźników i scoringu")
-
-        heat_cols = [
-            "RSI",
-            "Mom% 10d",
-            "Volatility10d",
-            "VolumeSurge%",
-            "DistHigh20%",
-            "DistLow20%",
-            "Score"
-        ]
-
-        heat_cols = [c for c in heat_cols if c in df_res.columns]
-
-        if heat_cols:
-            styled_heat = df_res.set_index("Symbol")[heat_cols].style.background_gradient(
-                cmap="viridis"
-            )
-            st.dataframe(styled_heat, use_container_width=True)
-
-        # ============================================================
-        # AI — WYROK ZBIORCZY
-        # ============================================================
+File "/mount/src/kombajn-gieldowy/main.py", line 390
+             elif table_style == "Gradient RSI":
+    
 
         st.divider()
         st.subheader(f"🤖 GENESIS AI ({model_choice}) — WYROK ZBIORCZY")
@@ -447,6 +387,17 @@ if st.button("🚀 URUCHOM AGRESYWNY SKAN CAŁEJ LISTY"):
             )
             st.warning("RAPORT STRATEGICZNY:")
             st.write(res_ai.choices[0].message.content)
+        # Tutaj musi być najpierw warunek IF
+        if table_style == "Standard":
+            st.dataframe(results)
+            
+        elif table_style == "Gradient RSI":
+            # Tutaj Twój kod dla stylu Gradientowego
+            st.dataframe(results.style.applymap(gradient_rsi, subset=['RSI']))
+
+        # Dalsza część Twojego kodu...
+        st.divider()
+        st.subheader(f"🤖 GENESIS AI ({model_choice}) — WYROK ZBIORCZY")
 
         # ============================================================
         # AI — RANKING 1–10
