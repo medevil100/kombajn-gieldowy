@@ -391,7 +391,6 @@ prompt = {
 "usd_pln": USD_PLN,
  "task": "Przeanalizuj Score, RSI, Momentum, Trend EMA, MACD, Volume Surge i News. Wybierz Top 3 okazje oraz 3 zagrożenia. Podaj SYMBOL - POWÓD."
         }
-
  with st.spinner("AI analizuje rynek..."):
  try:
  res_ai = client.chat.completions.create(
