@@ -396,10 +396,15 @@ if run_scan:
                 return "background-color: #4a0000; color: #ffb3b3;"
             return ""
 
-        styled = (
-            results_df.style
-            .background_gradient(subset=["Score"], cmap="plasma")
-            .applymap(color_rsi, subset=["RSI"])
+        def highlight_rsi(s):
+    return [color_rsi(v) for v in s]
+
+styled = (
+    results_df.style
+    .background_gradient(subset=["Score"], cmap="plasma")
+    .apply(highlight_rsi, subset=["RSI"])
+)
+
         )
         st.dataframe(styled, use_container_width=True)
     else:
