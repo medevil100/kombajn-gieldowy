@@ -358,7 +358,7 @@ def add_icons(df):
         lambda x: f"{x} 🔻" if x < 30 else (f"{x} 🔺" if x > 70 else f"{x} ➖")
     )
     df["Mom% 10d"] = df["Mom% 10d"].apply(
-        lambda x: f"{x}% 📈" if x > 0 else f"{x}% 📉"
+lambda x: f"{x}% 📈" if x > 0 else f"{x}% 📉"
     )
     return df
 
