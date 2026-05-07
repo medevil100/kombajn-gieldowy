@@ -55,7 +55,7 @@ st_autorefresh(interval=refresh_val * 60 * 1000, key="datarefresh")
 st.sidebar.header("🤖 MODEL AI")
 model_choice = st.sidebar.selectbox(
     "Model",
-    ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"],
+    ["gpt-4o-mini", "gpt-4o","gpt-41" "gpt-4.1-mini"],
     index=0
 )
 
@@ -143,7 +143,7 @@ elif preset == "Semiconductors":
 st.sidebar.header("💰 PORTFOLIO (PLN)")
 portfolio_input = st.sidebar.text_area(
     "SYMBOL,ILOŚĆ,CENA",
-    "NVDA,1,900\nSTX.WA,100,5.0"
+    "IOVA"
 )
 
 # ============================================================
