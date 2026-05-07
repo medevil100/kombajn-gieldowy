@@ -398,7 +398,6 @@ if run_scan:
 
         def highlight_rsi(s):
     return [color_rsi(v) for v in s]
-
 styled = (
     results_df.style
     .background_gradient(subset=["Score"], cmap="plasma")
