@@ -55,7 +55,7 @@ st_autorefresh(interval=refresh_val * 60 * 1000, key="datarefresh")
 st.sidebar.header("🤖 MODEL AI")
 model_choice = st.sidebar.selectbox(
     "Model",
-    ["gpt-4o-mini", "gpt-4o","gpt-41" "gpt-4.1-mini"],
+    ["gpt-4o-mini", "gpt-4o","gpt-41", "gpt-4.1-mini"],
     index=0
 )
 
