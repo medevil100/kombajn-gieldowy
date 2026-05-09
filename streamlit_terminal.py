@@ -1,10 +1,9 @@
 # tests/test_app.py
-import pandas as pd
+mport pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import sys
 import os
-import streamlit as st
 
 
 
