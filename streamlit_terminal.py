@@ -10,7 +10,6 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__)) if os.path.basename(os
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from app import parse_portfolio, backtest_advanced, add_indicators_full
 
 def test_parse_portfolio_basic():
     text = "AAPL, 10, 150\nTSLA,2, 700\nBADLINE\nGOOG,5, 1200"
