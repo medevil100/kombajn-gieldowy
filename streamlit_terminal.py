@@ -5,8 +5,7 @@ from datetime import datetime, timedelta
 import sys
 import os
 import streamlit as st
-st.title("TEST — aplikacja działa")
-st.write("Jeśli to widzisz, UI działa poprawnie.")
+
 
 
 # upewnij się, że katalog projektu jest w sys.path
