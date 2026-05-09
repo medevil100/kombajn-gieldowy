@@ -1,9 +1,14 @@
+# app.py - TERMINAL v15 ULTRA (zmodyfikowane)
+import logging
+import re
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import streamlit as st
 import pandas as pd
 import yfinance as yf
 from openai import OpenAI
 import numpy as np
-import concurrent.futures
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 import ta
@@ -15,19 +20,23 @@ import ta
 st.set_page_config(layout="wide", page_title="TERMINAL v15 ULTRA", page_icon="⚔️")
 
 # ============================================================
-# UI — NEON + GLASSMORPHISM
+# LOGGER
 # ============================================================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("terminal")
 
+# ============================================================
+# UI — (CSS pozostawione bez zmian, wklej swoje style)
+# ============================================================
 st.markdown("""
 <style>
-... (TWÓJ CSS BEZ ZMIAN)
+/* TWÓJ CSS BEZ ZMIAN */
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================
 # SIDEBAR
 # ============================================================
-
 st.sidebar.header("⚙️ USTAWIENIA SYSTEMU")
 refresh_val = st.sidebar.slider("Auto-odświeżanie (minuty)", 1, 15, 10)
 st_autorefresh(interval=refresh_val * 60 * 1000, key="datarefresh")
@@ -46,11 +55,14 @@ table_style = st.sidebar.radio(
     index=0
 )
 
+# ============================================================
+# OPENAI CLIENT
+# ============================================================
 OPENAI_KEY = st.secrets["OPENAI_API_KEY"]
 client = OpenAI(api_key=OPENAI_KEY)
 
 # ============================================================
-# FUNKCJE
+# FUNKCJE POMOCNICZE
 # ============================================================
 
 @st.cache_data(ttl=3600)
@@ -58,7 +70,8 @@ def get_usd_pln():
     try:
         data = yf.Ticker("USDPLN=X").history(period="1d")
         return float(data['Close'].iloc[-1])
-    except:
+    except Exception as e:
+        logger.info(f"Nie udało się pobrać kursu USD/PLN: {e}")
         return 4.0
 
 USD_PLN = get_usd_pln()
@@ -68,22 +81,17 @@ def get_beast_news(symbol):
         t = yf.Ticker(symbol)
         news = [n.get('title', '') for n in t.news[:2]]
         return " | ".join(news) if news else "Brak newsów."
-    except:
-        return "Lagg."
+    except Exception as e:
+        logger.info(f"get_beast_news error for {symbol}: {e}")
+        return "Brak danych."
 
-# ============================================================
-# INPUTY
-# ============================================================
+def safe_last(series):
+    s = series.dropna()
+    return float(s.iloc[-1]) if len(s) > 0 else np.nan
 
-st.sidebar.header("💰 PORTFOLIO (PLN)")
-portfolio_input = st.sidebar.text_area("SYMBOL,ILOŚĆ,CENA", "NVDA,1,900\nSTX.WA,100,5.0")
-
-st.sidebar.header("📡 SKANER MASOWY")
-default_list = "IOVA, STX.WA, PGV.WA, ATT.WA, NVDA, AAPL, TSLA, AMD"
-symbols_input = st.sidebar.text_area("Lista do analizy", default_list)
-symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
-
-st.title(f"⚔️ TERMINAL v15 ULTRA — REFRESH: {refresh_val} MIN")
+def is_pln(sym):
+    # traktuj tickery z końcówką .WA jako PLN; możesz rozszerzyć regułę
+    return sym.upper().endswith(".WA")
 
 # ============================================================
 # ANALIZA SYMBOLI
@@ -91,53 +99,68 @@ st.title(f"⚔️ TERMINAL v15 ULTRA — REFRESH: {refresh_val} MIN")
 
 def analyze_symbol(symbol):
     try:
+        logger.info(f"Analizuję {symbol}")
         t = yf.Ticker(symbol)
         df = t.history(period="3mo")
 
-        if df.empty or len(df) < 20:
+        if df.empty or len(df) < 10:
+            logger.info(f"Za mało danych dla {symbol}")
             return None
 
-        last_p = df['Close'].iloc[-1]
+        last_p = safe_last(df['Close'])
+        if np.isnan(last_p):
+            return None
 
-        rsi_series = ta.momentum.RSIIndicator(close=df['Close'], window=14).rsi()
-        rsi_value = float(rsi_series.iloc[-1])
+        # RSI
+        try:
+            rsi_series = ta.momentum.RSIIndicator(close=df['Close'], window=14).rsi()
+            rsi_value = float(rsi_series.dropna().iloc[-1]) if len(rsi_series.dropna())>0 else np.nan
+        except Exception:
+            rsi_value = np.nan
 
-        if len(df) > 10:
+        # Momentum 10d
+        if len(df['Close'].dropna()) > 10:
             mom = ((last_p - df['Close'].iloc[-10]) / df['Close'].iloc[-10]) * 100
         else:
             mom = np.nan
 
-        ema20 = df['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
-        ema50 = df['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
-        ema_trend = int(ema20 > ema50)
+        # EMA trend
+        ema20 = df['Close'].ewm(span=20, adjust=False).mean().iloc[-1] if len(df['Close'].dropna())>=20 else np.nan
+        ema50 = df['Close'].ewm(span=50, adjust=False).mean().iloc[-1] if len(df['Close'].dropna())>=50 else np.nan
+        ema_trend = int(not np.isnan(ema20) and not np.isnan(ema50) and ema20 > ema50)
 
+        # MACD
         ema12 = df['Close'].ewm(span=12, adjust=False).mean()
         ema26 = df['Close'].ewm(span=26, adjust=False).mean()
         macd = ema12 - ema26
         signal = macd.ewm(span=9, adjust=False).mean()
+        macd_last = float(macd.dropna().iloc[-1]) if len(macd.dropna())>0 else np.nan
+        signal_last = float(signal.dropna().iloc[-1]) if len(signal.dropna())>0 else np.nan
+        macd_trend = int(not np.isnan(macd_last) and not np.isnan(signal_last) and macd_last > signal_last)
 
-        macd_last = float(macd.iloc[-1])
-        signal_last = float(signal.iloc[-1])
-        macd_trend = int(macd_last > signal_last)
+        # Volatility
+        vol10 = df['Close'].pct_change().rolling(10).std().iloc[-1] * 100 if len(df['Close'].dropna())>=10 else np.nan
 
-        vol10 = df['Close'].pct_change().rolling(10).std().iloc[-1] * 100
+        # Volume surge
+        vol_now = safe_last(df['Volume'])
+        vol_avg = df['Volume'].rolling(20).mean().iloc[-1] if len(df['Volume'].dropna())>=20 else np.nan
+        vol_surge = round((vol_now / vol_avg) * 100, 1) if vol_avg and not np.isnan(vol_avg) and vol_avg > 0 else np.nan
 
-        vol_avg = df['Volume'].rolling(20).mean().iloc[-1]
-        vol_now = df['Volume'].iloc[-1]
-        vol_surge = round((vol_now / vol_avg) * 100, 1) if vol_avg > 0 else np.nan
+        # High/Low 20
+        high20 = df['High'].rolling(20).max().iloc[-1] if len(df['High'].dropna())>=20 else np.nan
+        low20 = df['Low'].rolling(20).min().iloc[-1] if len(df['Low'].dropna())>=20 else np.nan
 
-        high20 = df['High'].rolling(20).max().iloc[-1]
-        low20 = df['Low'].rolling(20).min().iloc[-1]
-
-        dist_high20 = round((last_p / high20 - 1) * 100, 2)
-        dist_low20 = round((last_p / low20 - 1) * 100, 2)
+        dist_high20 = round((last_p / high20 - 1) * 100, 2) if not np.isnan(high20) and high20>0 else np.nan
+        dist_low20 = round((last_p / low20 - 1) * 100, 2) if not np.isnan(low20) and low20>0 else np.nan
 
         news = get_beast_news(symbol)
 
+        # scoring
         score = 0
-        if rsi_value < 30: score += 25
-        elif rsi_value < 40: score += 15
-        elif rsi_value > 70: score -= 20
+        if not np.isnan(rsi_value):
+            if rsi_value < 30: score += 25
+            elif rsi_value < 40: score += 15
+            elif rsi_value > 70: score -= 20
 
         if not np.isnan(mom):
             if mom > 5: score += 15
@@ -150,8 +173,8 @@ def analyze_symbol(symbol):
             if vol_surge > 150: score += 15
             elif vol_surge > 100: score += 8
 
-        if dist_low20 < 5: score += 10
-        if dist_high20 > -5: score -= 10
+        if not np.isnan(dist_low20) and dist_low20 < 5: score += 10
+        if not np.isnan(dist_high20) and dist_high20 > -5: score -= 10
 
         score = max(0, min(100, score))
 
@@ -162,11 +185,11 @@ def analyze_symbol(symbol):
         return {
             "Symbol": symbol,
             "Cena": round(last_p, 2),
-            "RSI": round(rsi_value, 1),
-            "Mom% 10d": round(mom, 2),
+            "RSI": round(rsi_value, 1) if not np.isnan(rsi_value) else np.nan,
+            "Mom% 10d": round(mom, 2) if not np.isnan(mom) else np.nan,
             "EMA20>EMA50": ema_trend,
             "MACD>Signal": macd_trend,
-            "Volatility10d": round(vol10, 2),
+            "Volatility10d": round(vol10, 2) if not np.isnan(vol10) else np.nan,
             "VolumeSurge%": vol_surge,
             "DistHigh20%": dist_high20,
             "DistLow20%": dist_low20,
@@ -175,26 +198,48 @@ def analyze_symbol(symbol):
             "News": news
         }
 
-    except:
+    except Exception as e:
+        logger.exception(f"Błąd w analyze_symbol dla {symbol}: {e}")
         return None
 
 # ============================================================
-# WYNIKI SKANOWANIA
+# INPUTY
 # ============================================================
+st.sidebar.header("💰 PORTFOLIO (PLN)")
+portfolio_input = st.sidebar.text_area("SYMBOL,ILOŚĆ,CENA", "NVDA,1,900\nSTX.WA,100,5.0")
 
+st.sidebar.header("📡 SKANER MASOWY")
+default_list = "IOVA, STX.WA, PGV.WA, ATT.WA, NVDA, AAPL, TSLA, AMD"
+symbols_input = st.sidebar.text_area("Lista do analizy", default_list)
+symbols = [s.strip().upper() for s in re.split(r'[,\s]+', symbols_input) if s.strip()]
+
+st.title(f"⚔️ TERMINAL v15 ULTRA — REFRESH: {refresh_val} MIN")
+
+# ============================================================
+# WYNIKI SKANOWANIA (równoległe)
+# ============================================================
 st.subheader("📊 Wyniki Skanowania")
 
-results = []
-for s in symbols:
-    r = analyze_symbol(s)
-    if r:
-        results.append(r)
+def scan_symbols_parallel(symbols, max_workers=6):
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(analyze_symbol, s): s for s in symbols}
+        for fut in as_completed(futures):
+            sym = futures[fut]
+            try:
+                r = fut.result()
+                if r:
+                    results.append(r)
+            except Exception as e:
+                logger.info(f"Błąd podczas skanowania {sym}: {e}")
+    return results
 
-results = pd.DataFrame(results)
+results_list = scan_symbols_parallel(symbols, max_workers=6)
+results = pd.DataFrame(results_list)
 
 # Stylizacja
 def highlight_row_rsi(row):
-    rsi = row["RSI"]
+    rsi = row.get("RSI", np.nan)
     if pd.isna(rsi): return [""] * len(row)
     if rsi < 30: return ["background-color: rgba(0,120,0,0.25)"] * len(row)
     if rsi > 70: return ["background-color: rgba(120,0,0,0.25)"] * len(row)
@@ -213,30 +258,40 @@ def add_icons(df):
     df["Mom% 10d"] = df["Mom% 10d"].apply(lambda x: f"{x}% 📈" if x > 0 else f"{x}% 📉")
     return df
 
-if table_style == "Kolor wiersza (RSI)":
-    st.dataframe(results.style.apply(highlight_row_rsi, axis=1))
+if results.empty:
+    st.info("Brak wyników do wyświetlenia. Sprawdź listę tickerów.")
+else:
+    if table_style == "Kolor wiersza (RSI)":
+        st.dataframe(results.style.apply(highlight_row_rsi, axis=1))
+    elif table_style == "Gradient RSI":
+        st.dataframe(results.style.map(gradient_rsi, subset=['RSI']))
+    elif table_style == "Ikony ↑↓":
+        st.dataframe(add_icons(results))
 
-elif table_style == "Gradient RSI":
-    st.dataframe(results.style.map(gradient_rsi, subset=['RSI']))
-
-elif table_style == "Ikony ↑↓":
-    st.dataframe(add_icons(results))
+    # Export CSV
+    csv = results.to_csv(index=False).encode('utf-8')
+    st.download_button("Pobierz wyniki CSV", data=csv, file_name="scan_results.csv", mime="text/csv")
 
 # ============================================================
-# AI — ANALIZA
+# AI — ANALIZA (ograniczony prompt)
 # ============================================================
-
 st.divider()
 st.subheader(f"🤖 GENESIS AI ({model_choice}) — WYROK ZBIORCZY")
 
+if not results.empty:
+    top_for_ai = results.sort_values("Score", ascending=False).head(10).to_dict(orient="records")
+else:
+    top_for_ai = []
+
 prompt = {
-    "data": results.to_dict(orient='records'),
+    "data": top_for_ai,
     "usd_pln": USD_PLN,
     "task": "Przeanalizuj Score, RSI, Momentum, Trend EMA, MACD, Volume Surge i News. Wybierz Top 3 okazje oraz 3 zagrożenia. Podaj SYMBOL - POWÓD."
 }
 
 with st.spinner("AI analizuje rynek..."):
     try:
+        # Uwaga: klient OpenAI może mieć inną metodę wywołania w zależności od wersji SDK
         res_ai = client.chat.completions.create(
             model=model_choice,
             messages=[
@@ -247,8 +302,8 @@ with st.spinner("AI analizuje rynek..."):
         )
         st.warning("RAPORT STRATEGICZNY:")
         st.write(res_ai.choices[0].message.content)
-
     except Exception as e:
+        logger.info(f"Błąd AI: {e}")
         st.error(f"Błąd AI: {e}")
 
 st.subheader("🏆 Ranking AI")
@@ -256,7 +311,6 @@ st.subheader("🏆 Ranking AI")
 # ============================================================
 # WYKRESY ŚWIECOWE
 # ============================================================
-
 st.subheader("📉 Wykresy świecowe + wolumen")
 
 selected_symbol = st.selectbox("Wybierz ticker do wykresu", symbols)
@@ -295,39 +349,53 @@ if selected_symbol:
         )
 
         st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Brak danych do wykresu dla wybranego symbolu.")
 
 # ============================================================
 # PORTFOLIO
 # ============================================================
-
 st.divider()
 st.subheader(f"📈 Twoje Pozycje (Kurs USD/PLN: {round(USD_PLN, 2)})")
 
+def parse_portfolio(text):
+    tickers = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = [p.strip() for p in re.split(r'[,\s]+', line) if p.strip()]
+        if len(parts) < 3:
+            logger.info(f"Pominięto linię portfolio (niepoprawny format): {line}")
+            continue
+        sym, qty, b_p = parts[0].upper(), parts[1], parts[2]
+        try:
+            tickers[sym] = {"qty": float(qty), "buy": float(b_p)}
+        except Exception:
+            logger.info(f"Nie udało się sparsować linię portfolio: {line}")
+            continue
+    return tickers
+
 try:
     port_data = []
-    tickers = {}
+    tickers = parse_portfolio(portfolio_input)
 
-    for line in portfolio_input.split("\n"):
-        if not line or "," not in line:
-            continue
-        sym, qty, b_p = line.split(",")
-        sym = sym.strip().upper()
-        tickers[sym] = {"qty": float(qty), "buy": float(b_p)}
-
-    for sym in tickers:
+    for sym, info in tickers.items():
         t = yf.Ticker(sym)
         df_p = t.history(period="1d")
         if df_p.empty:
+            logger.info(f"Brak danych dla {sym} w portfolio")
             continue
 
-        price = float(df_p["Close"].iloc[-1])
-        qty = tickers[sym]["qty"]
-        buy = tickers[sym]["buy"]
+        price = safe_last(df_p["Close"])
+        if np.isnan(price):
+            continue
 
-        is_usd = ".WA" not in sym
+        qty = info["qty"]
+        buy = info["buy"]
 
-        cur_val = price * qty * (USD_PLN if is_usd else 1)
-        buy_val = buy * qty * (USD_PLN if is_usd else 1)
+        cur_val = price * qty * (USD_PLN if not is_pln(sym) else 1)
+        buy_val = buy * qty * (USD_PLN if not is_pln(sym) else 1)
 
         port_data.append({
             "Symbol": sym,
@@ -340,6 +408,13 @@ try:
         dfp = pd.DataFrame(port_data)
         st.table(dfp)
         st.metric("SUMA ZYSKU (PLN)", f"{round(sum(d['Zysk PLN'] for d in port_data), 2)} PLN")
+    else:
+        st.info("Brak pozycji do wyświetlenia w portfolio.")
 
-except:
+except Exception as e:
+    logger.exception(f"Błąd w sekcji portfolio: {e}")
     st.info("Oczekiwanie na poprawne dane portfolio... (Format: SYMBOL,ILOŚĆ,CENA)")
+
+# ============================================================
+# KONIEC PLIKU
+# ============================================================
