@@ -4,6 +4,10 @@ import numpy as np
 from datetime import datetime, timedelta
 import sys
 import os
+import streamlit as st
+st.title("TEST — aplikacja działa")
+st.write("Jeśli to widzisz, UI działa poprawnie.")
+
 
 # upewnij się, że katalog projektu jest w sys.path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__)) if os.path.basename(os.getcwd()) == 'tests' else os.getcwd()
