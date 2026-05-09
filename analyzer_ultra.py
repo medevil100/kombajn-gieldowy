@@ -1,836 +1,299 @@
-import streamlit as st
-import pandas as pd
-import yfinance as yf
-from openai import OpenAI
+# ============================================
+# ULTRA ENGINE v14 — ANALYZER FULL (1:1)
+# ============================================
+
+import os
 import numpy as np
-from streamlit_autorefresh import st_autorefresh
-import ta
+import pandas as pd
+import streamlit as st
+import yfinance as yf
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
 
-# ============================================================
-# ULTRA ENGINE v13+ — PROP-TRADER MODE + CYBERPUNK UI + DEEP DIVE
-# Trend Strength, Risk Index, Pattern Recognition, Volume Heatmap, Pre-Market Radar
-# ============================================================
+# ============================================
+# TRYB TESTOWY / KLUCZ OPENAI
+# ============================================
 
-st.set_page_config(layout="wide", page_title="ULTRA ENGINE v13+", page_icon="⚔️")
+IS_TEST = os.getenv("PYTEST_RUNNING") == "1"
 
-# --- CYBERPUNK UI / STYL ---
-st.markdown("""
-<style>
-.stApp {
-    background: radial-gradient(circle at top, #2b0040 0, #050510 45%, #000000 100%);
-    color: #f0f0f0;
-    font-family: "Roboto", sans-serif;
-}
-.sidebar .sidebar-content {
-    background-color: #050510 !important;
-}
-.neon-button {
-    background: linear-gradient(90deg, #ff0099, #ffcc00);
-    padding: 10px 22px;
-    border-radius: 10px;
-    color: #000000 !important;
-    font-weight: 800;
-    font-size: 18px;
-    border: 1px solid #ffcc00;
-    box-shadow: 0 0 18px #ff0099;
-    display: inline-block;
-}
-.neon-label {
-    color: #ffcc00;
-    font-weight: bold;
-}
-h1, h2, h3, h4 {
-    color: #ffcc00;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# --- SIDEBAR: USTAWIENIA SYSTEMU ---
-st.sidebar.header("⚙️ USTAWIENIA SYSTEMU")
-refresh_val = st.sidebar.slider("Auto-odświeżanie (minuty)", 1, 15, 10)
-st_autorefresh(interval=refresh_val * 60 * 1000, key="datarefresh")
-
-st.sidebar.header("🤖 MODEL AI")
-model_choice = st.sidebar.selectbox(
-    "Model",
-    ["gpt-4o-mini", "gpt-4o","gpt-41", "gpt-4.1-mini"],
-    index=0
-)
-
-st.sidebar.header("🧠 TRYBY")
-ai_only_mode = st.sidebar.checkbox("Tryb tylko AI (bez skanowania)", value=False)
-prop_trader_mode = st.sidebar.checkbox("Prop‑Trader Mode (styl odpowiedzi)", value=True)
-gpw_focus_mode = st.sidebar.checkbox("GPW focus (uwzględnia specyfikę GPW)", value=True)
-premarket_mode = st.sidebar.checkbox("Pre‑Market Radar (USA)", value=True)
-
-# --- CLIENT & SECRETS ---
-OPENAI_KEY = st.secrets.get("OPENAI_API_KEY", "")
-client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
-
-@st.cache_data(ttl=3600)
-def get_usd_pln():
+if IS_TEST:
+    OPENAI_KEY = ""
+else:
     try:
-        data = yf.Ticker("USDPLN=X").history(period="1d")
-        if not data.empty:
-            return float(data["Close"].iloc[-1])
-        return 4.0
-    except:
-        return 4.0
+        OPENAI_KEY = st.secrets["OPENAI_API_KEY"]
+    except Exception:
+        OPENAI_KEY = ""
+        st.warning("Brak klucza OPENAI_API_KEY — AI wyłączone.")
 
-USD_PLN = get_usd_pln()
+# ============================================
+# WSKAŹNIKI
+# ============================================
 
-def get_beast_news(symbol):
-    try:
-        t = yf.Ticker(symbol)
-        news = [n.get("title", "") for n in t.news[:2]]
-        return " | ".join(news) if news else "Brak newsów."
-    except:
-        return "Lagg."
+def compute_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = -delta.clip(upper=0).rolling(period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
-# --- SIDEBAR: PRESETY + LISTA + PORTFOLIO ---
-st.sidebar.header("📡 PRESETY LIST")
-preset = st.sidebar.selectbox(
-    "Wybierz preset:",
-    [
-        "Brak",
-        "Polska spekuła",
-        "USA growth",
-        "Mega-cap tech",
-        "Biotech USA",
-        "Crypto miners",
-        "AI small-caps",
-        "GPW gaming",
-        "GPW mid-caps",
-        "GPW śmieciówki",
-        "Semiconductors"
-    ],
-    index=0
-)
+def compute_macd(series):
+    ema12 = series.ewm(span=12).mean()
+    ema26 = series.ewm(span=26).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9).mean()
+    return macd, signal
 
-st.sidebar.header("📡 SKANER MASOWY")
-default_list = "EMT.WA, ENE.WA, EON.WA, ETL.WA, FAS.WA, FTE.WA, GTC.WA, HBP.WA, HLD.WA, IFE.WA, ING.WA, KRU.WA, LPP.WA, LWB.WA, MAB.WA, MCI.WA, MEX.WA, MLP.WA, MSO.WA, VGO.WA,HRT.WA,CFS.WA,PRT.WA,ATT.WA,STX.WA,PUR.WA,BCS.WA,KCH.WA,GTN.WALBW.WA,PGV.WA,HPE.WA,DNS.WA.ZUK.WA,VVD.WA,HIVE,MLN.WA,MER.WA,AP"
-symbols_input = st.sidebar.text_area("Lista do analizy (nadpisywana przez preset)", default_list)
-symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
+def compute_atr(df, period=14):
+    high_low = df["High"] - df["Low"]
+    high_close = (df["High"] - df["Close"].shift()).abs()
+    low_close = (df["Low"] - df["Close"].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
 
-# Presety
-if preset == "Polska spekuła":
-    symbols = [
-        "BBT.WA", "BIOM.WA", "MAB.WA", "CRL.WA", "BML.WA",
-        "VRC.WA", "CNT.WA", "STS.WA", "PLW.WA", "TEN.WA",
-        "CDR.WA", "11B.WA"
-    ]
-elif preset == "USA growth":
-    symbols = ["NVDA", "TSLA", "AMD", "PLTR", "SMCI", "META", "AAPL"]
-elif preset == "Mega-cap tech":
-    symbols = ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA"]
-elif preset == "Biotech USA":
-    symbols = ["IOVA", "IMGN", "SAVA", "NVAX", "BLUE", "BMRN", "VRTX"]
-elif preset == "Crypto miners":
-    symbols = ["MARA", "RIOT", "HUT", "BITF", "CIFR"]
-elif preset == "AI small-caps":
-    symbols = ["PLTR", "SOFI", "AI", "UPST", "PATH"]
-elif preset == "GPW gaming":
-    symbols = ["CDR.WA", "TEN.WA", "PLW.WA", "11B.WA", "CIG.WA"]
-elif preset == "GPW mid-caps":
-    symbols = ["ALR.WA", "PKP.WA", "MRC.WA", "PKP.WA"]
-elif preset == "GPW śmieciówki":
-    symbols = ["BBT.WA", "VRC.WA", "CNT.WA", "BML.WA", "MAB.WA"]
-elif preset == "Semiconductors":
-    symbols = ["NVDA", "AMD", "AVGO", "ASML", "TSM", "INTC"]
+def trend_strength_score(df):
+    score = np.zeros(len(df))
+    cond_trend = df["EMA20"] > df["EMA50"]
+    score = score + np.where(cond_trend, 1, -1)
+    score = score + np.where(df["RSI"] > 55, 1, 0)
+    score = score + np.where(df["RSI"] < 45, -1, 0)
+    return score
 
-st.sidebar.header("💰 PORTFOLIO (PLN)")
-portfolio_input = st.sidebar.text_area(
-    "SYMBOL,ILOŚĆ,CENA",
-    "IOVA"
-)
+def volume_heat(df, window=20):
+    vol = df["Volume"]
+    ma = vol.rolling(window).mean()
+    heat = (vol / ma).clip(0, 5)
+    return heat
 
-# ============================================================
-# SYSTEM PROMPT BUILDER
-# ============================================================
-
-def build_system_prompt():
-    base = []
-    if prop_trader_mode:
-        base.append(
-            "Jesteś technicznym traderem z prop‑tradingu. Mówisz krótko, konkretnie, bez dyplomacji. "
-            "Analizujesz wyłącznie dane techniczne i informacje, które dostajesz."
-        )
-    else:
-        base.append(
-            "Jesteś analitykiem technicznym rynku akcji. Oceniasz sygnały na podstawie wskaźników i danych."
-        )
-
-    if gpw_focus_mode:
-        base.append(
-            "Uwzględniasz specyfikę GPW: płytki rynek, możliwe zrzuty, znaczenie wolumenu, spekulacyjny charakter wielu spółek."
-        )
-
-    base.append(
-        "Zakazy: nie pisz, że nie możesz przewidywać przyszłości, nie pisz ogólników o ryzyku inwestowania, "
-        "nie odsyłaj do 'dokładnej analizy fundamentalnej'. "
-        "Zamiast tego opisuj sygnały techniczne jako: silne / mieszane / słabe, ryzyko: niskie / średnie / wysokie."
-    )
-
-    base.append(
-        "Zawsze odwołuj się do konkretnych parametrów: RSI, Momentum, EMA Trend, MACD, Volatility, Score, Volume, News/komunikaty. "
-        "Używaj pojęć typu: trend wzrostowy/spadkowy/boczny, wykupienie/wyprzedanie, sygnał byczy/niedźwiedzi, momentum rośnie/gaśnie."
-    )
-
-    return "\n".join(base)
-
-# ============================================================
-# TRYB TYLKO AI
-# ============================================================
-
-if ai_only_mode:
-    st.title("🤖 ULTRA ENGINE v13+ — TRYB TYLKO AI")
-    st.markdown(f'<span class="neon-label">Model:</span> {model_choice}', unsafe_allow_html=True)
-
-    user_prompt = st.text_area("Wpisz dowolne pytanie do AI:", "")
-
-    if st.button("Wyślij do AI"):
-        if not client:
-            st.error("Brak klucza API — AI wyłączone.")
-        elif not user_prompt.strip():
-            st.info("Najpierw wpisz pytanie.")
-        else:
-            with st.spinner("AI analizuje..."):
-                res = client.chat.completions.create(
-                    model=model_choice,
-                    messages=[
-                        {"role": "system", "content": build_system_prompt()},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    temperature=0.25
-                )
-            st.write(res.choices[0].message.content)
-    st.stop()
-
-# ============================================================
-# MAIN HEADER
-# ============================================================
-
-st.title(f"⚔️ ULTRA ENGINE v13+ — REFRESH: {refresh_val} MIN")
-
-# ============================================================
-# ANALIZA POJEDYNCZEGO SYMBOLU (SKANER)
-# ============================================================
-
-def detect_pattern(df):
-    # bardzo prosty pattern recognition: breakout / squeeze / range
-    if len(df) < 30:
-        return "Brak danych"
-    closes = df["Close"]
-    recent = closes[-5:]
-    last = recent.iloc[-1]
-    max_20 = closes[-20:].max()
-    min_20 = closes[-20:].min()
-    vol = closes.pct_change().rolling(20).std().iloc[-1] * 100
-
-    pattern = []
-    if last > max_20 * 1.01:
-        pattern.append("Breakout")
-    if vol < 2:
-        pattern.append("Volatility squeeze")
-    if (max_20 - min_20) / min_20 < 0.05:
-        pattern.append("Range")
-
-    return ", ".join(pattern) if pattern else "Brak wyraźnego patternu"
-
-def analyze_symbol(symbol: str):
-    try:
-        t = yf.Ticker(symbol)
-        df = t.history(period="3mo")
-        if df.empty or len(df) < 20:
-            return None
-
-        last_p = df["Close"].iloc[-1]
-
-        # RSI
-        rsi_series = ta.momentum.RSIIndicator(close=df["Close"], window=14).rsi()
-        rsi = float(rsi_series.iloc[-1])
-
-        # Momentum 10 dni
-        if len(df) > 10:
-            mom = ((last_p - df["Close"].iloc[-10]) / df["Close"].iloc[-10]) * 100
-        else:
-            mom = np.nan
-
-        # EMA TREND
-        ema20_series = df["Close"].ewm(span=20, adjust=False).mean()
-        ema50_series = df["Close"].ewm(span=50, adjust=False).mean()
-        ema20 = ema20_series.iloc[-1]
-        ema50 = ema50_series.iloc[-1]
-        ema_trend = int(ema20 > ema50)   # 1 = UP
-
-        # MACD
-        ema12 = df["Close"].ewm(span=12, adjust=False).mean()
-        ema26 = df["Close"].ewm(span=26, adjust=False).mean()
-        macd_line = ema12 - ema26
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
-        macd_trend = int(macd_line.iloc[-1] > signal_line.iloc[-1])  # 1 = bullish
-
-        # Volatility (10d)
-        vol10 = df["Close"].pct_change().rolling(10).std().iloc[-1] * 100
-
-        # Volume (ostatnia świeca)
-        volume = float(df["Volume"].iloc[-1]) if "Volume" in df.columns else np.nan
-
-        # News
-        news = get_beast_news(symbol)
-
-        # Trend Strength Score (0–100)
-        trend_score = 0
-        if ema_trend == 1:
-            trend_score += 35
-        if macd_trend == 1:
-            trend_score += 35
-        if not np.isnan(mom):
-            if mom > 5:
-                trend_score += 20
-            elif mom > 0:
-                trend_score += 10
-        if not np.isnan(vol10) and vol10 > 1:
-            trend_score += 10
-        trend_score = max(0, min(100, trend_score))
-
-        # Risk Index (0–100)
-        risk_index = 0
-        if not np.isnan(vol10):
-            if vol10 > 10:
-                risk_index += 40
-            elif vol10 > 5:
-                risk_index += 25
-            else:
-                risk_index += 10
-        if not np.isnan(rsi):
-            if rsi > 70 or rsi < 30:
-                risk_index += 25
-            else:
-                risk_index += 10
-        if not np.isnan(volume):
-            risk_index += 15
-        risk_index += 10  # spekuła baseline
-        risk_index = max(0, min(100, risk_index))
-
-        # Pattern
-        pattern = detect_pattern(df)
-
-        # SCORING (ogólny)
-        score = 0
-        if rsi < 30: score += 30
-        elif rsi < 40: score += 15
-        elif rsi > 70: score -= 25
-
-        if not np.isnan(mom):
-            if mom > 5: score += 20
-            elif mom < -5: score -= 10
-
-        if ema_trend == 1: score += 20
-        else: score -= 10
-
-        if macd_trend == 1: score += 20
-        else: score -= 10
-
-        if not np.isnan(vol10):
-            if vol10 > 8:
-                score += 5
-            elif vol10 < 2:
-                score -= 5
-
-        score = max(0, min(100, score))
-
-        return {
-            "Symbol": symbol,
-            "Cena": round(last_p, 2),
-            "RSI": round(rsi, 1),
-            "Mom% 10d": round(mom, 2) if not np.isnan(mom) else np.nan,
-            "EMA Trend": "UP" if ema_trend else "DOWN",
-            "MACD Trend": "UP" if macd_trend else "DOWN",
-            "Volatility10d": round(vol10, 2),
-            "Volume": int(volume) if not np.isnan(volume) else None,
-            "Score": int(score),
-            "TrendStrength": int(trend_score),
-            "RiskIndex": int(risk_index),
-            "Pattern": pattern,
-            "News": news
-        }
-    except:
-        return None
-
-# ============================================================
-# FUNKCJE DO DEEP DIVE (WYKRESY)
-# ============================================================
-
-def get_chart_data(symbol):
-    t = yf.Ticker(symbol)
-    df = t.history(period="6mo", interval="1d")
-    if df.empty:
-        return None
-
-    # RSI
-    df["RSI"] = ta.momentum.RSIIndicator(df["Close"], window=14).rsi()
-
-    # MACD
-    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
-    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["MACD"] = ema12 - ema26
-    df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
-
-    # Momentum 10d
-    df["Momentum10d"] = df["Close"].pct_change(10) * 100
-
-    # EMA20/EMA50
-    df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
-    df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
-
+def add_indicators_full(df):
+    df = df.copy()
+    df["EMA20"] = df["Close"].ewm(span=20).mean()
+    df["EMA50"] = df["Close"].ewm(span=50).mean()
+    df["RSI"] = compute_rsi(df["Close"])
+    df["MACD"], df["MACD_signal"] = compute_macd(df["Close"])
+    df["ATR"] = compute_atr(df)
+    df["TrendScore"] = trend_strength_score(df)
+    df["VolHeat"] = volume_heat(df)
+    df["Momentum"] = df["Close"].diff(5)
+    df["Volatility"] = df["Close"].pct_change().rolling(20).std() * 100
     return df
 
-def build_single_ticker_prompt(row):
-    data_block = f"""
-SYMBOL: {row['Symbol']}
-Cena: {row['Cena']}
-RSI: {row['RSI']}
-Momentum 10d: {row['Mom% 10d']}
-EMA Trend: {row['EMA Trend']}
-MACD Trend: {row['MACD Trend']}
-Volatility10d: {row['Volatility10d']}
-Volume: {row['Volume']}
-TrendStrength: {row['TrendStrength']}
-RiskIndex: {row['RiskIndex']}
-Pattern: {row['Pattern']}
-News: {row['News']}
-Score: {row['Score']}
-"""
+# ============================================
+# PATTERNY (SPEKULACJA)
+# ============================================
+
+def detect_breakout(df, lookback=20, thr=0.01):
+    if len(df) < lookback + 1:
+        return False
+    recent = df["Close"].iloc[-1]
+    max_prev = df["Close"].iloc[-lookback:-1].max()
+    return recent > max_prev * (1 + thr)
+
+def detect_consolidation(df, lookback=20, threshold_pct=3.0):
+    if len(df) < lookback:
+        return False
+    window = df["Close"].iloc[-lookback:]
+    rng = window.max() - window.min()
+    mid = window.mean()
+    if mid == 0:
+        return False
+    return (rng / mid * 100) < threshold_pct
+
+def detect_volume_spike(df, window=20, spike_mult=2.0):
+    if len(df) < window + 1:
+        return False
+    vol = df["Volume"]
+    ma = vol.rolling(window).mean()
+    return vol.iloc[-1] > ma.iloc[-1] * spike_mult
+
+# ============================================
+# RYZYKO / SL / TP
+# ============================================
+
+def calc_sl_tp(entry, atr, sl_mult=2.0, tp_mult=3.0, direction="long"):
+    if atr is None or atr == 0 or np.isnan(atr):
+        return None, None, None
+    if direction == "long":
+        sl = entry - sl_mult * atr
+        tp = entry + tp_mult * atr
+    else:
+        sl = entry + sl_mult * atr
+        tp = entry - tp_mult * atr
+    rr = abs(tp - entry) / abs(entry - sl) if sl != entry else None
+    return sl, tp, rr
+
+# ============================================
+# AI — PROP MODE / DEEP DIVE
+# ============================================
+
+def ai_analysis_prop_mode(df, ticker):
+    if not OPENAI_KEY:
+        return "AI wyłączone — brak klucza."
+
+    last = df.iloc[-1]
 
     prompt = f"""
-DANE TECHNICZNE I SENTYMENT (POJEDYNCZY TICKER):
-{data_block}
+    Tryb: Prop-Trader Mode (techniczny, konkretny).
+    Ticker: {ticker}
 
-ZADANIE:
-1. Oceń sygnały techniczne wyłącznie na podstawie powyższych danych.
-2. Opisz:
-   - TREND: wzrostowy / spadkowy / boczny (na podstawie EMA, MACD, Momentum, TrendStrength).
-   - STAN RYNKU: wykupienie / wyprzedanie / neutralny (na podstawie RSI).
-   - CHARAKTER SYGNAŁÓW: bycze / mieszane / niedźwiedzie.
-   - RYZYKO: niskie / średnie / wysokie (na podstawie RiskIndex, Volatility, Volume, Pattern, News).
-3. Używaj pojęć typu: trend wzrostowy/spadkowy, sygnał byczy/niedźwiedzi, momentum rośnie/gaśnie, wykupienie/wyprzedanie, pattern breakout/squeeze/range.
-4. Mów jak trader techniczny: krótko, konkretnie, bez ogólników.
-"""
-    return prompt
+    Dane:
+    Close: {last['Close']:.2f}
+    EMA20: {last['EMA20']:.2f}
+    EMA50: {last['EMA50']:.2f}
+    RSI: {last['RSI']:.2f}
+    MACD: {last['MACD']:.2f}
+    MACD_signal: {last['MACD_signal']:.2f}
+    Momentum: {last['Momentum']:.2f}
+    Volatility: {last['Volatility']:.2f}
+    TrendScore: {last['TrendScore']:.2f}
+    VolHeat: {last['VolHeat']:.2f}
 
-# ============================================================
-# SKANER + GŁÓWNY PIPELINE
-# ============================================================
+    Wygeneruj:
+    - Trend: strong/mixed/weak
+    - Momentum: strong/mixed/weak
+    - Ryzyko: low/medium/high
+    - Krótki komentarz techniczny (max 3 zdania).
+    """
 
-results_df = None
+    if IS_TEST:
+        return "AI TEST MODE — Prop Mode pominięty."
 
-col1, col2 = st.columns([1, 3])
-with col1:
-    run_scan = st.button("🚀 SKANUJ LISTĘ", key="scan_button")
-with col2:
-    st.markdown('<div class="neon-button">Pełny skan techniczny + AI + czat</div>', unsafe_allow_html=True)
-
-if run_scan:
-    results = []
-    progress = st.progress(0)
-
-    total = max(len(symbols), 1)
-    for i, s in enumerate(symbols):
-        r = analyze_symbol(s)
-        if r:
-            results.append(r)
-        progress.progress((i + 1) / total)
-
-    if results:
-        results_df = pd.DataFrame(results).sort_values("Score", ascending=False)
-        st.session_state["last_scan"] = results_df.copy()
-
-        st.subheader("📊 Wyniki skanowania — pełny widok")
-
-        def color_rsi(val):
-            if pd.isna(val):
-                return ""
-            if val < 30:
-                return "background-color: #004d40; color: #a5ffea;"
-            if val > 70:
-                return "background-color: #4a0000; color: #ffb3b3;"
-            return ""
-
-        styled = (
-            results_df.style
-            .background_gradient(subset=["Score"], cmap="plasma")
-            .background_gradient(subset=["TrendStrength"], cmap="Greens")
-            .background_gradient(subset=["RiskIndex"], cmap="Reds")
-            .apply(lambda s: [color_rsi(v) for v in s], subset=["RSI"])
-        )
-        st.dataframe(styled, use_container_width=True)
-    else:
-        st.warning("Brak wyników — sprawdź listę tickerów lub dane z Yahoo Finance.")
-
-# ============================================================
-# HEATMAPA WOLUMENU
-# ============================================================
-
-if "last_scan" in st.session_state:
-    st.divider()
-    st.subheader("🔥 Heatmapa wolumenu (ostatnia świeca)")
-
-    vol_df = st.session_state["last_scan"][["Symbol", "Volume"]].copy()
-    vol_df = vol_df.sort_values("Volume", ascending=False)
-    st.dataframe(
-        vol_df.style.background_gradient(subset=["Volume"], cmap="magma"),
-        use_container_width=True
+    import openai
+    openai.api_key = OPENAI_KEY
+    resp = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
     )
+    return resp["choices"][0]["message"]["content"]
 
-# ============================================================
-# PRE-MARKET RADAR (USA)
-# ============================================================
+def ai_deep_dive_mode(df, ticker):
+    if not OPENAI_KEY:
+        return "AI wyłączone — brak klucza."
 
-if premarket_mode and "last_scan" in st.session_state:
-    st.divider()
-    st.subheader("🌅 Pre‑Market Radar (USA)")
+    last = df.iloc[-1]
+    trend = last.get("TrendScore", 0)
+    rsi = last.get("RSI", None)
+    atr = last.get("ATR", None)
+    volh = last.get("VolHeat", None)
 
-    radar_rows = []
-    for sym in st.session_state["last_scan"]["Symbol"]:
-        if ".WA" in sym:
-            continue
-        try:
-            t = yf.Ticker(sym)
-            info = t.fast_info if hasattr(t, "fast_info") else {}
-            pre = getattr(info, "last_price", None)
-            # fallback: użyj history intraday, jeśli chcesz rozbudować
-            # tutaj uproszczenie: tylko aktualna cena vs wczorajsze close
-            hist = t.history(period="2d")
-            if len(hist) >= 2:
-                prev_close = hist["Close"].iloc[-2]
-                last_close = hist["Close"].iloc[-1]
-                change = (last_close - prev_close) / prev_close * 100
-            else:
-                change = np.nan
-            radar_rows.append({"Symbol": sym, "Zmiana vs wczoraj (%)": round(change, 2)})
-        except:
-            continue
+    prompt = f"""
+    Tryb: Deep Dive (GPW/biotech, spekulacja, SL/TP, ryzyko).
+    Ticker: {ticker}
 
-    if radar_rows:
-        radar_df = pd.DataFrame(radar_rows).sort_values("Zmiana vs wczoraj (%)", ascending=False)
-        st.dataframe(
-            radar_df.style.background_gradient(subset=["Zmiana vs wczoraj (%)"], cmap="coolwarm"),
-            use_container_width=True
-        )
-    else:
-        st.info("Brak danych pre‑market / dziennych dla obecnych tickerów USA.")
+    Dane:
+    Close: {last['Close']:.2f}
+    TrendScore: {trend}
+    RSI: {rsi}
+    ATR: {atr}
+    VolumeHeat: {volh}
 
-# ============================================================
-# AI: GLOBALNY RAPORT + TOP OKAZJE
-# ============================================================
+    Odpowiedz:
+    - 1) Czy to sensowny moment na spekulację (tak/nie + dlaczego)?
+    - 2) Główne ryzyka (max 3 punkty).
+    - 3) Jakie logiczne poziomy SL/TP (opisowo, nie liczbowo).
+    - 4) Bardziej trade na news/impuls czy swing/mean reversion?
+    """
 
-if "last_scan" in st.session_state and client:
-    results_df = st.session_state["last_scan"]
+    if IS_TEST:
+        return "AI TEST MODE — Deep Dive pominięty."
 
-    if not results_df.empty:
-        st.divider()
-        st.subheader("🤖 RAPORT TECHNICZNY — PROP‑TRADER VIEW")
-
-        summary = results_df.to_string(index=False)
-
-        user_prompt_global = f"""
-DANE TECHNICZNE I SENTYMENT:
-{summary}
-
-KURS USD/PLN: {USD_PLN}
-
-ZADANIE:
-1. Oceń każdą spółkę wyłącznie na podstawie powyższych danych (RSI, Momentum, EMA Trend, MACD, Volatility, Score, TrendStrength, RiskIndex, Volume, Pattern, News).
-2. Wybierz:
-   - TOP 3 z najsilniejszymi sygnałami wzrostowymi (wysoki TrendStrength, sensowny Score, akceptowalne RiskIndex),
-   - TOP 3 z najsłabszymi sygnałami (przewaga ryzyka spadku, wysoki RiskIndex, słaby TrendStrength).
-3. Dla każdej spółki podaj:
-   SYMBOL – OCENA (silne sygnały wzrostowe / mieszane / przewaga ryzyka spadku) – POWÓD (konkretnie, z parametrami).
-4. Używaj pojęć: trend wzrostowy/spadkowy, wykupienie/wyprzedanie, sygnał byczy/niedźwiedzi, momentum rośnie/gaśnie, pattern breakout/squeeze/range.
-5. Mów jak trader techniczny: krótko, konkretnie, bez ogólników.
-"""
-
-        with st.spinner("AI analizuje cały skan..."):
-            res_global = client.chat.completions.create(
-                model=model_choice,
-                messages=[
-                    {"role": "system", "content": build_system_prompt()},
-                    {"role": "user", "content": user_prompt_global}
-                ],
-                temperature=0.25
-            )
-            st.warning("RAPORT TECHNICZNY:")
-            st.write(res_global.choices[0].message.content)
-
-        st.subheader("🔥 TOP 5 wg Score")
-        top_df = results_df.sort_values("Score", ascending=False).head(5)
-        st.table(top_df)
-
-# ============================================================
-# CZAT Z AI NAD OSTATNIM SKANEM
-# ============================================================
-
-st.divider()
-st.subheader("💬 Czat z AI (synchronizowany z ostatnim skanem)")
-
-if "chat_history" not in st.session_state:
-    st.session_state["chat_history"] = []
-
-if "last_scan" not in st.session_state:
-    st.info("Najpierw uruchom skanowanie listy, żeby AI miało dane.")
-else:
-    scan_data = st.session_state["last_scan"]
-    user_msg = st.text_input("Twoje pytanie do AI (np. 'Które spółki mają najsilniejsze momentum?'):")
-
-    if st.button("Wyślij pytanie do AI"):
-        if not client:
-            st.error("Brak klucza API.")
-        elif not user_msg.strip():
-            st.info("Najpierw wpisz pytanie.")
-        else:
-            context = scan_data.to_string(index=False)
-
-            prompt_chat = f"""
-DANE Z OSTATNIEGO SKANU:
-{context}
-
-Pytanie użytkownika:
-{user_msg}
-
-Odpowiadaj konkretnie, używaj symboli i parametrów (RSI, Score, TrendStrength, RiskIndex, EMA Trend, MACD Trend, Volatility, Volume, Pattern, News).
-Opisuj sygnały jako: silne / mieszane / słabe, ryzyko: niskie / średnie / wysokie.
-Używaj pojęć: trend wzrostowy/spadkowy, wykupienie/wyprzedanie, sygnał byczy/niedźwiedzi, momentum rośnie/gaśnie, pattern breakout/squeeze/range.
-"""
-
-            with st.spinner("AI analizuje dane..."):
-                res_chat = client.chat.completions.create(
-                    model=model_choice,
-                    messages=[
-                        {"role": "system", "content": build_system_prompt()},
-                        {"role": "user", "content": prompt_chat}
-                    ],
-                    temperature=0.25
-                )
-                answer = res_chat.choices[0].message.content
-
-            st.session_state["chat_history"].append(("Ty", user_msg))
-            st.session_state["chat_history"].append(("AI", answer))
-
-    if st.session_state["chat_history"]:
-        st.markdown("### Historia rozmowy")
-        for speaker, text in st.session_state["chat_history"]:
-            if speaker == "Ty":
-                st.markdown(f"**Ty:** {text}")
-            else:
-                st.markdown(f"**AI:** {text}")
-
-# ============================================================
-# DEEP DIVE: POJEDYNCZY TICKER (WYKRESY + AI)
-# ============================================================
-
-st.divider()
-st.subheader("🎯 Deep Dive — pojedynczy ticker")
-
-if "last_scan" not in st.session_state:
-    st.info("Najpierw uruchom skanowanie listy, żeby mieć dane do analizy.")
-else:
-    scan_data = st.session_state["last_scan"]
-    tickers_available = list(scan_data["Symbol"].unique())
-
-    selected_ticker = st.selectbox(
-        "Wybierz ticker z ostatniego skanu:",
-        tickers_available
+    import openai
+    openai.api_key = OPENAI_KEY
+    resp = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
     )
+    return resp["choices"][0]["message"]["content"]
 
-    if st.button("Przeprowadź Deep Dive"):
-        row = scan_data[scan_data["Symbol"] == selected_ticker].iloc[0]
+# ============================================
+# WYKRES
+# ============================================
 
-        # Wykresy
-        chart_df = get_chart_data(selected_ticker)
+def plot_candles(df, ticker):
+    fig = go.Figure(data=[
+        go.Candlestick(
+            x=df.index,
+            open=df["Open"],
+            high=df["High"],
+            low=df["Low"],
+            close=df["Close"],
+            name="Candles"
+        )
+    ])
+    fig.update_layout(title=f"{ticker} — Wykres świecowy", height=600)
+    return fig
 
-        if chart_df is None:
-            st.warning("Brak danych wykresowych dla tego tickera.")
-        else:
-            # ŚWIECOWY + EMA
-            st.markdown("### 📈 Mini‑wykres świecowy (6m) + EMA20/EMA50")
+# ============================================
+# GŁÓWNA FUNKCJA ANALIZY
+# ============================================
 
-            fig = go.Figure(data=[
-                go.Candlestick(
-                    x=chart_df.index,
-                    open=chart_df["Open"],
-                    high=chart_df["High"],
-                    low=chart_df["Low"],
-                    close=chart_df["Close"],
-                    increasing_line_color="#00ff99",
-                    decreasing_line_color="#ff0066",
-                    name="Cena"
-                )
-            ])
+def run_analysis(ticker: str, period: str = "6mo", interval: str = "1d"):
+    df = yf.download(ticker, period=period, interval=interval)
+    if df.empty:
+        st.error("Brak danych.")
+        return
 
-            fig.add_trace(go.Scatter(
-                x=chart_df.index,
-                y=chart_df["EMA20"],
-                mode="lines",
-                line=dict(color="#00ccff", width=1.5),
-                name="EMA20"
-            ))
-            fig.add_trace(go.Scatter(
-                x=chart_df.index,
-                y=chart_df["EMA50"],
-                mode="lines",
-                line=dict(color="#ffcc00", width=1.5),
-                name="EMA50"
-            ))
+    df = add_indicators_full(df)
 
-            fig.update_layout(
-                height=350,
-                margin=dict(l=0, r=0, t=20, b=0),
-                paper_bgcolor="#050510",
-                plot_bgcolor="#050510",
-                font=dict(color="#ffcc00"),
-                xaxis_rangeslider_visible=False
-            )
+    st.subheader("Wykres")
+    st.plotly_chart(plot_candles(df, ticker), use_container_width=True)
 
-            st.plotly_chart(fig, use_container_width=True)
+    st.subheader("Ostatnie dane (wskaźniki)")
+    st.dataframe(df.tail(15))
 
-            # RSI
-            st.markdown("### 📉 RSI (14) — historia")
+    # Patterny
+    brk = detect_breakout(df)
+    cons = detect_consolidation(df)
+    vspike = detect_volume_spike(df)
 
-            fig_rsi = go.Figure()
-            fig_rsi.add_trace(go.Scatter(
-                x=chart_df.index,
-                y=chart_df["RSI"],
-                mode="lines",
-                line=dict(color="#ff0099", width=2),
-                name="RSI"
-            ))
+    st.subheader("Patterny (spekulacja biotech / news trade)")
+    st.write(f"Breakout: {'TAK' if brk else 'NIE'}")
+    st.write(f"Konsolidacja: {'TAK' if cons else 'NIE'}")
+    st.write(f"Volume spike: {'TAK' if vspike else 'NIE'}")
 
-            fig_rsi.add_hline(y=70, line=dict(color="#ff0066", dash="dot"))
-            fig_rsi.add_hline(y=30, line=dict(color="#00ff99", dash="dot"))
+    # SL/TP
+    last = df.iloc[-1]
+    entry = float(last["Close"])
+    atr = float(last["ATR"]) if not np.isnan(last["ATR"]) else 0.0
+    sl, tp, rr = calc_sl_tp(entry, atr, sl_mult=2.0, tp_mult=3.0, direction="long")
 
-            fig_rsi.update_layout(
-                height=200,
-                margin=dict(l=0, r=0, t=20, b=0),
-                paper_bgcolor="#050510",
-                plot_bgcolor="#050510",
-                font=dict(color="#ffcc00")
-            )
-
-            st.plotly_chart(fig_rsi, use_container_width=True)
-
-            # MACD
-            st.markdown("### 📊 MACD — historia")
-
-            fig_macd = go.Figure()
-            fig_macd.add_trace(go.Scatter(
-                x=chart_df.index,
-                y=chart_df["MACD"],
-                mode="lines",
-                line=dict(color="#ffcc00", width=2),
-                name="MACD"
-            ))
-            fig_macd.add_trace(go.Scatter(
-                x=chart_df.index,
-                y=chart_df["Signal"],
-                mode="lines",
-                line=dict(color="#00ccff", width=2),
-                name="Signal"
-            ))
-
-            fig_macd.update_layout(
-                height=200,
-                margin=dict(l=0, r=0, t=20, b=0),
-                paper_bgcolor="#050510",
-                plot_bgcolor="#050510",
-                font=dict(color="#ffcc00")
-            )
-
-            st.plotly_chart(fig_macd, use_container_width=True)
-
-            # MOMENTUM
-            st.markdown("### ⚡ Momentum 10d — historia")
-
-            fig_mom = go.Figure()
-            fig_mom.add_trace(go.Bar(
-                x=chart_df.index,
-                y=chart_df["Momentum10d"],
-                marker_color="#ffcc00",
-                name="Momentum 10d (%)"
-            ))
-
-            fig_mom.update_layout(
-                height=200,
-                margin=dict(l=0, r=0, t=20, b=0),
-                paper_bgcolor="#050510",
-                plot_bgcolor="#050510",
-                font=dict(color="#ffcc00")
-            )
-
-            st.plotly_chart(fig_mom, use_container_width=True)
-
-        # AI Deep Dive
-        if client:
-            single_prompt = build_single_ticker_prompt(row)
-
-            with st.spinner(f"AI analizuje {selected_ticker} (Deep Dive)..."):
-                res_single = client.chat.completions.create(
-                    model=model_choice,
-                    messages=[
-                        {"role": "system", "content": build_system_prompt()},
-                        {"role": "user", "content": single_prompt}
-                    ],
-                    temperature=0.25
-                )
-                st.markdown(f"### 🤖 Analiza techniczna — {selected_ticker}")
-                st.write(res_single.choices[0].message.content)
-        else:
-            st.info("Brak klucza API — analiza AI dla tickera wyłączona.")
-
-# ============================================================
-# PORTFOLIO
-# ============================================================
-
-st.divider()
-st.subheader(f"📈 Twoje Pozycje (Kurs USD/PLN: {round(USD_PLN, 2)})")
-
-try:
-    port_data = []
-    for line in portfolio_input.split("\n"):
-        if not line or "," not in line:
-            continue
-
-        parts = line.split(",")
-        sym = parts[0].strip().upper()
-        qty = float(parts[1])
-        b_p = float(parts[2])
-
-        t_ticker = yf.Ticker(sym)
-        t_hist = t_ticker.history(period="1d")
-        if t_hist.empty:
-            continue
-
-        t_p = float(t_hist["Close"].iloc[-1])
-
-        is_usd = ".WA" not in sym
-        current_val_pln = (t_p * qty * USD_PLN) if is_usd else (t_p * qty)
-        cost_val_pln = (b_p * qty * USD_PLN) if is_usd else (b_p * qty)
-        profit = current_val_pln - cost_val_pln
-
-        port_data.append({
-            "Symbol": sym,
-            "Cena (waluta)": round(t_p, 2),
-            "Wartość PLN": round(current_val_pln, 2),
-            "Zysk PLN": round(profit, 2)
-        })
-
-    if port_data:
-        dfp = pd.DataFrame(port_data)
-        st.table(dfp)
-        st.metric("SUMA ZYSKU (PLN)", f"{round(sum(d['Zysk PLN'] for d in port_data), 2)} PLN")
+    st.subheader("Spekulacja — SL/TP (ATR-based)")
+    if sl is None:
+        st.write("Brak ATR — nie można policzyć SL/TP.")
     else:
-        st.info("Brak poprawnych pozycji w portfelu.")
-except Exception:
-    st.info("Oczekiwanie na poprawne dane portfolio... (Format: SYMBOL,ILOŚĆ,CENA)")
+        st.write(f"Entry: {entry:.2f}")
+        st.write(f"SL: {sl:.2f}")
+        st.write(f"TP: {tp:.2f}")
+        st.write(f"R:R ≈ {rr:.2f}" if rr else "R:R: n/d")
+
+    # AI tryb
+    mode = st.radio("Tryb AI", ["Prop Mode", "Deep Dive"])
+    if mode == "Prop Mode":
+        ai_text = ai_analysis_prop_mode(df, ticker)
+    else:
+        ai_text = ai_deep_dive_mode(df, ticker)
+
+    st.subheader(f"AI — {mode}")
+    st.write(ai_text)
+
+# ============================================
+# UI STREAMLIT
+# ============================================
+
+if not IS_TEST:
+    st.title("ULTRA ENGINE v14 — Analyzer (GPW / Biotech / Spekulacja)")
+
+    default_ticker = "MABION.WA"  # przykładowy biotech z GPW
+    ticker = st.text_input("Ticker (GPW: *.WA, US: np. AAPL):", default_ticker)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        period = st.selectbox("Okres:", ["3mo", "6mo", "1y"], index=1)
+    with col2:
+        interval = st.selectbox("Interwał:", ["1d", "1h"], index=0)
+
+    if st.button("Analizuj"):
+        run_analysis(ticker, period=period, interval=interval)
+
+# ============================================
+# KONIEC
+# ============================================
