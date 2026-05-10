@@ -6,12 +6,12 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from openai import OpenAI
-
+import streamlit as st
+from openai import OpenAI
 ## ==========================================
 #  KLIENT AI — KLUCZ W STREAMLIT SECRETS
 # ==========================================
-import streamlit as st
-from openai import OpenAI
+
 
 # Klucz pobierany automatycznie z .streamlit/secrets.toml
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
