@@ -359,10 +359,20 @@ def show_rsi_chart(df):
     df["RSI"] = rsi(df["Close"])
     st.line_chart(df["RSI"])
 
-
 def show_bollinger_chart(df):
-    ma, upper, lower = bollinger(df["Close"])
-    st.line_chart({"MA": ma, "Upper": upper, "Lower": lower})
+    close = df["Close"]
+    ma, upper, lower = bollinger(close)
+
+    bb_df = pd.DataFrame(
+        {
+            "MA": ma,
+            "Upper": upper,
+            "Lower": lower,
+        },
+        index=df.index,  # jawny index, wszystko wyrównane
+    )
+
+    st.line_chart(bb_df)
 
 
 def show_atr_chart(df):
