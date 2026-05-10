@@ -437,7 +437,7 @@ def bollinger(series, length=20, num_std=2):
 
     return ma, upper, lower
 
-    )
+
 
     st.line_chart(bb_df)
 
