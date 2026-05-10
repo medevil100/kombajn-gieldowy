@@ -157,11 +157,27 @@ def sidebar():
 def get_price_data(symbol, period, interval, live=False):
     if not symbol:
         return pd.DataFrame()
+
     df = yf.download(symbol, period=period, interval=interval)
+
     if df is None or df.empty:
         return pd.DataFrame()
+
+    # 🔥 NORMALIZACJA WSZYSTKICH KOLUMN
+    for col in df.columns:
+        # jeśli kolumna ma listy/ndarray → wyciągamy pierwszy element
+        df[col] = df[col].apply(
+            lambda x: x[0] if isinstance(x, (list, tuple)) else
+                      (x.item() if hasattr(x, "item") else x)
+        )
+
+        # konwersja na liczby
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
     df = df.dropna()
+
     return df
+
 
 
 def sma(series, length):
