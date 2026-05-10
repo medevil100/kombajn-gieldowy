@@ -1,5 +1,6 @@
+
 # ==========================================
-#  TERMINAL TRADINGOWY 1:1 — analyzer_ultra.py
+#  TERMINAL TRADINGOWY 1:1 — analyzer_ultra.py (bez modułów)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -80,10 +81,13 @@ def inject_global_css():
 
 
 # ==========================================
-#  SIDEBAR — USTAWIENIA
+#  SIDEBAR — USTAWIENIA (BEZ MODUŁÓW)
 # ==========================================
 def sidebar():
     st.sidebar.title("⚙️ Ustawienia")
+
+    st.sidebar.markdown("### Symbol")
+    symbol = st.sidebar.text_input("Podaj symbol spółki:", placeholder="np. AAPL").upper()
 
     st.sidebar.markdown("### Dane rynkowe")
     history_period = st.sidebar.selectbox(
@@ -101,13 +105,24 @@ def sidebar():
     live_data = st.sidebar.checkbox("Dane live", value=False)
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### Wskaźniki")
+    st.sidebar.markdown("### Wskaźniki na wykresie")
 
     show_sma = st.sidebar.checkbox("SMA", value=True)
     show_rsi = st.sidebar.checkbox("RSI", value=True)
     show_boll = st.sidebar.checkbox("Bollinger Bands", value=True)
     show_atr = st.sidebar.checkbox("ATR", value=True)
     show_fibo = st.sidebar.checkbox("Fibonacci", value=True)
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Sekcje widoczne")
+
+    show_scanner = st.sidebar.checkbox("📡 Skaner rynku", value=True)
+    show_ai_comment = st.sidebar.checkbox("🤖 AI komentarz", value=True)
+    show_ai_chat = st.sidebar.checkbox("💬 AI czat", value=True)
+    show_trends = st.sidebar.checkbox("📊 Trendy", value=True)
+    show_sl_tp = st.sidebar.checkbox("🎯 SL / TP", value=True)
+    show_portfolio = st.sidebar.checkbox("💼 Portfel", value=True)
+    show_bidask = st.sidebar.checkbox("💹 BID / ASK / Spread", value=True)
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### AI")
@@ -119,6 +134,7 @@ def sidebar():
     )
 
     return {
+        "symbol": symbol,
         "history_period": history_period,
         "interval": interval,
         "live_data": live_data,
@@ -127,7 +143,14 @@ def sidebar():
         "show_rsi": show_rsi,
         "show_boll": show_boll,
         "show_atr": show_atr,
-        "show_fibo": show_fibo
+        "show_fibo": show_fibo,
+        "show_scanner": show_scanner,
+        "show_ai_comment": show_ai_comment,
+        "show_ai_chat": show_ai_chat,
+        "show_trends": show_trends,
+        "show_sl_tp": show_sl_tp,
+        "show_portfolio": show_portfolio,
+        "show_bidask": show_bidask,
     }
 
 
@@ -135,6 +158,8 @@ def sidebar():
 #  SEKCJA 2 — DANE, WSKAŹNIKI, BID/ASK, FX, RYZYKO
 # ==========================================
 def get_price_data(symbol, period, interval, live=False):
+    if not symbol:
+        return pd.DataFrame()
     df = yf.download(symbol, period=period, interval=interval)
     if df is None or df.empty:
         return pd.DataFrame()
@@ -188,13 +213,21 @@ def fibonacci_levels(df):
 
 def detect_trend(series):
     """
-    Stabilna wersja — działa dla każdej serii.
-    Zabezpieczenia: pusta seria, NaN, złe typy.
+    Stabilna wersja — działa dla każdej postaci danych:
+    Series, DataFrame, ndarray 1D/2D, list.
     """
     if series is None:
         return "NEUTRAL"
 
-    series = pd.Series(series)
+    try:
+        if isinstance(series, pd.DataFrame):
+            series = series.iloc[:, 0]
+        if hasattr(series, "ndim") and series.ndim == 2:
+            series = series.reshape(-1)
+        series = pd.Series(series)
+    except Exception:
+        return "NEUTRAL"
+
     series = pd.to_numeric(series, errors="coerce").dropna()
 
     if len(series) < 3:
@@ -237,23 +270,18 @@ def detect_multi_trend(df):
             "strength": 0.0,
         }
 
-    short = detect_trend(close[-20:])
-    medium = detect_trend(close[-50:])
-    long = detect_trend(close[-200:])
-
-    momentum = float(close.diff().iloc[-1])
-    strength = abs(momentum)
-
     return {
-        "short_term": short,
-        "medium_term": medium,
-        "long_term": long,
-        "momentum": momentum,
-        "strength": strength,
+        "short_term": detect_trend(close[-20:]),
+        "medium_term": detect_trend(close[-50:]),
+        "long_term": detect_trend(close[-200:]),
+        "momentum": float(close.diff().iloc[-1]),
+        "strength": abs(float(close.diff().iloc[-1])),
     }
 
 
 def get_bid_ask(symbol):
+    if not symbol:
+        return None, None, None
     try:
         ticker = yf.Ticker(symbol)
         info = ticker.fast_info
@@ -359,17 +387,14 @@ def show_rsi_chart(df):
     df["RSI"] = rsi(df["Close"])
     st.line_chart(df["RSI"])
 
+
 def show_bollinger_chart(df):
     close = df["Close"]
     ma, upper, lower = bollinger(close)
 
     bb_df = pd.DataFrame(
-        {
-            "MA": ma,
-            "Upper": upper,
-            "Lower": lower,
-        },
-        index=df.index,  # jawny index, wszystko wyrównane
+        {"MA": ma, "Upper": upper, "Lower": lower},
+        index=df.index,
     )
 
     st.line_chart(bb_df)
@@ -382,6 +407,7 @@ def show_atr_chart(df):
 
 def show_fibonacci_levels(df):
     levels = fibonacci_levels(df)
+    st.subheader("🔢 Poziomy Fibonacciego")
     for lvl, val in levels.items():
         st.write(f"{lvl}: {val:.2f}")
 
@@ -415,9 +441,9 @@ def scanner_window(settings):
     if "symbols_list" not in st.session_state:
         st.session_state.symbols_list = []
 
-    new_symbols = st.text_input("Dodaj symbole (przecinki):")
+    new_symbols = st.text_input("Dodaj symbole (przecinki):", key="scanner_input")
 
-    if st.button("➕ Dodaj"):
+    if st.button("➕ Dodaj", key="scanner_add"):
         if new_symbols.strip():
             parsed = [s.strip().upper() for s in new_symbols.split(",") if s.strip()]
             for sym in parsed:
@@ -433,7 +459,7 @@ def scanner_window(settings):
             st.session_state.symbols_list.remove(sym)
             st.experimental_rerun()
 
-    if st.button("🔎 Skanuj rynek"):
+    if st.button("🔎 Skanuj rynek", key="scanner_run"):
         for sym in st.session_state.symbols_list:
             st.markdown(f"### 🟦 {sym}")
             df = get_price_data(sym, settings["history_period"], settings["interval"], settings["live_data"])
@@ -503,9 +529,9 @@ def ai_chat_window(settings):
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
-    user_msg = st.text_input("Wpisz wiadomość:")
+    user_msg = st.text_input("Wpisz wiadomość:", key="chat_input")
 
-    if st.button("Wyślij"):
+    if st.button("Wyślij", key="chat_send"):
         if user_msg.strip():
             response = client.chat.completions.create(
                 model=settings["ai_model"],
@@ -567,7 +593,7 @@ def sl_tp_window(symbol, settings):
     st.write(f"Neutral: {results['neutral']:.2f}")
     st.write(f"Ryzyko systemowe: {results['risk']}")
 
-    qty = st.number_input("Ilość akcji:", min_value=1, value=1)
+    qty = st.number_input("Ilość akcji:", min_value=1, value=1, key="sl_qty")
 
     bid, ask, spread = get_bid_ask(symbol)
     if bid is None:
@@ -595,11 +621,11 @@ def portfolio_window():
     usd_pln = float(get_usd_pln())
     st.write(f"Kurs USD/PLN: {usd_pln:.2f}")
 
-    symbol = st.text_input("Symbol:")
-    qty = st.number_input("Ilość:", min_value=0.0)
-    price_usd = st.number_input("Cena USD:", min_value=0.0)
+    symbol = st.text_input("Symbol:", key="pf_symbol")
+    qty = st.number_input("Ilość:", min_value=0.0, key="pf_qty")
+    price_usd = st.number_input("Cena USD:", min_value=0.0, key="pf_price")
 
-    if st.button("➕ Dodaj"):
+    if st.button("➕ Dodaj", key="pf_add"):
         if symbol and qty > 0 and price_usd > 0:
             st.session_state.portfolio.append({
                 "symbol": symbol.upper(),
@@ -613,7 +639,7 @@ def portfolio_window():
         col1.write(f"{pos['symbol']} — {pos['qty']} szt.")
         col2.write(f"{pos['price_pln']:.2f} PLN")
         total_value += pos["price_pln"]
-        if col3.button("❌", key=f"del_{pos['symbol']}"):
+        if col3.button("❌", key=f"pf_del_{pos['symbol']}"):
             st.session_state.portfolio.remove(pos)
             st.experimental_rerun()
 
@@ -640,64 +666,57 @@ def bidask_window(symbol):
 
 
 # ==========================================
-#  SEKCJA 10 — GŁÓWNY INTERFEJS (ROUTING)
+#  GŁÓWNY INTERFEJS — BEZ MODUŁÓW
 # ==========================================
 def main_app():
     inject_global_css()
     settings = sidebar()
 
-    st.title("💹 Terminal Tradingowy — 1:1")
+    st.title("💹 Terminal Tradingowy — 1:1 (bez modułów)")
     st.markdown("---")
 
-    # WYBÓR MODUŁU W SIDEBARZE
-    module = st.sidebar.selectbox(
-        "Wybierz moduł:",
-        [
-            "📈 Wykresy i wskaźniki",
-            "📡 Skaner rynku",
-            "🤖 AI komentarz",
-            "💬 AI czat",
-            "📊 Trendy",
-            "🎯 SL / TP",
-            "💼 Portfel",
-            "💹 BID / ASK / Spread"
-        ]
-    )
+    symbol = settings["symbol"]
 
-    # SYMBOL TEŻ W SIDEBARZE (GDZIE POTRZEBNY)
-    symbol_required = module in [
-        "📈 Wykresy i wskaźniki",
-        "🤖 AI komentarz",
-        "📊 Trendy",
-        "🎯 SL / TP",
-        "💹 BID / ASK / Spread"
-    ]
-
-    symbol = None
-    if symbol_required:
-        symbol = st.sidebar.text_input("Podaj symbol spółki:", placeholder="np. AAPL")
-        if not symbol:
-            st.info("Wpisz symbol w panelu bocznym, aby kontynuować.")
-            return
-        symbol = symbol.upper()
-
-    st.markdown("---")
-
-    if module == "📈 Wykresy i wskaźniki":
+    # WYKRESY + WSKAŹNIKI
+    if symbol:
         charts_window(symbol, settings)
-    elif module == "📡 Skaner rynku":
+    else:
+        st.info("Podaj symbol w panelu bocznym, aby zobaczyć wykres i analizy.")
+
+    st.markdown("---")
+
+    # SKANER
+    if settings["show_scanner"]:
         scanner_window(settings)
-    elif module == "🤖 AI komentarz":
-        ai_commentary_window(symbol, settings)
-    elif module == "💬 AI czat":
-        ai_chat_window(settings)
-    elif module == "📊 Trendy":
+        st.markdown("---")
+
+    # TRENDY
+    if settings["show_trends"] and symbol:
         trends_window(symbol, settings)
-    elif module == "🎯 SL / TP":
+        st.markdown("---")
+
+    # SL / TP
+    if settings["show_sl_tp"] and symbol:
         sl_tp_window(symbol, settings)
-    elif module == "💼 Portfel":
+        st.markdown("---")
+
+    # AI KOMENTARZ
+    if settings["show_ai_comment"] and symbol:
+        ai_commentary_window(symbol, settings)
+        st.markdown("---")
+
+    # AI CZAT
+    if settings["show_ai_chat"]:
+        ai_chat_window(settings)
+        st.markdown("---")
+
+    # PORTFEL
+    if settings["show_portfolio"]:
         portfolio_window()
-    elif module == "💹 BID / ASK / Spread":
+        st.markdown("---")
+
+    # BID / ASK
+    if settings["show_bidask"] and symbol:
         bidask_window(symbol)
 
 
