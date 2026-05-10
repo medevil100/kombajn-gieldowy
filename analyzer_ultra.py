@@ -1,5 +1,6 @@
+```python
 # ==========================================
-#  TERMINAL TRADINGOWY 1:1 — analyzer_ultra.py (bez modułów)
+#  TERMINAL TRADINGOWY 1:1 — analyzer_ultra.py (spójny, bez modułów)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -26,7 +27,6 @@ def inject_global_css():
     st.markdown(
         f"""
         <style>
-
         .stApp {{
             background-color: {BACKGROUND};
         }}
@@ -63,7 +63,6 @@ def inject_global_css():
             border-radius: 10px;
         }}
 
-        /* Sidebar widoczny, neonowy */
         section[data-testid="stSidebar"] {{
             background-color: #0a0a0a !important;
             border-right: 2px solid {NEON_BLUE} !important;
@@ -72,7 +71,6 @@ def inject_global_css():
         section[data-testid="stSidebar"] * {{
             color: {NEON_YELLOW} !important;
         }}
-
         </style>
         """,
         unsafe_allow_html=True
@@ -80,7 +78,7 @@ def inject_global_css():
 
 
 # ==========================================
-#  SIDEBAR — USTAWIENIA (BEZ MODUŁÓW)
+#  SIDEBAR — USTAWIENIA
 # ==========================================
 def sidebar():
     st.sidebar.title("⚙️ Ustawienia")
@@ -162,7 +160,7 @@ def get_price_data(symbol, period, interval, live=False):
     df = yf.download(symbol, period=period, interval=interval)
     if df is None or df.empty:
         return pd.DataFrame()
-    df.dropna(inplace=True)
+    df = df.dropna()
     return df
 
 
@@ -197,21 +195,32 @@ def atr(df, period=14):
 
 
 def fibonacci_levels(df):
-    high = pd.to_numeric(df["High"], errors="coerce").max()
-    low = pd.to_numeric(df["Low"], errors="coerce").min()
+    high = df["High"]
+    low = df["Low"]
 
-    if pd.isna(high) or pd.isna(low):
+    if isinstance(high, pd.DataFrame):
+        high = high.iloc[:, 0]
+    if isinstance(low, pd.DataFrame):
+        low = low.iloc[:, 0]
+
+    high = pd.to_numeric(high, errors="coerce")
+    low = pd.to_numeric(low, errors="coerce")
+
+    high_val = high.max()
+    low_val = low.min()
+
+    if pd.isna(high_val) or pd.isna(low_val):
         return {lvl: None for lvl in ["0%", "23.6%", "38.2%", "50%", "61.8%", "100%"]}
 
-    diff = high - low
+    diff = high_val - low_val
 
     return {
-        "0%": high,
-        "23.6%": high - diff * 0.236,
-        "38.2%": high - diff * 0.382,
-        "50%": high - diff * 0.5,
-        "61.8%": high - diff * 0.618,
-        "100%": low
+        "0%": high_val,
+        "23.6%": high_val - diff * 0.236,
+        "38.2%": high_val - diff * 0.382,
+        "50%": high_val - diff * 0.5,
+        "61.8%": high_val - diff * 0.618,
+        "100%": low_val
     }
 
 
@@ -260,12 +269,15 @@ def detect_multi_trend(df):
             "strength": 0.0,
         }
 
+    momentum = float(close.diff().iloc[-1])
+    strength = abs(momentum)
+
     return {
         "short_term": detect_trend(close[-20:]),
         "medium_term": detect_trend(close[-50:]),
         "long_term": detect_trend(close[-200:]),
-        "momentum": float(close.diff().iloc[-1]),
-        "strength": abs(float(close.diff().iloc[-1])),
+        "momentum": momentum,
+        "strength": strength,
     }
 
 
@@ -369,11 +381,13 @@ def show_price_chart(df, symbol):
 
 
 def show_sma_chart(df):
+    df = df.copy()
     df["SMA20"] = sma(df["Close"], 20)
     st.line_chart(df["SMA20"])
 
 
 def show_rsi_chart(df):
+    df = df.copy()
     df["RSI"] = rsi(df["Close"])
     st.line_chart(df["RSI"])
 
@@ -391,6 +405,7 @@ def show_bollinger_chart(df):
 
 
 def show_atr_chart(df):
+    df = df.copy()
     df["ATR"] = atr(df)
     st.line_chart(df["ATR"])
 
@@ -401,14 +416,10 @@ def show_fibonacci_levels(df):
     levels = fibonacci_levels(df)
 
     for lvl, val in levels.items():
-        try:
-            num = float(val)
-            if pd.isna(num):
-                st.write(f"{lvl}: brak danych")
-            else:
-                st.write(f"{lvl}: {num:.2f}")
-        except Exception:
+        if val is None or pd.isna(val):
             st.write(f"{lvl}: brak danych")
+        else:
+            st.write(f"{lvl}: {float(val):.2f}")
 
 
 def charts_window(symbol, settings):
@@ -495,7 +506,7 @@ def ai_commentary(symbol, df, indicators, model_name):
         messages=[{"role": "user", "content": prompt}]
     )
 
-    return response.choices[0].message["content"]
+    return response.choices[0].message.content
 
 
 def ai_commentary_window(symbol, settings):
@@ -506,6 +517,7 @@ def ai_commentary_window(symbol, settings):
         st.error("Brak danych.")
         return
 
+    df = df.copy()
     df["RSI"] = rsi(df["Close"])
     df["ATR"] = atr(df)
     trends = detect_multi_trend(df)
@@ -540,7 +552,7 @@ def ai_chat_window(settings):
                     {"role": "user", "content": user_msg}
                 ]
             )
-            ai_msg = response.choices[0].message["content"]
+            ai_msg = response.choices[0].message.content
             st.session_state.chat_history.append({"role": "user", "content": user_msg})
             st.session_state.chat_history.append({"role": "assistant", "content": ai_msg})
 
@@ -580,6 +592,7 @@ def sl_tp_window(symbol, settings):
         st.error("Brak danych.")
         return
 
+    df = df.copy()
     df["ATR"] = atr(df)
     atr_value = df["ATR"].iloc[-1]
     trend = detect_trend(df["Close"])
@@ -724,3 +737,4 @@ def main_app():
 # ==========================================
 if __name__ == "__main__":
     main_app()
+```
