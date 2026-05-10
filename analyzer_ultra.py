@@ -1123,8 +1123,8 @@ if __name__ == "__main__":
 #  GLOBALNY NEON DARK MODE — CSS
 # ==========================================
 def main_app():
-    inject_global_css()
-    st.title("💹 Terminal Tradingowy — 1:1")
+inject_global_css()
+st.title("💹 Terminal Tradingowy — 1:1")
  inject_global_css():
     st.markdown(
         f"""
