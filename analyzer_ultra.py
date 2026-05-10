@@ -1,5 +1,5 @@
 # ==========================================
-#  SEKCJA 1 — IMPORTY, KOLORY, SIDEBAR
+#  TERMINAL TRADINGOWY 1:1 — app.py
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -9,7 +9,7 @@ from openai import OpenAI
 
 client = OpenAI()
 
-# Kolory neonowe
+# Kolory
 BACKGROUND = "#000000"
 NEON_GREEN = "#39FF14"
 NEON_PINK = "#FF1493"
@@ -20,7 +20,7 @@ st.set_page_config(page_title="Terminal Tradingowy", layout="wide")
 
 
 # ==========================================
-#  SEKCJA 12 — GLOBALNY NEON DARK MODE (CSS)
+#  GLOBALNY NEON DARK MODE — CSS
 # ==========================================
 def inject_global_css():
     st.markdown(
@@ -48,25 +48,14 @@ def inject_global_css():
             color: black;
         }}
 
-        .stTextInput>div>div>input,
-        .stNumberInput>div>div>input {{
+        input, select, textarea {{
             background-color: #111 !important;
             color: {NEON_GREEN} !important;
-            border: 1px solid {NEON_GREEN};
-        }}
-
-        .stSelectbox>div>div>select {{
-            background-color: #111 !important;
-            color: {NEON_YELLOW} !important;
-            border: 1px solid {NEON_YELLOW};
+            border: 1px solid {NEON_GREEN} !important;
         }}
 
         ::-webkit-scrollbar {{
             width: 8px;
-        }}
-
-        ::-webkit-scrollbar-track {{
-            background: #111;
         }}
 
         ::-webkit-scrollbar-thumb {{
@@ -74,8 +63,14 @@ def inject_global_css():
             border-radius: 10px;
         }}
 
-        ::-webkit-scrollbar-thumb:hover {{
-            background: {NEON_BLUE};
+        /* Sidebar widoczny, neonowy */
+        section[data-testid="stSidebar"] {{
+            background-color: #0a0a0a !important;
+            border-right: 2px solid {NEON_BLUE} !important;
+        }}
+
+        section[data-testid="stSidebar"] * {{
+            color: {NEON_YELLOW} !important;
         }}
 
         </style>
@@ -85,11 +80,12 @@ def inject_global_css():
 
 
 # ==========================================
-#  SIDEBAR — USTAWIENIA GLOBALNE
+#  SIDEBAR — USTAWIENIA
 # ==========================================
 def sidebar():
     st.sidebar.title("⚙️ Ustawienia")
 
+    st.sidebar.markdown("### Dane rynkowe")
     history_period = st.sidebar.selectbox(
         "Zakres danych:",
         ["1mo", "3mo", "6mo", "1y", "2y", "5y"],
@@ -104,17 +100,23 @@ def sidebar():
 
     live_data = st.sidebar.checkbox("Dane live", value=False)
 
-    ai_model = st.sidebar.selectbox(
-        "Model AI:",
-        ["gpt-4o-mini", "gpt-4o", "gpt-4.1"],
-        index=0
-    )
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Wskaźniki")
 
     show_sma = st.sidebar.checkbox("SMA", value=True)
     show_rsi = st.sidebar.checkbox("RSI", value=True)
     show_boll = st.sidebar.checkbox("Bollinger Bands", value=True)
     show_atr = st.sidebar.checkbox("ATR", value=True)
     show_fibo = st.sidebar.checkbox("Fibonacci", value=True)
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### AI")
+
+    ai_model = st.sidebar.selectbox(
+        "Model AI:",
+        ["gpt-4o-mini", "gpt-4o", "gpt-4.1"],
+        index=0
+    )
 
     return {
         "history_period": history_period,
@@ -127,12 +129,15 @@ def sidebar():
         "show_atr": show_atr,
         "show_fibo": show_fibo
     }
+
+
 # ==========================================
 #  SEKCJA 2 — DANE, WSKAŹNIKI, BID/ASK, FX, RYZYKO
 # ==========================================
-
 def get_price_data(symbol, period, interval, live=False):
     df = yf.download(symbol, period=period, interval=interval)
+    if df is None or df.empty:
+        return pd.DataFrame()
     df.dropna(inplace=True)
     return df
 
@@ -182,39 +187,54 @@ def fibonacci_levels(df):
 
 
 def detect_trend(series):
-    sma20 = sma(series, 20).iloc[-1]
-    close = series.iloc[-1]
-    if close > sma20:
+    if len(series) < 5:
+        return "NEUTRAL"
+    close_now = series.iloc[-1]
+    close_prev = series.iloc[-5]
+    if close_now > close_prev:
         return "BULL"
-    elif close < sma20:
+    elif close_now < close_prev:
         return "BEAR"
     return "NEUTRAL"
 
 
 def detect_multi_trend(df):
     close = df["Close"]
+    short = detect_trend(close[-20:])
+    medium = detect_trend(close[-50:])
+    long = detect_trend(close[-200:])
+    momentum = close.diff().iloc[-1]
+    strength = abs(momentum)
     return {
-        "short_term": detect_trend(close),
-        "medium_term": detect_trend(sma(close, 50)),
-        "long_term": detect_trend(sma(close, 200)),
-        "momentum": close.diff().iloc[-1],
-        "strength": abs(close.diff().iloc[-1])
+        "short_term": short,
+        "medium_term": medium,
+        "long_term": long,
+        "momentum": momentum,
+        "strength": strength
     }
 
 
 def get_bid_ask(symbol):
-    ticker = yf.Ticker(symbol)
-    info = ticker.fast_info
-    bid = info.get("bid")
-    ask = info.get("ask")
-    if bid is None or ask is None:
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.fast_info
+        bid = info.get("bid")
+        ask = info.get("ask")
+        if bid is None or ask is None:
+            return None, None, None
+        return float(bid), float(ask), float(ask - bid)
+    except Exception:
         return None, None, None
-    return bid, ask, ask - bid
 
 
 def get_usd_pln():
-    df = yf.download("USDPLN=X", period="5d", interval="1d")
-    return df["Close"].iloc[-1]
+    try:
+        df = yf.download("USDPLN=X", period="5d", interval="1d")
+        if df is None or df.empty:
+            return 4.00
+        return float(df["Close"].iloc[-1])
+    except Exception:
+        return 4.00
 
 
 def calculate_sl_tp(df, atr_value, trend):
@@ -232,7 +252,12 @@ def calculate_sl_tp(df, atr_value, trend):
 
     neutral = (sl + tp) / 2
 
-    risk = "LOW" if atr_value < close * 0.005 else "MEDIUM" if atr_value < close * 0.015 else "HIGH"
+    if atr_value < close * 0.005:
+        risk = "LOW"
+    elif atr_value < close * 0.015:
+        risk = "MEDIUM"
+    else:
+        risk = "HIGH"
 
     return {
         "close": close,
@@ -244,10 +269,13 @@ def calculate_sl_tp(df, atr_value, trend):
 
 
 def position_risk(close, atr_value, spread, qty, sl):
-    risk_per_share = abs(close - sl) + spread
+    risk_per_share = abs(close - sl) + (spread or 0)
     total_risk = risk_per_share * qty
     position_value = close * qty
-    risk_percent = (total_risk / position_value) * 100
+    if position_value == 0:
+        risk_percent = 0
+    else:
+        risk_percent = (total_risk / position_value) * 100
 
     if risk_percent < 1:
         level = "LOW"
@@ -268,7 +296,6 @@ def position_risk(close, atr_value, spread, qty, sl):
 # ==========================================
 #  SEKCJA 3 — WYKRESY
 # ==========================================
-
 def show_price_chart(df, symbol):
     st.subheader(f"📈 Wykres ceny — {symbol}")
 
@@ -312,6 +339,9 @@ def show_fibonacci_levels(df):
 
 def charts_window(symbol, settings):
     df = get_price_data(symbol, settings["history_period"], settings["interval"], settings["live_data"])
+    if df.empty:
+        st.error("Brak danych dla tego symbolu.")
+        return
 
     show_price_chart(df, symbol)
 
@@ -330,7 +360,6 @@ def charts_window(symbol, settings):
 # ==========================================
 #  SEKCJA 4 — SKANER RYNKU
 # ==========================================
-
 def scanner_window(settings):
     st.subheader("📡 Skaner rynku")
 
@@ -348,7 +377,7 @@ def scanner_window(settings):
 
     st.markdown("### Lista spółek:")
 
-    for sym in st.session_state.symbols_list:
+    for sym in list(st.session_state.symbols_list):
         col1, col2 = st.columns([4, 1])
         col1.write(f"🔹 {sym}")
         if col2.button(f"❌", key=f"del_{sym}"):
@@ -375,10 +404,7 @@ def scanner_window(settings):
 # ==========================================
 #  SEKCJA 5 — AI KOMENTARZ + AI CZAT
 # ==========================================
-
 def ai_commentary(symbol, df, indicators, model_name):
-    model = model_name
-
     prompt = f"""
     Przeanalizuj spółkę {symbol} na podstawie:
     Cena: {df['Close'].iloc[-1]}
@@ -387,10 +413,11 @@ def ai_commentary(symbol, df, indicators, model_name):
     ATR: {indicators['atr']}
     Momentum: {indicators['momentum']}
     Siła trendu: {indicators['strength']}
+    Napisz krótki, konkretny komentarz tradingowy.
     """
 
     response = client.chat.completions.create(
-        model=model,
+        model=model_name,
         messages=[{"role": "user", "content": prompt}]
     )
 
@@ -401,6 +428,10 @@ def ai_commentary_window(symbol, settings):
     st.subheader("🤖 AI Komentarz")
 
     df = get_price_data(symbol, settings["history_period"], settings["interval"], settings["live_data"])
+    if df.empty:
+        st.error("Brak danych.")
+        return
+
     df["RSI"] = rsi(df["Close"])
     df["ATR"] = atr(df)
     trends = detect_multi_trend(df)
@@ -430,7 +461,7 @@ def ai_chat_window(settings):
             response = client.chat.completions.create(
                 model=settings["ai_model"],
                 messages=[
-                    {"role": "system", "content": "Jesteś pomocnym asystentem."},
+                    {"role": "system", "content": "Jesteś pomocnym asystentem tradingowym."},
                     *st.session_state.chat_history,
                     {"role": "user", "content": user_msg}
                 ]
@@ -440,17 +471,21 @@ def ai_chat_window(settings):
             st.session_state.chat_history.append({"role": "assistant", "content": ai_msg})
 
     for msg in st.session_state.chat_history:
-        st.write(f"**{msg['role']}:** {msg['content']}")
+        role = "Ty" if msg["role"] == "user" else "AI"
+        st.write(f"**{role}:** {msg['content']}")
 
 
 # ==========================================
 #  SEKCJA 6 — TRENDY
 # ==========================================
-
 def trends_window(symbol, settings):
     st.subheader(f"📊 Trendy — {symbol}")
 
     df = get_price_data(symbol, settings["history_period"], settings["interval"], settings["live_data"])
+    if df.empty:
+        st.error("Brak danych.")
+        return
+
     trends = detect_multi_trend(df)
 
     st.write(f"Krótki: {trends['short_term']}")
@@ -463,11 +498,14 @@ def trends_window(symbol, settings):
 # ==========================================
 #  SEKCJA 7 — SL / TP
 # ==========================================
-
 def sl_tp_window(symbol, settings):
     st.subheader(f"🎯 SL / TP — {symbol}")
 
     df = get_price_data(symbol, settings["history_period"], settings["interval"], settings["live_data"])
+    if df.empty:
+        st.error("Brak danych.")
+        return
+
     df["ATR"] = atr(df)
     atr_value = df["ATR"].iloc[-1]
     trend = detect_trend(df["Close"])
@@ -499,14 +537,13 @@ def sl_tp_window(symbol, settings):
 # ==========================================
 #  SEKCJA 8 — PORTFEL
 # ==========================================
-
 def portfolio_window():
     st.subheader("💼 Portfel")
 
     if "portfolio" not in st.session_state:
         st.session_state.portfolio = []
 
-    usd_pln = get_usd_pln()
+    usd_pln = float(get_usd_pln())
     st.write(f"Kurs USD/PLN: {usd_pln:.2f}")
 
     symbol = st.text_input("Symbol:")
@@ -521,19 +558,23 @@ def portfolio_window():
                 "price_pln": price_usd * usd_pln
             })
 
-    for pos in st.session_state.portfolio:
+    total_value = 0.0
+    for pos in list(st.session_state.portfolio):
         col1, col2, col3 = st.columns([3, 2, 1])
         col1.write(f"{pos['symbol']} — {pos['qty']} szt.")
         col2.write(f"{pos['price_pln']:.2f} PLN")
+        total_value += pos["price_pln"]
         if col3.button("❌", key=f"del_{pos['symbol']}"):
             st.session_state.portfolio.remove(pos)
             st.experimental_rerun()
+
+    st.markdown("---")
+    st.write(f"Łączna wartość portfela (na podstawie cen wejścia): {total_value:.2f} PLN")
 
 
 # ==========================================
 #  SEKCJA 9 — BID / ASK / SPREAD
 # ==========================================
-
 def bidask_window(symbol):
     st.subheader(f"💹 BID / ASK — {symbol}")
 
@@ -543,24 +584,22 @@ def bidask_window(symbol):
         st.error("Brak danych BID/ASK.")
         return
 
-    st.write(f"BID: {bid}")
-    st.write(f"ASK: {ask}")
-    st.write(f"Spread: {spread}")
+    st.markdown("---")
+    st.write(f"**BID:** {bid}")
+    st.write(f"**ASK:** {ask}")
+    st.write(f"**Spread:** {spread}")
+
+
 # ==========================================
 #  SEKCJA 10 — GŁÓWNY INTERFEJS (ROUTING)
 # ==========================================
-
 def main_app():
-    # Globalny CSS
     inject_global_css()
-
-    # Ustawienia z panelu bocznego
     settings = sidebar()
 
     st.title("💹 Terminal Tradingowy — 1:1")
     st.markdown("---")
 
-    # Wybór modułu
     module = st.selectbox(
         "Wybierz moduł:",
         [
@@ -577,7 +616,6 @@ def main_app():
 
     st.markdown("---")
 
-    # Moduły wymagające symbolu
     symbol_required = module in [
         "📈 Wykresy i wskaźniki",
         "🤖 AI komentarz",
@@ -594,28 +632,20 @@ def main_app():
             return
         symbol = symbol.upper()
 
-    # Routing
     if module == "📈 Wykresy i wskaźniki":
         charts_window(symbol, settings)
-
     elif module == "📡 Skaner rynku":
         scanner_window(settings)
-
     elif module == "🤖 AI komentarz":
         ai_commentary_window(symbol, settings)
-
     elif module == "💬 AI czat":
         ai_chat_window(settings)
-
     elif module == "📊 Trendy":
         trends_window(symbol, settings)
-
     elif module == "🎯 SL / TP":
         sl_tp_window(symbol, settings)
-
     elif module == "💼 Portfel":
         portfolio_window()
-
     elif module == "💹 BID / ASK / Spread":
         bidask_window(symbol)
 
