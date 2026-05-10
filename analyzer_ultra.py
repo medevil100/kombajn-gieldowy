@@ -396,10 +396,27 @@ def show_price_chart(df, symbol):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def show_sma_chart(df):
-    df = df.copy()
-    df["SMA20"] = sma(df["Close"], 20)
-    st.line_chart(df["SMA20"])
+def show_bollinger_chart(df):
+    close = pd.to_numeric(df["Close"], errors="coerce")
+
+    ma, upper, lower = bollinger(close)
+
+    bb_df = pd.DataFrame(
+        {
+            "MA": ma.values,      # wymuszamy 1D
+            "Upper": upper.values,
+            "Lower": lower.values,
+        },
+        index=df.index,
+    )
+
+    bb_df = bb_df.dropna()
+
+    if bb_df.empty:
+        st.info("Za mało danych, żeby policzyć Bollinger Bands.")
+        return
+
+    st.line_chart(bb_df)
 
 
 def show_rsi_chart(df):
@@ -408,13 +425,18 @@ def show_rsi_chart(df):
     st.line_chart(df["RSI"])
 
 
-def show_bollinger_chart(df):
-    close = df["Close"]
-    ma, upper, lower = bollinger(close)
+def bollinger(series, length=20, num_std=2):
+    # upewniamy się, że to 1D Series float
+    s = pd.to_numeric(pd.Series(series), errors="coerce")
 
-    bb_df = pd.DataFrame(
-        {"MA": ma, "Upper": upper, "Lower": lower},
-        index=df.index,
+    ma = s.rolling(length).mean()
+    std = s.rolling(length).std()
+
+    upper = ma + num_std * std
+    lower = ma - num_std * std
+
+    return ma, upper, lower
+
     )
 
     st.line_chart(bb_df)
