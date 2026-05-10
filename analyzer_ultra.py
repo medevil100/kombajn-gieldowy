@@ -1,5 +1,5 @@
 # ==========================================
-#  TERMINAL TRADINGOWY 1:1 — app.py
+#  TERMINAL TRADINGOWY 1:1 — analyzer_ultra.py
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -187,30 +187,52 @@ def fibonacci_levels(df):
 
 
 def detect_trend(series):
-    if len(series) < 5:
+    """
+    Stabilna wersja — działa dla każdej serii.
+    Trend na podstawie zmiany ceny w ostatnich N świecach.
+    """
+    series = series.dropna()
+
+    if len(series) < 3:
         return "NEUTRAL"
-    close_now = series.iloc[-1]
-    close_prev = series.iloc[-5]
+
+    step = min(10, len(series) - 1)
+    close_now = float(series.iloc[-1])
+    close_prev = float(series.iloc[-step])
+
     if close_now > close_prev:
         return "BULL"
     elif close_now < close_prev:
         return "BEAR"
-    return "NEUTRAL"
+    else:
+        return "NEUTRAL"
 
 
 def detect_multi_trend(df):
-    close = df["Close"]
+    close = df["Close"].dropna()
+
+    if len(close) < 5:
+        return {
+            "short_term": "NEUTRAL",
+            "medium_term": "NEUTRAL",
+            "long_term": "NEUTRAL",
+            "momentum": 0.0,
+            "strength": 0.0,
+        }
+
     short = detect_trend(close[-20:])
     medium = detect_trend(close[-50:])
     long = detect_trend(close[-200:])
-    momentum = close.diff().iloc[-1]
+
+    momentum = float(close.diff().iloc[-1])
     strength = abs(momentum)
+
     return {
         "short_term": short,
         "medium_term": medium,
         "long_term": long,
         "momentum": momentum,
-        "strength": strength
+        "strength": strength,
     }
 
 
