@@ -1,5 +1,7 @@
+
 # ==========================================
-#  TERMINAL TRADINGOWY — analyzer_ultra.py (spójny, bez modułów)
+#  TERMINAL TRADINGOWY — analyzer_ultra.py
+#  Wersja: spójna, bez modułów, z normalizacją danych
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -144,6 +146,17 @@ def sidebar():
 # ==========================================
 #  DANE I WSKAŹNIKI
 # ==========================================
+def _to_scalar(x):
+    if isinstance(x, (list, tuple)):
+        return x[0]
+    if hasattr(x, "item"):
+        try:
+            return x.item()
+        except Exception:
+            return x
+    return x
+
+
 def get_price_data(symbol, period, interval, live=False):
     if not symbol:
         return pd.DataFrame()
@@ -154,11 +167,7 @@ def get_price_data(symbol, period, interval, live=False):
 
     # normalizacja wszystkich kolumn do 1D float
     for col in df.columns:
-        df[col] = df[col].apply(
-            lambda x: x[0]
-            if isinstance(x, (list, tuple))
-            else (x.item() if hasattr(x, "item") else x)
-        )
+        df[col] = df[col].apply(_to_scalar)
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df = df.dropna()
@@ -201,11 +210,6 @@ def fibonacci_levels(df):
     high = df["High"]
     low = df["Low"]
 
-    if isinstance(high, pd.DataFrame):
-        high = high.iloc[:, 0]
-    if isinstance(low, pd.DataFrame):
-        low = low.iloc[:, 0]
-
     high = pd.to_numeric(high, errors="coerce")
     low = pd.to_numeric(low, errors="coerce")
 
@@ -230,9 +234,6 @@ def fibonacci_levels(df):
 def detect_trend(series):
     if series is None:
         return "NEUTRAL"
-
-    if isinstance(series, pd.DataFrame):
-        series = series.iloc[:, 0]
 
     s = pd.to_numeric(pd.Series(series), errors="coerce").dropna()
 
@@ -310,7 +311,7 @@ def get_usd_pln():
 
 
 def calculate_sl_tp(df, atr_value, trend):
-    close = df["Close"].iloc[-1]
+    close = float(df["Close"].iloc[-1])
 
     if trend == "BULL":
         sl = close - atr_value * 2
@@ -490,22 +491,11 @@ def scanner_window(settings):
 
             trend = detect_trend(df["Close"])
 
-            raw_close = df["Close"].iloc[-1]
-            last_close = pd.to_numeric(raw_close, errors="coerce")
+            last_close = float(df["Close"].iloc[-1])
+            volume = float(df["Volume"].iloc[-1])
 
-            raw_volume = df["Volume"].iloc[-1]
-            volume = pd.to_numeric(raw_volume, errors="coerce")
-
-            if pd.isna(last_close):
-                st.write("Cena: brak danych")
-            else:
-                st.write(f"Cena: {last_close:.2f}")
-
-            if pd.isna(volume):
-                st.write("Wolumen: brak danych")
-            else:
-                st.write(f"Wolumen: {int(volume)}")
-
+            st.write(f"Cena: {last_close:.2f}")
+            st.write(f"Wolumen: {int(volume)}")
             st.write(f"Trend: {trend}")
 
 
@@ -617,7 +607,7 @@ def sl_tp_window(symbol, settings):
 
     df = df.copy()
     df["ATR"] = atr(df)
-    atr_value = df["ATR"].iloc[-1]
+    atr_value = float(df["ATR"].iloc[-1])
     trend = detect_trend(df["Close"])
 
     results = calculate_sl_tp(df, atr_value, trend)
