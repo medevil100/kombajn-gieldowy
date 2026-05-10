@@ -1122,10 +1122,7 @@ if __name__ == "__main__":
 # ==========================================
 #  GLOBALNY NEON DARK MODE — CSS
 # ==========================================
-def main_app():
-    inject_global_css()
-    st.title("💹 Terminal Tradingowy — 1:1")
- inject_global_css():
+def inject_global_css():
     st.markdown(
         f"""
         <style>
@@ -1197,5 +1194,14 @@ def main_app():
         unsafe_allow_html=True
     )
 
-# Inicjalizacja ustawień z sidebaru
-settings = sidebar()
+
+# ==========================================
+#  GŁÓWNY INTERFEJS
+# ==========================================
+def main_app():
+    inject_global_css()   # <-- poprawne miejsce i wcięcie
+
+    st.title("💹 Terminal Tradingowy — 1:1")
+    st.markdown("---")
+
+    # ...reszta Twojego kodu main_app()...
