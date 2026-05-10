@@ -1,4 +1,3 @@
-
 # ==========================================
 #  TERMINAL TRADINGOWY 1:1 — analyzer_ultra.py (bez modułów)
 # ==========================================
@@ -155,7 +154,7 @@ def sidebar():
 
 
 # ==========================================
-#  SEKCJA 2 — DANE, WSKAŹNIKI, BID/ASK, FX, RYZYKO
+#  DANE, WSKAŹNIKI, BID/ASK, FX, RYZYKO
 # ==========================================
 def get_price_data(symbol, period, interval, live=False):
     if not symbol:
@@ -198,9 +197,14 @@ def atr(df, period=14):
 
 
 def fibonacci_levels(df):
-    high = df["High"].max()
-    low = df["Low"].min()
+    high = pd.to_numeric(df["High"], errors="coerce").max()
+    low = pd.to_numeric(df["Low"], errors="coerce").min()
+
+    if pd.isna(high) or pd.isna(low):
+        return {lvl: None for lvl in ["0%", "23.6%", "38.2%", "50%", "61.8%", "100%"]}
+
     diff = high - low
+
     return {
         "0%": high,
         "23.6%": high - diff * 0.236,
@@ -212,34 +216,20 @@ def fibonacci_levels(df):
 
 
 def detect_trend(series):
-    """
-    Stabilna wersja — działa dla każdej postaci danych:
-    Series, DataFrame, ndarray 1D/2D, list.
-    """
     if series is None:
         return "NEUTRAL"
 
-    try:
-        if isinstance(series, pd.DataFrame):
-            series = series.iloc[:, 0]
-        if hasattr(series, "ndim") and series.ndim == 2:
-            series = series.reshape(-1)
-        series = pd.Series(series)
-    except Exception:
-        return "NEUTRAL"
+    if isinstance(series, pd.DataFrame):
+        series = series.iloc[:, 0]
 
-    series = pd.to_numeric(series, errors="coerce").dropna()
+    series = pd.to_numeric(pd.Series(series), errors="coerce").dropna()
 
     if len(series) < 3:
         return "NEUTRAL"
 
     step = min(10, len(series) - 1)
-
-    try:
-        close_now = float(series.iloc[-1])
-        close_prev = float(series.iloc[-step])
-    except Exception:
-        return "NEUTRAL"
+    close_now = float(series.iloc[-1])
+    close_prev = float(series.iloc[-step])
 
     if close_now > close_prev:
         return "BULL"
@@ -361,7 +351,7 @@ def position_risk(close, atr_value, spread, qty, sl):
 
 
 # ==========================================
-#  SEKCJA 3 — WYKRESY
+#  WYKRESY
 # ==========================================
 def show_price_chart(df, symbol):
     st.subheader(f"📈 Wykres ceny — {symbol}")
@@ -406,10 +396,19 @@ def show_atr_chart(df):
 
 
 def show_fibonacci_levels(df):
-    levels = fibonacci_levels(df)
     st.subheader("🔢 Poziomy Fibonacciego")
+
+    levels = fibonacci_levels(df)
+
     for lvl, val in levels.items():
-        st.write(f"{lvl}: {val:.2f}")
+        try:
+            num = float(val)
+            if pd.isna(num):
+                st.write(f"{lvl}: brak danych")
+            else:
+                st.write(f"{lvl}: {num:.2f}")
+        except Exception:
+            st.write(f"{lvl}: brak danych")
 
 
 def charts_window(symbol, settings):
@@ -433,7 +432,7 @@ def charts_window(symbol, settings):
 
 
 # ==========================================
-#  SEKCJA 4 — SKANER RYNKU
+#  SKANER RYNKU
 # ==========================================
 def scanner_window(settings):
     st.subheader("📡 Skaner rynku")
@@ -477,7 +476,7 @@ def scanner_window(settings):
 
 
 # ==========================================
-#  SEKCJA 5 — AI KOMENTARZ + AI CZAT
+#  AI KOMENTARZ + AI CZAT
 # ==========================================
 def ai_commentary(symbol, df, indicators, model_name):
     prompt = f"""
@@ -551,7 +550,7 @@ def ai_chat_window(settings):
 
 
 # ==========================================
-#  SEKCJA 6 — TRENDY
+#  TRENDY
 # ==========================================
 def trends_window(symbol, settings):
     st.subheader(f"📊 Trendy — {symbol}")
@@ -571,7 +570,7 @@ def trends_window(symbol, settings):
 
 
 # ==========================================
-#  SEKCJA 7 — SL / TP
+#  SL / TP
 # ==========================================
 def sl_tp_window(symbol, settings):
     st.subheader(f"🎯 SL / TP — {symbol}")
@@ -610,7 +609,7 @@ def sl_tp_window(symbol, settings):
 
 
 # ==========================================
-#  SEKCJA 8 — PORTFEL
+#  PORTFEL
 # ==========================================
 def portfolio_window():
     st.subheader("💼 Portfel")
@@ -648,7 +647,7 @@ def portfolio_window():
 
 
 # ==========================================
-#  SEKCJA 9 — BID / ASK / SPREAD
+#  BID / ASK / SPREAD
 # ==========================================
 def bidask_window(symbol):
     st.subheader(f"💹 BID / ASK — {symbol}")
