@@ -189,16 +189,24 @@ def fibonacci_levels(df):
 def detect_trend(series):
     """
     Stabilna wersja — działa dla każdej serii.
-    Trend na podstawie zmiany ceny w ostatnich N świecach.
+    Zabezpieczenia: pusta seria, NaN, złe typy.
     """
-    series = series.dropna()
+    if series is None:
+        return "NEUTRAL"
+
+    series = pd.Series(series)
+    series = pd.to_numeric(series, errors="coerce").dropna()
 
     if len(series) < 3:
         return "NEUTRAL"
 
     step = min(10, len(series) - 1)
-    close_now = float(series.iloc[-1])
-    close_prev = float(series.iloc[-step])
+
+    try:
+        close_now = float(series.iloc[-1])
+        close_prev = float(series.iloc[-step])
+    except Exception:
+        return "NEUTRAL"
 
     if close_now > close_prev:
         return "BULL"
@@ -209,7 +217,16 @@ def detect_trend(series):
 
 
 def detect_multi_trend(df):
-    close = df["Close"].dropna()
+    if df is None or df.empty or "Close" not in df.columns:
+        return {
+            "short_term": "NEUTRAL",
+            "medium_term": "NEUTRAL",
+            "long_term": "NEUTRAL",
+            "momentum": 0.0,
+            "strength": 0.0,
+        }
+
+    close = pd.to_numeric(df["Close"], errors="coerce").dropna()
 
     if len(close) < 5:
         return {
@@ -622,7 +639,8 @@ def main_app():
     st.title("💹 Terminal Tradingowy — 1:1")
     st.markdown("---")
 
-    module = st.selectbox(
+    # WYBÓR MODUŁU W SIDEBARZE
+    module = st.sidebar.selectbox(
         "Wybierz moduł:",
         [
             "📈 Wykresy i wskaźniki",
@@ -636,8 +654,7 @@ def main_app():
         ]
     )
 
-    st.markdown("---")
-
+    # SYMBOL TEŻ W SIDEBARZE (GDZIE POTRZEBNY)
     symbol_required = module in [
         "📈 Wykresy i wskaźniki",
         "🤖 AI komentarz",
@@ -648,11 +665,13 @@ def main_app():
 
     symbol = None
     if symbol_required:
-        symbol = st.text_input("Podaj symbol spółki:", placeholder="np. AAPL")
+        symbol = st.sidebar.text_input("Podaj symbol spółki:", placeholder="np. AAPL")
         if not symbol:
-            st.info("Wpisz symbol, aby kontynuować.")
+            st.info("Wpisz symbol w panelu bocznym, aby kontynuować.")
             return
         symbol = symbol.upper()
+
+    st.markdown("---")
 
     if module == "📈 Wykresy i wskaźniki":
         charts_window(symbol, settings)
