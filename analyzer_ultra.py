@@ -1,6 +1,5 @@
-
 # ==========================================
-#  TERMINAL TRADINGOWY 1:1 — analyzer_ultra.py (spójny, bez modułów)
+#  TERMINAL TRADINGOWY — analyzer_ultra.py (spójny, bez modułów)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -10,7 +9,6 @@ from openai import OpenAI
 
 client = OpenAI()
 
-# Kolory
 BACKGROUND = "#000000"
 NEON_GREEN = "#39FF14"
 NEON_PINK = "#FF1493"
@@ -21,7 +19,7 @@ st.set_page_config(page_title="Terminal Tradingowy", layout="wide")
 
 
 # ==========================================
-#  GLOBALNY NEON DARK MODE — CSS
+#  GLOBALNY STYL
 # ==========================================
 def inject_global_css():
     st.markdown(
@@ -30,11 +28,9 @@ def inject_global_css():
         .stApp {{
             background-color: {BACKGROUND};
         }}
-
         html, body, [class*="css"]  {{
             color: {NEON_YELLOW} !important;
         }}
-
         .stButton>button {{
             background-color: #111;
             color: {NEON_BLUE};
@@ -42,43 +38,37 @@ def inject_global_css():
             padding: 0.6rem 1.2rem;
             border-radius: 6px;
         }}
-
         .stButton>button:hover {{
             background-color: {NEON_BLUE};
             color: black;
         }}
-
         input, select, textarea {{
             background-color: #111 !important;
             color: {NEON_GREEN} !important;
             border: 1px solid {NEON_GREEN} !important;
         }}
-
         ::-webkit-scrollbar {{
             width: 8px;
         }}
-
         ::-webkit-scrollbar-thumb {{
             background: {NEON_PINK};
             border-radius: 10px;
         }}
-
         section[data-testid="stSidebar"] {{
             background-color: #0a0a0a !important;
             border-right: 2px solid {NEON_BLUE} !important;
         }}
-
         section[data-testid="stSidebar"] * {{
             color: {NEON_YELLOW} !important;
         }}
         </style>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
 
 # ==========================================
-#  SIDEBAR — USTAWIENIA
+#  SIDEBAR
 # ==========================================
 def sidebar():
     st.sidebar.title("⚙️ Ustawienia")
@@ -90,13 +80,13 @@ def sidebar():
     history_period = st.sidebar.selectbox(
         "Zakres danych:",
         ["1mo", "3mo", "6mo", "1y", "2y", "5y"],
-        index=2
+        index=2,
     )
 
     interval = st.sidebar.selectbox(
         "Interwał:",
         ["1m", "5m", "15m", "30m", "1h", "1d"],
-        index=5
+        index=5,
     )
 
     live_data = st.sidebar.checkbox("Dane live", value=False)
@@ -127,7 +117,7 @@ def sidebar():
     ai_model = st.sidebar.selectbox(
         "Model AI:",
         ["gpt-4o-mini", "gpt-4o", "gpt-4.1"],
-        index=0
+        index=0,
     )
 
     return {
@@ -152,32 +142,27 @@ def sidebar():
 
 
 # ==========================================
-#  DANE, WSKAŹNIKI, BID/ASK, FX, RYZYKO
+#  DANE I WSKAŹNIKI
 # ==========================================
 def get_price_data(symbol, period, interval, live=False):
     if not symbol:
         return pd.DataFrame()
 
     df = yf.download(symbol, period=period, interval=interval)
-
     if df is None or df.empty:
         return pd.DataFrame()
 
-    # 🔥 NORMALIZACJA WSZYSTKICH KOLUMN
+    # normalizacja wszystkich kolumn do 1D float
     for col in df.columns:
-        # jeśli kolumna ma listy/ndarray → wyciągamy pierwszy element
         df[col] = df[col].apply(
-            lambda x: x[0] if isinstance(x, (list, tuple)) else
-                      (x.item() if hasattr(x, "item") else x)
+            lambda x: x[0]
+            if isinstance(x, (list, tuple))
+            else (x.item() if hasattr(x, "item") else x)
         )
-
-        # konwersja na liczby
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df = df.dropna()
-
     return df
-
 
 
 def sma(series, length):
@@ -185,7 +170,8 @@ def sma(series, length):
 
 
 def rsi(series, period=14):
-    delta = series.diff()
+    s = pd.to_numeric(pd.Series(series), errors="coerce")
+    delta = s.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(period).mean()
@@ -195,8 +181,9 @@ def rsi(series, period=14):
 
 
 def bollinger(series, length=20, num_std=2):
-    ma = series.rolling(length).mean()
-    std = series.rolling(length).std()
+    s = pd.to_numeric(pd.Series(series), errors="coerce")
+    ma = s.rolling(length).mean()
+    std = s.rolling(length).std()
     upper = ma + num_std * std
     lower = ma - num_std * std
     return ma, upper, lower
@@ -236,7 +223,7 @@ def fibonacci_levels(df):
         "38.2%": high_val - diff * 0.382,
         "50%": high_val - diff * 0.5,
         "61.8%": high_val - diff * 0.618,
-        "100%": low_val
+        "100%": low_val,
     }
 
 
@@ -247,14 +234,14 @@ def detect_trend(series):
     if isinstance(series, pd.DataFrame):
         series = series.iloc[:, 0]
 
-    series = pd.to_numeric(pd.Series(series), errors="coerce").dropna()
+    s = pd.to_numeric(pd.Series(series), errors="coerce").dropna()
 
-    if len(series) < 3:
+    if len(s) < 3:
         return "NEUTRAL"
 
-    step = min(10, len(series) - 1)
-    close_now = float(series.iloc[-1])
-    close_prev = float(series.iloc[-step])
+    step = min(10, len(s) - 1)
+    close_now = float(s.iloc[-1])
+    close_prev = float(s.iloc[-step])
 
     if close_now > close_prev:
         return "BULL"
@@ -349,7 +336,7 @@ def calculate_sl_tp(df, atr_value, trend):
         "sl": sl,
         "tp": tp,
         "neutral": neutral,
-        "risk": risk
+        "risk": risk,
     }
 
 
@@ -374,7 +361,7 @@ def position_risk(close, atr_value, spread, qty, sl):
         "risk_per_share": risk_per_share,
         "total_risk": total_risk,
         "risk_percent": risk_percent,
-        "level": level
+        "level": level,
     }
 
 
@@ -390,33 +377,16 @@ def show_price_chart(df, symbol):
         open=df["Open"],
         high=df["High"],
         low=df["Low"],
-        close=df["Close"]
+        close=df["Close"],
     )
     fig.update_layout(template="plotly_dark", height=500)
     st.plotly_chart(fig, use_container_width=True)
 
 
-def show_bollinger_chart(df):
-    close = pd.to_numeric(df["Close"], errors="coerce")
-
-    ma, upper, lower = bollinger(close)
-
-    bb_df = pd.DataFrame(
-        {
-            "MA": ma.values,      # wymuszamy 1D
-            "Upper": upper.values,
-            "Lower": lower.values,
-        },
-        index=df.index,
-    )
-
-    bb_df = bb_df.dropna()
-
-    if bb_df.empty:
-        st.info("Za mało danych, żeby policzyć Bollinger Bands.")
-        return
-
-    st.line_chart(bb_df)
+def show_sma_chart(df):
+    df = df.copy()
+    df["SMA20"] = sma(df["Close"], 20)
+    st.line_chart(df["SMA20"])
 
 
 def show_rsi_chart(df):
@@ -425,19 +395,22 @@ def show_rsi_chart(df):
     st.line_chart(df["RSI"])
 
 
-def bollinger(series, length=20, num_std=2):
-    # upewniamy się, że to 1D Series float
-    s = pd.to_numeric(pd.Series(series), errors="coerce")
+def show_bollinger_chart(df):
+    close = df["Close"]
+    ma, upper, lower = bollinger(close)
 
-    ma = s.rolling(length).mean()
-    std = s.rolling(length).std()
+    bb_df = pd.DataFrame(
+        {
+            "MA": ma.values,
+            "Upper": upper.values,
+            "Lower": lower.values,
+        },
+        index=df.index,
+    ).dropna()
 
-    upper = ma + num_std * std
-    lower = ma - num_std * std
-
-    return ma, upper, lower
-
-
+    if bb_df.empty:
+        st.info("Za mało danych, żeby policzyć Bollinger Bands.")
+        return
 
     st.line_chart(bb_df)
 
@@ -481,7 +454,7 @@ def charts_window(symbol, settings):
 
 
 # ==========================================
-#  SKANER RYNKU
+#  SKANER
 # ==========================================
 def scanner_window(settings):
     st.subheader("📡 Skaner rynku")
@@ -503,7 +476,7 @@ def scanner_window(settings):
     for sym in list(st.session_state.symbols_list):
         col1, col2 = st.columns([4, 1])
         col1.write(f"🔹 {sym}")
-        if col2.button(f"❌", key=f"del_{sym}"):
+        if col2.button("❌", key=f"del_{sym}"):
             st.session_state.symbols_list.remove(sym)
             st.experimental_rerun()
 
@@ -516,16 +489,28 @@ def scanner_window(settings):
                 continue
 
             trend = detect_trend(df["Close"])
-            last_close = df["Close"].iloc[-1]
-            volume = df["Volume"].iloc[-1]
 
-            st.write(f"Cena: {last_close:.2f}")
-            st.write(f"Wolumen: {volume}")
+            raw_close = df["Close"].iloc[-1]
+            last_close = pd.to_numeric(raw_close, errors="coerce")
+
+            raw_volume = df["Volume"].iloc[-1]
+            volume = pd.to_numeric(raw_volume, errors="coerce")
+
+            if pd.isna(last_close):
+                st.write("Cena: brak danych")
+            else:
+                st.write(f"Cena: {last_close:.2f}")
+
+            if pd.isna(volume):
+                st.write("Wolumen: brak danych")
+            else:
+                st.write(f"Wolumen: {int(volume)}")
+
             st.write(f"Trend: {trend}")
 
 
 # ==========================================
-#  AI KOMENTARZ + AI CZAT
+#  AI KOMENTARZ + CZAT
 # ==========================================
 def ai_commentary(symbol, df, indicators, model_name):
     prompt = f"""
@@ -541,7 +526,7 @@ def ai_commentary(symbol, df, indicators, model_name):
 
     response = client.chat.completions.create(
         model=model_name,
-        messages=[{"role": "user", "content": prompt}]
+        messages=[{"role": "user", "content": prompt}],
     )
 
     return response.choices[0].message.content
@@ -550,36 +535,22 @@ def ai_commentary(symbol, df, indicators, model_name):
 def ai_commentary_window(symbol, settings):
     st.subheader("🤖 AI Komentarz")
 
-   df = get_price_data(sym, settings["history_period"], settings["interval"], settings["live_data"])
-if df.empty:
-    st.error("Brak danych.")
-    continue
+    df = get_price_data(symbol, settings["history_period"], settings["interval"], settings["live_data"])
+    if df.empty:
+        st.error("Brak danych.")
+        return
 
-# BEZPIECZNE POBRANIE CENY
-raw_close = df["Close"].iloc[-1]
+    df = df.copy()
+    df["RSI"] = rsi(df["Close"])
+    df["ATR"] = atr(df)
+    trends = detect_multi_trend(df)
 
-# konwersja na liczbę
-last_close = pd.to_numeric(raw_close, errors="coerce")
-
-# wolumen też zabezpieczamy
-raw_volume = df["Volume"].iloc[-1]
-volume = pd.to_numeric(raw_volume, errors="coerce")
-
-trend = detect_trend(df["Close"])
-
-# WYŚWIETLANIE
-if pd.isna(last_close):
-    st.write("Cena: brak danych")
-else:
-    st.write(f"Cena: {last_close:.2f}")
-
-if pd.isna(volume):
-    st.write("Wolumen: brak danych")
-else:
-    st.write(f"Wolumen: {int(volume)}")
-
-st.write(f"Trend: {trend}")
-
+    indicators = {
+        "trend": trends["short_term"],
+        "rsi": df["RSI"].iloc[-1],
+        "atr": df["ATR"].iloc[-1],
+        "momentum": trends["momentum"],
+        "strength": trends["strength"],
     }
 
     comment = ai_commentary(symbol, df, indicators, settings["ai_model"])
@@ -601,8 +572,8 @@ def ai_chat_window(settings):
                 messages=[
                     {"role": "system", "content": "Jesteś pomocnym asystentem tradingowym."},
                     *st.session_state.chat_history,
-                    {"role": "user", "content": user_msg}
-                ]
+                    {"role": "user", "content": user_msg},
+                ],
             )
             ai_msg = response.choices[0].message.content
             st.session_state.chat_history.append({"role": "user", "content": user_msg})
@@ -691,11 +662,13 @@ def portfolio_window():
 
     if st.button("➕ Dodaj", key="pf_add"):
         if symbol and qty > 0 and price_usd > 0:
-            st.session_state.portfolio.append({
-                "symbol": symbol.upper(),
-                "qty": qty,
-                "price_pln": price_usd * usd_pln
-            })
+            st.session_state.portfolio.append(
+                {
+                    "symbol": symbol.upper(),
+                    "qty": qty,
+                    "price_pln": price_usd * usd_pln,
+                }
+            )
 
     total_value = 0.0
     for pos in list(st.session_state.portfolio):
@@ -712,7 +685,7 @@ def portfolio_window():
 
 
 # ==========================================
-#  BID / ASK / SPREAD
+#  BID / ASK
 # ==========================================
 def bidask_window(symbol):
     st.subheader(f"💹 BID / ASK — {symbol}")
@@ -730,7 +703,7 @@ def bidask_window(symbol):
 
 
 # ==========================================
-#  GŁÓWNY INTERFEJS — BEZ MODUŁÓW
+#  MAIN
 # ==========================================
 def main_app():
     inject_global_css()
@@ -741,7 +714,6 @@ def main_app():
 
     symbol = settings["symbol"]
 
-    # WYKRESY + WSKAŹNIKI
     if symbol:
         charts_window(symbol, settings)
     else:
@@ -749,44 +721,33 @@ def main_app():
 
     st.markdown("---")
 
-    # SKANER
     if settings["show_scanner"]:
         scanner_window(settings)
         st.markdown("---")
 
-    # TRENDY
     if settings["show_trends"] and symbol:
         trends_window(symbol, settings)
         st.markdown("---")
 
-    # SL / TP
     if settings["show_sl_tp"] and symbol:
         sl_tp_window(symbol, settings)
         st.markdown("---")
 
-    # AI KOMENTARZ
     if settings["show_ai_comment"] and symbol:
         ai_commentary_window(symbol, settings)
         st.markdown("---")
 
-    # AI CZAT
     if settings["show_ai_chat"]:
         ai_chat_window(settings)
         st.markdown("---")
 
-    # PORTFEL
     if settings["show_portfolio"]:
         portfolio_window()
         st.markdown("---")
 
-    # BID / ASK
     if settings["show_bidask"] and symbol:
         bidask_window(symbol)
 
 
-# ==========================================
-#  START APLIKACJI
-# ==========================================
 if __name__ == "__main__":
     main_app()
-
