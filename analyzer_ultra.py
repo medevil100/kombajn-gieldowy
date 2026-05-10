@@ -1,549 +1,1198 @@
-# ============================================
-# ULTRA ENGINE v14 — TradingView-like GPW / Biotech / AI
-# PART 1/3 — CORE ENGINE
-# ============================================
-
-import os
-os.chdir(os.path.dirname(os.path.abspath(__file__)))  # fix working directory
-
-import numpy as np
-import pandas as pd
+# ==========================================
+#  IMPORTY I KONFIGURACJA APLIKACJI
+# ==========================================
 import streamlit as st
 import yfinance as yf
+import pandas as pd
 import plotly.graph_objects as go
+from openai import OpenAI
 
-# ============================================
-# TRYB TESTOWY / KLUCZ OPENAI
-# ============================================
+## ==========================================
+#  KLIENT AI — KLUCZ W STREAMLIT SECRETS
+# ==========================================
+import streamlit as st
+from openai import OpenAI
 
-IS_TEST = os.getenv("PYTEST_RUNNING") == "1"
+# Klucz pobierany automatycznie z .streamlit/secrets.toml
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-if IS_TEST:
-    OPENAI_KEY = ""
-else:
-    try:
-        OPENAI_KEY = st.secrets["OPENAI_API_KEY"]
-    except Exception:
-        OPENAI_KEY = ""
-        st.warning("Brak klucza OPENAI_API_KEY — AI wyłączone.")
+client = OpenAI()
 
-# ============================================
-# PRESETY GPW / BIOTECH
-# ============================================
+# ==========================================
+#  KOLORY I STYL NEONOWY
+# ==========================================
+NEON_BLUE = "#00baff"
+NEON_PINK = "#ff00ff"
+NEON_GREEN = "#39ff14"
+NEON_YELLOW = "#f5ff00"
+BACKGROUND = "#0a0a0f"
 
-GPW_BIOTECH = [
-    "MABION.WA",
-    "RYVU.WA",
-    "CELON.WA",
-    "BIOTON.WA",
-    "ONCO.WA",
-]
+# ==========================================
+#  USTAWIENIA STRONY
+# ==========================================
+st.set_page_config(
+    page_title="Terminal Tradingowy",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-US_BIOTECH = [
-    "NVAX",
-    "MRNA",
-    "BNTX",
-    "REGN",
-    "VRTX",
-]
+# ==========================================
+#  FUNKCJE POMOCNICZE: MODELE AI
+# ==========================================
+def get_ai_model(name: str) -> str:
+    if name == "AI‑1":
+        return "gpt-4o-mini"
+    if name == "AI‑2":
+        return "gpt-4o"
+    if name == "AI‑3":
+        return "gpt-o3-mini"
+    if name == "AI‑4":
+        return "gpt-o1"
+    return "gpt-4o-mini"
 
-# ============================================
-# WSKAŹNIKI — SMA / EMA / MACD / RSI / ATR / Momentum / Volatility
-# ============================================
+# ==========================================
+#  PANEL BOCZNY (SIDEBAR)
+# ==========================================
+def sidebar():
+    st.sidebar.title("⚙️ Ustawienia")
 
-def compute_rsi(series, period=14):
+    # Auto-odświeżanie
+    refresh = st.sidebar.number_input(
+        "🔄 Auto-odświeżanie (minuty)",
+        min_value=1,
+        max_value=120,
+        value=5
+    )
+
+    st.sidebar.markdown("---")
+
+    # Skaner i dane
+    st.sidebar.subheader("📡 Skaner i dane")
+
+    history_period = st.sidebar.selectbox(
+        "Okres historyczny",
+        ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"]
+    )
+
+    live_data = st.sidebar.checkbox("Używaj danych bieżących (real-time)")
+
+    interval = st.sidebar.selectbox(
+        "Interwał",
+        ["30m", "1h", "2h", "4h", "1d", "1wk"]
+    )
+
+    st.sidebar.markdown("---")
+
+    # Wykresy i wskaźniki
+    st.sidebar.subheader("📊 Wykresy i wskaźniki")
+
+    show_sma = st.sidebar.checkbox("SMA")
+    show_rsi = st.sidebar.checkbox("RSI")
+    show_boll = st.sidebar.checkbox("Bollinger Bands")
+    show_atr = st.sidebar.checkbox("ATR")
+    show_fibo = st.sidebar.checkbox("Fibonacci")
+
+    st.sidebar.markdown("---")
+
+    # AI
+    st.sidebar.subheader("🤖 AI analiza")
+
+    ai_model = st.sidebar.selectbox(
+        "Wybierz model AI",
+        ["AI‑1", "AI‑2", "AI‑3", "AI‑4"]
+    )
+
+    st.sidebar.markdown("---")
+
+    # Portfel (pusty, gotowy do zapisu)
+    st.sidebar.subheader("💼 Portfel (PLN)")
+
+    st.sidebar.text_input("Nazwa spółki (wyłączone)", disabled=True)
+    st.sidebar.number_input("Kwota (wyłączone)", disabled=True)
+
+    save_btn = st.sidebar.button("💾 Zapisz dane portfela")
+
+    return {
+        "refresh": refresh,
+        "history_period": history_period,
+        "live_data": live_data,
+        "interval": interval,
+        "show_sma": show_sma,
+        "show_rsi": show_rsi,
+        "show_boll": show_boll,
+        "show_atr": show_atr,
+        "show_fibo": show_fibo,
+        "ai_model": ai_model,
+        "save_btn": save_btn
+    }
+# ==========================================
+#  DANE — POBIERANIE NOTOWAŃ
+# ==========================================
+def get_price_data(symbol, period, interval, live):
+    if live:
+        df = yf.download(symbol, period="1d", interval=interval)
+    else:
+        df = yf.download(symbol, period=period, interval=interval)
+
+    df.dropna(inplace=True)
+    return df
+
+
+# ==========================================
+#  BID / ASK / SPREAD
+# ==========================================
+def get_bid_ask(symbol):
+    ticker = yf.Ticker(symbol)
+    info = ticker.fast_info
+
+    bid = info.get("bid")
+    ask = info.get("ask")
+
+    if bid is None or ask is None:
+        return None, None, None
+
+    spread = ask - bid
+    return bid, ask, spread
+
+
+# ==========================================
+#  KURS USD/PLN
+# ==========================================
+def get_usd_pln():
+    df = yf.download("USDPLN=X", period="1d", interval="1h")
+    return df["Close"].iloc[-1]
+
+
+# ==========================================
+#  WSKAŹNIKI — SMA
+# ==========================================
+def sma(series, period=20):
+    return series.rolling(window=period).mean()
+
+
+# ==========================================
+#  WSKAŹNIKI — RSI
+# ==========================================
+def rsi(series, period=14):
     delta = series.diff()
     gain = delta.clip(lower=0).rolling(period).mean()
     loss = -delta.clip(upper=0).rolling(period).mean()
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def compute_macd(series):
-    ema12 = series.ewm(span=12).mean()
-    ema26 = series.ewm(span=26).mean()
-    macd = ema12 - ema26
-    signal = macd.ewm(span=9).mean()
-    return macd, signal
 
-def compute_atr(df, period=14):
+# ==========================================
+#  WSKAŹNIKI — BOLLINGER BANDS
+# ==========================================
+def bollinger(series, period=20, std_mult=2):
+    ma = series.rolling(period).mean()
+    std = series.rolling(period).std()
+    upper = ma + std_mult * std
+    lower = ma - std_mult * std
+    return ma, upper, lower
+
+
+# ==========================================
+#  WSKAŹNIKI — ATR
+# ==========================================
+def atr(df, period=14):
     high_low = df["High"] - df["Low"]
     high_close = (df["High"] - df["Close"].shift()).abs()
     low_close = (df["Low"] - df["Close"].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return tr.rolling(period).mean()
 
-def trend_strength_score(df):
-    score = np.zeros(len(df))
-    score += np.where(df["EMA20"] > df["EMA50"], 1, -1)
-    score += np.where(df["SMA20"] > df["SMA50"], 1, -1)
-    score += np.where(df["RSI"] > 55, 1, 0)
-    score += np.where(df["RSI"] < 45, -1, 0)
-    return score
 
-def volume_heat(df, window=20):
-    vol = df["Volume"]
-    ma = vol.rolling(window).mean()
-    heat = (vol / ma).clip(0, 5)
-    return heat
-
-def add_indicators_full(df):
-    df = df.copy()
-    df["SMA20"] = df["Close"].rolling(20).mean()
-    df["SMA50"] = df["Close"].rolling(50).mean()
-    df["SMA200"] = df["Close"].rolling(200).mean()
-    df["EMA20"] = df["Close"].ewm(span=20).mean()
-    df["EMA50"] = df["Close"].ewm(span=50).mean()
-    df["RSI"] = compute_rsi(df["Close"])
-    df["MACD"], df["MACD_signal"] = compute_macd(df["Close"])
-    df["ATR"] = compute_atr(df)
-    df["Momentum"] = df["Close"].diff(5)
-    df["Volatility"] = df["Close"].pct_change().rolling(20).std() * 100
-    df["TrendScore"] = trend_strength_score(df)
-    df["VolHeat"] = volume_heat(df)
-    return df
-
-# ============================================
-# PATTERNY — breakout / konsolidacja / volume spike
-# ============================================
-
-def detect_breakout(df, lookback=20, thr=0.01):
-    if len(df) < lookback + 1:
-        return False
-    recent = df["Close"].iloc[-1]
-    max_prev = df["Close"].iloc[-lookback:-1].max()
-    return recent > max_prev * (1 + thr)
-
-def detect_consolidation(df, lookback=20, threshold_pct=3.0):
-    if len(df) < lookback:
-        return False
-    window = df["Close"].iloc[-lookback:]
-    rng = window.max() - window.min()
-    mid = window.mean()
-    if mid == 0:
-        return False
-    return (rng / mid * 100) < threshold_pct
-
-def detect_volume_spike(df, window=20, spike_mult=2.0):
-    if len(df) < window + 1:
-        return False
-    vol = df["Volume"]
-    ma = vol.rolling(window).mean()
-    return vol.iloc[-1] > ma.iloc[-1] * spike_mult
-
-# ============================================
-# SL / TP — ATR-based + R:R
-# ============================================
-
-def calc_sl_tp(entry, atr, sl_mult=2.0, tp_mult=3.0, direction="long"):
-    if atr is None or atr == 0 or np.isnan(atr):
-        return None, None, None
-    if direction == "long":
-        sl = entry - sl_mult * atr
-        tp = entry + tp_mult * atr
-    else:
-        sl = entry + sl_mult * atr
-        tp = entry - tp_mult * atr
-    rr = abs(tp - entry) / abs(entry - sl) if sl != entry else None
-    return sl, tp, rr
-# ============================================
-# ULTRA ENGINE v14 — PART 2/3
-# AI PIPELINE (4 MODELS) + COLLECTIVE VERDICT
-# ============================================
-
-# ============================================
-# AI — HELPER
-# ============================================
-
-def _ensure_ai():
-    if not OPENAI_KEY:
-        return False, "AI wyłączone — brak klucza."
-    if IS_TEST:
-        return False, "AI TEST MODE — pominięte."
-    return True, None
-
-import openai
-
-# ============================================
-# AI MODEL DEFINITIONS (v13 CLASSIC)
-# ============================================
-
-AI_MODELS = {
-    "AI1": "gpt-4o-mini",     # szybki sygnałowy
-    "AI2": "gpt-4o",          # analiza kontekstowa
-    "AI3": "gpt-4.1",         # Prop-Trader Mode
-    "AI4": "gpt-4.1-mini",    # scoring / sanity-check
-}
-
-# ============================================
-# AI — PROMPTS
-# ============================================
-
-def _prompt_ai1_signal(df, ticker):
-    last = df.iloc[-1]
-    return f"""
-    Model: AI-1 (Signal Engine)
-    Ticker: {ticker}
-
-    Dane:
-    Close: {last['Close']:.2f}
-    SMA20: {last['SMA20']:.2f}
-    SMA50: {last['SMA50']:.2f}
-    SMA200: {last['SMA200']:.2f}
-    EMA20: {last['EMA20']:.2f}
-    EMA50: {last['EMA50']:.2f}
-    RSI: {last['RSI']:.2f}
-    MACD: {last['MACD']:.2f}
-    MACD_signal: {last['MACD_signal']:.2f}
-
-    Wygeneruj:
-    - Sygnał: long / short / neutral
-    - Siła sygnału: 1-10
-    - Komentarz (1 zdanie)
-    """
-
-def _prompt_ai2_context(df, ticker):
-    last = df.iloc[-1]
-    return f"""
-    Model: AI-2 (Context Engine)
-    Ticker: {ticker}
-
-    Dane:
-    TrendScore: {last['TrendScore']:.2f}
-    VolHeat: {last['VolHeat']:.2f}
-    Momentum: {last['Momentum']:.2f}
-    Volatility: {last['Volatility']:.2f}
-
-    Wygeneruj:
-    - Ocena kontekstu: bullish / bearish / mixed
-    - Ryzyko: low / medium / high
-    - Komentarz (1-2 zdania)
-    """
-
-def _prompt_ai3_prop(df, ticker):
-    last = df.iloc[-1]
-    return f"""
-    Model: AI-3 (Prop Trader Mode)
-    Ticker: {ticker}
-
-    Dane:
-    Close: {last['Close']:.2f}
-    EMA20: {last['EMA20']:.2f}
-    EMA50: {last['EMA50']:.2f}
-    RSI: {last['RSI']:.2f}
-    MACD: {last['MACD']:.2f}
-    MACD_signal: {last['MACD_signal']:.2f}
-    TrendScore: {last['TrendScore']:.2f}
-
-    Wygeneruj:
-    - Trend: strong/mixed/weak
-    - Momentum: strong/mixed/weak
-    - Ryzyko: low/medium/high
-    - Komentarz techniczny (max 2 zdania)
-    """
-
-def _prompt_ai4_score(df, ticker):
-    last = df.iloc[-1]
-    return f"""
-    Model: AI-4 (Scoring Engine)
-    Ticker: {ticker}
-
-    Dane:
-    TrendScore: {last['TrendScore']:.2f}
-    RSI: {last['RSI']:.2f}
-    VolHeat: {last['VolHeat']:.2f}
-    Momentum: {last['Momentum']:.2f}
-
-    Wygeneruj:
-    - Ocena techniczna 0-100
-    - Komentarz (1 zdanie)
-    """
-
-# ============================================
-# AI — RUNNER
-# ============================================
-
-def _run_ai(model_name, prompt):
-    ok, msg = _ensure_ai()
-    if not ok:
-        return msg
-
-    openai.api_key = OPENAI_KEY
-
-    resp = openai.ChatCompletion.create(
-        model=model_name,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    return resp["choices"][0]["message"]["content"]
-
-# ============================================
-# AI — PIPELINE EXECUTION
-# ============================================
-
-def run_ai_pipeline(df, ticker):
-    """Uruchamia 4 modele AI i zwraca ich wyniki."""
-    results = {}
-
-    # AI-1
-    results["AI1"] = _run_ai(
-        AI_MODELS["AI1"],
-        _prompt_ai1_signal(df, ticker)
-    )
-
-    # AI-2
-    results["AI2"] = _run_ai(
-        AI_MODELS["AI2"],
-        _prompt_ai2_context(df, ticker)
-    )
-
-    # AI-3
-    results["AI3"] = _run_ai(
-        AI_MODELS["AI3"],
-        _prompt_ai3_prop(df, ticker)
-    )
-
-    # AI-4
-    results["AI4"] = _run_ai(
-        AI_MODELS["AI4"],
-        _prompt_ai4_score(df, ticker)
-    )
-
-    return results
-
-# ============================================
-# AI — COLLECTIVE VERDICT (v13 CLASSIC)
-# ============================================
-
-def parse_score_from_ai4(text):
-    """Wyciąga ocenę 0-100 z AI-4."""
-    import re
-    nums = re.findall(r"\d+", text)
-    if not nums:
-        return 50
-    val = int(nums[0])
-    return max(0, min(100, val))
-
-def collective_verdict(ai_results):
-    """Łączy 4 modele AI w finalny werdykt."""
-    score = parse_score_from_ai4(ai_results["AI4"])
-
-    # klasyczny rating v13
-    if score >= 85:
-        verdict = "STRONG BUY"
-        color = "green"
-    elif score >= 70:
-        verdict = "BUY"
-        color = "lime"
-    elif score >= 45:
-        verdict = "NEUTRAL"
-        color = "gray"
-    elif score >= 25:
-        verdict = "SELL"
-        color = "orange"
-    else:
-        verdict = "STRONG SELL"
-        color = "red"
+# ==========================================
+#  WSKAŹNIKI — FIBONACCI
+# ==========================================
+def fibonacci_levels(df):
+    high = df["High"].max()
+    low = df["Low"].min()
+    diff = high - low
 
     return {
-        "score": score,
-        "verdict": verdict,
-        "color": color,
+        "0%": high,
+        "23.6%": high - 0.236 * diff,
+        "38.2%": high - 0.382 * diff,
+        "50%": high - 0.5 * diff,
+        "61.8%": high - 0.618 * diff,
+        "100%": low
     }
-# ============================================
-# ULTRA ENGINE v14 — PART 3/3
-# UI + INTEGRATION (TradingView-like)
-# ============================================
 
-# ============================================
-# WYKRES (TradingView-like)
-# ============================================
 
-def plot_tradingview_style(df, ticker):
+# ==========================================
+#  TREND — KRÓTKI / ŚREDNI / DŁUGI
+# ==========================================
+def detect_trend(close_series):
+    if close_series.iloc[-1] > close_series.iloc[-20]:
+        return "BULL"
+    elif close_series.iloc[-1] < close_series.iloc[-20]:
+        return "BEAR"
+    return "NEUTRAL"
+
+
+def detect_multi_trend(df):
+    close = df["Close"]
+
+    trends = {
+        "short": detect_trend(close[-20:]),
+        "medium": detect_trend(close[-50:]),
+        "long": detect_trend(close[-200:])
+    }
+
+    momentum = close.iloc[-1] - close.iloc[-10]
+    strength = abs(close.iloc[-1] - close.iloc[-50])
+
+    return {
+        "short_term": trends["short"],
+        "medium_term": trends["medium"],
+        "long_term": trends["long"],
+        "momentum": momentum,
+        "strength": strength
+    }
+
+
+# ==========================================
+#  SL / TP — LOGIKA
+# ==========================================
+def calculate_sl_tp(df, atr_value, trend):
+    close = df["Close"].iloc[-1]
+
+    sl = close - (atr_value * 2)
+    tp = close + (atr_value * 3)
+
+    if trend == "BULL":
+        tp = close + (atr_value * 4)
+    elif trend == "BEAR":
+        sl = close - (atr_value * 3)
+
+    neutral = close
+
+    risk = "LOW" if atr_value < close * 0.01 else "MEDIUM" if atr_value < close * 0.02 else "HIGH"
+
+    return {
+        "close": close,
+        "sl": sl,
+        "tp": tp,
+        "neutral": neutral,
+        "risk": risk
+    }
+
+
+# ==========================================
+#  RYZYKO POZYCJI — ATR + SPREAD + ILOŚĆ AKCJI
+# ==========================================
+def position_risk(close, atr_value, spread, qty, sl):
+    position_value = close * qty
+
+    risk_per_share = (close - sl) + spread
+    total_risk = risk_per_share * qty
+
+    risk_percent = (total_risk / position_value) * 100 if position_value > 0 else 0
+
+    if risk_percent < 1:
+        level = "LOW"
+    elif risk_percent < 3:
+        level = "MEDIUM"
+        level = "MEDIUM"
+    else:
+        level = "HIGH"
+
+    return {
+        "position_value": position_value,
+        "risk_per_share": risk_per_share,
+        "total_risk": total_risk,
+        "risk_percent": risk_percent,
+        "level": level
+    }
+# ==========================================
+#  WYKRES CENY — OSOBNE OKNO
+# ==========================================
+def show_price_chart(df, symbol):
+    st.subheader(f"📈 Wykres ceny — {symbol}")
+
     fig = go.Figure()
 
-    fig.add_trace(go.Candlestick(
+    fig.add_candlestick(
         x=df.index,
         open=df["Open"],
         high=df["High"],
         low=df["Low"],
         close=df["Close"],
-        name="Price",
-        increasing_line_color="#26a69a",
-        decreasing_line_color="#ef5350",
-        increasing_fillcolor="#26a69a",
-        decreasing_fillcolor="#ef5350",
-        showlegend=False,
-    ))
-
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["SMA20"],
-        line=dict(color="#42a5f5", width=1),
-        name="SMA20"
-    ))
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["SMA50"],
-        line=dict(color="#ab47bc", width=1),
-        name="SMA50"
-    ))
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["SMA200"],
-        line=dict(color="#ffa726", width=1),
-        name="SMA200"
-    ))
+        name="Cena"
+    )
 
     fig.update_layout(
-        title=f"{ticker} — TradingView-like",
-        xaxis_rangeslider_visible=False,
-        template="plotly_white",
-        height=600,
-        margin=dict(l=10, r=10, t=40, b=10),
+        template="plotly_dark",
+        height=500,
+        paper_bgcolor=BACKGROUND,
+        plot_bgcolor=BACKGROUND,
+        font=dict(color=NEON_YELLOW)
     )
-    return fig
 
-# ============================================
-# GŁÓWNA ANALIZA TICKERA
-# ============================================
+    st.plotly_chart(fig, use_container_width=True)
 
-def run_analysis(ticker, period="6mo", interval="1d"):
-    df = yf.download(ticker, period=period, interval=interval)
-    if df.empty:
-        st.error("Brak danych.")
+
+# ==========================================
+#  WYKRES SMA — OSOBNE OKNO
+# ==========================================
+def show_sma_chart(df):
+    st.subheader("📘 SMA (Simple Moving Average)")
+
+    df["SMA20"] = sma(df["Close"], 20)
+
+    st.line_chart(df["SMA20"])
+
+
+# ==========================================
+#  WYKRES RSI — OSOBNE OKNO
+# ==========================================
+def show_rsi_chart(df):
+    st.subheader("📗 RSI (Relative Strength Index)")
+
+    df["RSI"] = rsi(df["Close"])
+
+    st.line_chart(df["RSI"])
+
+
+# ==========================================
+#  WYKRES BOLLINGER BANDS — OSOBNE OKNO
+# ==========================================
+def show_bollinger_chart(df):
+    st.subheader("📕 Bollinger Bands")
+
+    ma, upper, lower = bollinger(df["Close"])
+
+    st.line_chart({
+        "MA": ma,
+        "Upper": upper,
+        "Lower": lower
+    })
+
+
+# ==========================================
+#  WYKRES ATR — OSOBNE OKNO
+# ==========================================
+def show_atr_chart(df):
+    st.subheader("📙 ATR (Average True Range)")
+
+    df["ATR"] = atr(df)
+
+    st.line_chart(df["ATR"])
+
+
+# ==========================================
+#  WYKRES FIBONACCI — OSOBNE OKNO
+# ==========================================
+def show_fibonacci_levels(df):
+    st.subheader("📐 Poziomy Fibonacciego")
+
+    levels = fibonacci_levels(df)
+
+    for lvl, val in levels.items():
+        st.write(f"{lvl}: {val:.2f}")
+
+
+# ==========================================
+#  GŁÓWNA FUNKCJA WYKRESÓW
+# ==========================================
+def charts_window(symbol, settings):
+    df = get_price_data(
+        symbol=symbol,
+        period=settings["history_period"],
+        interval=settings["interval"],
+        live=settings["live_data"]
+    )
+
+    # Wykres ceny
+    show_price_chart(df, symbol)
+
+    # SMA
+    if settings["show_sma"]:
+        show_sma_chart(df)
+
+    # RSI
+    if settings["show_rsi"]:
+        show_rsi_chart(df)
+
+    # Bollinger
+    if settings["show_boll"]:
+        show_bollinger_chart(df)
+
+    # ATR
+    if settings["show_atr"]:
+        show_atr_chart(df)
+
+    # Fibonacci
+    if settings["show_fibo"]:
+        show_fibonacci_levels(df)
+# ==========================================
+#  SKANER RYNKU — OKNO GŁÓWNE
+# ==========================================
+def scanner_window(settings):
+
+    st.subheader("📡 Skaner rynku")
+
+    # --------------------------------------
+    #  INICJALIZACJA LISTY SPÓŁEK
+    # --------------------------------------
+    if "symbols_list" not in st.session_state:
+        st.session_state.symbols_list = []
+
+    # --------------------------------------
+    #  DODAWANIE SPÓŁEK (jedna linia, przecinki)
+    # --------------------------------------
+    new_symbols = st.text_input(
+        "Dodaj symbole (oddzielone przecinkami):",
+        placeholder="np. AAPL, MSFT, TSLA"
+    )
+
+    if st.button("➕ Dodaj do listy"):
+        if new_symbols.strip():
+            parsed = [
+                s.strip().upper()
+                for s in new_symbols.split(",")
+                if s.strip()
+            ]
+            for sym in parsed:
+                if sym not in st.session_state.symbols_list:
+                    st.session_state.symbols_list.append(sym)
+
+    # --------------------------------------
+    #  WYŚWIETLANIE LISTY SPÓŁEK
+    # --------------------------------------
+    st.markdown("### 📋 Lista obserwowanych spółek")
+
+    if not st.session_state.symbols_list:
+        st.info("Brak zapisanych spółek.")
+    else:
+        for sym in st.session_state.symbols_list:
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.write(f"🔹 {sym}")
+            with col2:
+                if st.button(f"❌ Usuń {sym}", key=f"del_{sym}"):
+                    st.session_state.symbols_list.remove(sym)
+                    st.experimental_rerun()
+
+    st.markdown("---")
+
+    # --------------------------------------
+    #  SKANOWANIE RYNKU
+    # --------------------------------------
+    if st.button("🔎 Skanuj rynek"):
+        if not st.session_state.symbols_list:
+            st.warning("Najpierw dodaj spółki do listy.")
+            return
+
+        data = {
+            sym: get_price_data(
+                symbol=sym,
+                period=settings["history_period"],
+                interval=settings["interval"],
+                live=settings["live_data"]
+            )
+            for sym in st.session_state.symbols_list
+        }
+
+        st.markdown("---")
+
+        # --------------------------------------
+        #  WYNIKI SKANERA
+        # --------------------------------------
+        for symbol in st.session_state.symbols_list:
+            st.markdown(f"### 🟦 {symbol}")
+
+            df = data.get(symbol)
+
+            if df is None or df.empty:
+                st.error("Brak danych.")
+                continue
+
+            # Trend
+            trend = detect_trend(df["Close"])
+
+            # Cena i wolumen
+            last_close = df["Close"].iloc[-1]
+            volume = df["Volume"].iloc[-1]
+
+            # Kolory neonowe
+            color_map = {
+                "BULL": NEON_GREEN,
+                "BEAR": NEON_PINK,
+                "NEUTRAL": NEON_YELLOW
+            }
+
+            st.markdown(
+                f"""
+                <div style='padding:12px;background:{BACKGROUND};
+                border:1px solid {color_map[trend]};
+                border-radius:8px;'>
+                    <b>Cena zamknięcia:</b> {last_close:.2f}<br>
+                    <b>Wolumen:</b> {volume:,}<br>
+                    <b>Trend:</b>
+                    <span style='color:{color_map[trend]};'>
+                    {trend}</span>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            st.markdown("---")
+# ==========================================
+#  AI KOMENTARZ — ANALIZA DANYCH
+# ==========================================
+def ai_commentary(symbol, df, indicators, model_name):
+    model = get_ai_model(model_name)
+
+    last_close = df["Close"].iloc[-1]
+    volume = df["Volume"].iloc[-1]
+
+    trend = indicators.get("trend")
+    rsi_val = indicators.get("rsi")
+    atr_val = indicators.get("atr")
+    momentum = indicators.get("momentum")
+    strength = indicators.get("strength")
+
+    bid, ask, spread = get_bid_ask(symbol)
+
+    prompt = f"""
+    Jesteś profesjonalnym analitykiem giełdowym. Przeanalizuj spółkę {symbol} na podstawie:
+
+    • Cena bieżąca: {last_close}
+    • Wolumen: {volume}
+    • Trend: {trend}
+    • RSI: {rsi_val}
+    • ATR: {atr_val}
+    • Momentum: {momentum}
+    • Siła trendu: {strength}
+    • BID: {bid}
+    • ASK: {ask}
+    • Spread: {spread}
+    • Liczba świec historycznych: {len(df)}
+
+    Podaj:
+    1. Krótką analizę techniczną
+    2. Momentum i zmienność
+    3. Siłę trendu i kierunek
+    4. Wpływ spreadu na decyzję
+    5. Podsumowanie w 1 zdaniu
+    """
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    return response.choices[0].message["content"]
+
+
+# ==========================================
+#  OKNO AI KOMENTARZA
+# ==========================================
+def ai_commentary_window(symbol, settings):
+    st.subheader("🤖 AI Komentarz")
+
+    df = get_price_data(
+        symbol=symbol,
+        period=settings["history_period"],
+        interval=settings["interval"],
+        live=settings["live_data"]
+    )
+
+    # Wskaźniki
+    df["RSI"] = rsi(df["Close"])
+    df["ATR"] = atr(df)
+    trends = detect_multi_trend(df)
+
+    indicators = {
+        "trend": trends["short_term"],
+        "rsi": df["RSI"].iloc[-1],
+        "atr": df["ATR"].iloc[-1],
+        "momentum": trends["momentum"],
+        "strength": trends["strength"]
+    }
+
+    comment = ai_commentary(symbol, df, indicators, settings["ai_model"])
+
+    st.markdown(
+        f"""
+        <div style='padding:15px;background:{BACKGROUND};
+        border:1px solid {NEON_BLUE};border-radius:8px;'>
+            {comment}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+# ==========================================
+#  AI CZAT — NIEZALEŻNE OKNO
+# ==========================================
+def ai_chat_window(settings):
+    st.subheader("💬 Czat AI (niezależny)")
+
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+    user_msg = st.text_input("Wpisz wiadomość:")
+
+    if st.button("Wyślij"):
+        if user_msg.strip():
+            model = get_ai_model(settings["ai_model"])
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "Jesteś pomocnym asystentem."},
+                    *st.session_state.chat_history,
+                    {"role": "user", "content": user_msg}
+                ]
+            )
+
+            ai_msg = response.choices[0].message["content"]
+
+            st.session_state.chat_history.append({"role": "user", "content": user_msg})
+            st.session_state.chat_history.append({"role": "assistant", "content": ai_msg})
+
+    # Wyświetlanie historii
+    for msg in st.session_state.chat_history:
+        if msg["role"] == "user":
+            st.markdown(f"**Ty:** {msg['content']}")
+        else:
+            st.markdown(f"**AI:** {msg['content']}")
+# ==========================================
+#  OKNO TRENDÓW — KRÓTKI / ŚREDNI / DŁUGI
+# ==========================================
+def trends_window(symbol, settings):
+    st.subheader(f"📊 Trendy — {symbol}")
+
+    df = get_price_data(
+        symbol=symbol,
+        period=settings["history_period"],
+        interval=settings["interval"],
+        live=settings["live_data"]
+    )
+
+    trends = detect_multi_trend(df)
+
+    color_map = {
+        "BULL": NEON_GREEN,
+        "BEAR": NEON_PINK,
+        "NEUTRAL": NEON_YELLOW
+    }
+
+    st.markdown("---")
+
+    # --------------------------------------
+    #  TREND KRÓTKOTERMINOWY
+    # --------------------------------------
+    st.markdown(
+        f"""
+        <div style='padding:12px;background:{BACKGROUND};
+        border:1px solid {color_map[trends["short_term"]]};
+        border-radius:8px;'>
+            <b>Trend krótkoterminowy:</b>
+            <span style='color:{color_map[trends["short_term"]]};'>
+            {trends["short_term"]}</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # --------------------------------------
+    #  TREND ŚREDNIOTERMINOWY
+    # --------------------------------------
+    st.markdown(
+        f"""
+        <div style='padding:12px;background:{BACKGROUND};
+        border:1px solid {color_map[trends["medium_term"]]};
+        border-radius:8px;'>
+            <b>Trend średnioterminowy:</b>
+            <span style='color:{color_map[trends["medium_term"]]};'>
+            {trends["medium_term"]}</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # --------------------------------------
+    #  TREND DŁUGOTERMINOWY
+    # --------------------------------------
+    st.markdown(
+        f"""
+        <div style='padding:12px;background:{BACKGROUND};
+        border:1px solid {color_map[trends["long_term"]]};
+        border-radius:8px;'>
+            <b>Trend długoterminowy:</b>
+            <span style='color:{color_map[trends["long_term"]]};'>
+            {trends["long_term"]}</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.markdown("---")
+
+    # --------------------------------------
+    #  MOMENTUM
+    # --------------------------------------
+    st.markdown(
+        f"""
+        <div style='padding:12px;background:{BACKGROUND};
+        border:1px solid {NEON_BLUE};
+        border-radius:8px;'>
+            <b>Momentum:</b> {trends["momentum"]:.2f}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # --------------------------------------
+    #  SIŁA TRENDU
+    # --------------------------------------
+    st.markdown(
+        f"""
+        <div style='padding:12px;background:{BACKGROUND};
+        border:1px solid {NEON_PINK};
+        border-radius:8px;'>
+            <b>Siła trendu:</b> {trends["strength"]:.2f}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+# ==========================================
+#  OKNO SL / TP — PEŁNA ANALIZA
+# ==========================================
+def sl_tp_window(symbol, settings):
+
+    st.subheader(f"🎯 SL / TP — {symbol}")
+
+    # Pobranie danych
+    df = get_price_data(
+        symbol=symbol,
+        period=settings["history_period"],
+        interval=settings["interval"],
+        live=settings["live_data"]
+    )
+
+    # ATR
+    df["ATR"] = atr(df)
+    atr_value = df["ATR"].iloc[-1]
+
+    # Trend
+    trend = detect_trend(df["Close"])
+
+    # SL/TP
+    results = calculate_sl_tp(df, atr_value, trend)
+
+    # BID/ASK/SPREAD
+    bid, ask, spread = get_bid_ask(symbol)
+
+    color_map = {
+        "LOW": NEON_GREEN,
+        "MEDIUM": NEON_YELLOW,
+        "HIGH": NEON_PINK
+    }
+
+    st.markdown("---")
+
+    # --------------------------------------
+    #  CENA BIEŻĄCA
+    # --------------------------------------
+    st.markdown(
+        f"""
+        <div style='padding:12px;background:{BACKGROUND};
+        border:1px solid {NEON_BLUE};border-radius:8px;'>
+            <b>Cena bieżąca:</b> {results["close"]:.2f}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # --------------------------------------
+    #  STOP LOSS
+    # --------------------------------------
+    st.markdown(
+        f"""
+        <div style='padding:12px;background:{BACKGROUND};
+        border:1px solid {NEON_PINK};border-radius:8px;'>
+            <b>Stop‑Loss:</b> {results["sl"]:.2f}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # --------------------------------------
+    #  TAKE PROFIT
+    # --------------------------------------
+    st.markdown(
+        f"""
+        <div style='padding:12px;background:{BACKGROUND};
+        border:1px solid {NEON_GREEN};border-radius:8px;'>
+            <b>Take‑Profit:</b> {results["tp"]:.2f}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # --------------------------------------
+    #  POZIOM NEUTRALNY
+    # --------------------------------------
+    st.markdown(
+        f"""
+        <div style='padding:12px;background:{BACKGROUND};
+        border:1px solid {NEON_YELLOW};border-radius:8px;'>
+            <b>Poziom neutralny:</b> {results["neutral"]:.2f}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.markdown("---")
+
+    # --------------------------------------
+    #  RYZYKO SYSTEMOWE (LOW / MEDIUM / HIGH)
+    # --------------------------------------
+    st.markdown(
+        f"""
+        <div style='padding:12px;background:{BACKGROUND};
+        border:1px solid {color_map[results["risk"]]};border-radius:8px;'>
+            <b>Ryzyko systemowe:</b>
+            <span style='color:{color_map[results["risk"]]};'>
+            {results["risk"]}</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.markdown("---")
+
+    # --------------------------------------
+    #  RYZYKO POZYCJI (ilość akcji)
+    # --------------------------------------
+    st.subheader("⚠️ Ryzyko pozycji")
+
+    qty = st.number_input("Ilość akcji:", min_value=1, value=1)
+
+    if bid is None:
+        st.error("Brak danych BID/ASK — nie można policzyć ryzyka pozycji.")
         return
 
-    df = add_indicators_full(df)
-
-    # -----------------------------
-    # WYKRES + SNAPSHOT
-    # -----------------------------
-    col_chart, col_info = st.columns([2, 1])
-
-    with col_chart:
-        st.plotly_chart(plot_tradingview_style(df, ticker), use_container_width=True)
-
-    with col_info:
-        last = df.iloc[-1]
-        st.markdown("### Snapshot")
-        st.write(f"**Close:** {last['Close']:.2f}")
-        st.write(f"**RSI:** {last['RSI']:.2f}")
-        st.write(f"**TrendScore:** {last['TrendScore']:.2f}")
-        st.write(f"**VolHeat:** {last['VolHeat']:.2f}")
-        st.write(f"**ATR:** {last['ATR']:.2f}")
-
-        # -----------------------------
-        # PATTERNY
-        # -----------------------------
-        st.markdown("### Patterny")
-        brk = detect_breakout(df)
-        cons = detect_consolidation(df)
-        vspike = detect_volume_spike(df)
-        st.write(f"Breakout: {'TAK' if brk else 'NIE'}")
-        st.write(f"Konsolidacja: {'TAK' if cons else 'NIE'}")
-        st.write(f"Volume spike: {'TAK' if vspike else 'NIE'}")
-
-        # -----------------------------
-        # SL/TP
-        # -----------------------------
-        entry = float(last["Close"])
-        atr = float(last["ATR"]) if not np.isnan(last["ATR"]) else 0.0
-        sl, tp, rr = calc_sl_tp(entry, atr, sl_mult=2.0, tp_mult=3.0, direction="long")
-
-        st.markdown("### SL/TP (ATR-based)")
-        if sl is None:
-            st.write("Brak ATR — nie można policzyć SL/TP.")
-        else:
-            st.write(f"Entry: {entry:.2f}")
-            st.write(f"SL: {sl:.2f}")
-            st.write(f"TP: {tp:.2f}")
-            st.write(f"R:R ≈ {rr:.2f}" if rr else "R:R: n/d")
-
-    # -----------------------------
-    # DANE
-    # -----------------------------
-    st.markdown("### Dane (ostatnie 30)")
-    st.dataframe(df.tail(30))
-
-    # -----------------------------
-    # AI PANEL
-    # -----------------------------
-    st.markdown("## AI — Tryby analizy")
-
-    mode = st.selectbox(
-        "Tryb AI:",
-        ["Prop Mode", "Deep Dive", "Signal Mode", "Chat Mode", "Collective Verdict"]
+    risk = position_risk(
+        close=results["close"],
+        atr_value=atr_value,
+        spread=spread,
+        qty=qty,
+        sl=results["sl"]
     )
 
-    # Prop Mode
-    if mode == "Prop Mode":
-        st.subheader("AI — Prop Trader Mode")
-        st.write(ai_prop_mode(df, ticker))
+    st.markdown(
+        f"""
+        <div style='padding:15px;background:{BACKGROUND};
+        border:1px solid {color_map[risk["level"]]};border-radius:8px;'>
+            <b>Wartość pozycji:</b> {risk["position_value"]:.2f} PLN<br>
+            <b>Ryzyko na 1 akcję:</b> {risk["risk_per_share"]:.2f} PLN<br>
+            <b>Ryzyko całkowite:</b> {risk["total_risk"]:.2f} PLN<br>
+            <b>Ryzyko procentowe:</b> {risk["risk_percent"]:.2f}%<br>
+            <b>Poziom ryzyka:</b>
+            <span style='color:{color_map[risk["level"]]};'>
+            {risk["level"]}</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+# ==========================================
+#  PORTFEL — OKNO GŁÓWNE
+# ==========================================
+def portfolio_window():
 
-    # Deep Dive
-    elif mode == "Deep Dive":
-        st.subheader("AI — Deep Dive Mode")
-        brk = detect_breakout(df)
-        cons = detect_consolidation(df)
-        vspike = detect_volume_spike(df)
-        entry = float(df["Close"].iloc[-1])
-        atr = float(df["ATR"].iloc[-1]) if not np.isnan(df["ATR"].iloc[-1]) else 0.0
-        sl, tp, rr = calc_sl_tp(entry, atr)
-        st.write(ai_deep_dive(df, ticker, (brk, cons, vspike), sl, tp, rr))
+    st.subheader("💼 Portfel (PLN)")
 
-    # Signal Mode
-    elif mode == "Signal Mode":
-        st.subheader("AI — Signal Mode")
-        st.write(ai_signal_mode(df, ticker))
+    # --------------------------------------
+    #  INICJALIZACJA PORTFELA
+    # --------------------------------------
+    if "portfolio" not in st.session_state:
+        st.session_state.portfolio = []
 
-    # Chat Mode
-    elif mode == "Chat Mode":
-        st.subheader("AI — Chat Mode")
-        question = st.text_area("Twoje pytanie do AI o ten ticker:")
-        if st.button("Wyślij pytanie"):
-            st.write(ai_chat_mode(question, df, ticker))
+    # --------------------------------------
+    #  KURS USD/PLN
+    # --------------------------------------
+    usd_pln = get_usd_pln()
 
-    # Collective Verdict
-    else:
-        st.subheader("AI — Collective Verdict (4 modele)")
+    st.markdown(
+        f"""
+        <div style='padding:10px;background:{BACKGROUND};
+        border:1px solid {NEON_BLUE};border-radius:8px;'>
+            <b>Kurs USD/PLN:</b> {usd_pln:.2f} PLN
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-        with st.spinner("Uruchamianie 4 modeli AI..."):
-            ai_results = run_ai_pipeline(df, ticker)
+    st.markdown("---")
 
-        st.markdown("### Wyniki modeli AI")
-        st.write(ai_results)
+    # --------------------------------------
+    #  DODAWANIE POZYCJI
+    # --------------------------------------
+    col1, col2, col3 = st.columns(3)
 
-        verdict = collective_verdict(ai_results)
+    with col1:
+        symbol = st.text_input("Symbol spółki:")
 
-        st.markdown("### Finalny werdykt")
-        st.markdown(
-            f"""
-            <div style='padding:15px;border-radius:10px;background:{verdict['color']};color:white;font-size:22px;text-align:center;'>
-                {verdict['verdict']} (score: {verdict['score']})
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+    with col2:
+        qty = st.number_input("Ilość akcji:", min_value=0.0, step=0.1)
 
-# ============================================
-# UI — TRADINGVIEW-LIKE KOMBAJN
-# ============================================
+    with col3:
+        price_usd = st.number_input("Cena zakupu (USD):", min_value=0.0, step=0.01)
 
-if not IS_TEST:
-    st.set_page_config(page_title="ULTRA ENGINE v14", layout="wide")
-    st.title("ULTRA ENGINE v14 — TradingView-like GPW / Biotech / AI")
+    if st.button("➕ Dodaj do portfela"):
+        if symbol and qty > 0 and price_usd > 0:
+            st.session_state.portfolio.append({
+                "symbol": symbol.upper(),
+                "qty": qty,
+                "price_usd": price_usd,
+                "price_pln": price_usd * usd_pln
+            })
 
-    col_left, col_right = st.columns([2, 1])
+    st.markdown("---")
 
-    with col_left:
-        market = st.selectbox("Rynek:", ["GPW Biotech", "US Biotech", "Custom"])
-        if market == "GPW Biotech":
-            ticker = st.selectbox("Spółka:", GPW_BIOTECH)
-        elif market == "US Biotech":
-            ticker = st.selectbox("Spółka:", US_BIOTECH)
-        else:
-            ticker = st.text_input("Własny ticker (np. AAPL, MABION.WA):", "MABION.WA")
+    # --------------------------------------
+    #  WYŚWIETLANIE PORTFELA
+    # --------------------------------------
+    if not st.session_state.portfolio:
+        st.info("Portfel jest pusty.")
+        return
 
-    with col_right:
-        period = st.selectbox("Okres:", ["3mo", "6mo", "1y"], index=1)
-        interval = st.selectbox("Interwał:", ["1d", "1h"], index=0)
+    st.markdown("### 📋 Twoje pozycje:")
 
-    if st.button("Analizuj"):
-        run_analysis(ticker, period=period, interval=interval)
+    for pos in st.session_state.portfolio:
+
+        col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
+
+        with col1:
+            st.write(f"🔹 {pos['symbol']}")
+
+        with col2:
+            st.write(f"Ilość: {pos['qty']}")
+
+        with col3:
+            st.write(f"Wartość PLN: {pos['price_pln']:.2f}")
+
+        with col4:
+            if st.button(f"❌ Usuń {pos['symbol']}", key=f"del_{pos['symbol']}"):
+                st.session_state.portfolio.remove(pos)
+                st.experimental_rerun()
+# ==========================================
+#  OKNO BID / ASK / SPREAD
+# ==========================================
+def bidask_window(symbol):
+
+    st.subheader(f"💹 BID / ASK — {symbol}")
+
+    bid, ask, spread = get_bid_ask(symbol)
+
+    if bid is None or ask is None:
+        st.error("Brak danych BID/ASK dla tej spółki.")
+        return
+
+    st.markdown("---")
+
+    # --------------------------------------
+    #  BID
+    # --------------------------------------
+    st.markdown(
+        f"""
+        <div style='padding:12px;background:{BACKGROUND};
+        border:1px solid {NEON_GREEN};border-radius:8px;'>
+            <b>BID:</b> {bid}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # --------------------------------------
+    #  ASK
+    # --------------------------------------
+    st.markdown(
+        f"""
+        <div style='padding:12px;background:{BACKGROUND};
+        border:1px solid {NEON_PINK};border-radius:8px;'>
+            <b>ASK:</b> {ask}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # --------------------------------------
+    #  SPREAD
+    # --------------------------------------
+    st.markdown(
+        f"""
+        <div style='padding:12px;background:{BACKGROUND};
+        border:1px solid {NEON_YELLOW};border-radius:8px;'>
+            <b>Spread:</b> {spread}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+# ==========================================
+#  GŁÓWNY INTERFEJS — ROUTING I LAYOUT
+# ==========================================
+def main_app():
+
+    st.title("💹 Terminal Tradingowy — 1:1")
+
+    st.markdown("---")
+
+    # --------------------------------------
+    #  WYBÓR MODUŁU
+    # --------------------------------------
+    module = st.selectbox(
+        "Wybierz moduł:",
+        [
+            "📈 Wykresy i wskaźniki",
+            "📡 Skaner rynku",
+            "🤖 AI komentarz",
+            "💬 AI czat",
+            "📊 Trendy",
+            "🎯 SL / TP",
+            "💼 Portfel",
+            "💹 BID / ASK / Spread"
+        ]
+    )
+
+    st.markdown("---")
+
+    # --------------------------------------
+    #  SYMBOL (dla modułów które go potrzebują)
+    # --------------------------------------
+    symbol_required = module in [
+        "📈 Wykresy i wskaźniki",
+        "🤖 AI komentarz",
+        "📊 Trendy",
+        "🎯 SL / TP",
+        "💹 BID / ASK / Spread"
+    ]
+
+    symbol = None
+    if symbol_required:
+        symbol = st.text_input("Podaj symbol spółki:", placeholder="np. AAPL")
+
+        if not symbol:
+            st.info("Wpisz symbol, aby kontynuować.")
+            return
+
+        symbol = symbol.upper()
+
+    # --------------------------------------
+    #  ROUTING DO MODUŁÓW
+    # --------------------------------------
+    if module == "📈 Wykresy i wskaźniki":
+        charts_window(symbol, settings)
+
+    elif module == "📡 Skaner rynku":
+        scanner_window(settings)
+
+    elif module == "🤖 AI komentarz":
+        ai_commentary_window(symbol, settings)
+
+    elif module == "💬 AI czat":
+        ai_chat_window(settings)
+
+    elif module == "📊 Trendy":
+        trends_window(symbol, settings)
+
+    elif module == "🎯 SL / TP":
+        sl_tp_window(symbol, settings)
+
+    elif module == "💼 Portfel":
+        portfolio_window()
+
+    elif module == "💹 BID / ASK / Spread":
+        bidask_window(symbol)
+
+
+# ==========================================
+#  START APLIKACJI
+# ==========================================
+if __name__ == "__main__":
+    main_app()
+# ==========================================
+#  GLOBALNY NEON DARK MODE — CSS
+# ==========================================
+def inject_global_css():
+    st.markdown(
+        f"""
+        <style>
+
+        /* Tło całej aplikacji */
+        .stApp {{
+            background-color: {BACKGROUND};
+        }}
+
+        /* Tekst */
+        html, body, [class*="css"]  {{
+            color: {NEON_YELLOW} !important;
+        }}
+
+        /* Przyciski */
+        .stButton>button {{
+            background-color: #111;
+            color: {NEON_BLUE};
+            border: 1px solid {NEON_BLUE};
+            padding: 0.6rem 1.2rem;
+            border-radius: 6px;
+        }}
+
+        .stButton>button:hover {{
+            background-color: {NEON_BLUE};
+            color: black;
+        }}
+
+        /* Inputy */
+        .stTextInput>div>div>input {{
+            background-color: #111 !important;
+            color: {NEON_GREEN} !important;
+            border: 1px solid {NEON_GREEN};
+        }}
+
+        .stNumberInput>div>div>input {{
+            background-color: #111 !important;
+            color: {NEON_GREEN} !important;
+            border: 1px solid {NEON_GREEN};
+        }}
+
+        /* Selectbox */
+        .stSelectbox>div>div>select {{
+            background-color: #111 !important;
+            color: {NEON_YELLOW} !important;
+            border: 1px solid {NEON_YELLOW};
+        }}
+
+        /* Scrollbar */
+        ::-webkit-scrollbar {{
+            width: 8px;
+        }}
+
+        ::-webkit-scrollbar-track {{
+            background: #111;
+        }}
+
+        ::-webkit-scrollbar-thumb {{
+            background: {NEON_PINK};
+            border-radius: 10px;
+        }}
+
+        ::-webkit-scrollbar-thumb:hover {{
+            background: {NEON_BLUE};
+        }}
+
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+# Inicjalizacja ustawień z sidebaru
+settings = sidebar()
