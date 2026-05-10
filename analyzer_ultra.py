@@ -550,22 +550,36 @@ def ai_commentary(symbol, df, indicators, model_name):
 def ai_commentary_window(symbol, settings):
     st.subheader("🤖 AI Komentarz")
 
-    df = get_price_data(symbol, settings["history_period"], settings["interval"], settings["live_data"])
-    if df.empty:
-        st.error("Brak danych.")
-        return
+   df = get_price_data(sym, settings["history_period"], settings["interval"], settings["live_data"])
+if df.empty:
+    st.error("Brak danych.")
+    continue
 
-    df = df.copy()
-    df["RSI"] = rsi(df["Close"])
-    df["ATR"] = atr(df)
-    trends = detect_multi_trend(df)
+# BEZPIECZNE POBRANIE CENY
+raw_close = df["Close"].iloc[-1]
 
-    indicators = {
-        "trend": trends["short_term"],
-        "rsi": df["RSI"].iloc[-1],
-        "atr": df["ATR"].iloc[-1],
-        "momentum": trends["momentum"],
-        "strength": trends["strength"]
+# konwersja na liczbę
+last_close = pd.to_numeric(raw_close, errors="coerce")
+
+# wolumen też zabezpieczamy
+raw_volume = df["Volume"].iloc[-1]
+volume = pd.to_numeric(raw_volume, errors="coerce")
+
+trend = detect_trend(df["Close"])
+
+# WYŚWIETLANIE
+if pd.isna(last_close):
+    st.write("Cena: brak danych")
+else:
+    st.write(f"Cena: {last_close:.2f}")
+
+if pd.isna(volume):
+    st.write("Wolumen: brak danych")
+else:
+    st.write(f"Wolumen: {int(volume)}")
+
+st.write(f"Trend: {trend}")
+
     }
 
     comment = ai_commentary(symbol, df, indicators, settings["ai_model"])
