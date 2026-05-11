@@ -1253,92 +1253,52 @@ else:
             st.subheader("🤝 Multi-AI Panel — komentarze")
             st.markdown(st.session_state.ai_multi_comment)
 
-    # --- NEWS RADAR ---
-    with tab_news:
-        st.subheader("📰 News Radar — NewsScore + ryzyko newsowe / potencjał wybicia")
+# --- NEWS RADAR ---
+with tab_news:
+    st.subheader("📰 News Radar — NewsScore + ryzyko newsowe / potencjał wybicia")
 
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        news_df = pd.DataFrame(rows)
-        news_df = news_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
+    rows = [compute_metrics(s) for s in st.session_state.symbols]
+    news_df = pd.DataFrame(rows)
+    news_df = news_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
 
-        if st.session_state.news_scores:
-            news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
+    # Jeśli NewsScore już istnieje — dodaj do tabeli
+    if st.session_state.news_scores:
+        news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
 
-        col_n1, col_n2 = st.columns(2)
-        with col_n1:
-            if st.button("📰 Generuj / odśwież NewsScore (wszystkie spółki)"):
-                with st.spinner("AI liczy NewsScore (mix ryzyka i potencjału)..."):
-                    st.session_state.news_scores = ai_news_score_for_df(news_df)
+    col_n1, col_n2 = st.columns(2)
+
+    # Generowanie NewsScore
+    with col_n1:
+        if st.button("📰 Generuj / odśwież NewsScore (wszystkie spółki)"):
+            with st.spinner("AI liczy NewsScore (mix ryzyka i potencjału)..."):
+                st.session_state.news_scores = ai_news_score_for_df(news_df)
+                news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
+
+    # Generowanie News Radar
+    with col_n2:
+        if st.button("📡 Generuj News Radar (AI raport)"):
+            with st.spinner("AI generuje News Radar..."):
+                if "NewsScore" not in news_df.columns and st.session_state.news_scores:
                     news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
-        with col_n2:
-            if st.button("📡 Generuj News Radar (AI raport)"):
-                with st.spinner("AI generuje News Radar..."):
-                    if "NewsScore" not in news_df.columns and st.session_state.news_scores:
-                        news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
-                    st.session_state.ai_news_radar_comment = ai_news_radar(news_df)
+                st.session_state.ai_news_radar_comment = ai_news_radar(news_df)
 
-st.markdown("""
-<style>
-/* BLOOMBERG DARK MODE */
-body, .stApp {
-    background-color: #0d0d0d !important;
-    color: #e6e6e6 !important;
-    font-family: "Segoe UI", sans-serif;
-}
-[data-testid="stDataFrame"] {
-    background-color: #0d0d0d !important;
-    border: 1px solid #333 !important;
-    border-radius: 6px !important;
-    padding: 10px !important;
-}
-.dataframe tbody tr th, .dataframe tbody tr td {
-    background-color: #111 !important;
-    color: #e6e6e6 !important;
-    font-size: 17px !important;
-    padding: 10px 14px !important;
-    border-color: #222 !important;
-}
-.dataframe thead th {
-    background-color: #1a1a1a !important;
-    color: #f2f2f2 !important;
-    font-size: 18px !important;
-    border-bottom: 2px solid #444 !important;
-    padding: 12px !important;
-}
-::-webkit-scrollbar {
-    width: 12px;
-    height: 12px;
-}
-::-webkit-scrollbar-track {
-    background: #0d0d0d;
-}
-::-webkit-scrollbar-thumb {
-    background: #444;
-    border-radius: 6px;
-}
-::-webkit-scrollbar-thumb:hover {
-    background: #666;
-}
-</style>
-""", unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("📊 Tabela z NewsScore")
 
-            st.dataframe(
-                neutral_df[[
-                    "Symbol", "SetupScore", "Trend", "Signal",
-                    "MomentumScore", "VolatilityScore", "RiskScore", "TrendScore"
-                ]],
-                use_container_width=True
-            )
+    if st.session_state.news_scores:
+        news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
+        st.dataframe(
+            style_heatmap(news_df),
+            use_container_width=True
+        )
+    else:
+        st.info("Brak NewsScore — kliknij przycisk, aby wygenerować.")
 
+    if st.session_state.ai_news_radar_comment:
+        st.markdown("---")
+        st.subheader("📰 AI News Radar — komentarz")
+        st.markdown(st.session_state.ai_news_radar_comment)
 
-   
-        else:
-            st.info("Brak NewsScore — kliknij przycisk, aby wygenerować.")
-
-        if st.session_state.ai_news_radar_comment:
-            st.markdown("---")
-            st.subheader("📰 AI News Radar — komentarz")
-            st.markdown(st.session_state.ai_news_radar_comment)
 
 
 if __name__ == "__main__":
