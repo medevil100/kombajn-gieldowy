@@ -695,16 +695,18 @@ edited = st.data_editor(
     hide_index=True,
 )
 
-# 🔥 ZAPISUJEMY SEKTORY TYLKO JEŚLI TABELA JEST JUŻ WYPEŁNIONA
+# 🔥 POPRAWNE — Streamlit zwraca LISTĘ dictów, nie DataFrame
 if "sector_editor" in st.session_state:
-    for _, row in st.session_state["sector_editor"].iterrows():
+    editor_data = st.session_state["sector_editor"]
+    for row in editor_data:
         st.session_state.sector_map[row["Symbol"]] = row["Sektor"]
 
-# 🔥 WALIDACJA — dopiero po aktualizacji
+# 🔥 WALIDACJA
 missing = [s for s in st.session_state.symbols if not st.session_state.sector_map.get(s)]
 if missing:
     st.error(f"Brak przypisanego sektora dla: {', '.join(missing)}")
     st.stop()
+
 
 
     tab_heatmap, tab_chart, tab_scanner, tab_sector, tab_premarket, tab_ai_turbo, tab_ai_news, tab_ai_risk, tab_ai_pattern = st.tabs([
