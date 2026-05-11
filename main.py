@@ -1116,17 +1116,19 @@ def main():
                     st.write(f"**Change:** {row['Change']:+.2f}%")
 
         st.markdown("---")
-        st.markdown("## 🟡 Neutral Radar")
-        if neutral_df.empty:
-            st.info("Brak neutralnych setupów.")
-        else:
-            st.dataframe(
-                neutral_df[[
-                    "Symbol", "SetupScore", "Trend", "Signal",
-                    "MomentumScore", "VolatilityScore", "RiskScore", "TrendScore"
-                ]],
-                use_container_width=True
-            )
+st.markdown("## 🟡 Neutral Radar")
+
+if neutral_df.empty:
+    st.info("Brak neutralnych setupów.")
+else:
+    st.dataframe(
+        neutral_df[[
+            "Symbol", "SetupScore", "Trend", "Signal",
+            "MomentumScore", "VolatilityScore", "RiskScore", "TrendScore"
+        ]],
+        use_container_width=True
+    )
+
 
     # --- ALERTY ---
     with tab_alerts:
