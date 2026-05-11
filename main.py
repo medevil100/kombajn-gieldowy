@@ -969,103 +969,100 @@ def main():
     ])
 
     # --- HEATMAP ---
-    with tab_heatmap:
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        df = pd.DataFrame(rows)
-        df = df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
+with tab_heatmap:
+    rows = [compute_metrics(s) for s in st.session_state.symbols]
+    df = pd.DataFrame(rows)
+    df = df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
 
-        st.subheader("🏆 TOP 5 setupów (kafelki)")
-        top_n = min(5, len(df))
-        if top_n > 0:
-            top_df = df.head(top_n)
-            cols = st.columns(top_n)
-            for idx, (_, row) in enumerate(top_df.iterrows()):
-                with cols[idx]:
-                    ss = row["SetupScore"]
-                    color = "🟢" if ss >= 60 else ("🟡" if ss >= 40 else "🔴")
-                    st.markdown(f"### {color} {row['Symbol']}")
-                    st.write(f"**SetupScore:** {ss:.1f} / 100")
-                    st.write(f"**Change:** {row['Change']:+.2f}%")
-                    st.write(f"**Trend:** {row['Trend']}")
-                    st.write(f"**Signal:** {row['Signal']}")
-                    st.write(f"**Momentum:** {row['MomentumScore']:.1f}")
-                    st.write(f"**Volatility:** {row['VolatilityScore']:.1f}")
-                    st.write(f"**Risk:** {row['RiskScore']:.1f}")
-                    st.write(f"**TrendScore:** {row.get('TrendScore',0):.1f}")
+    st.subheader("🏆 TOP 5 setupów (kafelki)")
+    top_n = min(5, len(df))
+    if top_n > 0:
+        top_df = df.head(top_n)
+        cols = st.columns(top_n)
+        for idx, (_, row) in enumerate(top_df.iterrows()):
+            with cols[idx]:
+                ss = row["SetupScore"]
+                color = "🟢" if ss >= 60 else ("🟡" if ss >= 40 else "🔴")
+                st.markdown(f"### {color} {row['Symbol']}")
+                st.write(f"**SetupScore:** {ss:.1f} / 100")
+                st.write(f"**Change:** {row['Change']:+.2f}%")
+                st.write(f"**Trend:** {row['Trend']}")
+                st.write(f"**Signal:** {row['Signal']}")
+                st.write(f"**Momentum:** {row['MomentumScore']:.1f}")
+                st.write(f"**Volatility:** {row['VolatilityScore']:.1f}")
+                st.write(f"**Risk:** {row['RiskScore']:.1f}")
+                st.write(f"**TrendScore:** {row.get('TrendScore',0):.1f}")
 
-           st.markdown("""
-<style>
+# --- WYKRES PRO ---
+with tab_chart:
+    st.subheader("📈 Wykres PRO dla wybranej spółki")
+    symbol_for_chart = st.selectbox(
+        "Wybierz spółkę do wykresu:", st.session_state.symbols
+    )
+    plot_pro_chart(symbol_for_chart)
 
-    /* --- GLOBAL BLOOMBERG DARK MODE --- */
-    body, .stApp {
-        background-color: #0d0d0d !important;
-        color: #e6e6e6 !important;
-        font-family: "Segoe UI", sans-serif;
-    }
+# --- SKANER ---
+with tab_scanner:
+    st.subheader("📡 BUY / SELL Radar — Skaner Sygnałów")
 
-    /* --- TABELA: pełna szerokość + ciemny styl --- */
-    [data-testid="stDataFrame"] {
-        background-color: #0d0d0d !important;
-        border: 1px solid #333 !important;
-        border-radius: 6px !important;
-        padding: 10px !important;
-    }
+    rows = [compute_metrics(s) for s in st.session_state.symbols]
+    scan_df = pd.DataFrame(rows)
+    scan_df = scan_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
 
-    /* --- Komórki tabeli --- */
-    .dataframe tbody tr th, .dataframe tbody tr td {
-        background-color: #111 !important;
-        color: #e6e6e6 !important;
-        font-size: 17px !important;
-        padding: 10px 14px !important;
-        border-color: #222 !important;
-    }
+    buy_df = scan_df[
+        (scan_df["Signal"] == "BUY") &
+        (scan_df["Trend"] == "UP") &
+        (scan_df["SetupScore"] >= 60) &
+        (scan_df["MomentumScore"] >= 55)
+    ]
 
-    /* --- Nagłówki tabeli --- */
-    .dataframe thead th {
-        background-color: #1a1a1a !important;
-        color: #f2f2f2 !important;
-        font-size: 18px !important;
-        border-bottom: 2px solid #444 !important;
-        padding: 12px !important;
-    }
+    sell_df = scan_df[
+        (scan_df["Signal"] == "SELL") &
+        (scan_df["Trend"] == "DOWN") &
+        (scan_df["SetupScore"] >= 50)
+    ]
 
-    /* --- Scrollbar Bloomberg --- */
-    ::-webkit-scrollbar {
-        width: 12px;
-        height: 12px;
-    }
-    ::-webkit-scrollbar-track {
-        background: #0d0d0d;
-    }
-    ::-webkit-scrollbar-thumb {
-        background: #444;
-        border-radius: 6px;
-    }
-    ::-webkit-scrollbar-thumb:hover {
-        background: #666;
-    }
+    neutral_df = scan_df[
+        ~scan_df.index.isin(buy_df.index) &
+        ~scan_df.index.isin(sell_df.index)
+    ]
 
-    /* --- Podświetlenia (Twoje kolory heatmapy zostają) --- */
-    .stDataFrame td {
-        transition: background-color 0.2s ease-in-out;
-    }
-    .stDataFrame td:hover {
-        background-color: #333 !important;
-    }
+    st.markdown("## 🟢 BUY Radar")
+    if buy_df.empty:
+        st.info("Brak mocnych sygnałów BUY.")
+    else:
+        cols = st.columns(min(5, len(buy_df)))
+        for idx, (_, row) in enumerate(buy_df.iterrows()):
+            with cols[idx % len(cols)]:
+                st.markdown(f"### 🟢 {row['Symbol']}")
+                st.write(f"**SetupScore:** {row['SetupScore']:.1f}")
+                st.write(f"**Momentum:** {row['MomentumScore']:.1f}")
+                st.write(f"**Trend:** {row['Trend']}")
+                st.write(f"**Change:** {row['Change']:+.2f}%")
 
-</style>
-""", unsafe_allow_html=True)
- 
+    st.markdown("---")
+    st.markdown("## 🔴 SELL Radar")
+    if sell_df.empty:
+        st.info("Brak mocnych sygnałów SELL.")
+    else:
+        cols = st.columns(min(5, len(sell_df)))
+        for idx, (_, row) in enumerate(sell_df.iterrows()):
+            with cols[idx % len(cols)]:
+                st.markdown(f"### 🔴 {row['Symbol']}")
+                st.write(f"**SetupScore:** {row['SetupScore']:.1f}")
+                st.write(f"**Volatility:** {row['VolatilityScore']:.1f}")
+                st.write(f"**Trend:** {row['Trend']}")
+                st.write(f"**Change:** {row['Change']:+.2f}%")
 
-    # --- WYKRES PRO ---
-    with tab_chart:
-        st.subheader("📈 Wykres PRO dla wybranej spółki")
-        symbol_for_chart = st.selectbox(
-            "Wybierz spółkę do wykresu:", st.session_state.symbols
-        )
-        plot_pro_chart(symbol_for_chart)
-
-    # --- SKANER ---
+    st.markdown("---")
+    st.markdown("## 🟡 Neutral Radar")
+    if neutral_df.empty:
+        st.info("Brak neutralnych setupów.")
+    else:
+        st.dataframe(
+            neutral_df[[
+                "Symbol", "SetupScore", "Trend", "Signal",
+                "MomentumScore", "VolatilityScore
     with tab_scanner:
         st.subheader("📡 BUY / SELL Radar — Skaner Sygnałów")
         rows = [compute_metrics(s) for s in st.session_state.symbols]
