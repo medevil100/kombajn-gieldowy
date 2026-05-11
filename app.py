@@ -1,9 +1,4 @@
 
-# 🔥 **KOMBAJN v6.2 — FINALNY, DZIAŁAJĄCY, POPRAWIONY**
-
-👇 **Wklej cały ten plik 1:1 jako `main.py`**
-
-```python
 import os
 import pandas as pd
 import yfinance as yf
