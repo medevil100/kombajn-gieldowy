@@ -608,46 +608,50 @@ Nie udzielasz porad inwestycyjnych – to tylko analiza scenariuszy.
                     "Brak jeszcze analizy AI. Użyj przycisku powyżej lub włącz automatyczną analizę."
                 )
 
-    # --- HEATMAPA RYNKU ---
-    with tab_heatmap:
-        st.subheader("🔥 Heatmapa Rynku – zmiana % dla wszystkich spółek")
+ # --- HEATMAPA RYNKU ---
+with tab_heatmap:
+    st.subheader("🔥 Heatmapa Rynku – zmiana % dla wszystkich spółek")
 
-        if not st.session_state.symbols:
-            st.info("Brak spółek do wyświetlenia heatmapy.")
-        else:
-            heat_data = []
+    if not st.session_state.symbols:
+        st.info("Brak spółek do wyświetlenia heatmapy.")
+    else:
+        heat_data = []
 
-            for s in st.session_state.symbols:
-                df_h = get_price_data(s, "1d", "1h")
+        for s in st.session_state.symbols:
+            df_h = get_price_data(s, "1d", "1h")
 
-                if df_h.empty:
-                    heat_data.append({"Symbol": s, "Change": 0})
-                    continue
+            if df_h.empty:
+                heat_data.append({"Symbol": s, "Change": 0})
+                continue
 
-                close_h = df_h["Close"].astype(float)
-                last_h = float(close_h.iloc[-1])
-                prev_h = float(close_h.iloc[-2]) if len(close_h) > 1 else last_h
+            close_h = df_h["Close"].astype(float)
+            last_h = float(close_h.iloc[-1])
+            prev_h = float(close_h.iloc[-2]) if len(close_h) > 1 else last_h
 
-                change = ((last_h - prev_h) / prev_h * 100) if prev_h != 0 else 0
-                heat_data.append({"Symbol": s, "Change": change})
+            change = ((last_h - prev_h) / prev_h * 100) if prev_h != 0 else 0
+            heat_data.append({"Symbol": s, "Change": change})
 
-            heat_df = pd.DataFrame(heat_data)
+        heat_df = pd.DataFrame(heat_data)
 
-            def color_map(val):
-                if val > 0:
-                    return f"background-color: rgba(0, 255, 0, {min(abs(val)/10, 1)})"
-                elif val < 0:
-                    return f"background-color: rgba(255, 0, 0, {min(abs(val)/10, 1)})"
-                else:
-                    return "background-color: rgba(128,128,128,0.3)"
+        # --- KLUCZOWA ZMIANA ---
+        def color_map(val, col_name):
+            if col_name != "Change":
+                return ""
+            if val > 0:
+                return f"background-color: rgba(0,255,0,{min(abs(val)/10,1)})"
+            elif val < 0:
+                return f"background-color: rgba(255,0,0,{min(abs(val)/10,1)})"
+            else:
+                return "background-color: rgba(128,128,128,0.3)"
 
-            st.dataframe(
-                heat_df.style
-                    .apply(lambda col: col.map(color_map) if col.name == "Change" else col)
-                    .format({"Change": "{:+.2f}%"})
-            )
+        st.dataframe(
+            heat_df.style
+                .applymap(lambda v: color_map(v, "Change"))
+                .format({"Change": "{:+.2f}%"})
+        )
 
-            st.caption("Kolor = kierunek ruchu, intensywność = siła zmiany procentowej.")
+        st.caption("Kolor = kierunek ruchu, intensywność = siła zmiany procentowej.")
+
 
 
 if __name__ == "__main__":
