@@ -1059,10 +1059,14 @@ with tab_scanner:
     if neutral_df.empty:
         st.info("Brak neutralnych setupów.")
     else:
-        st.dataframe(
-            neutral_df[[
-                "Symbol", "SetupScore", "Trend", "Signal",
-                "MomentumScore", "VolatilityScore"
+       st.dataframe(
+    neutral_df[[
+        "Symbol", "SetupScore", "Trend", "Signal",
+        "MomentumScore", "VolatilityScore", "RiskScore", "TrendScore"
+    ]],
+    use_container_width=True
+)
+
     with tab_scanner:
         st.subheader("📡 BUY / SELL Radar — Skaner Sygnałów")
         rows = [compute_metrics(s) for s in st.session_state.symbols]
