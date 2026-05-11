@@ -1,518 +1,1253 @@
-# app.py
-# TERMINAL v15 ULTRA — zaawansowany backtest, ATR sizing, SL/TP, multi-positions
-# Uruchom: streamlit run app.py
-# Wymagane pakiety: streamlit, pandas, numpy, yfinance, ta, plotly, streamlit-autorefresh
-
-import logging
-import re
-import math
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
+import os
 import streamlit as st
 import pandas as pd
-import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
-from streamlit_autorefresh import st_autorefresh
-import ta
+from openai import OpenAI
 
-# ============================================================
-# KONFIGURACJA I LOGGER
-# ============================================================
-st.set_page_config(layout="wide", page_title="TERMINAL v15 ULTRA", page_icon="⚔️")
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("terminal")
+st.set_page_config(page_title="Heatmap PRO", layout="wide")
 
-# ============================================================
-# NEON CIEMNONIEBIESKI CSS
-# ============================================================
-st.markdown("""
-<style>
-:root {
-  --bg:#071028;
-  --panel: rgba(10,18,40,0.6);
-  --neon-blue: #00b3ff;
-  --neon-deep: #003a8c;
-  --accent: #00e0ff;
-  --muted: #9fb3d6;
-}
-body { background: linear-gradient(180deg, var(--bg), #020617); color: #e6eef8; }
-section.main { background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border-radius: 12px; padding: 12px; }
-.stButton>button { background: linear-gradient(90deg,var(--neon-blue),var(--neon-deep)); color: white; border: none; box-shadow: 0 6px 18px rgba(0,179,255,0.12); }
-.stDownloadButton>button { background: linear-gradient(90deg,#0b2546,#07203a); color: #fff; border: none; }
-h1, h2, h3 { color: var(--accent); text-shadow: 0 2px 8px rgba(0,179,255,0.08); }
-.sidebar .stSlider>div>div>input { color: #fff; }
-.stTextInput>div>input, .stTextArea>div>textarea { background: rgba(255,255,255,0.02); color: #e6eef8; border: 1px solid rgba(255,255,255,0.03); }
-.stSelectbox>div>div>div { background: rgba(255,255,255,0.02); color: #e6eef8; }
-footer { display:none; }
-</style>
-""", unsafe_allow_html=True)
+# --- OpenAI config ---
+AI_MODEL = "gpt-4o-mini"
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ============================================================
-# SIDEBAR - USTAWIENIA
-# ============================================================
-st.sidebar.header("⚙️ USTAWIENIA SYSTEMU")
-refresh_val = st.sidebar.slider("Auto-odświeżanie (minuty)", 1, 60, 10)
-st_autorefresh(interval=refresh_val * 60 * 1000, key="datarefresh")
+# --- Pobieranie danych cenowych ---
+def get_price_data(symbol, period="5d", interval="1h"):
+    df = yf.download(symbol, period=period, interval=interval, progress=False)
+    if df.empty:
+        return pd.DataFrame()
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df.astype(float).dropna()
 
-st.sidebar.header("📡 Skaner i dane")
-period_choice = st.sidebar.selectbox("Okres historyczny", ["1mo","3mo","6mo","1y","2y"], index=2)
-interval_choice = st.sidebar.selectbox("Interwał", ["1d","1wk"], index=0)
-max_workers = st.sidebar.slider("Wątki (równoległość)", 2, 20, 6)
-
-st.sidebar.header("📈 Wykresy i wskaźniki")
-show_sma = st.sidebar.checkbox("Pokaż SMA", value=True)
-show_bb = st.sidebar.checkbox("Pokaż Bollinger Bands", value=True)
-show_atr = st.sidebar.checkbox("Pokaż ATR", value=True)
-show_fibo = st.sidebar.checkbox("Pokaż Fibonacci", value=True)
-fibo_lookback = st.sidebar.slider("Fibo lookback (dni)", 20, 200, 50)
-
-st.sidebar.header("⚖️ Pozycjonowanie i backtest")
-use_atr_positioning = st.sidebar.checkbox("Użyj pozycjonowania opartego na ATR", value=True)
-risk_per_trade_pct = st.sidebar.slider("Ryzyko na transakcję (% kapitału)", 0.1, 10.0, 1.0, step=0.1)
-atr_multiplier = st.sidebar.slider("Stop = ATR *", 0.5, 5.0, 2.0, step=0.1)
-tp_multiplier = st.sidebar.slider("Take Profit = ATR *", 0.5, 10.0, 2.0, step=0.1)
-min_lot = st.sidebar.number_input("Minimalna wielkość lota (akcje)", value=1, step=1)
-max_position_cap = st.sidebar.number_input("Maks. wartość pozycji (waluta)", value=5000.0, step=100.0)
-fee_per_trade = st.sidebar.number_input("Prowizja na transakcję (waluta)", value=0.0, step=0.1)
-slippage_pct = st.sidebar.slider("Poślizg (%)", 0.0, 2.0, 0.1, step=0.01)
-max_concurrent_positions = st.sidebar.slider("Max jednoczesnych pozycji", 1, 10, 3)
-
-initial_capital = st.sidebar.number_input("Kapitał początkowy", value=10000.0, step=100.0)
-
-st.sidebar.header("🔎 Lista tickerów i portfolio")
-default_list = "AAPL, NVDA, TSLA, AMD, MSFT"
-symbols_input = st.sidebar.text_area("Lista tickerów (oddziel przecinkami)", default_list)
-symbols = [s.strip().upper() for s in re.split(r'[,\s]+', symbols_input) if s.strip()]
-
-portfolio_input = st.sidebar.text_area("Portfolio (SYMBOL,ILOŚĆ,CENA)", "NVDA,1,900\nSTX.WA,100,5.0")
-
-st.sidebar.markdown("---")
-run_scan_btn = st.sidebar.button("Uruchom skan")
-run_backtest_btn = st.sidebar.button("Uruchom backtest (dla wybranego symbolu)")
-
-# ============================================================
-# POMOCNICZE FUNKCJE
-# ============================================================
-@st.cache_data(ttl=3600)
-def get_usd_pln():
-    try:
-        data = yf.Ticker("USDPLN=X").history(period="1d")
-        return float(data['Close'].iloc[-1])
-    except Exception:
-        return 4.0
-
-USD_PLN = get_usd_pln()
-
-def safe_last(series):
-    s = series.dropna()
-    return float(s.iloc[-1]) if len(s) > 0 else np.nan
-
-def parse_portfolio(text):
-    tickers = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = [p.strip() for p in re.split(r'[,\s]+', line) if p.strip()]
-        if len(parts) < 3:
-            continue
-        sym, qty, b_p = parts[0].upper(), parts[1], parts[2]
-        try:
-            tickers[sym] = {"qty": float(qty), "buy": float(b_p)}
-        except Exception:
-            continue
-    return tickers
-
-def add_indicators_full(df):
-    df = df.copy()
-    df["SMA20"] = df["Close"].rolling(20).mean()
-    df["SMA50"] = df["Close"].rolling(50).mean()
-    df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
-    df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
-    bb = ta.volatility.BollingerBands(close=df["Close"], window=20, window_dev=2)
-    df["BB_high"] = bb.bollinger_hband()
-    df["BB_low"] = bb.bollinger_lband()
-    df["ATR14"] = ta.volatility.AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=14).average_true_range()
-    df["RSI14"] = ta.momentum.RSIIndicator(close=df["Close"], window=14).rsi()
-    return df
-
-def find_swing_high_low(df, lookback=50):
-    s = df.dropna(subset=["High","Low"])
-    if s.empty or len(s) < lookback:
-        return None, None
-    window = s.iloc[-lookback:]
-    swing_high = window["High"].idxmax()
-    swing_low = window["Low"].idxmin()
-    return swing_high, swing_low
-
-# ============================================================
-# ANALIZA SYMBOLI (równoległe pobieranie)
-# ============================================================
-def analyze_symbol_basic(symbol, period="3mo", interval="1d"):
+# --- Pobieranie BID / ASK / SPREAD% ---
+def get_bid_ask(symbol: str):
     try:
         t = yf.Ticker(symbol)
-        df = t.history(period=period, interval=interval)
-        if df.empty or len(df) < 10:
-            return None
-        last_p = safe_last(df['Close'])
-        df_ind = add_indicators_full(df)
-        rsi = float(df_ind["RSI14"].dropna().iloc[-1]) if len(df_ind["RSI14"].dropna())>0 else np.nan
-        ema20 = float(df_ind["EMA20"].dropna().iloc[-1]) if len(df_ind["EMA20"].dropna())>0 else np.nan
-        ema50 = float(df_ind["EMA50"].dropna().iloc[-1]) if len(df_ind["EMA50"].dropna())>0 else np.nan
-        score = 50
-        if not np.isnan(rsi):
-            if rsi < 30: score += 20
-            elif rsi > 70: score -= 20
-        if not np.isnan(ema20) and not np.isnan(ema50) and ema20 > ema50:
-            score += 10
-        news = []
-        try:
-            news = [n.get('title','') for n in yf.Ticker(symbol).news[:2]]
-        except Exception:
-            news = []
-        return {"Symbol": symbol, "Cena": round(last_p,2), "RSI": round(rsi,1) if not np.isnan(rsi) else np.nan, "Score": int(score), "News": " | ".join(news)}
-    except Exception as e:
-        logger.info(f"analyze_symbol_basic error {symbol}: {e}")
-        return None
+        info = t.info or {}
+        bid = info.get("bid", None)
+        ask = info.get("ask", None)
 
-def scan_symbols_parallel(symbols, period="6mo", interval="1d", max_workers=6):
-    results = []
-    progress = st.progress(0)
-    total = len(symbols) if symbols else 1
-    completed = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(analyze_symbol_basic, s, period, interval): s for s in symbols}
-        for fut in as_completed(futures):
-            sym = futures[fut]
-            try:
-                r = fut.result()
-                if r:
-                    results.append(r)
-            except Exception as e:
-                logger.info(f"Błąd podczas skanowania {sym}: {e}")
-            completed += 1
-            progress.progress(int(completed/total * 100))
-    return results
+        if bid is None or ask is None or bid == 0 or ask == 0:
+            return None, None, None
 
-# ============================================================
-# WYKRESY PLOTLY + FIBO
-# ============================================================
-def plot_candles_with_indicators(df, symbol, show_sma=True, show_bb=True, show_atr=True, show_fibo=True, fibo_lookback=50):
-    df = df.copy()
-    df = add_indicators_full(df)
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
-        name="Cena", increasing_line_color="#00b3ff", decreasing_line_color="#003a8c", opacity=0.95
-    ))
-    if show_sma:
-        if "SMA20" in df.columns:
-            fig.add_trace(go.Scatter(x=df.index, y=df["SMA20"], mode="lines", line=dict(color="#66d9ff", width=1), name="SMA20"))
-        if "SMA50" in df.columns:
-            fig.add_trace(go.Scatter(x=df.index, y=df["SMA50"], mode="lines", line=dict(color="#1e90ff", width=1), name="SMA50"))
-    if "EMA20" in df.columns and "EMA50" in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df["EMA20"], mode="lines", line=dict(color="#ffa500", width=1, dash="dash"), name="EMA20"))
-        fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], mode="lines", line=dict(color="#1e90ff", width=1, dash="dash"), name="EMA50"))
-    if show_bb and "BB_high" in df.columns and "BB_low" in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df["BB_high"], mode="lines", line=dict(color="rgba(150,200,255,0.18)"), name="BB High", showlegend=False))
-        fig.add_trace(go.Scatter(x=df.index, y=df["BB_low"], mode="lines", line=dict(color="rgba(150,200,255,0.18)"), name="BB Low", fill='tonexty', fillcolor='rgba(150,200,255,0.03)', showlegend=False))
-    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name="Wolumen", marker_color="rgba(0,179,255,0.18)", yaxis="y2"))
-    fig.update_layout(template="plotly_dark", height=700, xaxis_rangeslider_visible=False,
-                      yaxis=dict(title="Cena"), yaxis2=dict(title="Wolumen", overlaying="y", side="right", showgrid=False, position=0.15),
-                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-    if show_atr and "ATR14" in df.columns:
-        atr = df["ATR14"].fillna(0)
-        scale = (df["Close"].max() - df["Close"].min()) / (atr.max() + 1e-9)
-        atr_scaled = atr * 0.2 * scale
-        fig.add_trace(go.Scatter(x=df.index, y=df["Close"] - atr_scaled, mode="lines", line=dict(color="rgba(0,179,255,0.18)"), name="ATR14 (skala)"))
-    if show_fibo:
-        sh_idx, sl_idx = find_swing_high_low(df, lookback=fibo_lookback)
-        if sh_idx is not None and sl_idx is not None:
-            sh = df.loc[sh_idx]["High"]
-            sl = df.loc[sl_idx]["Low"]
-            high = float(sh)
-            low = float(sl)
-            if high != low:
-                diff = high - low
-                levels = {
-                    "0.0": high,
-                    "0.236": high - 0.236 * diff,
-                    "0.382": high - 0.382 * diff,
-                    "0.5": high - 0.5 * diff,
-                    "0.618": high - 0.618 * diff,
-                    "0.786": high - 0.786 * diff,
-                    "1.0": low
-                }
-                colors = {"0.0":"#ff4d4d","0.236":"#ff944d","0.382":"#ffd24d","0.5":"#ffff66","0.618":"#b3ff66","0.786":"#66ffb3","1.0":"#66d9ff"}
-                for lvl, price in levels.items():
-                    fig.add_hline(y=price, line=dict(color=colors.get(lvl,"#888"), width=1), annotation_text=f"Fibo {lvl} {price:.2f}", annotation_position="right", opacity=0.7)
-                fig.add_trace(go.Scatter(x=[sh_idx], y=[high], mode="markers+text", marker=dict(color="#ff4d4d", size=8), text=["Swing High"], textposition="top right", showlegend=False))
-                fig.add_trace(go.Scatter(x=[sl_idx], y=[low], mode="markers+text", marker=dict(color="#66d9ff", size=8), text=["Swing Low"], textposition="bottom right", showlegend=False))
-    return fig
+        mid = (bid + ask) / 2
+        if not mid:
+            return float(bid), float(ask), None
 
-# ============================================================
-# ZAawansowany BACKTEST ENGINE (SL/TP, ATR sizing, multi positions)
-# ============================================================
-def backtest_advanced(df, initial_capital=10000.0,
-                      use_atr_positioning=True, risk_per_trade_pct=1.0, atr_multiplier=2.0, tp_multiplier=2.0,
-                      min_lot=1, max_position_cap=5000.0, fee_per_trade=0.0, slippage_pct=0.1,
-                      max_concurrent_positions=3):
-    df = add_indicators_full(df).copy()
-    df = df.dropna(subset=["EMA20","EMA50","RSI14","Open","Close","ATR14"])
-    if df.empty:
-        return {"trades": [], "equity": pd.Series(dtype=float), "metrics": {}}
+        spread_pct = (ask - bid) / mid * 100
+        return float(bid), float(ask), float(spread_pct)
+    except Exception:
+        return None, None, None
 
-    equity = initial_capital
-    cash = initial_capital
-    open_positions = []
-    trades = []
-    equity_series = []
+# --- ENTRY RISK ---
+def compute_entry_risk(volume, spread_pct):
+    if volume >= 2_000_000:
+        liquidity = "HIGH"
+    elif volume >= 500_000:
+        liquidity = "MEDIUM"
+    else:
+        liquidity = "LOW"
 
-    def compute_shares(equity_val, price, atr, risk_pct, atr_mult, min_lot, max_pos_cap, cash_available):
-        if atr is None or atr <= 0:
-            raw = int(cash_available // price)
-            if raw < min_lot:
-                return 0
-            if raw * price > max_pos_cap:
-                raw = int(max_pos_cap // price)
-            return raw
-        stop_distance = atr * atr_mult
-        risk_amount = equity_val * (risk_pct / 100.0)
-        raw_shares = int(risk_amount // stop_distance) if stop_distance > 0 else 0
-        if raw_shares < min_lot:
-            raw_shares = 0
-        if raw_shares * price > max_pos_cap:
-            raw_shares = int(max_pos_cap // price)
-        if raw_shares * price > cash_available:
-            raw_shares = int(cash_available // price)
-        if raw_shares < min_lot:
-            return 0
-        return raw_shares
+    if spread_pct is None:
+        spread_rating = "UNKNOWN"
+    elif spread_pct < 0.5:
+        spread_rating = "GOOD"
+    elif spread_pct < 2:
+        spread_rating = "OK"
+    else:
+        spread_rating = "BAD"
 
-    close_next_open_flags = []
-    for i in range(len(df)-1):
-        row = df.iloc[i]
-        next_row = df.iloc[i+1]
-        date = df.index[i+1]
+    if liquidity == "HIGH" and (spread_pct is not None and spread_pct < 1):
+        slippage = "LOW"
+    elif liquidity == "MEDIUM" or (spread_pct is not None and 1 <= spread_pct <= 3):
+        slippage = "MEDIUM"
+    else:
+        slippage = "HIGH"
 
-        if close_next_open_flags:
-            for flag in close_next_open_flags:
-                pos = flag["pos"]
-                if pos in open_positions:
-                    shares = pos["shares"]
-                    exit_price = next_row["Open"] * (1 - slippage_pct/100.0)
-                    cash += shares * exit_price
-                    cash -= fee_per_trade
-                    trades.append({"type":"SELL", "date": date, "price": exit_price, "shares": shares, "reason": flag.get("reason","SL/TP")})
-                    open_positions.remove(pos)
-            close_next_open_flags = []
+    return liquidity, spread_rating, slippage
 
-        for pos in list(open_positions):
-            sl = pos["sl"]
-            tp = pos["tp"]
-            if row["Low"] <= sl or row["High"] >= tp:
-                close_next_open_flags.append({"pos": pos, "reason": "TP" if row["High"] >= tp else "SL"})
+# --- SL / TP ---
+def compute_sl_tp(last_price, atr, trend):
+    if last_price is None or atr is None or last_price == 0:
+        return None, None
 
-        for pos in list(open_positions):
-            exit_signal = (row["EMA20"] < row["EMA50"]) or (row["RSI14"] > 60)
-            if exit_signal:
-                close_next_open_flags.append({"pos": pos, "reason": "SignalExit"})
+    sl_zone = (last_price - atr * 1.5, last_price - atr * 1.0)
+    tp_zone = (last_price + atr * 2.0, last_price + atr * 3.0)
 
-        entry_signal = (row["EMA20"] > row["EMA50"]) and (row["RSI14"] < 40)
-        while entry_signal and len(open_positions) < max_concurrent_positions:
-            price = next_row["Open"] * (1 + slippage_pct/100.0)
-            atr = row["ATR14"] if not np.isnan(row["ATR14"]) else None
-            shares = compute_shares(equity, price, atr, risk_per_trade_pct, atr_multiplier, min_lot, max_position_cap, cash)
-            if shares <= 0:
-                break
-            cost = shares * price
-            if cost > cash:
-                shares = int(cash // price)
-                if shares < min_lot:
-                    break
-                cost = shares * price
-            cash -= cost
-            cash -= fee_per_trade
-            stop_distance = (atr * atr_multiplier) if atr and atr > 0 else price * 0.02
-            sl = price - stop_distance
-            tp = price + tp_multiplier * stop_distance
-            pos = {"entry_idx": i+1, "entry_price": price, "shares": shares, "sl": sl, "tp": tp}
-            open_positions.append(pos)
-            trades.append({"type":"BUY", "date": date, "price": price, "shares": shares, "atr": float(atr) if atr is not None else None})
-            market_val = sum([p["shares"] * row["Close"] for p in open_positions])
-            equity = cash + market_val
-            if cash < min_lot * price:
-                break
+    if trend == "UP":
+        tp_zone = (tp_zone[0] * 1.01, tp_zone[1] * 1.02)
+    elif trend == "DOWN":
+        sl_zone = (sl_zone[0] * 0.98, sl_zone[1] * 0.99)
 
-        market_val = sum([p["shares"] * row["Close"] for p in open_positions])
-        equity = cash + market_val
-        equity_series.append((df.index[i], equity))
+    return sl_zone, tp_zone
 
-    if open_positions:
-        last_row = df.iloc[-1]
-        for pos in list(open_positions):
-            exit_price = last_row["Close"] * (1 - slippage_pct/100.0)
-            cash += pos["shares"] * exit_price
-            cash -= fee_per_trade
-            trades.append({"type":"SELL", "date": df.index[-1], "price": exit_price, "shares": pos["shares"], "reason": "EOD"})
-        open_positions = []
-        equity = cash
-        equity_series.append((df.index[-1], equity))
+# --- TREND EVALUATION (MODEL C) ---
+def compute_trend_evaluation(
+    last_price: float,
+    change_pct: float,
+    momentum_score: float,
+    volatility_score: float,
+    trend_strength: float,
+    volume_current: float,
+    volume_prev: float,
+    ema20_last: float,
+    ema50_last: float,
+    atr: float,
+):
+    try:
+        mom = max(0.0, min(100.0, float(momentum_score)))
+    except:
+        mom = 50.0
 
-    equity_idx = [d for d,_ in equity_series]
-    equity_vals = [v for _,v in equity_series]
-    equity_series = pd.Series(data=equity_vals, index=equity_idx) if equity_vals else pd.Series(dtype=float)
+    try:
+        vol = max(0.0, min(100.0, float(volatility_score)))
+    except:
+        vol = 50.0
 
-    total_return = (equity_series.iloc[-1] - initial_capital) / initial_capital if len(equity_series)>0 else 0.0
-    days = (equity_series.index[-1] - equity_series.index[0]).days if len(equity_series)>1 else 1
-    cagr = ( (equity_series.iloc[-1] / initial_capital) ** (365.0 / days) - 1.0 ) if days>0 else 0.0
-    returns = equity_series.pct_change().dropna()
-    sharpe = (returns.mean() / returns.std() * math.sqrt(252)) if (not returns.empty and returns.std() != 0) else None
-    closed_trades = []
-    wins = 0
-    for i in range(1, len(trades), 2):
-        buy = trades[i-1]
-        sell = trades[i] if i < len(trades) else None
-        if sell:
-            pnl = (sell["price"] - buy["price"]) * buy["shares"] - fee_per_trade*2
-            closed_trades.append(pnl)
-            if pnl > 0:
-                wins += 1
-    win_rate = (wins / len(closed_trades)) if closed_trades else None
-    avg_win = np.mean([p for p in closed_trades if p>0]) if closed_trades and any(p>0 for p in closed_trades) else None
-    avg_loss = np.mean([p for p in closed_trades if p<0]) if closed_trades and any(p<0 for p in closed_trades) else None
-    max_dd = None
-    if not equity_series.empty:
-        roll_max = equity_series.cummax()
-        drawdown = (equity_series - roll_max) / roll_max
-        max_dd = drawdown.min()
-    avg_position_size = np.mean([t["shares"]*t["price"] if t["type"]=="BUY" else 0 for t in trades]) if trades else None
+    try:
+        ts = max(0.0, min(100.0, float(trend_strength)))
+    except:
+        ts = 50.0
 
-    metrics = {
-        "total_return": total_return,
-        "cagr": cagr,
-        "sharpe": sharpe,
-        "win_rate": win_rate,
-        "avg_win": avg_win,
-        "avg_loss": avg_loss,
-        "max_drawdown": max_dd,
-        "num_trades": len(trades),
-        "avg_position_size": avg_position_size
+    try:
+        ch = float(change_pct)
+    except:
+        ch = 0.0
+
+    if volume_prev and volume_prev > 0:
+        vol_trend = (volume_current - volume_prev) / volume_prev * 100.0
+    else:
+        vol_trend = 0.0
+
+    if last_price:
+        ema_div = abs(ema20_last - ema50_last) / last_price * 100.0
+    else:
+        ema_div = 0.0
+
+    if last_price and atr:
+        atr_pct = atr / last_price * 100.0
+    else:
+        atr_pct = 0.0
+
+    ch_clamped = max(-5.0, min(5.0, ch))
+    comp_change = 50.0 + (ch_clamped / 5.0) * 50.0
+
+    vt_clamped = max(-50.0, min(50.0, vol_trend))
+    comp_vol_trend = 50.0 + (vt_clamped / 50.0) * 50.0
+
+    comp_volatility = 100.0 - vol
+
+    ema_div_clamped = max(0.0, min(5.0, ema_div))
+    comp_ema_div = (ema_div_clamped / 5.0) * 100.0
+
+    atr_clamped = max(0.0, min(5.0, atr_pct))
+    comp_atr_stab = 100.0 - (atr_clamped / 5.0) * 100.0
+
+    trend_score = (
+        ts * 0.25
+        + mom * 0.25
+        + comp_change * 0.15
+        + comp_vol_trend * 0.10
+        + comp_volatility * 0.10
+        + comp_ema_div * 0.10
+        + comp_atr_stab * 0.05
+    )
+
+    trend_score = max(0.0, min(100.0, trend_score))
+
+    if trend_score >= 75:
+        health = "STRONG"
+    elif trend_score >= 55:
+        health = "HEALTHY"
+    elif trend_score >= 35:
+        health = "WEAK"
+    else:
+        health = "REVERSAL RISK"
+
+    if trend_score >= 70:
+        confidence = "HIGH"
+    elif trend_score >= 45:
+        confidence = "MEDIUM"
+    else:
+        confidence = "LOW"
+
+    if trend_score < 40 and vol > 60:
+        reversal_risk = "HIGH"
+    elif trend_score < 55 and vol > 50:
+        reversal_risk = "MEDIUM"
+    else:
+        reversal_risk = "LOW"
+
+    flags = []
+    if mom >= 60 and ts >= 60:
+        flags.append("Momentum zgodne z trendem.")
+    elif mom < 40 and ts >= 60:
+        flags.append("Silny trend, ale momentum słabnie.")
+    elif mom >= 60 and ts < 40:
+        flags.append("Silne momentum, ale trend strukturalnie słaby.")
+
+    if vol_trend > 20:
+        flags.append("Wolumen rośnie i potwierdza ruch.")
+    elif vol_trend < -20:
+        flags.append("Wolumen spada — ruch może być słabszy.")
+
+    if vol > 70:
+        flags.append("Bardzo wysoka zmienność — większe ryzyko szarpania.")
+    elif vol < 30:
+        flags.append("Niska zmienność — trend stabilny.")
+
+    if reversal_risk == "HIGH":
+        comment = "Trend jest kruchy: wysoka zmienność i niska jakość trendu sugerują ryzyko odwrócenia."
+    elif health == "STRONG":
+        comment = "Trend wygląda bardzo solidnie: momentum, struktura i wolumen wspierają kierunek ruchu."
+    elif health == "HEALTHY":
+        comment = "Trend jest zdrowy — obserwuj momentum i wolumen."
+    elif health == "WEAK":
+        comment = "Trend jest osłabiony — część metryk nie potwierdza kierunku."
+    else:
+        comment = "Struktura trendu słaba, zmienność wysoka — ryzyko odwrócenia zauważalne."
+
+    return {
+        "TrendScore": float(trend_score),
+        "TrendHealth": health,
+        "TrendConfidence": confidence,
+        "TrendReversalRisk": reversal_risk,
+        "TrendFlags": flags,
+        "TrendComment": comment,
     }
 
-    return {"trades": trades, "equity": equity_series, "metrics": metrics}
+# --- METRYKI ---
+def compute_metrics(symbol):
+    df = get_price_data(symbol, "5d", "1h")
+    if df.empty or len(df) < 3:
+        return {
+            "Symbol": symbol,
+            "LastPrice": 0.0,
+            "Change": 0.0,
+            "Volume": 0.0,
+            "ATR": 0.0,
+            "Trend": "NONE",
+            "Signal": "NEUTRAL",
+            "MomentumScore": 0.0,
+            "VolatilityScore": 0.0,
+            "TrendStrength": 0.0,
+            "RiskScore": 50.0,
+            "SetupScore": 0.0,
+            "TrendScore": 0.0,
+            "TrendHealth": "UNKNOWN",
+            "TrendConfidence": "UNKNOWN",
+            "TrendReversalRisk": "UNKNOWN",
+            "TrendComment": "",
+        }
 
-# ============================================================
-# UI - GŁÓWNY PANEL
-# ============================================================
-st.title("⚔️ TERMINAL v15 ULTRA — Zaawansowany Backtest i ATR Sizing")
+    close = df["Close"].astype(float)
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    volume = df["Volume"].astype(float)
 
-st.header("📊 Skaner tickerów")
-st.write("Lista tickerów do analizy:")
-st.write(", ".join(symbols))
-if run_scan_btn:
-    with st.spinner("Skanuję tickery..."):
-        scan_results = scan_symbols_parallel(symbols, period=period_choice, interval=interval_choice, max_workers=max_workers)
-        if scan_results:
-            df_scan = pd.DataFrame(scan_results)
-            st.dataframe(df_scan.sort_values("Score", ascending=False))
-            csv = df_scan.to_csv(index=False).encode('utf-8')
-            st.download_button("Pobierz wyniki skanu (CSV)", data=csv, file_name="scan_results.csv", mime="text/csv")
-        else:
-            st.info("Brak wyników skanu. Sprawdź tickery i połączenie internetowe.")
+    last = float(close.iloc[-1])
+    prev = float(close.iloc[-2])
+    change = ((last - prev) / prev * 100) if prev != 0 else 0.0
 
-st.header("📉 Wykresy, Fibonacci i Backtest")
-col1, col2 = st.columns([3,1])
+    tr = pd.concat(
+        [
+            (high - low),
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr_series = tr.rolling(14).mean()
+    atr = float(atr_series.iloc[-1]) if not atr_series.dropna().empty else 0.0
 
-with col1:
-    selected_symbol = st.selectbox("Wybierz ticker do wykresu i backtestu", symbols)
-    if selected_symbol:
-        t = yf.Ticker(selected_symbol)
-        df_chart = t.history(period=period_choice, interval=interval_choice)
-        if df_chart.empty:
-            st.info("Brak danych dla wybranego symbolu.")
-        else:
-            fig = plot_candles_with_indicators(df_chart, selected_symbol, show_sma=show_sma, show_bb=show_bb, show_atr=show_atr, show_fibo=show_fibo, fibo_lookback=fibo_lookback)
-            st.plotly_chart(fig, use_container_width=True)
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+    ema20_last = float(ema20.iloc[-1])
+    ema50_last = float(ema50.iloc[-1])
 
-with col2:
-    st.markdown("### Opis Fibonacci")
-    st.markdown("""
-- Poziomy Fibonacciego rysowane są między ostatnim **Swing High** i **Swing Low** w oknie `fibo_lookback`.
-- Poziomy: **0.0 (High)**, **0.236**, **0.382**, **0.5**, **0.618**, **0.786**, **1.0 (Low)**.
-- Interpretacja: traktuj jako potencjalne wsparcia/opory; używaj razem z RSI, wolumenem i trendem EMA.
-""")
-    st.markdown("### Parametry backtestu (aktualne)")
-    st.write(f"Kapitał początkowy: **{initial_capital:.2f}**")
-    st.write(f"ATR sizing: **{use_atr_positioning}**, ryzyko: **{risk_per_trade_pct}%**, ATR stop x{atr_multiplier}, TP x{tp_multiplier}")
-    st.write(f"Min lot: **{min_lot}**, Max pos cap: **{max_position_cap}**, Max concurrent pos: **{max_concurrent_positions}**")
-    st.write(f"Prowizja: **{fee_per_trade}**, Poślizg: **{slippage_pct}%**")
-
-if run_backtest_btn:
-    if not selected_symbol:
-        st.error("Wybierz symbol do backtestu.")
+    if last > ema20_last > ema50_last:
+        trend = "UP"
+    elif last < ema20_last < ema50_last:
+        trend = "DOWN"
     else:
-        with st.spinner("Uruchamiam zaawansowany backtest..."):
-            t = yf.Ticker(selected_symbol)
-            df_chart = t.history(period=period_choice, interval=interval_choice)
-            if df_chart.empty:
-                st.error("Brak danych historycznych dla wybranego symbolu.")
+        trend = "SIDE"
+
+    if trend == "UP" and change > 0:
+        signal = "BUY"
+    elif trend == "DOWN" and change < 0:
+        signal = "SELL"
+    else:
+        signal = "NEUTRAL"
+
+    vol_last = float(volume.iloc[-1])
+    vol_prev = float(volume.iloc[-2]) if len(volume) > 1 else vol_last
+    vol_change = ((vol_last - vol_prev) / vol_prev * 100) if vol_prev != 0 else 0.0
+
+    raw_momentum = change * 0.7 + vol_change * 0.3
+    momentum_score = max(0.0, min(100.0, 50.0 + raw_momentum))
+
+    vol_ratio = (atr / last * 100) if last != 0 else 0.0
+    volatility_score = max(0.0, min(100.0, vol_ratio * 2))
+
+    trend_diff = abs(ema20_last - ema50_last) / last * 100 if last != 0 else 0.0
+    trend_strength = max(0.0, min(100.0, trend_diff * 5))
+
+    risk_score = max(0.0, min(100.0, volatility_score))
+
+    setup = 0.0
+    if signal == "BUY":
+        setup += 30
+    elif signal == "SELL":
+        setup += 20
+
+    setup += momentum_score * 0.3
+    setup += trend_strength * 0.3
+    setup -= risk_score * 0.2
+
+    setup_score = max(0.0, min(100.0, setup))
+
+    trend_eval = compute_trend_evaluation(
+        last_price=last,
+        change_pct=change,
+        momentum_score=momentum_score,
+        volatility_score=volatility_score,
+        trend_strength=trend_strength,
+        volume_current=vol_last,
+        volume_prev=vol_prev,
+        ema20_last=ema20_last,
+        ema50_last=ema50_last,
+        atr=atr,
+    )
+
+    return {
+        "Symbol": symbol,
+        "LastPrice": last,
+        "Change": change,
+        "Volume": vol_last,
+        "ATR": atr,
+        "Trend": trend,
+        "Signal": signal,
+        "MomentumScore": momentum_score,
+        "VolatilityScore": volatility_score,
+        "TrendStrength": trend_strength,
+        "RiskScore": risk_score,
+        "SetupScore": setup_score,
+        "TrendScore": trend_eval["TrendScore"],
+        "TrendHealth": trend_eval["TrendHealth"],
+        "TrendConfidence": trend_eval["TrendConfidence"],
+        "TrendReversalRisk": trend_eval["TrendReversalRisk"],
+        "TrendComment": trend_eval["TrendComment"],
+        "TrendFlags": trend_eval["TrendFlags"],
+    }
+
+# --- Formatowanie paska NewsScore ---
+def format_news_score(value):
+    try:
+        score = float(value)
+    except:
+        score = 0.0
+
+    score = max(0.0, min(100.0, score))
+    length = 40
+    filled = int(round(score / 100 * length))
+    bar = "█" * filled + "░" * (length - filled)
+
+    if score < 30:
+        icon = "🟢"
+    elif score < 60:
+        icon = "🟠"
+    else:
+        icon = "🔴"
+
+    return f"{icon} {score:.0f} |{bar}|"
+
+# --- Stylowanie tabeli ---
+def style_heatmap(df):
+    styles = pd.DataFrame("", index=df.index, columns=df.columns)
+
+    for i, row in df.iterrows():
+        ss = row["SetupScore"]
+        intensity = min(max(ss / 100.0, 0.0), 1.0)
+        base_color = "0,255,0" if ss >= 50 else "255,0,0"
+        row_bg = f"background-color: rgba({base_color},{0.15 + 0.35*intensity})"
+
+        for col in df.columns:
+            styles.loc[i, col] = row_bg
+
+        c = row["Change"]
+        if c > 0:
+            styles.loc[i, "Change"] = f"background-color: rgba(0,255,0,{min(abs(c)/10,1)})"
+        elif c < 0:
+            styles.loc[i, "Change"] = f"background-color: rgba(255,0,0,{min(abs(c)/10,1)})"
+        else:
+            styles.loc[i, "Change"] = "background-color: rgba(128,128,128,0.3)"
+
+        if row["Trend"] == "UP":
+            styles.loc[i, "Trend"] = "background-color: rgba(0,255,0,0.4)"
+        elif row["Trend"] == "DOWN":
+            styles.loc[i, "Trend"] = "background-color: rgba(255,0,0,0.4)"
+        else:
+            styles.loc[i, "Trend"] = "background-color: rgba(128,128,128,0.3)"
+
+        if row["Signal"] == "BUY":
+            styles.loc[i, "Signal"] = "background-color: rgba(0,255,0,0.6)"
+        elif row["Signal"] == "SELL":
+            styles.loc[i, "Signal"] = "background-color: rgba(255,0,0,0.6)"
+        else:
+            styles.loc[i, "Signal"] = "background-color: rgba(128,128,128,0.3)"
+
+        if "NewsScore" in df.columns:
+            ns = row.get("NewsScore", 0.0)
+            try:
+                ns = float(ns)
+            except:
+                ns = 0.0
+            ns = max(0.0, min(100.0, ns))
+
+            if ns <= 50:
+                t = ns / 50.0
+                r = int(0 + t * (255 - 0))
+                g = int(255 - t * (255 - 165))
+                b = 0
             else:
-                res = backtest_advanced(df_chart, initial_capital=initial_capital,
-                                        use_atr_positioning=use_atr_positioning,
-                                        risk_per_trade_pct=risk_per_trade_pct,
-                                        atr_multiplier=atr_multiplier,
-                                        tp_multiplier=tp_multiplier,
-                                        min_lot=int(min_lot),
-                                        max_position_cap=max_position_cap,
-                                        fee_per_trade=fee_per_trade,
-                                        slippage_pct=slippage_pct,
-                                        max_concurrent_positions=int(max_concurrent_positions))
-                metrics = res["metrics"]
-                st.subheader("📋 Metryki backtestu")
-                st.write(f"Łączny zwrot: **{metrics.get('total_return',0.0)*100:.2f}%**")
-                st.write(f"CAGR (przybliżone): **{metrics.get('cagr',0.0)*100:.2f}%**")
-                st.write(f"Sharpe (przybliżone): **{metrics.get('sharpe'):.2f}**" if metrics.get('sharpe') is not None else "Sharpe: brak danych")
-                st.write(f"Win rate: **{metrics.get('win_rate')*100:.1f}%**" if metrics.get('win_rate') is not None else "Win rate: brak danych")
-                st.write(f"Max Drawdown: **{metrics.get('max_drawdown')*100:.2f}%**" if metrics.get('max_drawdown') is not None else "Max Drawdown: brak danych")
-                st.write(f"Liczba transakcji: **{metrics.get('num_trades',0)}**")
-                if not res["equity"].empty:
-                    eq_fig = go.Figure()
-                    eq_fig.add_trace(go.Scatter(x=res["equity"].index, y=res["equity"].values, mode="lines", name="Equity", line=dict(color="#00b3ff")))
-                    eq_fig.update_layout(template="plotly_dark", height=300, yaxis_title="Kapitał")
-                    st.plotly_chart(eq_fig, use_container_width=True)
-                if res["trades"]:
-                    df_trades = pd.DataFrame(res["trades"])
-                    st.subheader("📑 Lista transakcji")
-                    st.table(df_trades)
-                    csv_trades = df_trades.to_csv(index=False).encode('utf-8')
-                    st.download_button("Pobierz transakcje (CSV)", data=csv_trades, file_name="trades.csv", mime="text/csv")
-                else:
-                    st.info("Brak transakcji w backtestcie.")
+                t = (ns - 50) / 50.0
+                r = 255
+                g = int(165 - t * 165)
+                b = 0
 
-st.header("💼 Twoje pozycje (szacunkowo)")
-try:
-    tickers = parse_portfolio(portfolio_input)
-    port_data = []
-    for sym, info in tickers.items():
-        t = yf.Ticker(sym)
-        df_p = t.history(period="1d")
-        if df_p.empty:
+            styles.loc[i, "NewsScore"] = f"background-color: rgba({r},{g},{b},0.35)"
+
+    fmt_dict = {
+        "Change": "{:+.2f}%",
+        "Volume": "{:,.0f}",
+        "ATR": "{:.4f}",
+        "MomentumScore": "{:.1f}",
+        "VolatilityScore": "{:.1f}",
+        "TrendStrength": "{:.1f}",
+        "RiskScore": "{:.1f}",
+        "SetupScore": "{:.1f}",
+        "TrendScore": "{:.1f}",
+    }
+
+    if "NewsScore" in df.columns:
+        fmt_dict["NewsScore"] = format_news_score
+
+    return df.style.apply(lambda _: styles, axis=None).format(fmt_dict)
+
+# --- Wykres PRO ---
+def plot_pro_chart(symbol: str):
+def plot_pro_chart(symbol: str):
+    df = get_price_data(symbol, "3mo", "1d")
+    if df.empty:
+        st.warning("Brak danych do wykresu.")
+        return
+
+    close = df["Close"].astype(float)
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+
+    fig = go.Figure()
+    fig.add_candlestick(
+        x=df.index,
+        open=df["Open"],
+        high=df["High"],
+        low=df["Low"],
+        close=df["Close"],
+        name="Cena",
+    )
+    fig.add_trace(go.Scatter(x=df.index, y=ema20, mode="lines", name="EMA20", line=dict(color="cyan")))
+    fig.add_trace(go.Scatter(x=df.index, y=ema50, mode="lines", name="EMA50", line=dict(color="magenta")))
+    fig.update_layout(template="plotly_dark", height=500)
+    st.plotly_chart(fig, use_container_width=True)
+
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean().abs()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.dropna()
+
+    st.subheader("RSI(14)")
+    st.line_chart(rsi)
+
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd_line = ema12 - ema26
+    signal_line = macd_line.ewm(span=9, adjust=False).mean()
+    macd_df = pd.DataFrame({"MACD": macd_line, "Signal": signal_line}).dropna()
+
+    st.subheader("MACD")
+    st.line_chart(macd_df)
+
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    tr = pd.concat(
+        [
+            (high - low),
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr_series = tr.rolling(14).mean().dropna()
+
+    st.subheader("ATR(14)")
+    st.line_chart(atr_series)
+
+# --- ALERTY ---
+def generate_alerts(df: pd.DataFrame):
+    alerts = []
+    for _, row in df.iterrows():
+        sym = row["Symbol"]
+        ss = row["SetupScore"]
+        mom = row["MomentumScore"]
+        trend = row["Trend"]
+        ch = row["Change"]
+        vol = row["VolatilityScore"]
+
+        if ss >= 70 and trend == "UP":
+            alerts.append(f"🔥 {sym}: mocny setup (SetupScore {ss:.1f}, trend UP).")
+        if mom >= 60:
+            alerts.append(f"⚡ {sym}: wysokie momentum ({mom:.1f}).")
+        if abs(ch) >= 3:
+            alerts.append(f"📈 {sym}: duża zmiana intraday ({ch:+.2f}%).")
+        if vol >= 70:
+            alerts.append(f"⚠️ {sym}: bardzo wysoka zmienność (VolatilityScore {vol:.1f}).")
+    return alerts
+
+# --- PATTERNY ---
+def detect_patterns_for_symbol(symbol: str):
+    df = get_price_data(symbol, "3mo", "1d")
+    if df.empty or len(df) < 30:
+        return []
+
+    close = df["Close"].astype(float)
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+
+    patterns = []
+    rolling_max = close.rolling(20).max()
+    rolling_min = close.rolling(20).min()
+    last = close.iloc[-1]
+    prev_max = rolling_max.iloc[-2]
+    prev_min = rolling_min.iloc[-2]
+
+    if last > prev_max:
+        patterns.append("Breakout UP (wybicie powyżej 20-dniowego maksimum).")
+    if last < prev_min:
+        patterns.append("Breakout DOWN (wybicie poniżej 20-dniowego minimum).")
+
+    ma20 = close.rolling(20).mean()
+    std20 = close.rolling(20).std()
+    bb_width = (std20 * 2).iloc[-1] / last * 100 if last != 0 else 0
+    if bb_width < 3:
+        patterns.append("Bollinger Squeeze (bardzo niska zmienność, możliwe wybicie).")
+
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean().abs()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_last = rsi.iloc[-1]
+
+    if rsi_last > 70:
+        patterns.append(f"RSI overbought ({rsi_last:.1f}).")
+    elif rsi_last < 30:
+        patterns.append(f"RSI oversold ({rsi_last:.1f}).")
+
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+    if ema20.iloc[-2] < ema50.iloc[-2] and ema20.iloc[-1] > ema50.iloc[-1]:
+        patterns.append("Golden Cross (EMA20 przebiła EMA50 w górę).")
+    if ema20.iloc[-2] > ema50.iloc[-2] and ema20.iloc[-1] < ema50.iloc[-1]:
+        patterns.append("Death Cross (EMA20 przebiła EMA50 w dół).")
+
+    return patterns
+
+def detect_patterns_all(symbols):
+    out = {}
+    for s in symbols:
+        pats = detect_patterns_for_symbol(s)
+        if pats:
+            out[s] = pats
+    return out
+
+# --- AI VERDICT TOP5 (TECH) ---
+def ai_verdict_for_top5(top_df: pd.DataFrame) -> str:
+    if top_df.empty:
+        return "Brak spółek do analizy."
+
+    lines = []
+    for _, row in top_df.iterrows():
+        lines.append(
+            f"{row['Symbol']}: "
+            f"SetupScore={row['SetupScore']:.1f}, "
+            f"Change={row['Change']:+.2f}%, "
+            f"Trend={row['Trend']}, "
+            f"Signal={row['Signal']}, "
+            f"Momentum={row['MomentumScore']:.1f}, "
+            f"Volatility={row['VolatilityScore']:.1f}, "
+            f"Risk={row['RiskScore']:.1f}, "
+            f"TrendScore={row.get('TrendScore',0):.1f}"
+        )
+    context = "\n".join(lines)
+
+    system_prompt = """
+Jesteś analitykiem prop‑desk. Mówisz po polsku.
+Masz listę maksymalnie 5 spółek z metrykami:
+- SetupScore
+- Change %
+- Trend
+- Signal
+- MomentumScore
+- VolatilityScore
+- RiskScore
+- TrendScore
+
+Twoje zadanie:
+1) Dla każdej spółki daj krótki werdykt (1–3 zdania): co jest mocne, co słabe, co obserwować.
+2) Na końcu daj zbiorczy komentarz:
+   - która spółka wygląda najciekawiej jako setup,
+   - gdzie ryzyko jest najwyższe,
+   - co musi się stać, żeby setup był „A+”.
+
+Pisz konkretnie, bez lania wody, po polsku.
+"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Oto dane spółek:\n{context}"},
+    ]
+    res = client.chat.completions.create(
+        model=AI_MODEL,
+        messages=messages,
+    )
+    return res.choices[0].message.content
+
+# --- AI DEEP DIVE TECH ---
+def ai_deep_dive(symbol: str, metrics: dict):
+    text = (
+        f"Symbol: {symbol}\n"
+        f"SetupScore: {metrics['SetupScore']:.1f}\n"
+        f"Change: {metrics['Change']:+.2f}%\n"
+        f"Trend: {metrics['Trend']}\n"
+        f"Signal: {metrics['Signal']}\n"
+        f"MomentumScore: {metrics['MomentumScore']:.1f}\n"
+        f"VolatilityScore: {metrics['VolatilityScore']:.1f}\n"
+        f"RiskScore: {metrics['RiskScore']:.1f}\n"
+        f"ATR: {metrics['ATR']:.4f}\n"
+        f"Volume: {metrics['Volume']:.0f}\n"
+        f"TrendScore: {metrics.get('TrendScore', 0):.1f}\n"
+        f"TrendHealth: {metrics.get('TrendHealth', 'UNKNOWN')}\n"
+        f"TrendConfidence: {metrics.get('TrendConfidence', 'UNKNOWN')}\n"
+        f"TrendReversalRisk: {metrics.get('TrendReversalRisk', 'UNKNOWN')}\n"
+    )
+
+    system_prompt = """
+Jesteś analitykiem prop‑desk. Mówisz po polsku.
+Masz DANE LICZBOWE spółki i masz OBOWIĄZEK używać ich w analizie.
+
+Dane:
+- SetupScore
+- Change %
+- Trend
+- Signal
+- MomentumScore
+- VolatilityScore
+- RiskScore
+- ATR
+- Volume
+- TrendScore (0–100)
+- TrendHealth (STRONG / HEALTHY / WEAK / REVERSAL RISK)
+- TrendConfidence (HIGH / MEDIUM / LOW)
+- TrendReversalRisk (LOW / MEDIUM / HIGH)
+
+Zadanie:
+1) Ocena setupu (momentum, trend, zmienność, wolumen, sygnał) z użyciem liczb.
+2) Mocne i słabe strony (2–3 punkty, każdy z liczbą).
+3) Scenariusze: byczy, niedźwiedzi, neutralny (1–2 zdania, oparte na danych).
+4) Ocena trendu:
+   - wykorzystaj TrendScore, TrendHealth, TrendReversalRisk,
+   - jasno powiedz, czy trend jest zdrowy, przeciążony czy zagrożony odwróceniem.
+
+Zero ogólników, zero lania wody, zero porad inwestycyjnych.
+"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": text},
+    ]
+    res = client.chat.completions.create(
+        model=AI_MODEL,
+        messages=messages,
+    )
+    return res.choices[0].message.content
+
+# --- MULTI-AI ---
+def multi_ai_verdict(top_df: pd.DataFrame) -> str:
+    if top_df.empty:
+        return "Brak spółek do analizy."
+
+    context_lines = []
+    for _, row in top_df.iterrows():
+        context_lines.append(
+            f"{row['Symbol']}: SetupScore={row['SetupScore']:.1f}, "
+            f"Change={row['Change']:+.2f}%, Trend={row['Trend']}, "
+            f"Signal={row['Signal']}, Momentum={row['MomentumScore']:.1f}, "
+            f"Volatility={row['VolatilityScore']:.1f}, Risk={row['RiskScore']:.1f}, "
+            f"TrendScore={row.get('TrendScore',0):.1f}"
+        )
+    context = "\n".join(context_lines)
+
+    system_prompt = """
+Jesteś panelem 4 różnych 'AI-traderów':
+1) Konserwatywny risk manager
+2) Agresywny momentum trader
+3) Swing trader
+4) Mean-reversion trader
+
+Dostajesz listę spółek z metrykami (SetupScore, Trend, Signal, Momentum, Volatility, Risk, TrendScore).
+Dla każdej spółki:
+- każdy z 4 traderów daje 1–2 zdania swojego spojrzenia.
+Na końcu:
+- krótki konsensus: które tickery są najciekawsze dla którego stylu.
+
+Pisz krótko, w formie:
+[TYP TRADERA] komentarz...
+Po polsku.
+"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Dane spółek:\n{context}"},
+    ]
+    res = client.chat.completions.create(
+        model=AI_MODEL,
+        messages=messages,
+    )
+    return res.choices[0].message.content
+
+# --- AI NEWS: NewsScore ---
+def ai_news_score_for_df(df: pd.DataFrame) -> dict:
+    if df.empty:
+        return {}
+
+    lines = []
+    for _, row in df.iterrows():
+        lines.append(
+            f"{row['Symbol']}: "
+            f"SetupScore={row['SetupScore']:.1f}, "
+            f"Change={row['Change']:+.2f}%, "
+            f"Trend={row['Trend']}, "
+            f"Signal={row['Signal']}, "
+            f"Momentum={row['MomentumScore']:.1f}, "
+            f"Volatility={row['VolatilityScore']:.1f}, "
+            f"Risk={row['RiskScore']:.1f}, "
+            f"Volume={row['Volume']:.0f}, "
+            f"TrendScore={row.get('TrendScore',0):.1f}"
+        )
+    context = "\n".join(lines)
+
+    system_prompt = """
+Jesteś analitykiem newsowym w stylu Bloomberg. Mówisz po polsku.
+Masz listę spółek z danymi technicznymi.
+Masz wyliczyć NewsScore (0–100) jako mix:
+- ryzyko newsowe,
+- potencjał wybicia pod newsy.
+
+Używaj WYŁĄCZNIE danych:
+- Change
+- MomentumScore
+- VolatilityScore
+- RiskScore
+- Volume
+- Trend
+- Signal
+- TrendScore
+
+Zwróć TYLKO linie:
+TICKER: SCORE
+Bez komentarzy.
+"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Dane spółek:\n{context}"},
+    ]
+    res = client.chat.completions.create(
+        model=AI_MODEL,
+        messages=messages,
+    )
+    content = res.choices[0].message.content
+
+    scores = {}
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
             continue
-        price = safe_last(df_p["Close"])
-        qty = info["qty"]
-        buy = info["buy"]
-        is_pln = sym.endswith(".WA")
-        cur_val = price * qty * (1 if is_pln else USD_PLN)
-        buy_val = buy * qty * (1 if is_pln else USD_PLN)
-        port_data.append({"Symbol": sym, "Cena (waluta)": price, "Wartość PLN": round(cur_val,2), "Zysk PLN": round(cur_val - buy_val,2)})
-    if port_data:
-        dfp = pd.DataFrame(port_data)
-        st.table(dfp)
-        st.metric("SUMA ZYSKU (PLN)", f"{round(sum(d['Zysk PLN'] for d in port_data),2)} PLN")
-    else:
-        st.info("Brak pozycji do wyświetlenia.")
-except Exception as e:
-    logger.exception(f"Portfolio error: {e}")
-    st.info("Błąd przy wczytywaniu portfolio.")
+        try:
+            sym, val = line.split(":", 1)
+            sym = sym.strip().upper()
+            val = val.strip().replace("%", "").replace(",", ".")
+            score = float(val)
+            score = max(0.0, min(100.0, score))
+            scores[sym] = score
+        except:
+            continue
+    return scores
+
+# --- AI NEWS: Deep Dive News ---
+def ai_news_deep_dive(symbol: str, metrics: dict, bid: float | None, ask: float | None, spread_pct: float | None):
+    liquidity, spread_rating, slippage = compute_entry_risk(
+        metrics["Volume"], spread_pct
+    )
+    sl_zone, tp_zone = compute_sl_tp(
+        metrics["LastPrice"], metrics["ATR"], metrics["Trend"]
+    )
+
+    text = (
+        f"Symbol: {symbol}\n"
+        f"SetupScore: {metrics['SetupScore']:.1f}\n"
+        f"Change: {metrics['Change']:+.2f}%\n"
+        f"Trend: {metrics['Trend']}\n"
+        f"Signal: {metrics['Signal']}\n"
+        f"MomentumScore: {metrics['MomentumScore']:.1f}\n"
+        f"VolatilityScore: {metrics['VolatilityScore']:.1f}\n"
+        f"RiskScore: {metrics['RiskScore']:.1f}\n"
+        f"ATR: {metrics['ATR']:.4f}\n"
+        f"Volume: {metrics['Volume']:.0f}\n"
+        f"Bid: {bid if bid is not None else 'brak danych'}\n"
+        f"Ask: {ask if ask is not None else 'brak danych'}\n"
+        f"SpreadPct: {spread_pct if spread_pct is not None else 'brak danych'}\n"
+        f"Liquidity: {liquidity}\n"
+        f"SpreadRating: {spread_rating}\n"
+        f"SlippageRisk: {slippage}\n"
+        f"SLzone: {sl_zone}\n"
+        f"TPzone: {tp_zone}\n"
+        f"TrendScore: {metrics.get('TrendScore', 0):.1f}\n"
+        f"TrendHealth: {metrics.get('TrendHealth', 'UNKNOWN')}\n"
+        f"TrendConfidence: {metrics.get('TrendConfidence', 'UNKNOWN')}\n"
+        f"TrendReversalRisk: {metrics.get('TrendReversalRisk', 'UNKNOWN')}\n"
+    )
+
+    system_prompt = """
+Jesteś analitykiem newsowym w stylu Bloomberg Terminal. Mówisz po polsku.
+Masz dane:
+- SetupScore, Change, Trend, Signal
+- MomentumScore, VolatilityScore, RiskScore
+- ATR, Volume
+- Bid, Ask, SpreadPct
+- Liquidity, SpreadRating, SlippageRisk
+- SLzone, TPzone
+- TrendScore, TrendHealth, TrendConfidence, TrendReversalRisk
+
+Zadanie:
+1) Kontekst rynkowy (tylko z danych).
+2) Ryzyko newsowe (gap, gwałtowne ruchy).
+3) Płynność i spread (wejście/wyjście, poślizg).
+4) Scenariusze: byczy, niedźwiedzi, neutralny (1–2 zdania każdy).
+5) Strefy: SLzone, TPzone w kontekście trendu i zmienności.
+6) Wykorzystaj TrendScore / TrendHealth / TrendReversalRisk do oceny, czy newsy mogą wzmocnić czy złamać trend.
+
+Zero ogólników, zero lania wody, zero porad inwestycyjnych.
+"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": text},
+    ]
+    res = client.chat.completions.create(
+        model=AI_MODEL,
+        messages=messages,
+    )
+    return res.choices[0].message.content
+
+# --- AI NEWS: News Radar ---
+def ai_news_radar(df: pd.DataFrame) -> str:
+    if df.empty:
+        return "Brak spółek do analizy."
+
+    lines = []
+    for _, row in df.iterrows():
+        ns = row.get("NewsScore", 0.0)
+        lines.append(
+            f"{row['Symbol']}: "
+            f"NewsScore={ns:.1f}, "
+            f"SetupScore={row['SetupScore']:.1f}, "
+            f"Trend={row['Trend']}, "
+            f"Signal={row['Signal']}, "
+            f"Momentum={row['MomentumScore']:.1f}, "
+            f"Volatility={row['VolatilityScore']:.1f}, "
+            f"Risk={row['RiskScore']:.1f}, "
+            f"TrendScore={row.get('TrendScore',0):.1f}, "
+            f"Change={row['Change']:+.2f}%, "
+            f"Volume={row['Volume']:.0f}"
+        )
+    context = "\n".join(lines)
+
+    system_prompt = """
+Jesteś analitykiem newsowym w stylu Bloomberg. Mówisz po polsku.
+Masz:
+- NewsScore
+- SetupScore
+- Trend, Signal
+- MomentumScore, VolatilityScore, RiskScore
+- TrendScore
+- Change, Volume
+
+Zadanie:
+1) TOP 5 z najwyższym NewsScore — dlaczego są wysoko (z liczbami).
+2) Kandydaci pod event/earnings (wysokie momentum + wolumen / zmienność).
+3) Ryzyko gapów (wysoka VolatilityScore + wysoki NewsScore).
+4) Krótkie podsumowanie: gdzie największe ryzyko, gdzie największy potencjał wybicia.
+
+Zero ogólników, zero lania wody, zero porad inwestycyjnych.
+"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Dane spółek:\n{context}"},
+    ]
+    res = client.chat.completions.create(
+        model=AI_MODEL,
+        messages=messages,
+    )
+    return res.choices[0].message.content
+def main():
+    st.title("🔥 HEATMAPA PRO — Prop‑Desk Kombajn: AI + Wykres + Skaner + Alerty + Patterny + News")
+
+    if "symbols" not in st.session_state:
+        st.session_state.symbols = []
+    if "ai_top5_comment" not in st.session_state:
+        st.session_state.ai_top5_comment = ""
+    if "ai_deep_dive_cache" not in st.session_state:
+        st.session_state.ai_deep_dive_cache = {}
+    if "ai_multi_comment" not in st.session_state:
+        st.session_state.ai_multi_comment = ""
+    if "news_scores" not in st.session_state:
+        st.session_state.news_scores = {}
+    if "ai_news_deep_cache" not in st.session_state:
+        st.session_state.ai_news_deep_cache = {}
+    if "ai_news_radar_comment" not in st.session_state:
+        st.session_state.ai_news_radar_comment = ""
+
+    symbols_input = st.sidebar.text_input("Dodaj spółki (oddzielone przecinkami):", "")
+
+    if st.sidebar.button("Dodaj"):
+        for raw in symbols_input.split(","):
+            sym = raw.strip().upper()
+            if sym and sym not in st.session_state.symbols:
+                st.session_state.symbols.append(sym)
+
+    if st.sidebar.button("Wyczyść"):
+        st.session_state.symbols = []
+        st.session_state.ai_top5_comment = ""
+        st.session_state.ai_deep_dive_cache = {}
+        st.session_state.ai_multi_comment = ""
+        st.session_state.news_scores = {}
+        st.session_state.ai_news_deep_cache = {}
+        st.session_state.ai_news_radar_comment = ""
+
+    if not st.session_state.symbols:
+        st.warning("Dodaj spółki, aby kontynuować.")
+        return
+
+    tab_heatmap, tab_chart, tab_scanner, tab_alerts, tab_patterns, tab_deep, tab_multi, tab_news = st.tabs([
+        "📊 Heatmap PRO + AI + NewsScore",
+        "📈 Wykres PRO",
+        "📡 Skaner Sygnałów",
+        "🚨 Alerty",
+        "📐 Patterny",
+        "🧠 AI Deep Dive",
+        "🤝 Multi-AI Panel",
+        "📰 News Radar",
+    ])
+
+    # --- HEATMAP ---
+    with tab_heatmap:
+        rows = [compute_metrics(s) for s in st.session_state.symbols]
+        df = pd.DataFrame(rows)
+        df = df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
+
+        st.subheader("🏆 TOP 5 setupów (kafelki)")
+        top_n = min(5, len(df))
+        if top_n > 0:
+            top_df = df.head(top_n)
+            cols = st.columns(top_n)
+            for idx, (_, row) in enumerate(top_df.iterrows()):
+                with cols[idx]:
+                    ss = row["SetupScore"]
+                    color = "🟢" if ss >= 60 else ("🟡" if ss >= 40 else "🔴")
+                    st.markdown(f"### {color} {row['Symbol']}")
+                    st.write(f"**SetupScore:** {ss:.1f} / 100")
+                    st.write(f"**Change:** {row['Change']:+.2f}%")
+                    st.write(f"**Trend:** {row['Trend']}")
+                    st.write(f"**Signal:** {row['Signal']}")
+                    st.write(f"**Momentum:** {row['MomentumScore']:.1f}")
+                    st.write(f"**Volatility:** {row['VolatilityScore']:.1f}")
+                    st.write(f"**Risk:** {row['RiskScore']:.1f}")
+                    st.write(f"**TrendScore:** {row.get('TrendScore',0):.1f}")
+
+            st.markdown("---")
+            col_ai1, col_ai2 = st.columns(2)
+            with col_ai1:
+                if st.button("🧠 Generuj komentarz AI dla TOP 5"):
+                    with st.spinner("AI analizuje TOP 5 setupów..."):
+                        st.session_state.ai_top5_comment = ai_verdict_for_top5(top_df)
+            with col_ai2:
+                if st.button("📰 Generuj NewsScore dla wszystkich spółek"):
+                    with st.spinner("AI analizuje news-ryzyko i potencjał wybicia..."):
+                        st.session_state.news_scores = ai_news_score_for_df(df)
+
+            if st.session_state.ai_top5_comment:
+                st.subheader("🧠 Komentarz AI (prop‑desk view)")
+                st.markdown(st.session_state.ai_top5_comment)
+
+        if st.session_state.news_scores:
+            df["NewsScore"] = df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
+
+        st.markdown("---")
+        st.subheader("📊 Pełna tabela — Heatmapa PRO + NewsScore")
+        st.dataframe(style_heatmap(df), use_container_width=True)
+
+    # --- WYKRES PRO ---
+    with tab_chart:
+        st.subheader("📈 Wykres PRO dla wybranej spółki")
+        symbol_for_chart = st.selectbox(
+            "Wybierz spółkę do wykresu:", st.session_state.symbols
+        )
+        plot_pro_chart(symbol_for_chart)
+
+    # --- SKANER ---
+    with tab_scanner:
+        st.subheader("📡 BUY / SELL Radar — Skaner Sygnałów")
+        rows = [compute_metrics(s) for s in st.session_state.symbols]
+        scan_df = pd.DataFrame(rows)
+        scan_df = scan_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
+
+        buy_df = scan_df[
+            (scan_df["Signal"] == "BUY") &
+            (scan_df["Trend"] == "UP") &
+            (scan_df["SetupScore"] >= 60) &
+            (scan_df["MomentumScore"] >= 55)
+        ]
+        sell_df = scan_df[
+            (scan_df["Signal"] == "SELL") &
+            (scan_df["Trend"] == "DOWN") &
+            (scan_df["SetupScore"] >= 50)
+        ]
+        neutral_df = scan_df[
+            ~scan_df.index.isin(buy_df.index) &
+            ~scan_df.index.isin(sell_df.index)
+        ]
+
+        st.markdown("## 🟢 BUY Radar")
+        if buy_df.empty:
+            st.info("Brak mocnych sygnałów BUY.")
+        else:
+            cols = st.columns(min(5, len(buy_df)))
+            for idx, (_, row) in enumerate(buy_df.iterrows()):
+                with cols[idx % len(cols)]:
+                    st.markdown(f"### 🟢 {row['Symbol']}")
+                    st.write(f"**SetupScore:** {row['SetupScore']:.1f}")
+                    st.write(f"**Momentum:** {row['MomentumScore']:.1f}")
+                    st.write(f"**Trend:** {row['Trend']}")
+                    st.write(f"**Change:** {row['Change']:+.2f}%")
+
+        st.markdown("---")
+        st.markdown("## 🔴 SELL Radar")
+        if sell_df.empty:
+            st.info("Brak mocnych sygnałów SELL.")
+        else:
+            cols = st.columns(min(5, len(sell_df)))
+            for idx, (_, row) in enumerate(sell_df.iterrows()):
+                with cols[idx % len(cols)]:
+                    st.markdown(f"### 🔴 {row['Symbol']}")
+                    st.write(f"**SetupScore:** {row['SetupScore']:.1f}")
+                    st.write(f"**Volatility:** {row['VolatilityScore']:.1f}")
+                    st.write(f"**Trend:** {row['Trend']}")
+                    st.write(f"**Change:** {row['Change']:+.2f}%")
+
+        st.markdown("---")
+        st.markdown("## 🟡 Neutral Radar")
+        if neutral_df.empty:
+            st.info("Brak neutralnych setupów.")
+        else:
+            st.dataframe(
+                neutral_df[[
+                    "Symbol", "SetupScore", "Trend", "Signal",
+                    "MomentumScore", "VolatilityScore", "RiskScore", "TrendScore"
+                ]],
+                use_container_width=True
+            )
+
+    # --- ALERTY ---
+    with tab_alerts:
+        st.subheader("🚨 Alerty z rynku (na bazie Heatmap PRO)")
+        rows = [compute_metrics(s) for s in st.session_state.symbols]
+        alert_df = pd.DataFrame(rows)
+        alert_df = alert_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
+        alerts = generate_alerts(alert_df)
+
+        if not alerts:
+            st.info("Brak alertów spełniających kryteria.")
+        else:
+            for a in alerts:
+                st.write("• " + a)
+
+        st.markdown("---")
+        st.write("Kryteria możesz zmienić w funkcji generate_alerts().")
+
+    # --- PATTERNY ---
+    with tab_patterns:
+        st.subheader("📐 Patterny techniczne (breakout, squeeze, RSI, EMA cross)")
+        patterns_all = detect_patterns_all(st.session_state.symbols)
+        if not patterns_all:
+            st.info("Brak wykrytych patternów (lub za mało danych).")
+        else:
+            for sym, pats in patterns_all.items():
+                st.markdown(f"### {sym}")
+                for p in pats:
+                    st.write("• " + p)
+                st.markdown("---")
+
+    # --- AI DEEP DIVE ---
+    with tab_deep:
+        st.subheader("🧠 AI Deep Dive — TECH + NEWS + Entry Risk / SL-TP + Trend")
+
+        rows = [compute_metrics(s) for s in st.session_state.symbols]
+        deep_df = pd.DataFrame(rows)
+        deep_df = deep_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
+
+        symbol_for_deep = st.selectbox(
+            "Wybierz spółkę do analizy AI:", deep_df["Symbol"].tolist()
+        )
+        metrics = deep_df[deep_df["Symbol"] == symbol_for_deep].iloc[0].to_dict()
+
+        bid, ask, spread_pct = get_bid_ask(symbol_for_deep)
+        liquidity, spread_rating, slippage = compute_entry_risk(
+            metrics["Volume"], spread_pct
+        )
+        sl_zone, tp_zone = compute_sl_tp(
+            metrics["LastPrice"], metrics["ATR"], metrics["Trend"]
+        )
+
+        st.markdown("### 📉 Ryzyko wejścia")
+        st.write(f"**Bid:** {bid if bid is not None else 'brak danych'}")
+        st.write(f"**Ask:** {ask if ask is not None else 'brak danych'}")
+        st.write(f"**Spread%:** {spread_pct:.2f}%"
+                 if spread_pct is not None else "**Spread%:** brak danych")
+        st.write(f"**Płynność:** {liquidity}")
+        st.write(f"**Spread rating:** {spread_rating}")
+        st.write(f"**Ryzyko poślizgu:** {slippage}")
+
+        st.markdown("### 🎯 Strefy SL / TP (ATR-based)")
+        if sl_zone and tp_zone:
+            st.write(f"**SL zone:** {sl_zone[0]:.4f} – {sl_zone[1]:.4f}")
+            st.write(f"**TP zone:** {tp_zone[0]:.4f} – {tp_zone[1]:.4f}")
+        else:
+            st.write("Brak danych do wyznaczenia stref SL/TP.")
+
+        st.markdown("### 📈 Ocena trendu")
+        st.write(f"**TrendScore:** {metrics.get('TrendScore', 0):.1f} / 100")
+        st.write(f"**Trend Health:** {metrics.get('TrendHealth', 'UNKNOWN')}")
+        st.write(f"**Trend Confidence:** {metrics.get('TrendConfidence', 'UNKNOWN')}")
+        st.write(f"**Ryzyko odwrócenia trendu:** {metrics.get('TrendReversalRisk', 'UNKNOWN')}")
+
+        flags = metrics.get("TrendFlags", None)
+        comment_trend = metrics.get("TrendComment", None)
+
+        if flags:
+            st.write("**Sygnały dot. trendu:**")
+            for f in flags:
+                st.write("• " + f)
+
+        if comment_trend:
+            st.write("**Komentarz trendowy:**")
+            st.write(comment_trend)
+
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            if st.button("🔍 Generuj AI Deep Dive (techniczny)"):
+                with st.spinner("AI analizuje wybraną spółkę (technicznie)..."):
+                    comment = ai_deep_dive(symbol_for_deep, metrics)
+                    st.session_state.ai_deep_dive_cache[symbol_for_deep] = comment
+        with col_d2:
+            if st.button("📰 Generuj AI Deep Dive News"):
+                with st.spinner("AI analizuje news-ryzyko i potencjał wybicia..."):
+                    comment_news = ai_news_deep_dive(symbol_for_deep, metrics, bid, ask, spread_pct)
+                    st.session_state.ai_news_deep_cache[symbol_for_deep] = comment_news
+
+        if symbol_for_deep in st.session_state.ai_deep_dive_cache:
+            st.subheader(f"🧠 AI TECH — {symbol_for_deep}")
+            st.markdown(st.session_state.ai_deep_dive_cache[symbol_for_deep])
+
+        if symbol_for_deep in st.session_state.ai_news_deep_cache:
+            st.subheader(f"📰 AI NEWS — {symbol_for_deep}")
+            st.markdown(st.session_state.ai_news_deep_cache[symbol_for_deep])
+
+    # --- MULTI-AI ---
+    with tab_multi:
+        st.subheader("🤝 Multi-AI Panel — 4 style tradingu na TOP setupach")
+        rows = [compute_metrics(s) for s in st.session_state.symbols]
+        multi_df = pd.DataFrame(rows)
+        multi_df = multi_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
+        top_n = min(5, len(multi_df))
+        top_df = multi_df.head(top_n)
+
+        if st.button("🤝 Generuj Multi-AI werdykt dla TOP setupów"):
+            with st.spinner("AI generuje panel 4 stylów tradingu..."):
+                st.session_state.ai_multi_comment = multi_ai_verdict(top_df)
+
+        if st.session_state.ai_multi_comment:
+            st.subheader("🤝 Multi-AI Panel — komentarze")
+            st.markdown(st.session_state.ai_multi_comment)
+
+    # --- NEWS RADAR ---
+    with tab_news:
+        st.subheader("📰 News Radar — NewsScore + ryzyko newsowe / potencjał wybicia")
+
+        rows = [compute_metrics(s) for s in st.session_state.symbols]
+        news_df = pd.DataFrame(rows)
+        news_df = news_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
+
+        if st.session_state.news_scores:
+            news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
+
+        col_n1, col_n2 = st.columns(2)
+        with col_n1:
+            if st.button("📰 Generuj / odśwież NewsScore (wszystkie spółki)"):
+                with st.spinner("AI liczy NewsScore (mix ryzyka i potencjału)..."):
+                    st.session_state.news_scores = ai_news_score_for_df(news_df)
+                    news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
+        with col_n2:
+            if st.button("📡 Generuj News Radar (AI raport)"):
+                with st.spinner("AI generuje News Radar..."):
+                    if "NewsScore" not in news_df.columns and st.session_state.news_scores:
+                        news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
+                    st.session_state.ai_news_radar_comment = ai_news_radar(news_df)
+
+        st.markdown("---")
+        st.subheader("📊 Tabela z NewsScore")
+        if st.session_state.news_scores:
+            news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
+            st.dataframe(
+                style_heatmap(news_df),
+                use_container_width=True
+            )
+        else:
+            st.info("Brak NewsScore — kliknij przycisk, aby wygenerować.")
+
+        if st.session_state.ai_news_radar_comment:
+            st.markdown("---")
+            st.subheader("📰 AI News Radar — komentarz")
+            st.markdown(st.session_state.ai_news_radar_comment)
+
+
+if __name__ == "__main__":
+    main()
