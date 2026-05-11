@@ -1,7 +1,4 @@
-Dobra, jedziemy: **pełny kombajn**, po polsku, ciemny neon, z trendami, SL/TP, Prop‑Mode, heatmapą, pre‑marketem, sektorówką, AI Turbo.  
-Wklej to jako **cały `main.py`** — bez niczego ponad to.
 
-```python
 import os
 import streamlit as st
 import pandas as pd
@@ -713,6 +710,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
+
 
 Jak coś jeszcze ma być „bardziej prop”, to wtedy już tylko dopieszczamy logikę, nie walczymy z błędami.
