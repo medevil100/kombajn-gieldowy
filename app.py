@@ -1,4 +1,3 @@
-
 import os
 import pandas as pd
 import yfinance as yf
@@ -31,11 +30,7 @@ AUTO_SECTOR_MAP = {
 }
 
 def get_auto_sector(symbol):
-    if symbol in AUTO_SECTOR_MAP:
-        return AUTO_SECTOR_MAP[symbol]
-    if symbol.endswith(".WA"):
-        return "GPW / Inne"
-    return "Inne"
+    return AUTO_SECTOR_MAP.get(symbol, "GPW / Inne" if symbol.endswith(".WA") else "Inne")
 
 # ====================== PRESETY ======================
 
@@ -71,8 +66,7 @@ def get_bid_ask(symbol):
         if not bid or not ask:
             return None, None, None
         mid = (bid + ask) / 2
-        spread = (ask - bid) / mid * 100
-        return bid, ask, spread
+        return bid, ask, (ask - bid) / mid * 100
     except:
         return None, None, None
 
@@ -115,11 +109,11 @@ def compute_metrics(symbol):
             "Symbol": symbol, "LastPrice": 0, "Change": 0, "Volume": 0,
             "ATR": 0, "Trend": "BRAK", "Signal": "NEUTRAL",
             "MomentumScore": 0, "VolatilityScore": 0, "TrendStrength": 0,
-            "RiskScore": 50, "SetupScore": 0, "SL_Low": None, "SL_High": None,
-            "TP_Low": None, "TP_High": None, "Bid": None, "Ask": None,
-            "SpreadPct": None, "Liquidity": "NIEZNANA",
-            "SpreadRating": "NIEZNANY", "Slippage": "NIEZNANE",
-            "Sector": get_auto_sector(symbol)
+            "RiskScore": 50, "SetupScore": 0,
+            "SL_Low": None, "SL_High": None, "TP_Low": None, "TP_High": None,
+            "Bid": None, "Ask": None, "SpreadPct": None,
+            "Liquidity": "NIEZNANA", "SpreadRating": "NIEZNANY",
+            "Slippage": "NIEZNANE", "Sector": get_auto_sector(symbol)
         }
 
     close = df["Close"]
@@ -178,14 +172,14 @@ def compute_metrics(symbol):
         "Slippage": slippage, "Sector": get_auto_sector(symbol)
     }
 
-# ====================== HEATMAPA KOLORY ======================
+# ====================== HEATMAPA (DZIAŁAJĄCA) ======================
 
 def heat_color(val):
     if pd.isna(val): return ""
-    if val >= 70: return "background-color:#166534;color:white;"
-    if val >= 55: return "background-color:#15803d;color:white;"
-    if val >= 45: return "background-color:#ca8a04;color:black;"
-    return "background-color:#7f1d1d;color:white;"
+    if val >= 70: return "#166534"
+    if val >= 55: return "#15803d"
+    if val >= 45: return "#ca8a04"
+    return "#7f1d1d"
 
 # ====================== WYKRES ======================
 
@@ -211,28 +205,28 @@ def plot_pro_chart(symbol):
                       xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# ====================== AI RISK v2 ======================
+# ====================== RISK CHECK ======================
 
 def risk_check_v2(df):
     out = []
     for _, r in df.iterrows():
         sym = r["Symbol"]
         if r["Volume"] == 0 or r["ATR"] == 0:
-            out.append(f"### {sym}\n**Brak danych / pomiń**\n")
+            out.append(f"### {sym}\nBrak danych / pomiń\n")
             continue
         if r["RiskScore"] >= 90 and r["VolatilityScore"] >= 90 and r["Liquidity"] == "NISKA":
-            out.append(f"### {sym}\n**Ekstremalne ryzyko / unikać**\n")
+            out.append(f"### {sym}\nEkstremalne ryzyko / unikać\n")
             continue
         if r["Trend"] == "DOWN" and r["Signal"] == "SELL":
-            out.append(f"### {sym}\n**Kandydat do shorta**\n")
+            out.append(f"### {sym}\nKandydat do shorta\n")
             continue
         if r["Trend"] == "UP" and r["Signal"] == "BUY" and r["Liquidity"] != "NISKA":
-            out.append(f"### {sym}\n**Kandydat do longa**\n")
+            out.append(f"### {sym}\nKandydat do longa\n")
             continue
         if r["Trend"] == "SIDE" or r["Signal"] == "NEUTRAL":
-            out.append(f"### {sym}\n**Neutralne / brak przewagi**\n")
+            out.append(f"### {sym}\nNeutralne / brak przewagi\n")
             continue
-        out.append(f"### {sym}\n**Wysokie ryzyko / brak przewagi**\n")
+        out.append(f"### {sym}\nWysokie ryzyko / brak przewagi\n")
     return "\n".join(out)
 
 # ====================== CSS ======================
@@ -247,9 +241,9 @@ def inject_css():
 # ====================== MAIN ======================
 
 def main():
-    st.set_page_config(page_title="KOMBAJN 6.2", layout="wide")
+    st.set_page_config(page_title="KOMBAJN 6.3", layout="wide")
     inject_css()
-    st.title("🔥 KOMBAJN v6.2 — FINALNY, POPRAWIONY, DZIAŁAJĄCY")
+    st.title("🔥 KOMBAJN v6.3 — FINALNY, DZIAŁAJĄCY, NIEUCINANY")
 
     if "symbols" not in st.session_state:
         st.session_state.symbols = []
@@ -304,8 +298,30 @@ def main():
     with tabs[0]:
         rows = [compute_metrics(s) for s in st.session_state.symbols]
         df = pd.DataFrame(rows).sort_values("SetupScore", ascending=False)
-        styled = df.style.applymap(heat_color, subset=["SetupScore"])
-        st.markdown(styled.to_html(), unsafe_allow_html=True)
+
+        df["Color"] = df["SetupScore"].apply(heat_color)
+
+        st.dataframe(
+            df,
+            use_container_width=True,
+            column_config={
+                "SetupScore": st.column_config.NumberColumn(
+                    "SetupScore",
+                    help="Ocena setupu",
+                    format="%.1f",
+                    min_value=0,
+                    max_value=100,
+                    step=1,
+                    width="medium",
+                ),
+                "Color": st.column_config.TextColumn(
+                    "Kolor",
+                    help="Heatmapa",
+                    width="small",
+                ),
+            },
+            hide_index=True
+        )
 
     # WYKRES
     with tabs[1]:
