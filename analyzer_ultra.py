@@ -1,4 +1,3 @@
-
 import time
 import streamlit as st
 import pandas as pd
@@ -7,10 +6,10 @@ import plotly.graph_objects as go
 from openai import OpenAI
 from streamlit_autorefresh import st_autorefresh
 
-# Inicjalizacja OpenAI (klucz z Secrets / zmiennej środowiskowej)
+# Inicjalizacja OpenAI
 client = OpenAI()
 
-# Kolory Terminala
+# Kolory
 BACKGROUND = "#000000"
 NEON_GREEN = "#39FF14"
 NEON_PINK = "#FF1493"
@@ -49,6 +48,7 @@ def get_price_data(symbol, period, interval):
 
 # --- Wskaźniki ---
 def rsi(series, period=14):
+    series = pd.Series(series).astype(float)
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -59,11 +59,14 @@ def rsi(series, period=14):
 
 
 def atr(df, period=14):
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    close = df["Close"].astype(float)
     tr = pd.concat(
         [
-            (df["High"] - df["Low"]),
-            (df["High"] - df["Close"].shift()).abs(),
-            (df["Low"] - df["Close"].shift()).abs(),
+            (high - low),
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs(),
         ],
         axis=1,
     ).max(axis=1)
@@ -71,10 +74,12 @@ def atr(df, period=14):
 
 
 def ema(series, period=20):
+    series = pd.Series(series).astype(float)
     return series.ewm(span=period, adjust=False).mean()
 
 
 def macd(series):
+    series = pd.Series(series).astype(float)
     ema12 = series.ewm(span=12, adjust=False).mean()
     ema26 = series.ewm(span=26, adjust=False).mean()
     macd_line = ema12 - ema26
@@ -84,9 +89,9 @@ def macd(series):
 
 
 def smi(df, k_period=14, d_period=3, smoothing=3):
-    high = df["High"]
-    low = df["Low"]
-    close = df["Close"]
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    close = df["Close"].astype(float)
 
     ll = low.rolling(k_period).min()
     hh = high.rolling(k_period).max()
@@ -102,8 +107,8 @@ def smi(df, k_period=14, d_period=3, smoothing=3):
 
 
 def fib_levels(df):
-    high = df["High"].tail(100).max()
-    low = df["Low"].tail(100).min()
+    high = df["High"].astype(float).tail(100).max()
+    low = df["Low"].astype(float).tail(100).min()
     diff = high - low
     levels = {
         "0.0%": high,
@@ -118,19 +123,18 @@ def fib_levels(df):
 
 
 def trend_and_levels(df, symbol):
-    close = df["Close"]
-    last = close.iloc[-1]
-    r = rsi(close).iloc[-1]
-    a = atr(df).iloc[-1]
+    close = df["Close"].astype(float)
+    last = float(close.iloc[-1])
+    r = float(rsi(close).iloc[-1])
+    a = float(atr(df).iloc[-1])
 
-    ema20 = ema(close, 20).iloc[-1]
-    ema50 = ema(close, 50).iloc[-1]
+    ema20_val = float(ema(close, 20).iloc[-1])
+    ema50_val = float(ema(close, 50).iloc[-1])
 
-    if ema20 > ema50 and last > ema20:
+    if ema20_val > ema50_val and last > ema20_val:
         trend = "UP"
-    elif ema20 < ema50 and last < ema20:
+    elif ema20_val < ema50_val and last < ema20_val:
         trend = "DOWN"
-        # SIDE
     else:
         trend = "SIDE"
 
@@ -144,15 +148,15 @@ def trend_and_levels(df, symbol):
     bid = fi.get("bid", None)
     ask = fi.get("ask", None)
     spread = None
-    if bid and ask:
+    if bid is not None and ask is not None:
         spread = ask - bid
 
     return {
         "last": last,
         "rsi": r,
         "atr": a,
-        "ema20": ema20,
-        "ema50": ema50,
+        "ema20": ema20_val,
+        "ema50": ema50_val,
         "trend": trend,
         "sl_long": sl_long,
         "tp_long": tp_long,
@@ -165,15 +169,21 @@ def trend_and_levels(df, symbol):
 
 
 def build_market_context_single(df, symbol):
-    close = df["Close"]
-    last = close.iloc[-1]
-    prev = close.iloc[-2] if len(close) > 1 else last
-    ch_pct = (last - prev) / prev * 100 if prev != 0 else 0
+    close = df["Close"].astype(float)
+    last = float(close.iloc[-1])
+    if len(close) > 1:
+        prev = float(close.iloc[-2])
+    else:
+        prev = last
+    if prev == 0:
+        ch_pct = 0.0
+    else:
+        ch_pct = (last - prev) / prev * 100
 
-    r = rsi(close).iloc[-1]
-    a = atr(df).iloc[-1]
-    ema20 = ema(close, 20).iloc[-1]
-    ema50 = ema(close, 50).iloc[-1]
+    r = float(rsi(close).iloc[-1])
+    a = float(atr(df).iloc[-1])
+    ema20_val = float(ema(close, 20).iloc[-1])
+    ema50_val = float(ema(close, 50).iloc[-1])
 
     ctx = f"""
 SYMBOL: {symbol}
@@ -181,12 +191,12 @@ LAST PRICE: {last:.2f} ({ch_pct:+.2f}% vs poprzednia świeca)
 
 RSI(14): {r:.2f}
 ATR(14): {a:.4f}
-EMA20: {ema20:.2f}
-EMA50: {ema50:.2f}
+EMA20: {ema20_val:.2f}
+EMA50: {ema50_val:.2f}
 
 RELACJA CENY DO EMA:
-- Cena {'POWYŻEJ' if last > ema20 else 'PONIŻEJ'} EMA20
-- Cena {'POWYŻEJ' if last > ema50 else 'PONIŻEJ'} EMA50
+- Cena {'POWYŻEJ' if last > ema20_val else 'PONIŻEJ'} EMA20
+- Cena {'POWYŻEJ' if last > ema50_val else 'PONIŻEJ'} EMA50
 """
     return ctx
 
@@ -199,7 +209,6 @@ def get_news_summary(symbol, max_items=5):
     for n in items:
         title = n.get("title", "")
         publisher = n.get("publisher", "")
-        ts = n.get("providerPublishTime", None)
         lines.append(f"- [{publisher}] {title}")
     if not lines:
         return "Brak świeżych newsów."
@@ -214,15 +223,21 @@ def build_multi_context(symbols, period, interval):
             blocks.append(f"SYMBOL: {sym}\nBrak danych.\n")
             continue
 
-        close = df["Close"]
-        last = close.iloc[-1]
-        prev = close.iloc[-2] if len(close) > 1 else last
-        ch_pct = (last - prev) / prev * 100 if prev != 0 else 0
+        close = df["Close"].astype(float)
+        last = float(close.iloc[-1])
+        if len(close) > 1:
+            prev = float(close.iloc[-2])
+        else:
+            prev = last
+        if prev == 0:
+            ch_pct = 0.0
+        else:
+            ch_pct = (last - prev) / prev * 100
 
-        r = rsi(close).iloc[-1]
-        a = atr(df).iloc[-1]
-        ema20_val = ema(close, 20).iloc[-1]
-        ema50_val = ema(close, 50).iloc[-1]
+        r = float(rsi(close).iloc[-1])
+        a = float(atr(df).iloc[-1])
+        ema20_val = float(ema(close, 20).iloc[-1])
+        ema50_val = float(ema(close, 50).iloc[-1])
 
         if ema20_val > ema50_val and last > ema20_val:
             trend = "UP"
@@ -243,7 +258,7 @@ EMA20: {ema20_val:.2f}
 EMA50: {ema50_val:.2f}
 TREND: {trend}
 
-NEWS (ostatnie kilka nagłówków, bez linków):
+NEWS (ostatnie nagłówki, bez linków):
 {news_txt}
 """
         blocks.append(block)
@@ -251,7 +266,15 @@ NEWS (ostatnie kilka nagłówków, bez linków):
     return "\n".join(blocks)
 
 
-# --- UI GŁÓWNE ---
+# --- UI ---
+def label_to_seconds(label: str) -> int:
+    if label.endswith("s"):
+        return int(label[:-1])
+    if label.endswith("m"):
+        return int(label[:-1]) * 60
+    return 60
+
+
 def main():
     inject_global_css()
 
@@ -266,13 +289,18 @@ def main():
 
     st.sidebar.title("⚙️ ULTRA ENGINE v2")
 
-    # Dodawanie spółek – czysty start, nic w kodzie
-    new_sym = st.sidebar.text_input("Dodaj spółkę (ticker):", "").upper()
+    # Dodawanie spółek – tickery oddzielone przecinkami, np. PKN.WA, PKO.WA, AAPL, TSLA
+    symbols_input = st.sidebar.text_input(
+        "Dodaj spółki (tickery, oddzielone przecinkami):", ""
+    )
     add_col1, add_col2 = st.sidebar.columns([2, 1])
     with add_col1:
-        if st.button("➕ Dodaj spółkę", use_container_width=True) and new_sym:
-            if new_sym not in st.session_state.symbols:
-                st.session_state.symbols.append(new_sym)
+        if st.button("➕ Dodaj spółki", use_container_width=True) and symbols_input:
+            raw_list = symbols_input.split(",")
+            for raw in raw_list:
+                sym = raw.strip().upper()
+                if sym and sym not in st.session_state.symbols:
+                    st.session_state.symbols.append(sym)
     with add_col2:
         if st.button("🗑 Wyczyść listę", use_container_width=True):
             st.session_state.symbols = []
@@ -281,9 +309,9 @@ def main():
         sym = st.sidebar.selectbox("Aktywna spółka (do wykresów):", st.session_state.symbols)
     else:
         sym = None
-        st.sidebar.info("Brak spółek. Dodaj ticker powyżej.")
+        st.sidebar.info("Brak spółek. Dodaj tickery powyżej (np. PKN.WA, AAPL).")
 
-    # Zakres danych: 1m–2y
+    # Zakres danych
     range_p = st.sidebar.selectbox(
         "Zakres danych:",
         ["1mo", "3mo", "6mo", "1y", "2y"],
@@ -293,7 +321,7 @@ def main():
     # Interwał
     tf = st.sidebar.selectbox("Interwał:", ["1d", "1h", "15m"], index=0)
 
-    # Modele AI
+    # Model AI
     ai_mod = st.sidebar.selectbox(
         "Model AI (Prop-Trader):",
         ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1-preview"],
@@ -314,32 +342,21 @@ def main():
         index=2,
     )
 
-    def label_to_seconds(label: str) -> int:
-        if label.endswith("s"):
-            return int(label[:-1])
-        if label.endswith("m"):
-            return int(label[:-1]) * 60
-        return 60
-
     data_interval_sec = label_to_seconds(data_interval_label)
     ai_interval_sec = label_to_seconds(ai_interval_label)
 
-    # Globalny autorefresh – steruje danymi, AI pilnujemy osobno
     st_autorefresh(interval=data_interval_sec * 1000, key="auto_refresh")
 
-    # Lista spółek w sidebarze
     if st.session_state.symbols:
         st.sidebar.markdown("---")
         st.sidebar.subheader("Spółki w portfelu")
         for s in st.session_state.symbols:
             st.sidebar.write(f"- {s}")
 
-    # Jeśli nie ma aktywnej spółki – kończymy na info
     if not sym:
-        st.warning("Dodaj spółkę i wybierz ją z listy, aby zobaczyć dane i analizy.")
+        st.warning("Dodaj spółki i wybierz jedną jako aktywną, aby zobaczyć dane.")
         return
 
-    # Dane dla aktywnej spółki
     df = get_price_data(sym, range_p, tf)
     if df.empty:
         st.info("Brak danych dla tego symbolu w wybranym zakresie.")
@@ -358,7 +375,7 @@ def main():
         ]
     )
 
-    # --- Wykres główny + Fibo na wykresie ---
+    # --- Wykres główny + Fibo ---
     with tab_price:
         st.subheader(f"📈 Wykres {sym} z poziomami Fibo")
         fig = go.Figure(
@@ -373,7 +390,6 @@ def main():
                 )
             ]
         )
-
         levels = fib_levels(df)
         for name, val in levels.items():
             fig.add_hline(
@@ -383,16 +399,13 @@ def main():
                 annotation_text=name,
                 annotation_position="right",
             )
-
         fig.update_layout(
             template="plotly_dark",
             height=550,
             margin=dict(l=0, r=0, t=30, b=0),
         )
         st.plotly_chart(fig, use_container_width=True)
-        st.caption(
-            "Wykres świecowy z poziomami Fibonacciego (ostatnie ~100 świec). Poziomy mogą działać jako wsparcia/opory."
-        )
+        st.caption("Świece + poziomy Fibonacciego (ostatnie ~100 świec).")
 
     # --- RSI ---
     with tab_rsi:
@@ -400,11 +413,9 @@ def main():
         r = rsi(df["Close"]).dropna()
         st.line_chart(r)
         st.write(f"Ostatnia wartość RSI(14): **{r.iloc[-1]:.2f}**")
-        st.caption(
-            "RSI mierzy siłę ruchu. Powyżej 70 – wykupienie, poniżej 30 – wyprzedanie (ale zawsze w kontekście trendu)."
-        )
+        st.caption("RSI > 70 – wykupienie, < 30 – wyprzedanie (w kontekście trendu).")
 
-    # --- Fibo (tabela + opis) ---
+    # --- Fibo – tabela + osobny wykres ---
     with tab_fibo:
         st.subheader("Poziomy Fibonacciego – tabela")
         levels = fib_levels(df)
@@ -412,9 +423,32 @@ def main():
             {"Poziom": list(levels.keys()), "Cena": [round(v, 4) for v in levels.values()]}
         )
         st.table(fib_df)
-        st.caption(
-            "Poziomy Fibo wyznaczają potencjalne strefy reakcji ceny na bazie ostatniego większego ruchu."
+
+        st.subheader("Wykres Fibo (Close + poziomy)")
+        fig_f = go.Figure()
+        fig_f.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df["Close"],
+                mode="lines",
+                name="Close",
+                line=dict(color=NEON_YELLOW),
+            )
         )
+        for name, val in levels.items():
+            fig_f.add_hline(
+                y=val,
+                line_dash="dot",
+                line_color=NEON_BLUE,
+                annotation_text=name,
+                annotation_position="right",
+            )
+        fig_f.update_layout(
+            template="plotly_dark",
+            height=400,
+            margin=dict(l=0, r=0, t=30, b=0),
+        )
+        st.plotly_chart(fig_f, use_container_width=True)
 
     # --- SMI ---
     with tab_smi:
@@ -425,20 +459,14 @@ def main():
         st.write(
             f"Ostatni SMI: **{s['SMI'].iloc[-1]:.2f}**, Signal: **{s['Signal'].iloc[-1]:.2f}**"
         )
-        st.caption(
-            "SMI to wskaźnik momentum – pokazuje, jak silny jest ruch względem ostatniego zakresu cen."
-        )
 
     # --- MACD ---
     with tab_macd:
-        st.subheader("MACD (Moving Average Convergence Divergence)")
+        st.subheader("MACD")
         macd_line, signal_line, hist = macd(df["Close"])
         m = pd.DataFrame({"MACD": macd_line, "Signal": signal_line, "Hist": hist}).dropna()
         st.line_chart(m[["MACD", "Signal"]])
         st.bar_chart(m["Hist"])
-        st.caption(
-            "MACD pokazuje relację dwóch średnich kroczących i momentum trendu. Przecięcia MACD/Signal często sygnalizują zmianę momentum."
-        )
 
     # --- Trend / SL / TP / bid / ask / spread ---
     with tab_trend:
@@ -446,7 +474,6 @@ def main():
         info = trend_and_levels(df, sym)
 
         col_a, col_b = st.columns(2)
-
         with col_a:
             st.write(f"**Cena ostatnia:** {info['last']:.2f}")
             st.write(f"**Trend:** {info['trend']}")
@@ -456,24 +483,19 @@ def main():
             st.write(f"**EMA50:** {info['ema50']:.2f}")
 
         with col_b:
-            st.write("**Scenariusz LONG (przykładowy, na bazie ATR):**")
+            st.write("**Scenariusz LONG (na bazie ATR):**")
             st.write(f"SL: {info['sl_long']:.2f}")
             st.write(f"TP: {info['tp_long']:.2f}")
-            st.write("**Scenariusz SHORT (przykładowy, na bazie ATR):**")
+            st.write("**Scenariusz SHORT (na bazie ATR):**")
             st.write(f"SL: {info['sl_short']:.2f}")
             st.write(f"TP: {info['tp_short']:.2f}")
-
             st.markdown("---")
-            st.write(f"**Bid:** {info['bid'] if info['bid'] else 'brak'}")
-            st.write(f"**Ask:** {info['ask'] if info['ask'] else 'brak'}")
+            st.write(f"**Bid:** {info['bid'] if info['bid'] is not None else 'brak'}")
+            st.write(f"**Ask:** {info['ask'] if info['ask'] is not None else 'brak'}")
             if info["spread"] is not None:
-                st.write(f"**Spread (kwotowo):** {info['spread']:.4f}")
+                st.write(f"**Spread:** {info['spread']:.4f}")
 
-        st.caption(
-            "Trend i poziomy SL/TP są przykładowe – służą jako punkt wyjścia do własnej oceny ryzyka, nie jako sygnał."
-        )
-
-    # --- AI Chat – jedna spółka, wolny czat ---
+    # --- AI Chat – jedna spółka ---
     with tab_ai_chat:
         st.subheader(f"💬 AI – Prop-Trader Chat (tylko {sym})")
 
@@ -518,7 +540,7 @@ To nie jest porada inwestycyjna, tylko analiza scenariuszy.
             st.session_state.chat.append({"role": "assistant", "content": reply})
             st.rerun()
 
-    # --- AI Multi Verdict – wiele spółek naraz + newsy + zbiorczy werdykt ---
+    # --- AI Multi Verdict – wiele spółek ---
     with tab_ai_multi:
         st.subheader("🧠 AI Multi Verdict – analiza wielu spółek naraz")
 
@@ -526,7 +548,7 @@ To nie jest porada inwestycyjna, tylko analiza scenariuszy.
             st.info("Brak spółek do analizy.")
         else:
             st.write(
-                f"Spółki do analizy: {', '.join(st.session_state.symbols)} (max ~20 realnie sensownie)."
+                f"Spółki do analizy: {', '.join(st.session_state.symbols)} (realnie sensownie do ~20)."
             )
 
             now = time.time()
@@ -534,7 +556,6 @@ To nie jest porada inwestycyjna, tylko analiza scenariuszy.
                 "Automatyczna analiza AI zgodnie z suwakiem odświeżania AI",
                 value=False,
             )
-
             run_ai_now = st.button("🔍 Uruchom analizę AI teraz")
 
             should_run_ai = False
@@ -591,4 +612,3 @@ Nie udzielasz porad inwestycyjnych – to tylko analiza scenariuszy.
 
 if __name__ == "__main__":
     main()
-
