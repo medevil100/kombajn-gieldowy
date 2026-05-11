@@ -829,4 +829,3 @@ if __name__ == "__main__":
     main()
 
 
-Jeśli coś jeszcze strzeli błąd — wklej sam traceback, bez reszty, i wtedy poprawimy już punktowo, a nie od nowa.
