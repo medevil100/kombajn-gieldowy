@@ -321,123 +321,55 @@ def main():
     # Interwał
     tf = st.sidebar.selectbox("Interwał:", ["1d", "1h", "15m"], index=0)
 
-    # Model AI
-    ai_mod = st.sidebar.selectbox(
-        "Model AI (Prop-Trader):",
-        ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1-preview"],
+    # Suwaki odświeżania
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("⏱ Odświeżanie")
+
+    data_interval_label = st.sidebar.selectbox(
+        "Odświeżanie danych:",
+        ["5s", "10s", "30s", "1m", "5m", "15m"],
+        index=3,
+    )
+    ai_interval_label = st.sidebar.selectbox(
+        "Odświeżanie AI (multi-analiza):",
+        ["30s", "1m", "5m", "15m", "30m"],
+        index=2,
     )
 
-    # --- Suwaki odświeżania ---
-st.sidebar.markdown("---")
-st.sidebar.subheader("⏱ Odświeżanie")
+    data_interval_sec = label_to_seconds(data_interval_label)
+    ai_interval_sec = label_to_seconds(ai_interval_label)
 
-data_interval_label = st.sidebar.selectbox(
-    "Odświeżanie danych:",
-    ["5s", "10s", "30s", "1m", "5m", "15m"],
-    index=3,
-)
-ai_interval_label = st.sidebar.selectbox(
-    "Odświeżanie AI (multi-analiza):",
-    ["30s", "1m", "5m", "15m", "30m"],
-    index=2,
-)
+    st_autorefresh(interval=data_interval_sec * 1000, key="auto_refresh")
 
-data_interval_sec = label_to_seconds(data_interval_label)
-ai_interval_sec = label_to_seconds(ai_interval_label)
-
-st_autorefresh(interval=data_interval_sec * 1000, key="auto_refresh")
-
-if st.session_state.symbols:
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Spółki w portfelu")
-    for s in st.session_state.symbols:
-        st.sidebar.write(f"- {s}")
-
-if not sym:
-    st.warning("Dodaj spółki i wybierz jedną jako aktywną, aby zobaczyć dane.")
-    return
-
-df = get_price_data(sym, range_p, tf)
-if df.empty:
-    st.info("Brak danych dla tego symbolu w wybranym zakresie.")
-    return
-
-# --- TABS (POPRAWIONE, BEZ BŁĘDU) ---
-tab_price, tab_rsi, tab_fibo, tab_smi, tab_macd, tab_trend, tab_ai_chat, tab_ai_multi, tab_heatmap = st.tabs(
-    [
-        "Wykres",
-        "RSI",
-        "Fibo",
-        "SMI",
-        "MACD",
-        "Trend / SL/TP",
-        "AI Chat (1 spółka)",
-        "AI Multi Verdict (wiele spółek)",
-        "Heatmapa Rynku"
-    ]
-)
-
-
-# --- HEATMAPA RYNKU ---
-with tab_heatmap:
-    st.subheader("🔥 Heatmapa Rynku – zmiana % dla wszystkich spółek")
-
-    if not st.session_state.symbols:
-        st.info("Brak spółek do wyświetlenia heatmapy.")
-    else:
-        heat_data = []
-
+    if st.session_state.symbols:
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("Spółki w portfelu")
         for s in st.session_state.symbols:
-            df_h = get_price_data(s, "1d", "1h")
+            st.sidebar.write(f"- {s}")
 
-            if df_h.empty:
-                heat_data.append({"Symbol": s, "Change": 0})
-                continue
+    if not sym:
+        st.warning("Dodaj spółki i wybierz jedną jako aktywną, aby zobaczyć dane.")
+        return
 
-            close = df_h["Close"].astype(float)
-            last = float(close.iloc[-1])
-            prev = float(close.iloc[-2]) if len(close) > 1 else last
+    df = get_price_data(sym, range_p, tf)
+    if df.empty:
+        st.info("Brak danych dla tego symbolu w wybranym zakresie.")
+        return
 
-            change = ((last - prev) / prev * 100) if prev != 0 else 0
-            heat_data.append({"Symbol": s, "Change": change})
-
-        heat_df = pd.DataFrame(heat_data)
-
-        # Kolory: czerwony → spadek, zielony → wzrost
-        def color_map(val):
-            if val > 0:
-                return f"background-color: rgba(0, 255, 0, {min(abs(val)/10, 1)})"
-            elif val < 0:
-                return f"background-color: rgba(255, 0, 0, {min(abs(val)/10, 1)})"
-            else:
-                return "background-color: rgba(128,128,128,0.3)"
-
-        st.dataframe(
-            heat_df.style
-                .applymap(color_map, subset=["Change"])
-                .format({"Change": "{:+.2f}%"})
-        )
-
-        st.caption("Kolor = kierunek ruchu, intensywność = siła zmiany procentowej.")
-
-
-
-        # Kolory: czerwony → spadek, zielony → wzrost
-        def color_map(val):
-            if val > 0:
-                return f"background-color: rgba(0, 255, 0, {min(abs(val)/10, 1)})"
-            elif val < 0:
-                return f"background-color: rgba(255, 0, 0, {min(abs(val)/10, 1)})"
-            else:
-                return "background-color: rgba(128,128,128,0.3)"
-
-        st.dataframe(
-            heat_df.style.applymap(color_map, subset=["Change"])
-                         .format({"Change": "{:+.2f}%"})
-        )
-
-        st.caption("Kolor = kierunek ruchu, intensywność = siła zmiany procentowej.")
-
+    # --- TABS ---
+    tab_price, tab_rsi, tab_fibo, tab_smi, tab_macd, tab_trend, tab_ai_chat, tab_ai_multi, tab_heatmap = st.tabs(
+        [
+            "Wykres",
+            "RSI",
+            "Fibo",
+            "SMI",
+            "MACD",
+            "Trend / SL/TP",
+            "AI Chat (1 spółka)",
+            "AI Multi Verdict (wiele spółek)",
+            "Heatmapa Rynku",
+        ]
+    )
 
     # --- Wykres główny + Fibo ---
     with tab_price:
@@ -659,7 +591,7 @@ Nie udzielasz porad inwestycyjnych – to tylko analiza scenariuszy.
                 ]
 
                 res_multi = client.chat.completions.create(
-                    model=ai_mod,
+                    model="gpt-4o",
                     messages=messages_multi,
                 )
                 st.session_state.ai_multi_result = res_multi.choices[0].message.content
@@ -672,6 +604,47 @@ Nie udzielasz porad inwestycyjnych – to tylko analiza scenariuszy.
                 st.info(
                     "Brak jeszcze analizy AI. Użyj przycisku powyżej lub włącz automatyczną analizę."
                 )
+
+    # --- HEATMAPA RYNKU ---
+    with tab_heatmap:
+        st.subheader("🔥 Heatmapa Rynku – zmiana % dla wszystkich spółek")
+
+        if not st.session_state.symbols:
+            st.info("Brak spółek do wyświetlenia heatmapy.")
+        else:
+            heat_data = []
+
+            for s in st.session_state.symbols:
+                df_h = get_price_data(s, "1d", "1h")
+
+                if df_h.empty:
+                    heat_data.append({"Symbol": s, "Change": 0})
+                    continue
+
+                close_h = df_h["Close"].astype(float)
+                last_h = float(close_h.iloc[-1])
+                prev_h = float(close_h.iloc[-2]) if len(close_h) > 1 else last_h
+
+                change = ((last_h - prev_h) / prev_h * 100) if prev_h != 0 else 0
+                heat_data.append({"Symbol": s, "Change": change})
+
+            heat_df = pd.DataFrame(heat_data)
+
+            def color_map(val):
+                if val > 0:
+                    return f"background-color: rgba(0, 255, 0, {min(abs(val)/10, 1)})"
+                elif val < 0:
+                    return f"background-color: rgba(255, 0, 0, {min(abs(val)/10, 1)})"
+                else:
+                    return "background-color: rgba(128,128,128,0.3)"
+
+            st.dataframe(
+                heat_df.style
+                    .applymap(color_map, subset=["Change"])
+                    .format({"Change": "{:+.2f}%"})
+            )
+
+            st.caption("Kolor = kierunek ruchu, intensywność = siła zmiany procentowej.")
 
 
 if __name__ == "__main__":
