@@ -1323,7 +1323,7 @@ body, .stApp {
 """, unsafe_allow_html=True)
  
 
-        )
+    )
         else:
             st.info("Brak NewsScore — kliknij przycisk, aby wygenerować.")
 
