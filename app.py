@@ -1,18 +1,4 @@
 
-- poprawioną heatmapą (bez `.style` błędów),
-- działającym Pre‑Market Radarem,
-- presetami, które **dodają**, a nie nadpisują,
-- możliwością wpisywania własnych spółek,
-- kolorami,
-- stabilnymi funkcjami,
-- bez żadnych eksperymentalnych elementów,
-- bez błędów Pandas / Streamlit.
-
-**To jest finalny, kompletny plik `main.py`.**  
-Wklejasz → odpalasz → działa.
-
----
-
 # 🔥 **KOMBAJN v6.2 — FINALNY, DZIAŁAJĄCY, POPRAWIONY**
 
 👇 **Wklej cały ten plik 1:1 jako `main.py`**
