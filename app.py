@@ -1,359 +1,227 @@
-import os
-import pandas as pd
-import yfinance as yf
 import streamlit as st
-import plotly.graph_objects as go
-from openai import OpenAI
+import pandas as pd
+import cloudscraper
+from bs4 import BeautifulSoup
+from datetime import datetime
+import time
 
-# ====================== KONFIGURACJA AI ======================
+# ============================================
+# KONFIGURACJA: TICKERY → URL + ID
+# ============================================
 
-MODEL_TURBO = "gpt-4o"
-MODEL_NEWS = "gpt-4o-mini"
-MODEL_RISK = "gpt-4.1"
-MODEL_PATTERN = "gpt-4o-mini"
-
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# ====================== AUTO-SEKTORY ======================
-
-AUTO_SECTOR_MAP = {
-    "PKN.WA": "Energia", "PKO.WA": "Finanse", "PEO.WA": "Finanse",
-    "CDR.WA": "Gaming", "11B.WA": "Gaming", "DNP.WA": "Technologia",
-    "KGH.WA": "Surowce", "JSW.WA": "Surowce", "LPP.WA": "Konsumpcja cyclical",
-    "NVDA": "AI / Semiconductors", "AMD": "AI / Semiconductors",
-    "SMCI": "AI / Semiconductors", "AVGO": "AI / Semiconductors",
-    "ASML": "AI / Semiconductors", "TSM": "AI / Semiconductors",
-    "QCOM": "AI / Semiconductors",
-    "HIVE": "Crypto miners", "MARA": "Crypto miners",
-    "RIOT": "Crypto miners", "CLSK": "Crypto miners",
-    "IREN": "Crypto miners", "WULF": "Crypto miners",
+INVESTING_URLS = {
+    "ATT.WA": "https://www.investing.com/equities/grupa-azoty-sa",
 }
 
-def get_auto_sector(symbol):
-    return AUTO_SECTOR_MAP.get(symbol, "GPW / Inne" if symbol.endswith(".WA") else "Inne")
+INVESTING_IDS = {
+    "ATT.WA": 945,
+}
 
-# ====================== PRESETY ======================
+# ============================================
+# SCRAPER: DANE BIEŻĄCE
+# ============================================
 
-def preset_gpw_spekula():
-    return ["HRT.WA","CFS.WA","PRT.WA","ATT.WA","STX.WA","PUR.WA","BCS.WA",
-            "KCH.WA","GTN.WA","LBW.WA","PGV.WA","HPE.WA","DNS.WA","ZUK.WA",
-            "VVD.WA","MLN.WA","MER.WA","APS.WA","NVG.WA"]
+def get_investing_live(url: str):
+    scraper = cloudscraper.create_scraper(
+        browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
+    )
+    r = scraper.get(url)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
 
-def preset_usa_biotech():
-    return ["IOVA","PLRX","HUMA","TCRX","GOSS","MREO","ADTX"]
+    price_el = soup.select_one("div.instrument-price_instrument-price__3uw25 span.text-2xl")
+    price = float(price_el.text.replace("\xa0", "").replace(",", ".")) if price_el else None
 
-def preset_ai_semiconductors():
-    return ["NVDA","AMD","SMCI","AVGO","ASML","TSM","QCOM"]
+    change_el = soup.select_one("div.instrument-price_change-percent__19cas span")
+    change_pct = None
+    if change_el:
+        txt = change_el.text.replace("%", "").replace("\xa0", "").replace(",", ".")
+        try:
+            change_pct = float(txt)
+        except:
+            change_pct = None
 
-def preset_crypto_miners():
-    return ["HIVE","MARA","RIOT","CLSK","IREN","WULF"]
+    stats = {}
+    rows = soup.select("div.instrument-stats_instrument-stats__1x0eu div.flex.flex-col")
+    for row in rows:
+        label_el = row.select_one("span.text-xs")
+        value_el = row.select_one("span.text-sm")
+        if not label_el or not value_el:
+            continue
+        label = label_el.text.strip()
+        value = value_el.text.strip().replace("\xa0", "").replace(",", ".")
+        try:
+            if value.endswith("K"):
+                value = float(value[:-1]) * 1_000
+            elif value.endswith("M"):
+                value = float(value[:-1]) * 1_000_000
+            else:
+                value = float(value)
+        except:
+            pass
+        stats[label] = value
 
-# ====================== DANE RYNKOWE ======================
+    return {"price": price, "change_pct": change_pct, "stats": stats}
 
-def get_price_data(symbol, period="5d", interval="1h"):
-    df = yf.download(symbol, period=period, interval=interval, progress=False)
-    if df.empty:
+# ============================================
+# SCRAPER: HISTORIA OHLC
+# ============================================
+
+def get_investing_history(instrument_id: int, start="2020-01-01", end=None):
+    if end is None:
+        end = datetime.now().strftime("%Y-%m-%d")
+
+    url = (
+        f"https://api.investing.com/api/financialdata/historical/"
+        f"{instrument_id}?interval=P1D&start-date={start}&end-date={end}"
+    )
+
+    scraper = cloudscraper.create_scraper()
+    r = scraper.get(url)
+    r.raise_for_status()
+    data = r.json()
+    rows = data.get("data", [])
+    if not rows:
         return pd.DataFrame()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df.astype(float).dropna()
 
-def get_bid_ask(symbol):
-    try:
-        info = yf.Ticker(symbol).info
-        bid = info.get("bid")
-        ask = info.get("ask")
-        if not bid or not ask:
-            return None, None, None
-        mid = (bid + ask) / 2
-        return bid, ask, (ask - bid) / mid * 100
-    except:
-        return None, None, None
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"], unit="ms")
+    df = df.rename(columns={
+        "date": "Date",
+        "last_close": "Close",
+        "last_open": "Open",
+        "last_max": "High",
+        "last_min": "Low",
+        "volume": "Volume"
+    })
+    df = df[["Date", "Open", "High", "Low", "Close", "Volume"]]
+    df = df.sort_values("Date").set_index("Date")
+    return df
 
-def compute_entry_risk(volume, spread):
-    if volume >= 2_000_000: liquidity = "WYSOKA"
-    elif volume >= 500_000: liquidity = "ŚREDNIA"
-    else: liquidity = "NISKA"
+# ============================================
+# WSKAŹNIKI TECHNICZNE
+# ============================================
 
-    if spread is None: spread_rating = "NIEZNANY"
-    elif spread < 0.5: spread_rating = "DOBRY"
-    elif spread < 2: spread_rating = "OK"
-    else: spread_rating = "SŁABY"
+def compute_indicators(df: pd.DataFrame):
+    out = {}
 
-    if liquidity == "WYSOKA" and spread and spread < 1:
-        slippage = "NISKIE"
-    elif liquidity == "ŚREDNIA" or (spread and spread <= 3):
-        slippage = "ŚREDNIE"
+    tr = pd.concat([
+        df["High"] - df["Low"],
+        (df["High"] - df["Close"].shift()).abs(),
+        (df["Low"] - df["Close"].shift()).abs()
+    ], axis=1).max(axis=1)
+    out["ATR"] = tr.rolling(14).mean().iloc[-1]
+
+    out["EMA20"] = df["Close"].ewm(span=20).mean().iloc[-1]
+    out["EMA50"] = df["Close"].ewm(span=50).mean().iloc[-1]
+
+    ema12 = df["Close"].ewm(span=12).mean()
+    ema26 = df["Close"].ewm(span=26).mean()
+    out["MACD"] = ema12.iloc[-1] - ema26.iloc[-1]
+
+    delta = df["Close"].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss
+    out["RSI"] = 100 - (100 / (1 + rs.iloc[-1]))
+
+    return out
+
+# ============================================
+# AI TURBO — OPIS TECHNICZNY
+# ============================================
+
+def ai_turbo(row):
+    txt = []
+
+    txt.append(f"{row['Symbol']}: trend {row['Trend']}, sygnał {row['Signal']}, setup {row['SetupScore']:.1f}/100.")
+
+    if row["RSI"] < 30:
+        txt.append("RSI wyprzedany — możliwy bounce.")
+    elif row["RSI"] > 70:
+        txt.append("RSI wykupiony — możliwa korekta.")
     else:
-        slippage = "WYSOKIE"
+        txt.append("RSI neutralny.")
 
-    return liquidity, spread_rating, slippage
+    if row["EMA20"] > row["EMA50"]:
+        txt.append("EMA20 > EMA50 — krótkoterminowy trend wzrostowy.")
+    else:
+        txt.append("EMA20 < EMA50 — trend spadkowy.")
 
-def get_premarket(symbol):
-    try:
-        info = yf.Ticker(symbol).info
-        prev = info.get("regularMarketPreviousClose")
-        now = info.get("regularMarketPrice")
-        if prev and now:
-            return (now - prev) / prev * 100
-        return None
-    except:
-        return None
+    if row["ATR"] / row["Price"] > 0.05:
+        txt.append("Wysoka zmienność — ostrożnie z pozycją.")
+    else:
+        txt.append("Zmienność umiarkowana.")
 
-# ====================== METRYKI ======================
+    return " ".join(txt)
 
-def compute_metrics(symbol):
-    df = get_price_data(symbol)
-    if df.empty or len(df) < 3:
-        return {
-            "Symbol": symbol, "LastPrice": 0, "Change": 0, "Volume": 0,
-            "ATR": 0, "Trend": "BRAK", "Signal": "NEUTRAL",
-            "MomentumScore": 0, "VolatilityScore": 0, "TrendStrength": 0,
-            "RiskScore": 50, "SetupScore": 0,
-            "SL_Low": None, "SL_High": None, "TP_Low": None, "TP_High": None,
-            "Bid": None, "Ask": None, "SpreadPct": None,
-            "Liquidity": "NIEZNANA", "SpreadRating": "NIEZNANY",
-            "Slippage": "NIEZNANE", "Sector": get_auto_sector(symbol)
-        }
+# ============================================
+# ANALIZA SYMBOLU
+# ============================================
 
-    close = df["Close"]
-    high = df["High"]
-    low = df["Low"]
-    volume = df["Volume"]
+def analyze_symbol(symbol):
+    url = INVESTING_URLS.get(symbol)
+    inst_id = INVESTING_IDS.get(symbol)
 
-    last = close.iloc[-1]
-    prev = close.iloc[-2]
-    change = (last - prev) / prev * 100 if prev else 0
+    live = get_investing_live(url)
+    df = get_investing_history(inst_id)
 
-    tr = pd.concat([(high - low),
-                    (high - close.shift()).abs(),
-                    (low - close.shift()).abs()], axis=1).max(axis=1)
-    atr = tr.rolling(14).mean().iloc[-1]
+    ind = compute_indicators(df)
 
-    ema20 = close.ewm(span=20).mean().iloc[-1]
-    ema50 = close.ewm(span=50).mean().iloc[-1]
+    last = df["Close"].iloc[-1]
+    prev = df["Close"].iloc[-2]
+    change = (last - prev) / prev * 100
 
-    if last > ema20 > ema50: trend = "UP"
-    elif last < ema20 < ema50: trend = "DOWN"
-    else: trend = "SIDE"
+    trend = "UP" if ind["EMA20"] > ind["EMA50"] else "DOWN"
+    signal = "BUY" if trend == "UP" else "SELL"
 
-    signal = "BUY" if trend == "UP" and change > 0 else \
-             "SELL" if trend == "DOWN" and change < 0 else "NEUTRAL"
+    momentum = max(0, min(100, 50 + change))
+    setup = max(0, min(100, momentum * 0.3 + (20 if signal == "BUY" else 10)))
 
-    vol_last = volume.iloc[-1]
-    vol_prev = volume.iloc[-2]
-    vol_change = (vol_last - vol_prev) / vol_prev * 100 if vol_prev else 0
-
-    momentum = max(0, min(100, 50 + change * 0.7 + vol_change * 0.3))
-    vol_score = max(0, min(100, (atr / last * 100) * 2))
-    trend_strength = max(0, min(100, abs(ema20 - ema50) / last * 500))
-
-    risk = vol_score
-    setup = max(0, min(100, momentum * 0.3 + trend_strength * 0.3 - risk * 0.2 +
-                       (30 if signal == "BUY" else 20 if signal == "SELL" else 0)))
-
-    sl_low = last - atr * 1.5
-    sl_high = last - atr * 1.0
-    tp_low = last + atr * 2.0
-    tp_high = last + atr * 3.0
-
-    bid, ask, spread = get_bid_ask(symbol)
-    liquidity, spread_rating, slippage = compute_entry_risk(vol_last, spread)
-
-    return {
-        "Symbol": symbol, "LastPrice": last, "Change": change, "Volume": vol_last,
-        "ATR": atr, "Trend": trend, "Signal": signal, "MomentumScore": momentum,
-        "VolatilityScore": vol_score, "TrendStrength": trend_strength,
-        "RiskScore": risk, "SetupScore": setup,
-        "SL_Low": sl_low, "SL_High": sl_high,
-        "TP_Low": tp_low, "TP_High": tp_high,
-        "Bid": bid, "Ask": ask, "SpreadPct": spread,
-        "Liquidity": liquidity, "SpreadRating": spread_rating,
-        "Slippage": slippage, "Sector": get_auto_sector(symbol)
+    row = {
+        "Symbol": symbol,
+        "Price": last,
+        "Change%": change,
+        "ATR": ind["ATR"],
+        "EMA20": ind["EMA20"],
+        "EMA50": ind["EMA50"],
+        "MACD": ind["MACD"],
+        "RSI": ind["RSI"],
+        "Trend": trend,
+        "Signal": signal,
+        "Momentum": momentum,
+        "SetupScore": setup,
     }
 
-# ====================== HEATMAPA (DZIAŁAJĄCA) ======================
+    row["AI"] = ai_turbo(row)
+    return row
 
-def heat_color(val):
-    if pd.isna(val): return ""
-    if val >= 70: return "#166534"
-    if val >= 55: return "#15803d"
-    if val >= 45: return "#ca8a04"
-    return "#7f1d1d"
+# ============================================
+# STREAMLIT UI
+# ============================================
 
-# ====================== WYKRES ======================
+st.set_page_config(page_title="KOMBAJN 3.0", layout="wide")
 
-def plot_pro_chart(symbol):
-    df = get_price_data(symbol)
-    if df.empty:
-        st.warning(f"Brak danych dla {symbol}")
-        return
+st.title("⚡ KOMBAJN 3.0 — Investing.com + AI Turbo")
 
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=df.index, open=df["Open"], high=df["High"],
-        low=df["Low"], close=df["Close"]
-    ))
+symbols = st.text_input("Podaj tickery (oddzielone przecinkami):", "ATT.WA")
+symbols = [s.strip() for s in symbols.split(",")]
 
-    ema20 = df["Close"].ewm(span=20).mean()
-    ema50 = df["Close"].ewm(span=50).mean()
+if st.button("Skanuj"):
+    results = []
+    for s in symbols:
+        with st.spinner(f"Analizuję {s}..."):
+            res = analyze_symbol(s)
+            results.append(res)
+            time.sleep(1)
 
-    fig.add_trace(go.Scatter(x=df.index, y=ema20, mode="lines", name="EMA20"))
-    fig.add_trace(go.Scatter(x=df.index, y=ema50, mode="lines", name="EMA50"))
+    df = pd.DataFrame(results).sort_values("SetupScore", ascending=False)
 
-    fig.update_layout(template="plotly_dark", height=600,
-                      xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, use_container_width=True)
+    st.subheader("📊 Ranking setupów")
+    st.dataframe(df)
 
-# ====================== RISK CHECK ======================
-
-def risk_check_v2(df):
-    out = []
-    for _, r in df.iterrows():
-        sym = r["Symbol"]
-        if r["Volume"] == 0 or r["ATR"] == 0:
-            out.append(f"### {sym}\nBrak danych / pomiń\n")
-            continue
-        if r["RiskScore"] >= 90 and r["VolatilityScore"] >= 90 and r["Liquidity"] == "NISKA":
-            out.append(f"### {sym}\nEkstremalne ryzyko / unikać\n")
-            continue
-        if r["Trend"] == "DOWN" and r["Signal"] == "SELL":
-            out.append(f"### {sym}\nKandydat do shorta\n")
-            continue
-        if r["Trend"] == "UP" and r["Signal"] == "BUY" and r["Liquidity"] != "NISKA":
-            out.append(f"### {sym}\nKandydat do longa\n")
-            continue
-        if r["Trend"] == "SIDE" or r["Signal"] == "NEUTRAL":
-            out.append(f"### {sym}\nNeutralne / brak przewagi\n")
-            continue
-        out.append(f"### {sym}\nWysokie ryzyko / brak przewagi\n")
-    return "\n".join(out)
-
-# ====================== CSS ======================
-
-def inject_css():
-    st.markdown("""
-    <style>
-    body, .stApp { background-color:#020617; color:#e5e5ff; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# ====================== MAIN ======================
-
-def main():
-    st.set_page_config(page_title="KOMBAJN 6.3", layout="wide")
-    inject_css()
-    st.title("🔥 KOMBAJN v6.3 — FINALNY, DZIAŁAJĄCY, NIEUCINANY")
-
-    if "symbols" not in st.session_state:
-        st.session_state.symbols = []
-
-    st.sidebar.header("Presety")
-
-    preset = st.sidebar.selectbox("Wybierz preset:", [
-        "Brak", "GPW spekuła", "USA biotech",
-        "AI / Semiconductors", "Crypto miners"
-    ])
-
-    if st.sidebar.button("Załaduj preset"):
-        if preset == "GPW spekuła":
-            for s in preset_gpw_spekula():
-                if s not in st.session_state.symbols:
-                    st.session_state.symbols.append(s)
-        elif preset == "USA biotech":
-            for s in preset_usa_biotech():
-                if s not in st.session_state.symbols:
-                    st.session_state.symbols.append(s)
-        elif preset == "AI / Semiconductors":
-            for s in preset_ai_semiconductors():
-                if s not in st.session_state.symbols:
-                    st.session_state.symbols.append(s)
-        elif preset == "Crypto miners":
-            for s in preset_crypto_miners():
-                if s not in st.session_state.symbols:
-                    st.session_state.symbols.append(s)
-
-    st.sidebar.header("Dodaj własne spółki")
-    symbols_input = st.sidebar.text_input("Tickery (oddzielone przecinkami):")
-
-    if st.sidebar.button("Dodaj"):
-        for raw in symbols_input.split(","):
-            sym = raw.strip().upper()
-            if sym and sym not in st.session_state.symbols:
-                st.session_state.symbols.append(sym)
-
-    if st.sidebar.button("Wyczyść"):
-        st.session_state.symbols = []
-
-    if not st.session_state.symbols:
-        st.warning("Dodaj spółki lub użyj presetów.")
-        return
-
-    tabs = st.tabs([
-        "📊 Heatmapa", "📈 Wykres", "🌅 Pre‑Market",
-        "🏭 Sektory", "🛡️ Risk Check"
-    ])
-
-    # HEATMAPA
-    with tabs[0]:
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        df = pd.DataFrame(rows).sort_values("SetupScore", ascending=False)
-
-        df["Color"] = df["SetupScore"].apply(heat_color)
-
-        st.dataframe(
-            df,
-            use_container_width=True,
-            column_config={
-                "SetupScore": st.column_config.NumberColumn(
-                    "SetupScore",
-                    help="Ocena setupu",
-                    format="%.1f",
-                    min_value=0,
-                    max_value=100,
-                    step=1,
-                    width="medium",
-                ),
-                "Color": st.column_config.TextColumn(
-                    "Kolor",
-                    help="Heatmapa",
-                    width="small",
-                ),
-            },
-            hide_index=True
-        )
-
-    # WYKRES
-    with tabs[1]:
-        symbol = st.selectbox("Wybierz spółkę:", st.session_state.symbols)
-        plot_pro_chart(symbol)
-
-    # PRE-MARKET
-    with tabs[2]:
-        pre = []
-        for s in st.session_state.symbols:
-            ch = get_premarket(s)
-            if ch is not None:
-                pre.append({"Symbol": s, "Change": ch})
-        if not pre:
-            st.info("Brak danych.")
-        else:
-            dfp = pd.DataFrame(pre).sort_values("Change", ascending=False)
-            st.dataframe(dfp)
-
-    # SEKTORY
-    with tabs[3]:
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        df = pd.DataFrame(rows)
-        sec = df.groupby("Sector")["SetupScore"].mean().reset_index()
-        st.dataframe(sec)
-
-    # RISK CHECK
-    with tabs[4]:
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        df = pd.DataFrame(rows)
-        if st.button("Risk Check"):
-            st.markdown(risk_check_v2(df))
-
-if __name__ == "__main__":
-    main()
+    st.subheader("🤖 AI Turbo — komentarze")
+    for _, row in df.iterrows():
+        st.write(f"### {row['Symbol']}")
+        st.write(row["AI"])
+        st.write("---")
