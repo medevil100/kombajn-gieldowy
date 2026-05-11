@@ -437,11 +437,11 @@ def style_heatmap(df):
 
 # --- Wykres PRO ---
 def plot_pro_chart(symbol: str):
-def plot_pro_chart(symbol: str):
     df = get_price_data(symbol, "3mo", "1d")
     if df.empty:
         st.warning("Brak danych do wykresu.")
         return
+
 
     close = df["Close"].astype(float)
     ema20 = close.ewm(span=20, adjust=False).mean()
