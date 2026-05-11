@@ -288,15 +288,184 @@ def plot_pro_chart(symbol: str):
 
     st.subheader("ATR(14)")
     st.line_chart(atr_series)
+# --- ALERTY ---
+def generate_alerts(df: pd.DataFrame):
+    alerts = []
 
+    for _, row in df.iterrows():
+        sym = row["Symbol"]
+        ss = row["SetupScore"]
+        mom = row["MomentumScore"]
+        trend = row["Trend"]
+        ch = row["Change"]
+        vol = row["VolatilityScore"]
+
+        if ss >= 70 and trend == "UP":
+            alerts.append(f"🔥 {sym}: mocny setup (SetupScore {ss:.1f}, trend UP).")
+        if mom >= 60:
+            alerts.append(f"⚡ {sym}: wysokie momentum ({mom:.1f}).")
+        if abs(ch) >= 3:
+            alerts.append(f"📈 {sym}: duża zmiana intraday ({ch:+.2f}%).")
+        if vol >= 70:
+            alerts.append(f"⚠️ {sym}: bardzo wysoka zmienność (VolatilityScore {vol:.1f}).")
+
+    return alerts
+
+# --- PATTERNY ---
+def detect_patterns_for_symbol(symbol: str):
+    df = get_price_data(symbol, "3mo", "1d")
+    if df.empty or len(df) < 30:
+        return []
+
+    close = df["Close"].astype(float)
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+
+    patterns = []
+
+    # Breakout górą / dołem (20 dni)
+    rolling_max = close.rolling(20).max()
+    rolling_min = close.rolling(20).min()
+    last = close.iloc[-1]
+    prev_max = rolling_max.iloc[-2]
+    prev_min = rolling_min.iloc[-2]
+
+    if last > prev_max:
+        patterns.append("Breakout UP (wybicie powyżej 20-dniowego maksimum).")
+    if last < prev_min:
+        patterns.append("Breakout DOWN (wybicie poniżej 20-dniowego minimum).")
+
+    # Bollinger squeeze (niska zmienność)
+    ma20 = close.rolling(20).mean()
+    std20 = close.rolling(20).std()
+    bb_width = (std20 * 2).iloc[-1] / last * 100 if last != 0 else 0
+    if bb_width < 3:
+        patterns.append("Bollinger Squeeze (bardzo niska zmienność, możliwe wybicie).")
+
+    # RSI overbought/oversold
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean().abs()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_last = rsi.iloc[-1]
+
+    if rsi_last > 70:
+        patterns.append(f"RSI overbought ({rsi_last:.1f}).")
+    elif rsi_last < 30:
+        patterns.append(f"RSI oversold ({rsi_last:.1f}).")
+
+    # EMA cross
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+    if ema20.iloc[-2] < ema50.iloc[-2] and ema20.iloc[-1] > ema50.iloc[-1]:
+        patterns.append("Golden Cross (EMA20 przebiła EMA50 w górę).")
+    if ema20.iloc[-2] > ema50.iloc[-2] and ema20.iloc[-1] < ema50.iloc[-1]:
+        patterns.append("Death Cross (EMA20 przebiła EMA50 w dół).")
+
+    return patterns
+
+def detect_patterns_all(symbols):
+    out = {}
+    for s in symbols:
+        pats = detect_patterns_for_symbol(s)
+        if pats:
+            out[s] = pats
+    return out
+
+# --- AI DEEP DIVE ---
+def ai_deep_dive(symbol: str, metrics: dict):
+    text = (
+        f"Symbol: {symbol}\n"
+        f"SetupScore: {metrics['SetupScore']:.1f}\n"
+        f"Change: {metrics['Change']:+.2f}%\n"
+        f"Trend: {metrics['Trend']}\n"
+        f"Signal: {metrics['Signal']}\n"
+        f"MomentumScore: {metrics['MomentumScore']:.1f}\n"
+        f"VolatilityScore: {metrics['VolatilityScore']:.1f}\n"
+        f"RiskScore: {metrics['RiskScore']:.1f}\n"
+        f"ATR: {metrics['ATR']:.4f}\n"
+        f"Volume: {metrics['Volume']:.0f}\n"
+    )
+
+    system_prompt = """
+Jesteś doświadczonym prop-traderem.
+Masz dane jednej spółki: setup, momentum, trend, ryzyko, zmienność.
+Zrób krótki DEEP DIVE:
+1) Jak wygląda obecny setup (kontekst, siła, słabości)?
+2) Jakie są 2–3 główne scenariusze (byczy, niedźwiedzi, neutralny)?
+3) Jakie poziomy / warunki obserwować, żeby setup stał się A+ lub się posypał?
+Nie dawaj porad typu 'kup/sprzedaj', tylko opis scenariuszy i ryzyka.
+Pisz konkretnie, bez lania wody.
+"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": text},
+    ]
+
+    res = client.chat.completions.create(
+        model=AI_MODEL,
+        messages=messages,
+    )
+    return res.choices[0].message.content
+
+# --- MULTI-AI (symulowany panel 4 perspektyw) ---
+def multi_ai_verdict(top_df: pd.DataFrame) -> str:
+    if top_df.empty:
+        return "Brak spółek do analizy."
+
+    context_lines = []
+    for _, row in top_df.iterrows():
+        context_lines.append(
+            f"{row['Symbol']}: SetupScore={row['SetupScore']:.1f}, "
+            f"Change={row['Change']:+.2f}%, Trend={row['Trend']}, "
+            f"Signal={row['Signal']}, Momentum={row['MomentumScore']:.1f}, "
+            f"Volatility={row['VolatilityScore']:.1f}, Risk={row['RiskScore']:.1f}"
+        )
+    context = "\n".join(context_lines)
+
+    system_prompt = """
+Jesteś panelem 4 różnych 'AI-traderów':
+1) Konserwatywny risk manager
+2) Agresywny momentum trader
+3) Swing trader
+4) Mean-reversion trader
+
+Dostajesz listę spółek z metrykami (SetupScore, Trend, Signal, Momentum, Volatility, Risk).
+Dla każdej spółki:
+- każdy z 4 traderów daje 1–2 zdania swojego spojrzenia.
+Na końcu:
+- krótki konsensus: które tickery są najciekawsze dla którego stylu.
+
+Pisz krótko, w formie:
+[TYP TRADERA] komentarz...
+"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Dane spółek:\n{context}"},
+    ]
+
+    res = client.chat.completions.create(
+        model=AI_MODEL,
+        messages=messages,
+    )
+    return res.choices[0].message.content
 # --- Aplikacja ---
 def main():
-    st.title("🔥 HEATMAPA PRO — Setup Scanner + AI + Wykres PRO + Skaner Sygnałów")
+    st.title("🔥 HEATMAPA PRO — Kombajn: AI + Wykres + Skaner + Alerty + Patterny + Multi-AI")
 
     if "symbols" not in st.session_state:
         st.session_state.symbols = []
     if "ai_top5_comment" not in st.session_state:
         st.session_state.ai_top5_comment = ""
+    if "ai_deep_dive_cache" not in st.session_state:
+        st.session_state.ai_deep_dive_cache = {}
+    if "ai_multi_comment" not in st.session_state:
+        st.session_state.ai_multi_comment = ""
 
     symbols_input = st.sidebar.text_input("Dodaj spółki (oddzielone przecinkami):", "")
 
@@ -309,16 +478,22 @@ def main():
     if st.sidebar.button("Wyczyść"):
         st.session_state.symbols = []
         st.session_state.ai_top5_comment = ""
+        st.session_state.ai_deep_dive_cache = {}
+        st.session_state.ai_multi_comment = ""
 
     if not st.session_state.symbols:
         st.warning("Dodaj spółki, aby kontynuować.")
         return
 
     # --- TABS ---
-    tab_heatmap, tab_chart, tab_scanner = st.tabs([
+    tab_heatmap, tab_chart, tab_scanner, tab_alerts, tab_patterns, tab_deep, tab_multi = st.tabs([
         "📊 Heatmap PRO + AI",
         "📈 Wykres PRO",
-        "📡 Skaner Sygnałów"
+        "📡 Skaner Sygnałów",
+        "🚨 Alerty",
+        "📐 Patterny",
+        "🧠 AI Deep Dive",
+        "🤝 Multi-AI Panel",
     ])
 
     # --- HEATMAP + AI ---
@@ -434,6 +609,81 @@ def main():
                 ]],
                 use_container_width=True
             )
+
+    # --- ALERTY ---
+    with tab_alerts:
+        st.subheader("🚨 Alerty z rynku (na bazie Heatmap PRO)")
+
+        rows = [compute_metrics(s) for s in st.session_state.symbols]
+        alert_df = pd.DataFrame(rows)
+        alert_df = alert_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
+
+        alerts = generate_alerts(alert_df)
+
+        if not alerts:
+            st.info("Brak alertów spełniających kryteria.")
+        else:
+            for a in alerts:
+                st.write("• " + a)
+
+        st.markdown("---")
+        st.write("Możesz później zaostrzyć / złagodzić kryteria w funkcji generate_alerts().")
+
+    # --- PATTERNY ---
+    with tab_patterns:
+        st.subheader("📐 Patterny techniczne (breakout, squeeze, RSI, EMA cross)")
+
+        patterns_all = detect_patterns_all(st.session_state.symbols)
+        if not patterns_all:
+            st.info("Brak wykrytych patternów dla obecnych spółek (lub za mało danych).")
+        else:
+            for sym, pats in patterns_all.items():
+                st.markdown(f"### {sym}")
+                for p in pats:
+                    st.write("• " + p)
+                st.markdown("---")
+
+    # --- AI DEEP DIVE ---
+    with tab_deep:
+        st.subheader("🧠 AI Deep Dive — pełny komentarz dla jednej spółki")
+
+        rows = [compute_metrics(s) for s in st.session_state.symbols]
+        deep_df = pd.DataFrame(rows)
+        deep_df = deep_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
+
+        symbol_for_deep = st.selectbox(
+            "Wybierz spółkę do analizy AI:", deep_df["Symbol"].tolist()
+        )
+
+        metrics = deep_df[deep_df["Symbol"] == symbol_for_deep].iloc[0].to_dict()
+
+        if st.button("🔍 Generuj AI Deep Dive"):
+            with st.spinner("AI analizuje wybraną spółkę..."):
+                comment = ai_deep_dive(symbol_for_deep, metrics)
+                st.session_state.ai_deep_dive_cache[symbol_for_deep] = comment
+
+        if symbol_for_deep in st.session_state.ai_deep_dive_cache:
+            st.subheader(f"AI Deep Dive — {symbol_for_deep}")
+            st.markdown(st.session_state.ai_deep_dive_cache[symbol_for_deep])
+
+    # --- MULTI-AI PANEL ---
+    with tab_multi:
+        st.subheader("🤝 Multi-AI Panel — 4 style tradingu na TOP setupach")
+
+        rows = [compute_metrics(s) for s in st.session_state.symbols]
+        multi_df = pd.DataFrame(rows)
+        multi_df = multi_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
+        top_n = min(5, len(multi_df))
+        top_df = multi_df.head(top_n)
+
+        if st.button("🤝 Generuj Multi-AI werdykt dla TOP setupów"):
+            with st.spinner("AI generuje panel 4 stylów tradingu..."):
+                st.session_state.ai_multi_comment = multi_ai_verdict(top_df)
+
+        if st.session_state.ai_multi_comment:
+            st.subheader("🤝 Multi-AI Panel — komentarze")
+            st.markdown(st.session_state.ai_multi_comment)
+
 
 if __name__ == "__main__":
     main()
