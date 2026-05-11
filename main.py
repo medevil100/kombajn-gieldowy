@@ -1,4 +1,3 @@
-
 import os
 import pandas as pd
 import yfinance as yf
@@ -637,8 +636,8 @@ SECTOR_OPTIONS = [
 # ====================== MAIN ======================
 
 def main():
-    st.set_page_config(page_title="KOMBAJN v5.1", layout="wide")
-    st.title("🔥 KOMBAJN v5.1 — Trend + SL/TP + Bid/Ask + AI Turbo 3.0 + Sektory")
+    st.set_page_config(page_title="KOMBAJN v5.4", layout="wide")
+    st.title("🔥 KOMBAJN v5.4 — Trend + SL/TP + Bid/Ask + AI Turbo 3.0 + Sektory")
 
     if "symbols" not in st.session_state:
         st.session_state.symbols = []
@@ -669,45 +668,44 @@ def main():
         st.warning("Dodaj spółki w sidebarze, aby rozpocząć.")
         return
 
-# ====== PRZYPISYWANIE SEKTORÓW W TABELI ======
-st.subheader("🏭 Przypisanie sektorów (wymagane)")
+    # ====== PRZYPISYWANIE SEKTORÓW W TABELI ======
+    st.subheader("🏭 Przypisanie sektorów (wymagane)")
 
-sector_rows = []
-for sym in st.session_state.symbols:
-    sector_rows.append({
-        "Symbol": sym,
-        "Sektor": st.session_state.sector_map.get(sym, "")
-    })
+    sector_rows = []
+    for sym in st.session_state.symbols:
+        sector_rows.append({
+            "Symbol": sym,
+            "Sektor": st.session_state.sector_map.get(sym, "")
+        })
 
-sector_df = pd.DataFrame(sector_rows)
+    sector_df = pd.DataFrame(sector_rows)
 
-edited = st.data_editor(
-    sector_df,
-    key="sector_editor",
-    use_container_width=True,
-    column_config={
-        "Sektor": st.column_config.SelectboxColumn(
-            "Sektor",
-            options=SECTOR_OPTIONS,
-            required=True,
-        )
-    },
-    hide_index=True,
-)
+    edited = st.data_editor(
+        sector_df,
+        key="sector_editor",
+        use_container_width=True,
+        column_config={
+            "Sektor": st.column_config.SelectboxColumn(
+                "Sektor",
+                options=SECTOR_OPTIONS,
+                required=True,
+            )
+        },
+        hide_index=True,
+    )
 
-# 🔥 POPRAWNE — Streamlit zwraca LISTĘ dictów, nie DataFrame
-if "sector_editor" in st.session_state:
-    editor_data = st.session_state["sector_editor"]
-    for row in editor_data:
-        st.session_state.sector_map[row["Symbol"]] = row["Sektor"]
+    # aktualizacja session_state na podstawie WYNIKU edycji (edited)
+    if edited is not None and not edited.empty:
+        for _, row in edited.iterrows():
+            symbol = row["Symbol"]
+            sektor = row["Sektor"]
+            if symbol and isinstance(sektor, str) and sektor.strip():
+                st.session_state.sector_map[symbol] = sektor
 
-# 🔥 WALIDACJA
-missing = [s for s in st.session_state.symbols if not st.session_state.sector_map.get(s)]
-if missing:
-    st.error(f"Brak przypisanego sektora dla: {', '.join(missing)}")
-    st.stop()
-
-
+    missing = [s for s in st.session_state.symbols if not st.session_state.sector_map.get(s)]
+    if missing:
+        st.error(f"Brak przypisanego sektora dla: {', '.join(missing)}")
+        st.stop()
 
     tab_heatmap, tab_chart, tab_scanner, tab_sector, tab_premarket, tab_ai_turbo, tab_ai_news, tab_ai_risk, tab_ai_pattern = st.tabs([
         "📊 Heatmapa PRO",
@@ -862,7 +860,7 @@ if missing:
             with st.spinner("Pobieram newsy..."):
                 news_list = get_news_for_symbol(symbol_news)
             if not news_list:
-                st.info("Brak newsów (tu możesz później podpiąć Investik Pro).")
+                st.info("Brak newsów.")
             else:
                 st.markdown("#### Surowe newsy")
                 for n in news_list:
@@ -897,4 +895,3 @@ if missing:
 
 if __name__ == "__main__":
     main()
-
