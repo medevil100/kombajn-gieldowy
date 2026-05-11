@@ -327,42 +327,43 @@ def main():
         ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1-preview"],
     )
 
-    # Suwaki odświeżania
+    # --- Suwaki odświeżania ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("⏱ Odświeżanie")
+
+data_interval_label = st.sidebar.selectbox(
+    "Odświeżanie danych:",
+    ["5s", "10s", "30s", "1m", "5m", "15m"],
+    index=3,
+)
+ai_interval_label = st.sidebar.selectbox(
+    "Odświeżanie AI (multi-analiza):",
+    ["30s", "1m", "5m", "15m", "30m"],
+    index=2,
+)
+
+data_interval_sec = label_to_seconds(data_interval_label)
+ai_interval_sec = label_to_seconds(ai_interval_label)
+
+st_autorefresh(interval=data_interval_sec * 1000, key="auto_refresh")
+
+if st.session_state.symbols:
     st.sidebar.markdown("---")
-    st.sidebar.subheader("⏱ Odświeżanie")
+    st.sidebar.subheader("Spółki w portfelu")
+    for s in st.session_state.symbols:
+        st.sidebar.write(f"- {s}")
 
-    data_interval_label = st.sidebar.selectbox(
-        "Odświeżanie danych:",
-        ["5s", "10s", "30s", "1m", "5m", "15m"],
-        index=3,
-    )
-    ai_interval_label = st.sidebar.selectbox(
-        "Odświeżanie AI (multi-analiza):",
-        ["30s", "1m", "5m", "15m", "30m"],
-        index=2,
-    )
+if not sym:
+    st.warning("Dodaj spółki i wybierz jedną jako aktywną, aby zobaczyć dane.")
+    return
 
-    data_interval_sec = label_to_seconds(data_interval_label)
-    ai_interval_sec = label_to_seconds(ai_interval_label)
+df = get_price_data(sym, range_p, tf)
+if df.empty:
+    st.info("Brak danych dla tego symbolu w wybranym zakresie.")
+    return
 
-    st_autorefresh(interval=data_interval_sec * 1000, key="auto_refresh")
-
-    if st.session_state.symbols:
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("Spółki w portfelu")
-        for s in st.session_state.symbols:
-            st.sidebar.write(f"- {s}")
-
-    if not sym:
-        st.warning("Dodaj spółki i wybierz jedną jako aktywną, aby zobaczyć dane.")
-        return
-
-    df = get_price_data(sym, range_p, tf)
-    if df.empty:
-        st.info("Brak danych dla tego symbolu w wybranym zakresie.")
-        return
- tab_price, tab_rsi, tab_fibo, tab_smi, tab_macd, tab_trend, tab_ai_chat, tab_ai_multi, tab_heatmap = st.tabs(
-  
+# --- TABS (POPRAWIONE) ---
+tab_price, tab_rsi, tab_fibo, tab_smi, tab_macd, tab_trend, tab_ai_chat, tab_ai_multi, tab_heatmap = st.tabs(
     [
         "Wykres",
         "RSI",
@@ -375,6 +376,7 @@ def main():
         "Heatmapa Rynku"
     ]
 )
+
 # --- HEATMAPA RYNKU ---
 with tab_heatmap:
     st.subheader("🔥 Heatmapa Rynku – zmiana % dla wszystkich spółek")
@@ -416,6 +418,7 @@ with tab_heatmap:
         )
 
         st.caption("Kolor = kierunek ruchu, intensywność = siła zmiany procentowej.")
+
 
 
         # Kolory: czerwony → spadek, zielony → wzrost
