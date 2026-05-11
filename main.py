@@ -1276,13 +1276,51 @@ else:
                         news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
                     st.session_state.ai_news_radar_comment = ai_news_radar(news_df)
 
-        st.markdown("---")
-        st.subheader("📊 Tabela z NewsScore")
-        if st.session_state.news_scores:
-            news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
-            st.dataframe(
-                style_heatmap(news_df),
-                use_container_width=True
+       st.markdown("""
+<style>
+/* BLOOMBERG DARK MODE */
+body, .stApp {
+    background-color: #0d0d0d !important;
+    color: #e6e6e6 !important;
+    font-family: "Segoe UI", sans-serif;
+}
+[data-testid="stDataFrame"] {
+    background-color: #0d0d0d !important;
+    border: 1px solid #333 !important;
+    border-radius: 6px !important;
+    padding: 10px !important;
+}
+.dataframe tbody tr th, .dataframe tbody tr td {
+    background-color: #111 !important;
+    color: #e6e6e6 !important;
+    font-size: 17px !important;
+    padding: 10px 14px !important;
+    border-color: #222 !important;
+}
+.dataframe thead th {
+    background-color: #1a1a1a !important;
+    color: #f2f2f2 !important;
+    font-size: 18px !important;
+    border-bottom: 2px solid #444 !important;
+    padding: 12px !important;
+}
+::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+}
+::-webkit-scrollbar-track {
+    background: #0d0d0d;
+}
+::-webkit-scrollbar-thumb {
+    background: #444;
+    border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #666;
+}
+</style>
+""", unsafe_allow_html=True)
+
             )
         else:
             st.info("Brak NewsScore — kliknij przycisk, aby wygenerować.")
