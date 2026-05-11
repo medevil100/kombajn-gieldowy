@@ -438,7 +438,6 @@ with tab_heatmap:
 
         st.caption("Kolor = kierunek ruchu, intensywność = siła zmiany procentowej.")
 
-    )
 
     # --- Wykres główny + Fibo ---
     with tab_price:
