@@ -132,140 +132,131 @@ def compute_sl_tp(last_price, atr, trend):
 
     return sl_zone, tp_zone
 
-# --- TREND EVALUATION ---
-def compute_trend_evaluation(
-    last_price: float,
-    change_pct: float,
-    momentum_score: float,
-    volatility_score: float,
-    trend_strength: float,
-    volume_current: float,
-    volume_prev: float,
-    ema20_last: float,
-    ema50_last: float,
-    atr: float,
-):
-    try:
-        mom = max(0.0, min(100.0, float(momentum_score)))
-    except:
-        mom = 50.0
+# --- METRYKI GŁÓWNE: compute_metrics ---
+def compute_metrics(symbol):
+    df = get_price_data(symbol, "5d", "1h")
+    if df.empty or len(df) < 3:
+        return {
+            "Symbol": symbol,
+            "LastPrice": 0.0,
+            "Change": 0.0,
+            "Volume": 0.0,
+            "ATR": 0.0,
+            "Trend": "NONE",
+            "Signal": "NEUTRAL",
+            "MomentumScore": 0.0,
+            "VolatilityScore": 0.0,
+            "TrendStrength": 0.0,
+            "RiskScore": 50.0,
+            "SetupScore": 0.0,
+            "TrendScore": 0.0,
+            "TrendHealth": "UNKNOWN",
+            "TrendConfidence": "UNKNOWN",
+            "TrendReversalRisk": "UNKNOWN",
+            "TrendComment": "",
+            "TrendFlags": [],
+        }
 
-    try:
-        vol = max(0.0, min(100.0, float(volatility_score)))
-    except:
-        vol = 50.0
+    close = df["Close"].astype(float)
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    volume = df["Volume"].astype(float)
 
-    try:
-        ts = max(0.0, min(100.0, float(trend_strength)))
-    except:
-        ts = 50.0
+    last = float(close.iloc[-1])
+    prev = float(close.iloc[-2])
+    change = ((last - prev) / prev * 100) if prev != 0 else 0.0
 
-    try:
-        ch = float(change_pct)
-    except:
-        ch = 0.0
+    tr = pd.concat(
+        [
+            (high - low),
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr_series = tr.rolling(14).mean()
+    atr = float(atr_series.iloc[-1]) if not atr_series.dropna().empty else 0.0
 
-    if volume_prev and volume_prev > 0:
-        vol_trend = (volume_current - volume_prev) / volume_prev * 100.0
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+    ema20_last = float(ema20.iloc[-1])
+    ema50_last = float(ema50.iloc[-1])
+
+    if last > ema20_last > ema50_last:
+        trend = "UP"
+    elif last < ema20_last < ema50_last:
+        trend = "DOWN"
     else:
-        vol_trend = 0.0
+        trend = "SIDE"
 
-    if last_price:
-        ema_div = abs(ema20_last - ema50_last) / last_price * 100.0
+    if trend == "UP" and change > 0:
+        signal = "BUY"
+    elif trend == "DOWN" and change < 0:
+        signal = "SELL"
     else:
-        ema_div = 0.0
+        signal = "NEUTRAL"
 
-    if last_price and atr:
-        atr_pct = atr / last_price * 100.0
-    else:
-        atr_pct = 0.0
+    vol_last = float(volume.iloc[-1])
+    vol_prev = float(volume.iloc[-2]) if len(volume) > 1 else vol_last
+    vol_change = ((vol_last - vol_prev) / vol_prev * 100) if vol_prev != 0 else 0.0
 
-    ch_clamped = max(-5.0, min(5.0, ch))
-    comp_change = 50.0 + (ch_clamped / 5.0) * 50.0
+    raw_momentum = change * 0.7 + vol_change * 0.3
+    momentum_score = max(0.0, min(100.0, 50.0 + raw_momentum))
 
-    vt_clamped = max(-50.0, min(50.0, vol_trend))
-    comp_vol_trend = 50.0 + (vt_clamped / 50.0) * 50.0
+    vol_ratio = (atr / last * 100) if last != 0 else 0.0
+    volatility_score = max(0.0, min(100.0, vol_ratio * 2))
 
-    comp_volatility = 100.0 - vol
+    trend_diff = abs(ema20_last - ema50_last) / last * 100 if last != 0 else 0.0
+    trend_strength = max(0.0, min(100.0, trend_diff * 5))
 
-    ema_div_clamped = max(0.0, min(5.0, ema_div))
-    comp_ema_div = (ema_div_clamped / 5.0) * 100.0
+    risk_score = max(0.0, min(100.0, volatility_score))
 
-    atr_clamped = max(0.0, min(5.0, atr_pct))
-    comp_atr_stab = 100.0 - (atr_clamped / 5.0) * 100.0
+    setup = 0.0
+    if signal == "BUY":
+        setup += 30
+    elif signal == "SELL":
+        setup += 20
 
-    trend_score = (
-        ts * 0.25
-        + mom * 0.25
-        + comp_change * 0.15
-        + comp_vol_trend * 0.10
-        + comp_volatility * 0.10
-        + comp_ema_div * 0.10
-        + comp_atr_stab * 0.05
+    setup += momentum_score * 0.3
+    setup += trend_strength * 0.3
+    setup -= risk_score * 0.2
+
+    setup_score = max(0.0, min(100.0, setup))
+
+    trend_eval = compute_trend_evaluation(
+        last_price=last,
+        change_pct=change,
+        momentum_score=momentum_score,
+        volatility_score=volatility_score,
+        trend_strength=trend_strength,
+        volume_current=vol_last,
+        volume_prev=vol_prev,
+        ema20_last=ema20_last,
+        ema50_last=ema50_last,
+        atr=atr,
     )
 
-    trend_score = max(0.0, min(100.0, trend_score))
-
-    if trend_score >= 75:
-        health = "STRONG"
-    elif trend_score >= 55:
-        health = "HEALTHY"
-    elif trend_score >= 35:
-        health = "WEAK"
-    else:
-        health = "REVERSAL RISK"
-
-    if trend_score >= 70:
-        confidence = "HIGH"
-    elif trend_score >= 45:
-        confidence = "MEDIUM"
-    else:
-        confidence = "LOW"
-
-    if trend_score < 40 and vol > 60:
-        reversal_risk = "HIGH"
-    elif trend_score < 55 and vol > 50:
-        reversal_risk = "MEDIUM"
-    else:
-        reversal_risk = "LOW"
-
-    flags = []
-    if mom >= 60 and ts >= 60:
-        flags.append("Momentum zgodne z trendem.")
-    elif mom < 40 and ts >= 60:
-        flags.append("Silny trend, ale momentum słabnie.")
-    elif mom >= 60 and ts < 40:
-        flags.append("Silne momentum, ale trend strukturalnie słaby.")
-
-    if vol_trend > 20:
-        flags.append("Wolumen rośnie i potwierdza ruch.")
-    elif vol_trend < -20:
-        flags.append("Wolumen spada — ruch może być słabszy.")
-
-    if vol > 70:
-        flags.append("Bardzo wysoka zmienność — większe ryzyko szarpania.")
-    elif vol < 30:
-        flags.append("Niska zmienność — trend stabilny.")
-
-    if reversal_risk == "HIGH":
-        comment = "Trend jest kruchy: wysoka zmienność i niska jakość trendu sugerują ryzyko odwrócenia."
-    elif health == "STRONG":
-        comment = "Trend wygląda bardzo solidnie: momentum, struktura i wolumen wspierają kierunek ruchu."
-    elif health == "HEALTHY":
-        comment = "Trend jest zdrowy — obserwuj momentum i wolumen."
-    elif health == "WEAK":
-        comment = "Trend jest osłabiony — część metryk nie potwierdza kierunku."
-    else:
-        comment = "Struktura trendu słaba, zmienność wysoka — ryzyko odwrócenia zauważalne."
-
     return {
-        "TrendScore": float(trend_score),
-        "TrendHealth": health,
-        "TrendConfidence": confidence,
-        "TrendReversalRisk": reversal_risk,
-        "TrendFlags": flags,
-        "TrendComment": comment,
+        "Symbol": symbol,
+        "LastPrice": last,
+        "Change": change,
+        "Volume": vol_last,
+        "ATR": atr,
+        "Trend": trend,
+        "Signal": signal,
+        "MomentumScore": momentum_score,
+        "VolatilityScore": volatility_score,
+        "TrendStrength": trend_strength,
+        "RiskScore": risk_score,
+        "SetupScore": setup_score,
+        "TrendScore": trend_eval["TrendScore"],
+        "TrendHealth": trend_eval["TrendHealth"],
+        "TrendConfidence": trend_eval["TrendConfidence"],
+        "TrendReversalRisk": trend_eval["TrendReversalRisk"],
+        "TrendComment": trend_eval["TrendComment"],
+        "TrendFlags": trend_eval["TrendFlags"],
     }
+}
 # ============================================================
 # ========================  MAIN  =============================
 # ============================================================
