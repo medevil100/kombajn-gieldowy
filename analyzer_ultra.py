@@ -6,10 +6,11 @@ import plotly.graph_objects as go
 from openai import OpenAI
 from streamlit_autorefresh import st_autorefresh
 
-# Inicjalizacja OpenAI
+# --- KONFIG AI ---
+AI_MODEL = "gpt-4o-mini"  # jeden model dla wszystkich wywołań
 client = OpenAI()
 
-# Kolory
+# --- KOLORY ---
 BACKGROUND = "#000000"
 NEON_GREEN = "#39FF14"
 NEON_PINK = "#FF1493"
@@ -34,7 +35,7 @@ def inject_global_css():
     )
 
 
-# --- Dane rynkowe ---
+# --- DANE RYNKOWE ---
 def get_price_data(symbol, period, interval):
     if not symbol:
         return pd.DataFrame()
@@ -46,7 +47,7 @@ def get_price_data(symbol, period, interval):
     return df.astype(float).dropna()
 
 
-# --- Wskaźniki ---
+# --- WSKAŹNIKI ---
 def rsi(series, period=14):
     series = pd.Series(series).astype(float)
     delta = series.diff()
@@ -266,7 +267,7 @@ NEWS (ostatnie nagłówki, bez linków):
     return "\n".join(blocks)
 
 
-# --- UI ---
+# --- UI POMOCNICZE ---
 def label_to_seconds(label: str) -> int:
     if label.endswith("s"):
         return int(label[:-1])
@@ -306,7 +307,9 @@ def main():
             st.session_state.symbols = []
 
     if st.session_state.symbols:
-        sym = st.sidebar.selectbox("Aktywna spółka (do wykresów):", st.session_state.symbols)
+        sym = st.sidebar.selectbox(
+            "Aktywna spółka (do wykresów):", st.session_state.symbols
+        )
     else:
         sym = None
         st.sidebar.info("Brak spółek. Dodaj tickery powyżej (np. PKN.WA, AAPL).")
@@ -529,7 +532,7 @@ To nie jest porada inwestycyjna, tylko analiza scenariuszy.
             ] + st.session_state.chat
 
             res = client.chat.completions.create(
-                model=ai_mod,
+                model=AI_MODEL,
                 messages=messages,
             )
             reply = res.choices[0].message.content
@@ -591,7 +594,7 @@ Nie udzielasz porad inwestycyjnych – to tylko analiza scenariuszy.
                 ]
 
                 res_multi = client.chat.completions.create(
-                    model="gpt-4o",
+                    model=AI_MODEL,
                     messages=messages_multi,
                 )
                 st.session_state.ai_multi_result = res_multi.choices[0].message.content
@@ -605,47 +608,46 @@ Nie udzielasz porad inwestycyjnych – to tylko analiza scenariuszy.
                     "Brak jeszcze analizy AI. Użyj przycisku powyżej lub włącz automatyczną analizę."
                 )
 
-  # --- HEATMAPA RYNKU ---
-with tab_heatmap:
-    st.subheader("🔥 Heatmapa Rynku – zmiana % dla wszystkich spółek")
+    # --- HEATMAPA RYNKU ---
+    with tab_heatmap:
+        st.subheader("🔥 Heatmapa Rynku – zmiana % dla wszystkich spółek")
 
-    if not st.session_state.symbols:
-        st.info("Brak spółek do wyświetlenia heatmapy.")
-    else:
-        heat_data = []
+        if not st.session_state.symbols:
+            st.info("Brak spółek do wyświetlenia heatmapy.")
+        else:
+            heat_data = []
 
-        for s in st.session_state.symbols:
-            df_h = get_price_data(s, "1d", "1h")
+            for s in st.session_state.symbols:
+                df_h = get_price_data(s, "1d", "1h")
 
-            if df_h.empty:
-                heat_data.append({"Symbol": s, "Change": 0})
-                continue
+                if df_h.empty:
+                    heat_data.append({"Symbol": s, "Change": 0})
+                    continue
 
-            close_h = df_h["Close"].astype(float)
-            last_h = float(close_h.iloc[-1])
-            prev_h = float(close_h.iloc[-2]) if len(close_h) > 1 else last_h
+                close_h = df_h["Close"].astype(float)
+                last_h = float(close_h.iloc[-1])
+                prev_h = float(close_h.iloc[-2]) if len(close_h) > 1 else last_h
 
-            change = ((last_h - prev_h) / prev_h * 100) if prev_h != 0 else 0
-            heat_data.append({"Symbol": s, "Change": change})
+                change = ((last_h - prev_h) / prev_h * 100) if prev_h != 0 else 0
+                heat_data.append({"Symbol": s, "Change": change})
 
-        heat_df = pd.DataFrame(heat_data)
+            heat_df = pd.DataFrame(heat_data)
 
-        def color_map(val):
-            if val > 0:
-                return f"background-color: rgba(0, 255, 0, {min(abs(val)/10, 1)})"
-            elif val < 0:
-                return f"background-color: rgba(255, 0, 0, {min(abs(val)/10, 1)})"
-            else:
-                return "background-color: rgba(128,128,128,0.3)"
+            def color_map(val):
+                if val > 0:
+                    return f"background-color: rgba(0, 255, 0, {min(abs(val)/10, 1)})"
+                elif val < 0:
+                    return f"background-color: rgba(255, 0, 0, {min(abs(val)/10, 1)})"
+                else:
+                    return "background-color: rgba(128,128,128,0.3)"
 
-        st.dataframe(
-            heat_df.style
-                .apply(lambda col: col.map(color_map) if col.name == "Change" else col)
-                .format({"Change": "{:+.2f}%"})
-        )
+            st.dataframe(
+                heat_df.style
+                    .apply(lambda col: col.map(color_map) if col.name == "Change" else col)
+                    .format({"Change": "{:+.2f}%"})
+            )
 
-        st.caption("Kolor = kierunek ruchu, intensywność = siła zmiany procentowej.")
-
+            st.caption("Kolor = kierunek ruchu, intensywność = siła zmiany procentowej.")
 
 
 if __name__ == "__main__":
