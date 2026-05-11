@@ -712,4 +712,3 @@ if __name__ == "__main__":
     main()
 
 
-Jak coś jeszcze ma być „bardziej prop”, to wtedy już tylko dopieszczamy logikę, nie walczymy z błędami.
