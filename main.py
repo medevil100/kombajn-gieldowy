@@ -1062,7 +1062,7 @@ with tab_scanner:
         st.dataframe(
             neutral_df[[
                 "Symbol", "SetupScore", "Trend", "Signal",
-                "MomentumScore", "VolatilityScore
+                "MomentumScore", "VolatilityScore"
     with tab_scanner:
         st.subheader("📡 BUY / SELL Radar — Skaner Sygnałów")
         rows = [compute_metrics(s) for s in st.session_state.symbols]
