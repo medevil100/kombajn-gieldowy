@@ -1,10 +1,12 @@
-
+```python
 import os
 import pandas as pd
 import yfinance as yf
 import streamlit as st
 import plotly.graph_objects as go
 from openai import OpenAI
+
+# ====================== KONFIGURACJA AI ======================
 
 AI_MODEL = "gpt-4o-mini"
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -457,15 +459,13 @@ def ai_turbo_v3(df: pd.DataFrame) -> str:
     records = df.to_dict(orient="records")
     prompt = f"""
 Jesteś traderem z prop-desku. Analizujesz TYLKO dane, które naprawdę istnieją w rekordach poniżej.
-Nie wymyślasz żadnych wartości, nie dopowiadasz „co by było gdyby”.
+Nie wymyślasz żadnych wartości, nie dopowiadasz "co by było gdyby".
 Jeśli jakiegoś pola brakuje lub jest 0/None – piszesz wprost, że brak danych i pomijasz ten element.
 
 Dane (lista słowników, każdy to jedna spółka):
 {records}
 
 Dla KAŻDEGO symbolu zrób techniczną analizę w stylu prop-desk:
-
-FORMAT:
 
 SYMBOL
 1. Trend i momentum:
@@ -483,9 +483,8 @@ SYMBOL
 
 Zasady:
 - Zero wymyślania danych.
-- Zero ogólników typu "może być ciekawie".
-- Każdy punkt musi się odwoływać do KONKRETNYCH pól z rekordu (np. "VolatilityScore=72 → wysokie ryzyko").
-- Jeśli czegoś brakuje – piszesz wprost: "brak danych X – pomijam".
+- Zero ogólników.
+- Każdy punkt musi się odwoływać do KONKRETNYCH pól z rekordu.
 - Odpowiadasz po polsku, technicznie, w stylu prop-desk.
 """
     resp = client.chat.completions.create(
@@ -595,7 +594,7 @@ Styl:
     )
     return resp.choices[0].message.content
 
-# ====================== MAIN APP ======================
+# ====================== SEKTORY ======================
 
 SECTOR_OPTIONS = [
     "Technologia",
@@ -635,9 +634,11 @@ SECTOR_OPTIONS = [
     "Inne",
 ]
 
+# ====================== MAIN ======================
+
 def main():
-    st.set_page_config(page_title="KOMBAJN v5.0", layout="wide")
-    st.title("🔥 KOMBAJN v5.0 — Trend + SL/TP + Bid/Ask + AI Turbo 3.0 + Sektory")
+    st.set_page_config(page_title="KOMBAJN v5.1", layout="wide")
+    st.title("🔥 KOMBAJN v5.1 — Trend + SL/TP + Bid/Ask + AI Turbo 3.0 + Sektory")
 
     if "symbols" not in st.session_state:
         st.session_state.symbols = []
@@ -668,42 +669,40 @@ def main():
         st.warning("Dodaj spółki w sidebarze, aby rozpocząć.")
         return
 
-    #====== PRZYPISYWANIE SEKTORÓW W TABELI ======
-st.subheader("🏭 Przypisanie sektorów (wymagane)")
+    # ====== PRZYPISYWANIE SEKTORÓW W TABELI ======
+    st.subheader("🏭 Przypisanie sektorów (wymagane)")
 
-sector_rows = []
-for sym in st.session_state.symbols:
-    sector_rows.append({
-        "Symbol": sym,
-        "Sektor": st.session_state.sector_map.get(sym, "")
-    })
+    sector_rows = []
+    for sym in st.session_state.symbols:
+        sector_rows.append({
+            "Symbol": sym,
+            "Sektor": st.session_state.sector_map.get(sym, "")
+        })
 
-sector_df = pd.DataFrame(sector_rows)
+    sector_df = pd.DataFrame(sector_rows)
 
-edited = st.data_editor(
-    sector_df,
-    key="sector_editor",
-    use_container_width=True,
-    column_config={
-        "Sektor": st.column_config.SelectboxColumn(
-            "Sektor",
-            options=SECTOR_OPTIONS,
-            required=True,
-        )
-    },
-    hide_index=True,
-)
+    edited = st.data_editor(
+        sector_df,
+        key="sector_editor",
+        use_container_width=True,
+        column_config={
+            "Sektor": st.column_config.SelectboxColumn(
+                "Sektor",
+                options=SECTOR_OPTIONS,
+                required=True,
+            )
+        },
+        hide_index=True,
+    )
 
-# 🔥 KLUCZOWY FRAGMENT — aktualizacja session_state
-for _, row in edited.iterrows():
-    st.session_state.sector_map[row["Symbol"]] = row["Sektor"]
+    # aktualizacja session_state
+    for _, row in edited.iterrows():
+        st.session_state.sector_map[row["Symbol"]] = row["Sektor"]
 
-# 🔥 Wymuszenie przypisania sektora
-missing = [s for s in st.session_state.symbols if not st.session_state.sector_map.get(s)]
-if missing:
-    st.error(f"Brak przypisanego sektora dla: {', '.join(missing)}")
-    st.stop()
-
+    missing = [s for s in st.session_state.symbols if not st.session_state.sector_map.get(s)]
+    if missing:
+        st.error(f"Brak przypisanego sektora dla: {', '.join(missing)}")
+        st.stop()
 
     tab_heatmap, tab_chart, tab_scanner, tab_sector, tab_premarket, tab_ai_turbo, tab_ai_news, tab_ai_risk, tab_ai_pattern = st.tabs([
         "📊 Heatmapa PRO",
@@ -893,3 +892,4 @@ if missing:
 
 if __name__ == "__main__":
     main()
+```
