@@ -6,16 +6,10 @@ import streamlit as st
 import plotly.graph_objects as go
 from openai import OpenAI
 
-# ============================================================
-# ======================  KONFIGURACJA AI  ===================
-# ============================================================
-
 AI_MODEL = "gpt-4o-mini"
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ============================================================
-# ======================  DANE RYNKOWE  ======================
-# ============================================================
+# ====================== DANE RYNKOWE ======================
 
 def get_price_data(symbol: str, period: str = "5d", interval: str = "1h") -> pd.DataFrame:
     df = yf.download(symbol, period=period, interval=interval, progress=False)
@@ -65,9 +59,7 @@ def compute_entry_risk(volume: float, spread_pct: float | None):
 
     return liquidity, spread_rating, slippage
 
-# ============================================================
-# ======================  SL / TP / TREND  ===================
-# ============================================================
+# ====================== SL / TP / TREND ======================
 
 def compute_sl_tp(last_price: float | None, atr: float | None, trend: str):
     if last_price is None or atr is None or last_price == 0:
@@ -162,9 +154,7 @@ def compute_trend_evaluation(
         "TrendComment": "",
     }
 
-# ============================================================
-# ======================  METRYKI GŁÓWNE  ====================
-# ============================================================
+# ====================== METRYKI GŁÓWNE ======================
 
 def compute_metrics(symbol: str) -> dict:
     df = get_price_data(symbol, "5d", "1h")
@@ -315,27 +305,21 @@ def compute_metrics(symbol: str) -> dict:
         "Slippage": slippage,
     }
 
-# ============================================================
-# ======================  PATTERNY  ==========================
-# ============================================================
+# ====================== PATTERNY ======================
 
 def detect_patterns_for_symbol(symbol: str):
     df = get_price_data(symbol, "5d", "1h")
     if df.empty or len(df) < 20:
         return []
-
     patterns = []
     close = df["Close"]
-
     if close.iloc[-1] > close.rolling(20).max().iloc[-2]:
         patterns.append("📈 Wybicie 20‑okresowego szczytu")
-
     if close.iloc[-1] < close.rolling(20).min().iloc[-2]:
         patterns.append("📉 Wybicie 20‑okresowego dołka")
-
     return patterns
 
-def detect_patterns_all(symbols):
+def detect_patterns_all(symbols: list[str]) -> dict:
     out = {}
     for s in symbols:
         pats = detect_patterns_for_symbol(s)
@@ -343,9 +327,7 @@ def detect_patterns_all(symbols):
             out[s] = pats
     return out
 
-# ============================================================
-# ======================  NEWS (POD INVESTIK)  ===============
-# ============================================================
+# ====================== NEWS ======================
 
 def get_news_for_symbol(symbol: str) -> list[dict]:
     try:
@@ -366,9 +348,7 @@ def get_news_for_symbol(symbol: str) -> list[dict]:
     except Exception:
         return []
 
-# ============================================================
-# ======================  PRE‑MARKET  ========================
-# ============================================================
+# ====================== PRE‑MARKET ======================
 
 def get_premarket(symbol: str):
     try:
@@ -381,9 +361,7 @@ def get_premarket(symbol: str):
     except Exception:
         return None
 
-# ============================================================
-# ======================  PROP FILTERY  ======================
-# ============================================================
+# ====================== PROP FILTERY ======================
 
 def apply_prop_filters(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -393,9 +371,7 @@ def apply_prop_filters(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[out["SetupScore"] >= 70, "SetupScore"] += 5
     return out
 
-# ============================================================
-# ======================  CIEMNY NEON CSS  ===================
-# ============================================================
+# ====================== CSS ======================
 
 st.markdown("""
 <style>
@@ -425,9 +401,7 @@ h1, h2, h3, h4 {
 </style>
 """, unsafe_allow_html=True)
 
-# ============================================================
-# ======================  HEATMAP STYLE  =====================
-# ============================================================
+# ====================== HEATMAP STYLE ======================
 
 def style_heatmap(df):
     def color_row(row):
@@ -446,9 +420,7 @@ def style_heatmap(df):
         return styles
     return df.style.apply(color_row, axis=1)
 
-# ============================================================
-# ======================  WYKRES PRO  ========================
-# ============================================================
+# ====================== WYKRES PRO ======================
 
 def plot_pro_chart(symbol):
     df = get_price_data(symbol, "5d", "1h")
@@ -479,48 +451,43 @@ def plot_pro_chart(symbol):
 
     st.plotly_chart(fig, use_container_width=True)
 
-# ============================================================
-# ======================  AI FUNKCJE  ========================
-# ============================================================
+# ====================== AI FUNKCJE ======================
 
-def ai_turbo_v2(df: pd.DataFrame) -> str:
-    records = df[[
-        "Symbol", "LastPrice", "Change", "MomentumScore",
-        "VolatilityScore", "TrendStrength", "TrendScore",
-        "SetupScore", "RiskScore"
-    ]].to_dict(orient="records")
-
+def ai_turbo_v3(df: pd.DataFrame) -> str:
+    records = df.to_dict(orient="records")
     prompt = f"""
-Jesteś traderem z prop‑desku. Mówisz technicznie, bez lania wody, bez fundamentów.
-Masz dane dla instrumentów (każdy rekord to jedna spółka):
+Jesteś traderem z prop-desku. Analizujesz TYLKO dane, które naprawdę istnieją w rekordach poniżej.
+Nie wymyślasz żadnych wartości, nie dopowiadasz „co by było gdyby”.
+Jeśli jakiegoś pola brakuje lub jest 0/None – piszesz wprost, że brak danych i pomijasz ten element.
 
+Dane (lista słowników, każdy to jedna spółka):
 {records}
 
-Dla KAŻDEGO symbolu przygotuj 4‑stylowy werdykt:
-- SCALPER
-- DAY-TRADER
-- SWING
-- POSITION
+Dla KAŻDEGO symbolu zrób techniczną analizę w stylu prop-desk:
 
-Zasady:
-- Styl: „Prop‑Desk Techniczny” — konkretnie, agresywnie, ale profesjonalnie.
-- Zero fundamentów, zero ogólników, zero „stabilny wzrost przychodów”.
-- Opierasz się TYLKO na polach: Change, MomentumScore, VolatilityScore, TrendStrength, TrendScore, SetupScore, RiskScore.
-- Maksymalnie 1 krótka linia na każdy styl.
-- Używaj języka technicznego: momentum, wybicie, trend, zmienność, ryzyko, przewaga kupujących/sprzedających.
-- Nie pisz podsumowania na końcu.
-
-Format odpowiedzi:
+FORMAT:
 
 SYMBOL
-SCALPER: ...
-DAY-TRADER: ...
-SWING: ...
-POSITION: ...
+1. Trend i momentum:
+   - opisz trend tylko jeśli masz Trend, TrendScore, TrendStrength; jeśli brak – napisz: "brak danych o trendzie".
+   - opisz momentum tylko jeśli masz MomentumScore lub Change.
+2. Zmienność i ryzyko:
+   - użyj VolatilityScore, ATR, Change; jeśli brak – napisz, czego brakuje.
+3. Spread, płynność, slippage:
+   - użyj SpreadPct, Liquidity, SpreadRating, Slippage; jeśli brak – napisz: "brak danych bid/ask – nie oceniam spreadu".
+4. Setup:
+   - użyj SetupScore, Signal; jeśli brak – napisz: "brak danych o setupie".
+5. Werdykt:
+   - AGRESYWNE OK / TYLKO DLA DOŚWIADCZONYCH / LEPIEJ ODPUSCIĆ
+   - uzasadnij TYLKO na podstawie realnych pól z rekordu.
 
-Odpowiadaj po polsku.
+Zasady:
+- Zero wymyślania danych.
+- Zero ogólników typu "może być ciekawie".
+- Każdy punkt musi się odwoływać do KONKRETNYCH pól z rekordu (np. "VolatilityScore=72 → wysokie ryzyko").
+- Jeśli czegoś brakuje – piszesz wprost: "brak danych X – pomijam".
+- Odpowiadasz po polsku, technicznie, w stylu prop-desk.
 """
-
     resp = client.chat.completions.create(
         model=AI_MODEL,
         messages=[{"role": "user", "content": prompt}]
@@ -529,27 +496,25 @@ Odpowiadaj po polsku.
 
 def ai_news_summary(symbol: str, raw_news: str) -> str:
     prompt = f"""
-Jesteś traderem intraday z prop‑desku. Analizujesz newsy dla {symbol}.
+Jesteś traderem intraday z prop-desku. Analizujesz newsy dla {symbol}.
 
 Newsy (tytuły, skróty):
-
 {raw_news}
 
 Zadanie:
-- Określ, czy newsy są pro‑wzrostowe, pro‑spadkowe czy neutralne.
+- Określ, czy newsy są pro-wzrostowe, pro-spadkowe czy neutralne.
 - Oceń, czy zwiększają ryzyko (gap, zmienność, niepewność).
 - Napisz krótko, jak to wpływa na:
   - scalping,
-  - day‑trading,
+  - day-trading,
   - swing.
 
 Zasady:
-- Zero fundamentów typu „długoterminowy rozwój spółki”.
+- Zero fundamentów typu "długoterminowy rozwój spółki".
 - Skup się na zmienności, kierunku reakcji, ryzyku.
-- Maksymalnie 4–6 krótkich zdań.
-- Odpowiadaj po polsku, technicznie, bez lania wody.
+- Maksymalnie 4–6 krótkich, treściwych zdań.
+- Odpowiadasz po polsku, technicznie.
 """
-
     resp = client.chat.completions.create(
         model=AI_MODEL,
         messages=[{"role": "user", "content": prompt}]
@@ -557,16 +522,9 @@ Zasady:
     return resp.choices[0].message.content
 
 def ai_risk_check(df: pd.DataFrame) -> str:
-    records = df[[
-        "Symbol", "LastPrice", "Change", "MomentumScore",
-        "VolatilityScore", "TrendStrength", "TrendScore",
-        "SetupScore", "RiskScore", "SL_Low", "SL_High",
-        "TP_Low", "TP_High", "SpreadPct", "Liquidity",
-        "SpreadRating", "Slippage"
-    ]].to_dict(orient="records")
-
+    records = df.to_dict(orient="records")
     prompt = f"""
-Jesteś risk managerem na prop‑desku. Masz dane o setupach i ryzyku:
+Jesteś risk managerem na prop-desku. Masz dane o setupach i ryzyku (tylko realne pola, bez wymyślania):
 
 {records}
 
@@ -575,47 +533,37 @@ Dla KAŻDEGO symbolu:
   - AGRESYWNE OK
   - TYLKO DLA DOŚWIADCZONYCH
   - LEPIEJ ODPUSCIĆ
-- weź pod uwagę:
-  - SetupScore, TrendScore, MomentumScore,
-  - VolatilityScore, RiskScore,
-  - SL/TP (odległość, sensowność),
-  - SpreadPct, Liquidity, SpreadRating, Slippage.
+- używaj TYLKO pól, które naprawdę istnieją w rekordzie (SetupScore, TrendScore, MomentumScore, VolatilityScore, RiskScore, SL/TP, SpreadPct, Liquidity, SpreadRating, Slippage).
+- jeśli czegoś brakuje – napisz wprost: "brak danych X – nie oceniam tego aspektu".
 
-Format odpowiedzi:
+Format:
 
 SYMBOL
 RYZYKO: ...
 KOMENTARZ: ...
 
-Zasady:
-- Styl „Prop‑Desk Techniczny”.
+Styl:
+- Prop-Desk Techniczny.
 - Krótko, konkretnie, bez lania wody.
-- Odpowiadaj po polsku.
+- Zero wymyślania danych.
 """
-
     resp = client.chat.completions.create(
         model=AI_MODEL,
         messages=[{"role": "user", "content": prompt}]
     )
     return resp.choices[0].message.content
 
-def ai_pattern_insight(symbols) -> str:
+def ai_pattern_insight(symbols: list[str]) -> str:
     pattern_map = detect_patterns_all(symbols)
     rows = [compute_metrics(s) for s in symbols]
     df = pd.DataFrame(rows)
-
     data = {
         "patterns": pattern_map,
-        "metrics": df[[
-            "Symbol", "LastPrice", "Change", "MomentumScore",
-            "VolatilityScore", "TrendStrength", "TrendScore",
-            "SetupScore", "RiskScore", "Trend", "Signal"
-        ]].to_dict(orient="records"),
+        "metrics": df.to_dict(orient="records"),
     }
-
     prompt = f"""
-Jesteś traderem technicznym na prop‑desku.
-Masz patterny i metryki dla instrumentów:
+Jesteś traderem technicznym na prop-desku.
+Masz patterny i metryki dla instrumentów (tylko realne dane, bez wymyślania):
 
 {data}
 
@@ -624,9 +572,11 @@ Zadanie:
   - powiedz, czy pattern jest wart zagrania (TAK / NIE / TYLKO NA MAŁĄ POZYCJĘ),
   - określ, czy lepiej pod to grać:
     - scalping,
-    - day‑trading,
+    - day-trading,
     - swing,
   - wskaż główne ryzyko (fałszywe wybicie, brak wolumenu, wysoka zmienność itd.).
+- Odwołuj się TYLKO do realnych pól (MomentumScore, VolatilityScore, Trend, Signal, Volume itd.).
+- Jeśli czegoś brakuje – napisz wprost, że brak danych.
 
 Format:
 
@@ -635,97 +585,59 @@ PATTERN: ...
 WERDYKT: ...
 RYZYKO: ...
 
-Zasady:
-- Styl „Prop‑Desk Techniczny”.
-- Zero lania wody, tylko technika.
-- Odpowiadaj po polsku.
+Styl:
+- Prop-Desk Techniczny.
+- Zero lania wody, zero wymyślania danych.
 """
-
     resp = client.chat.completions.create(
         model=AI_MODEL,
         messages=[{"role": "user", "content": prompt}]
     )
     return resp.choices[0].message.content
 
-# ============================================================
-# ======================  AI PANEL  ==========================
-# ============================================================
+# ====================== MAIN APP ======================
 
-def render_ai_panel():
-    if "symbols" not in st.session_state or not st.session_state.symbols:
-        st.warning("Najpierw dodaj spółki w sidebarze, żeby użyć AI Panelu.")
-        return
-
-    st.subheader("🤖 AI PANEL — Prop‑Desk Techniczny")
-
-    tab_turbo, tab_news, tab_risk, tab_pattern = st.tabs([
-        "⚡ AI Turbo 2.0",
-        "📰 AI News",
-        "🛡️ AI Risk Check",
-        "📐 AI Pattern Insight",
-    ])
-
-    with tab_turbo:
-        st.markdown("### ⚡ AI Turbo 2.0 — Scalper / Day / Swing / Position")
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        df = pd.DataFrame(rows).sort_values("SetupScore", ascending=False).reset_index(drop=True)
-        top_n = st.slider("Ile najlepszych setupów analizować?", 1, min(10, len(df)), min(5, len(df)))
-        target_df = df.head(top_n)
-        st.dataframe(target_df, use_container_width=True)
-        if st.button("Uruchom AI Turbo 2.0"):
-            with st.spinner("AI Turbo 2.0 analizuje setupy..."):
-                txt = ai_turbo_v2(target_df)
-            st.markdown("#### Werdykt AI")
-            st.markdown(txt)
-
-    with tab_news:
-        st.markdown("### 📰 AI News — sentyment i wpływ na trading")
-        symbol_news = st.selectbox(
-            "Wybierz spółkę do analizy newsów:",
-            st.session_state.symbols,
-            key="ai_news_symbol"
-        )
-        if st.button("Pobierz newsy i zrób analizę AI"):
-            with st.spinner("Pobieram newsy..."):
-                news_list = get_news_for_symbol(symbol_news)
-            if not news_list:
-                st.info("Brak newsów (tu możesz później podpiąć Investik Pro).")
-            else:
-                st.markdown("#### Surowe newsy")
-                for n in news_list:
-                    st.markdown(f"- **{n['title']}** ({n['publisher']})")
-                raw_text = "\n".join([n["title"] for n in news_list])
-                with st.spinner("AI analizuje newsy..."):
-                    summary = ai_news_summary(symbol_news, raw_text)
-                st.markdown("#### Werdykt AI (newsowy)")
-                st.markdown(summary)
-
-    with tab_risk:
-        st.markdown("### 🛡️ AI Risk Check — ocena ryzyka wejścia")
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        df = pd.DataFrame(rows).sort_values("SetupScore", ascending=False).reset_index(drop=True)
-        st.dataframe(df, use_container_width=True)
-        if st.button("Przeanalizuj ryzyko wejścia (AI)"):
-            with st.spinner("AI ocenia ryzyko..."):
-                txt = ai_risk_check(df)
-            st.markdown("#### Werdykt AI (ryzyko)")
-            st.markdown(txt)
-
-    with tab_pattern:
-        st.markdown("### 📐 AI Pattern Insight — patterny + momentum + trend")
-        if st.button("Analiza patternów (AI)"):
-            with st.spinner("AI analizuje patterny..."):
-                txt = ai_pattern_insight(st.session_state.symbols)
-            st.markdown("#### Werdykt AI (patterny)")
-            st.markdown(txt)
-
-# ============================================================
-# ======================  MAIN APP  ==========================
-# ============================================================
+SECTOR_OPTIONS = [
+    "Technologia",
+    "Finanse",
+    "Energia",
+    "Surowce",
+    "Zdrowie / Medycyna",
+    "Przemysł",
+    "Nieruchomości",
+    "Telekomunikacja",
+    "Utilities (energia, gaz, woda)",
+    "Transport / Logistyka",
+    "Konsumpcja Cyclical",
+    "Konsumpcja Defensive",
+    "ETF Akcyjne",
+    "ETF Obligacyjne",
+    "ETF Surowcowe",
+    "ETF Sektorowe",
+    "ETF Tematyczne",
+    "Krypto",
+    "Miners",
+    "Blockchain Infra",
+    "AI / Semiconductors",
+    "Biotech",
+    "Gaming",
+    "Cybersecurity",
+    "Cloud / Software",
+    "E-commerce",
+    "Green Energy / OZE",
+    "Oil & Gas",
+    "Automotive / EV",
+    "Polska spekuła",
+    "USA spekuła",
+    "Small-cap momentum",
+    "Mid-cap trend",
+    "High-volatility plays",
+    "Inne",
+]
 
 def main():
-    st.set_page_config(page_title="KOMBAJN v4.0", layout="wide")
-    st.title("🔥 KOMBAJN v4.0 — Ultra Dark Neon + Trend + SL/TP + Bid/Ask + AI + News")
+    st.set_page_config(page_title="KOMBAJN v5.0", layout="wide")
+    st.title("🔥 KOMBAJN v5.0 — Trend + SL/TP + Bid/Ask + AI Turbo 3.0 + Sektory")
 
     if "symbols" not in st.session_state:
         st.session_state.symbols = []
@@ -752,34 +664,57 @@ def main():
         st.session_state.symbols = []
         st.session_state.sector_map = {}
 
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🏭 Przypisanie sektorów")
-
-    for sym in st.session_state.symbols:
-        current = st.session_state.sector_map.get(sym, "Inne")
-        options = ["Technologia", "Finanse", "Energia", "Surowce", "Zdrowie", "Konsumpcja", "Inne"]
-        idx = options.index(current) if current in options else len(options) - 1
-        new_sector = st.sidebar.selectbox(
-            f"Sektor dla {sym}:",
-            options,
-            index=idx,
-            key=f"sector_{sym}"
-        )
-        st.session_state.sector_map[sym] = new_sector
-
     if not st.session_state.symbols:
         st.warning("Dodaj spółki w sidebarze, aby rozpocząć.")
         return
 
-    tab_heatmap, tab_chart, tab_scanner, tab_sector, tab_premarket, tab_ai = st.tabs([
+    # ====== PRZYPISYWANIE SEKTORÓW W TABELI ======
+    st.subheader("🏭 Przypisanie sektorów (wymagane)")
+
+    sector_rows = []
+    for sym in st.session_state.symbols:
+        sector_rows.append({
+            "Symbol": sym,
+            "Sektor": st.session_state.sector_map.get(sym, "")
+        })
+    sector_df = pd.DataFrame(sector_rows)
+
+    edited = st.data_editor(
+        sector_df,
+        key="sector_editor",
+        use_container_width=True,
+        column_config={
+            "Sektor": st.column_config.SelectboxColumn(
+                "Sektor",
+                options=SECTOR_OPTIONS,
+                required=True,
+            )
+        },
+        hide_index=True,
+    )
+
+    # aktualizacja mapy sektorów
+    for _, row in edited.iterrows():
+        st.session_state.sector_map[row["Symbol"]] = row["Sektor"]
+
+    # wymuszenie przypisania sektora
+    if any(not st.session_state.sector_map.get(sym) for sym in st.session_state.symbols):
+        st.error("Każda spółka MUSI mieć przypisany sektor, zanim przejdziesz dalej.")
+        return
+
+    tab_heatmap, tab_chart, tab_scanner, tab_sector, tab_premarket, tab_ai_turbo, tab_ai_news, tab_ai_risk, tab_ai_pattern = st.tabs([
         "📊 Heatmapa PRO",
         "📈 Wykres PRO",
         "📡 Skaner sygnałów",
         "🏭 Heatmapa sektorowa",
         "🌅 Pre‑Market Radar",
-        "🤖 AI PANEL",
+        "⚡ AI Turbo 3.0",
+        "📰 AI News",
+        "🛡️ AI Risk Check",
+        "📐 AI Pattern Insight",
     ])
 
+    # ---------- HEATMAPA ----------
     with tab_heatmap:
         st.subheader("📊 Heatmapa PRO + Trend + SL/TP + Bid/Ask")
         rows = [compute_metrics(s) for s in st.session_state.symbols]
@@ -824,6 +759,7 @@ def main():
         st.markdown("---")
         st.dataframe(style_heatmap(df), use_container_width=True)
 
+    # ---------- WYKRES ----------
     with tab_chart:
         st.subheader("📈 Wykres PRO")
         symbol_for_chart = st.selectbox(
@@ -832,6 +768,7 @@ def main():
         )
         plot_pro_chart(symbol_for_chart)
 
+    # ---------- SKANER ----------
     with tab_scanner:
         st.subheader("📡 BUY / SELL Radar")
         rows = [compute_metrics(s) for s in st.session_state.symbols]
@@ -864,9 +801,11 @@ def main():
         st.markdown("## 🟡 Neutral")
         st.dataframe(neutral_df, use_container_width=True)
 
+    # ---------- SEKTORÓWKA ----------
     with tab_sector:
         st.subheader("🏭 Heatmapa sektorowa")
-        df_sector = df.copy()
+        rows = [compute_metrics(s) for s in st.session_state.symbols]
+        df_sector = pd.DataFrame(rows)
         df_sector["Sector"] = df_sector["Symbol"].apply(lambda s: st.session_state.sector_map.get(s, "Inne"))
         sector_view = (
             df_sector.groupby("Sector")["SetupScore"]
@@ -876,6 +815,7 @@ def main():
         )
         st.dataframe(sector_view, use_container_width=True)
 
+    # ---------- PRE‑MARKET ----------
     with tab_premarket:
         st.subheader("🌅 Pre‑Market Radar")
         pre_rows = []
@@ -889,10 +829,64 @@ def main():
             pre_df = pd.DataFrame(pre_rows).sort_values("PreMarketChange", ascending=False)
             st.dataframe(pre_df, use_container_width=True)
 
-    with tab_ai:
-        render_ai_panel()
+    # ---------- AI TURBO 3.0 ----------
+    with tab_ai_turbo:
+        st.subheader("⚡ AI Turbo 3.0 — real data only")
+        rows = [compute_metrics(s) for s in st.session_state.symbols]
+        df_ai = pd.DataFrame(rows).sort_values("SetupScore", ascending=False).reset_index(drop=True)
+        top_n = st.slider("Ile najlepszych setupów analizować?", 1, min(10, len(df_ai)), min(5, len(df_ai)))
+        target_df = df_ai.head(top_n)
+        st.dataframe(target_df, use_container_width=True)
+        if st.button("Uruchom AI Turbo 3.0"):
+            with st.spinner("AI Turbo 3.0 analizuje setupy..."):
+                txt = ai_turbo_v3(target_df)
+            st.markdown("#### Werdykt AI")
+            st.markdown(txt)
+
+    # ---------- AI NEWS ----------
+    with tab_ai_news:
+        st.subheader("📰 AI News — sentyment i wpływ na trading")
+        symbol_news = st.selectbox(
+            "Wybierz spółkę do analizy newsów:",
+            st.session_state.symbols,
+            key="ai_news_symbol_main"
+        )
+        if st.button("Pobierz newsy i zrób analizę AI"):
+            with st.spinner("Pobieram newsy..."):
+                news_list = get_news_for_symbol(symbol_news)
+            if not news_list:
+                st.info("Brak newsów (tu możesz później podpiąć Investik Pro).")
+            else:
+                st.markdown("#### Surowe newsy")
+                for n in news_list:
+                    st.markdown(f"- **{n['title']}** ({n['publisher']})")
+                raw_text = "\n".join([n["title"] for n in news_list])
+                with st.spinner("AI analizuje newsy..."):
+                    summary = ai_news_summary(symbol_news, raw_text)
+                st.markdown("#### Werdykt AI (newsowy)")
+                st.markdown(summary)
+
+    # ---------- AI RISK ----------
+    with tab_ai_risk:
+        st.subheader("🛡️ AI Risk Check — ocena ryzyka wejścia")
+        rows = [compute_metrics(s) for s in st.session_state.symbols]
+        df_risk = pd.DataFrame(rows).sort_values("SetupScore", ascending=False).reset_index(drop=True)
+        st.dataframe(df_risk, use_container_width=True)
+        if st.button("Przeanalizuj ryzyko wejścia (AI)"):
+            with st.spinner("AI ocenia ryzyko..."):
+                txt = ai_risk_check(df_risk)
+            st.markdown("#### Werdykt AI (ryzyko)")
+            st.markdown(txt)
+
+    # ---------- AI PATTERN ----------
+    with tab_ai_pattern:
+        st.subheader("📐 AI Pattern Insight — patterny + momentum + trend")
+        if st.button("Analiza patternów (AI)"):
+            with st.spinner("AI analizuje patterny..."):
+                txt = ai_pattern_insight(st.session_state.symbols)
+            st.markdown("#### Werdykt AI (patterny)")
+            st.markdown(txt)
 
 
 if __name__ == "__main__":
     main()
-
