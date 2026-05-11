@@ -1,13 +1,4 @@
-Masz, Adam — **pełny KOMBAJN 4.0 w jednym pliku**:  
-Streamlit + Investing.com + świeczki + heatmapa + AI Turbo (bez zewnętrznego API).
 
-Skopiuj to jako `app.py` i odpal:
-
-```bash
-streamlit run app.py
-```
-
-```python
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -347,4 +338,4 @@ if st.button("Skanuj rynek"):
 
     st.subheader("📊 TradingView widget")
     tradingview_widget(selected)
-```
+
