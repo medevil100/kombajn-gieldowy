@@ -1277,7 +1277,7 @@ else:
                         news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
                     st.session_state.ai_news_radar_comment = ai_news_radar(news_df)
 
-       st.markdown("""
+     st.markdown("""
 <style>
 /* BLOOMBERG DARK MODE */
 body, .stApp {
@@ -1321,6 +1321,7 @@ body, .stApp {
 }
 </style>
 """, unsafe_allow_html=True)
+ 
 
             )
         else:
