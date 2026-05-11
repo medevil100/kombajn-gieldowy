@@ -993,27 +993,69 @@ def main():
                     st.write(f"**Risk:** {row['RiskScore']:.1f}")
                     st.write(f"**TrendScore:** {row.get('TrendScore',0):.1f}")
 
-            st.markdown("---")
-            col_ai1, col_ai2 = st.columns(2)
-            with col_ai1:
-                if st.button("🧠 Generuj komentarz AI dla TOP 5"):
-                    with st.spinner("AI analizuje TOP 5 setupów..."):
-                        st.session_state.ai_top5_comment = ai_verdict_for_top5(top_df)
-            with col_ai2:
-                if st.button("📰 Generuj NewsScore dla wszystkich spółek"):
-                    with st.spinner("AI analizuje news-ryzyko i potencjał wybicia..."):
-                        st.session_state.news_scores = ai_news_score_for_df(df)
+           st.markdown("""
+<style>
 
-            if st.session_state.ai_top5_comment:
-                st.subheader("🧠 Komentarz AI (prop‑desk view)")
-                st.markdown(st.session_state.ai_top5_comment)
+    /* --- GLOBAL BLOOMBERG DARK MODE --- */
+    body, .stApp {
+        background-color: #0d0d0d !important;
+        color: #e6e6e6 !important;
+        font-family: "Segoe UI", sans-serif;
+    }
 
-        if st.session_state.news_scores:
-            df["NewsScore"] = df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
+    /* --- TABELA: pełna szerokość + ciemny styl --- */
+    [data-testid="stDataFrame"] {
+        background-color: #0d0d0d !important;
+        border: 1px solid #333 !important;
+        border-radius: 6px !important;
+        padding: 10px !important;
+    }
 
-        st.markdown("---")
-        st.subheader("📊 Pełna tabela — Heatmapa PRO + NewsScore")
-        st.dataframe(style_heatmap(df), use_container_width=True)
+    /* --- Komórki tabeli --- */
+    .dataframe tbody tr th, .dataframe tbody tr td {
+        background-color: #111 !important;
+        color: #e6e6e6 !important;
+        font-size: 17px !important;
+        padding: 10px 14px !important;
+        border-color: #222 !important;
+    }
+
+    /* --- Nagłówki tabeli --- */
+    .dataframe thead th {
+        background-color: #1a1a1a !important;
+        color: #f2f2f2 !important;
+        font-size: 18px !important;
+        border-bottom: 2px solid #444 !important;
+        padding: 12px !important;
+    }
+
+    /* --- Scrollbar Bloomberg --- */
+    ::-webkit-scrollbar {
+        width: 12px;
+        height: 12px;
+    }
+    ::-webkit-scrollbar-track {
+        background: #0d0d0d;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #444;
+        border-radius: 6px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #666;
+    }
+
+    /* --- Podświetlenia (Twoje kolory heatmapy zostają) --- */
+    .stDataFrame td {
+        transition: background-color 0.2s ease-in-out;
+    }
+    .stDataFrame td:hover {
+        background-color: #333 !important;
+    }
+
+</style>
+""", unsafe_allow_html=True)
+ 
 
     # --- WYKRES PRO ---
     with tab_chart:
