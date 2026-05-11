@@ -8,7 +8,7 @@ st.set_page_config(page_title="Heatmap PRO", layout="wide")
 
 # --- OpenAI config ---
 AI_MODEL = "gpt-4o-mini"
-client = OpenAI()  # API key pobierze z sekreta automatycznie
+client = OpenAI()  # API key z sekreta
 
 # --- Pobieranie danych ---
 def get_price_data(symbol, period="5d", interval="1h"):
@@ -125,85 +125,6 @@ def compute_metrics(symbol):
         "RiskScore": risk_score,
         "SetupScore": setup_score,
     }
-    tab_heatmap, tab_chart, tab_scanner = st.tabs([
-        "📊 Heatmap PRO + AI",
-        "📈 Wykres PRO",
-        "📡 Skaner Sygnałów"
-            # --- SKANER SYGNAŁÓW ---
-    with tab_scanner:
-        st.subheader("📡 BUY / SELL Radar — Skaner Sygnałów")
-
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        df = pd.DataFrame(rows)
-        df = df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
-
-        # BUY Radar
-        buy_df = df[
-            (df["Signal"] == "BUY") &
-            (df["Trend"] == "UP") &
-            (df["SetupScore"] >= 50) &
-            (df["MomentumScore"] >= 40)
-        ]
-
-        # SELL Radar
-        sell_df = df[
-            (df["Signal"] == "SELL") &
-            (df["Trend"] == "DOWN") &
-            (df["SetupScore"] >= 40)
-        ]
-
-        # Neutral
-        neutral_df = df[
-            ~df.index.isin(buy_df.index) &
-            ~df.index.isin(sell_df.index)
-        ]
-
-        # --- BUY ---
-        st.markdown("## 🟢 BUY Radar")
-        if buy_df.empty:
-            st.info("Brak mocnych sygnałów BUY.")
-        else:
-            cols = st.columns(min(5, len(buy_df)))
-            for idx, (_, row) in enumerate(buy_df.iterrows()):
-                with cols[idx % len(cols)]:
-                    st.markdown(f"### 🟢 {row['Symbol']}")
-                    st.write(f"**SetupScore:** {row['SetupScore']:.1f}")
-                    st.write(f"**Momentum:** {row['MomentumScore']:.1f}")
-                    st.write(f"**Trend:** {row['Trend']}")
-                    st.write(f"**Change:** {row['Change']:+.2f}%")
-
-        st.markdown("---")
-
-        # --- SELL ---
-        st.markdown("## 🔴 SELL Radar")
-        if sell_df.empty:
-            st.info("Brak mocnych sygnałów SELL.")
-        else:
-            cols = st.columns(min(5, len(sell_df)))
-            for idx, (_, row) in enumerate(sell_df.iterrows()):
-                with cols[idx % len(cols)]:
-                    st.markdown(f"### 🔴 {row['Symbol']}")
-                    st.write(f"**SetupScore:** {row['SetupScore']:.1f}")
-                    st.write(f"**Volatility:** {row['VolatilityScore']:.1f}")
-                    st.write(f"**Trend:** {row['Trend']}")
-                    st.write(f"**Change:** {row['Change']:+.2f}%")
-
-        st.markdown("---")
-
-        # --- NEUTRAL ---
-        st.markdown("## 🟡 Neutral Radar")
-        if neutral_df.empty:
-            st.info("Brak neutralnych setupów.")
-        else:
-            st.dataframe(
-                neutral_df[[
-                    "Symbol", "SetupScore", "Trend", "Signal",
-                    "MomentumScore", "VolatilityScore", "RiskScore"
-                ]],
-                use_container_width=True
-            )
-
-    ])
 
 # --- Stylowanie tabeli ---
 def style_heatmap(df):
@@ -370,7 +291,7 @@ def plot_pro_chart(symbol: str):
 
 # --- Aplikacja ---
 def main():
-    st.title("🔥 HEATMAPA PRO — Setup Scanner + AI + Wykres PRO")
+    st.title("🔥 HEATMAPA PRO — Setup Scanner + AI + Wykres PRO + Skaner Sygnałów")
 
     if "symbols" not in st.session_state:
         st.session_state.symbols = []
@@ -393,7 +314,12 @@ def main():
         st.warning("Dodaj spółki, aby kontynuować.")
         return
 
-    tab_heatmap, tab_chart = st.tabs(["📊 Heatmap PRO + AI", "📈 Wykres PRO"])
+    # --- TABS ---
+    tab_heatmap, tab_chart, tab_scanner = st.tabs([
+        "📊 Heatmap PRO + AI",
+        "📈 Wykres PRO",
+        "📡 Skaner Sygnałów"
+    ])
 
     # --- HEATMAP + AI ---
     with tab_heatmap:
@@ -440,6 +366,74 @@ def main():
             "Wybierz spółkę do wykresu:", st.session_state.symbols
         )
         plot_pro_chart(symbol_for_chart)
+
+    # --- SKANER SYGNAŁÓW ---
+    with tab_scanner:
+        st.subheader("📡 BUY / SELL Radar — Skaner Sygnałów")
+
+        rows = [compute_metrics(s) for s in st.session_state.symbols]
+        scan_df = pd.DataFrame(rows)
+        scan_df = scan_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
+
+        buy_df = scan_df[
+            (scan_df["Signal"] == "BUY") &
+            (scan_df["Trend"] == "UP") &
+            (scan_df["SetupScore"] >= 50) &
+            (scan_df["MomentumScore"] >= 40)
+        ]
+
+        sell_df = scan_df[
+            (scan_df["Signal"] == "SELL") &
+            (scan_df["Trend"] == "DOWN") &
+            (scan_df["SetupScore"] >= 40)
+        ]
+
+        neutral_df = scan_df[
+            ~scan_df.index.isin(buy_df.index) &
+            ~scan_df.index.isin(sell_df.index)
+        ]
+
+        st.markdown("## 🟢 BUY Radar")
+        if buy_df.empty:
+            st.info("Brak mocnych sygnałów BUY.")
+        else:
+            cols = st.columns(min(5, len(buy_df)))
+            for idx, (_, row) in enumerate(buy_df.iterrows()):
+                with cols[idx % len(cols)]:
+                    st.markdown(f"### 🟢 {row['Symbol']}")
+                    st.write(f"**SetupScore:** {row['SetupScore']:.1f}")
+                    st.write(f"**Momentum:** {row['MomentumScore']:.1f}")
+                    st.write(f"**Trend:** {row['Trend']}")
+                    st.write(f"**Change:** {row['Change']:+.2f}%")
+
+        st.markdown("---")
+
+        st.markdown("## 🔴 SELL Radar")
+        if sell_df.empty:
+            st.info("Brak mocnych sygnałów SELL.")
+        else:
+            cols = st.columns(min(5, len(sell_df)))
+            for idx, (_, row) in enumerate(sell_df.iterrows()):
+                with cols[idx % len(cols)]:
+                    st.markdown(f"### 🔴 {row['Symbol']}")
+                    st.write(f"**SetupScore:** {row['SetupScore']:.1f}")
+                    st.write(f"**Volatility:** {row['VolatilityScore']:.1f}")
+                    st.write(f"**Trend:** {row['Trend']}")
+                    st.write(f"**Change:** {row['Change']:+.2f}%")
+
+        st.markdown("---")
+
+        st.markdown("## 🟡 Neutral Radar")
+        if neutral_df.empty:
+            st.info("Brak neutralnych setupów.")
+        else:
+            st.dataframe(
+                neutral_df[[
+                    "Symbol", "SetupScore", "Trend", "Signal",
+                    "MomentumScore", "VolatilityScore", "RiskScore"
+                ]],
+                use_container_width=True
+            )
 
 if __name__ == "__main__":
     main()
