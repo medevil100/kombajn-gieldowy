@@ -1,4 +1,5 @@
-
+```python
+import time
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -6,7 +7,7 @@ import plotly.graph_objects as go
 from openai import OpenAI
 from streamlit_autorefresh import st_autorefresh
 
-# Inicjalizacja OpenAI
+# Inicjalizacja OpenAI (klucz z Secrets / zmiennej środowiskowej)
 client = OpenAI()
 
 # Kolory Terminala
@@ -16,10 +17,7 @@ NEON_PINK = "#FF1493"
 NEON_BLUE = "#00FFFF"
 NEON_YELLOW = "#F5FF00"
 
-st.set_page_config(page_title="Terminal Tradingowy", layout="wide")
-
-# Odświeżanie co 5 minut
-st_autorefresh(interval=5 * 60 * 1000, key="datarefresh")
+st.set_page_config(page_title="ULTRA ENGINE v2", layout="wide")
 
 
 def inject_global_css():
@@ -37,7 +35,7 @@ def inject_global_css():
     )
 
 
-# --- Logika Danych ---
+# --- Dane rynkowe ---
 def get_price_data(symbol, period, interval):
     if not symbol:
         return pd.DataFrame()
@@ -132,6 +130,7 @@ def trend_and_levels(df, symbol):
         trend = "UP"
     elif ema20 < ema50 and last < ema20:
         trend = "DOWN"
+        # SIDE
     else:
         trend = "SIDE"
 
@@ -165,7 +164,7 @@ def trend_and_levels(df, symbol):
     }
 
 
-def build_market_context(df, symbol):
+def build_market_context_single(df, symbol):
     close = df["Close"]
     last = close.iloc[-1]
     prev = close.iloc[-2] if len(close) > 1 else last
@@ -173,9 +172,8 @@ def build_market_context(df, symbol):
 
     r = rsi(close).iloc[-1]
     a = atr(df).iloc[-1]
-
-    ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
-    ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
+    ema20 = ema(close, 20).iloc[-1]
+    ema50 = ema(close, 50).iloc[-1]
 
     ctx = f"""
 SYMBOL: {symbol}
@@ -193,37 +191,99 @@ RELACJA CENY DO EMA:
     return ctx
 
 
-def company_snapshot(symbol):
+def get_news_summary(symbol, max_items=5):
     t = yf.Ticker(symbol)
-    info = getattr(t, "info", {})
-    name = info.get("longName", "brak nazwy")
-    sector = info.get("sector", "brak sektora")
-    website = info.get("website", "brak strony")
-    return name, sector, website
+    news = getattr(t, "news", []) or []
+    items = news[:max_items]
+    lines = []
+    for n in items:
+        title = n.get("title", "")
+        publisher = n.get("publisher", "")
+        ts = n.get("providerPublishTime", None)
+        lines.append(f"- [{publisher}] {title}")
+    if not lines:
+        return "Brak świeżych newsów."
+    return "\n".join(lines)
+
+
+def build_multi_context(symbols, period, interval):
+    blocks = []
+    for sym in symbols:
+        df = get_price_data(sym, period, interval)
+        if df.empty:
+            blocks.append(f"SYMBOL: {sym}\nBrak danych.\n")
+            continue
+
+        close = df["Close"]
+        last = close.iloc[-1]
+        prev = close.iloc[-2] if len(close) > 1 else last
+        ch_pct = (last - prev) / prev * 100 if prev != 0 else 0
+
+        r = rsi(close).iloc[-1]
+        a = atr(df).iloc[-1]
+        ema20_val = ema(close, 20).iloc[-1]
+        ema50_val = ema(close, 50).iloc[-1]
+
+        if ema20_val > ema50_val and last > ema20_val:
+            trend = "UP"
+        elif ema20_val < ema50_val and last < ema20_val:
+            trend = "DOWN"
+        else:
+            trend = "SIDE"
+
+        news_txt = get_news_summary(sym, max_items=5)
+
+        block = f"""
+========================
+SYMBOL: {sym}
+LAST PRICE: {last:.2f} ({ch_pct:+.2f}% vs poprzednia świeca)
+RSI(14): {r:.2f}
+ATR(14): {a:.4f}
+EMA20: {ema20_val:.2f}
+EMA50: {ema50_val:.2f}
+TREND: {trend}
+
+NEWS (ostatnie kilka nagłówków, bez linków):
+{news_txt}
+"""
+        blocks.append(block)
+
+    return "\n".join(blocks)
 
 
 # --- UI GŁÓWNE ---
 def main():
     inject_global_css()
 
-    st.sidebar.title("⚙️ Terminal")
-
-    # Portfel – czysty na starcie, użytkownik dopisuje spółki
     if "symbols" not in st.session_state:
         st.session_state.symbols = []
+    if "chat" not in st.session_state:
+        st.session_state.chat = []
+    if "ai_multi_result" not in st.session_state:
+        st.session_state.ai_multi_result = ""
+    if "last_ai_run" not in st.session_state:
+        st.session_state.last_ai_run = 0.0
 
+    st.sidebar.title("⚙️ ULTRA ENGINE v2")
+
+    # Dodawanie spółek – czysty start, nic w kodzie
     new_sym = st.sidebar.text_input("Dodaj spółkę (ticker):", "").upper()
-    if st.sidebar.button("➕ Dodaj", use_container_width=True) and new_sym:
-        if new_sym not in st.session_state.symbols:
-            st.session_state.symbols.append(new_sym)
+    add_col1, add_col2 = st.sidebar.columns([2, 1])
+    with add_col1:
+        if st.button("➕ Dodaj spółkę", use_container_width=True) and new_sym:
+            if new_sym not in st.session_state.symbols:
+                st.session_state.symbols.append(new_sym)
+    with add_col2:
+        if st.button("🗑 Wyczyść listę", use_container_width=True):
+            st.session_state.symbols = []
 
     if st.session_state.symbols:
-        sym = st.sidebar.selectbox("Wybierz spółkę:", st.session_state.symbols)
+        sym = st.sidebar.selectbox("Aktywna spółka (do wykresów):", st.session_state.symbols)
     else:
         sym = None
         st.sidebar.info("Brak spółek. Dodaj ticker powyżej.")
 
-    # Zakres danych: 1 miesiąc – 2 lata
+    # Zakres danych: 1m–2y
     range_p = st.sidebar.selectbox(
         "Zakres danych:",
         ["1mo", "3mo", "6mo", "1y", "2y"],
@@ -233,34 +293,74 @@ def main():
     # Interwał
     tf = st.sidebar.selectbox("Interwał:", ["1d", "1h", "15m"], index=0)
 
-    # Model AI – zawsze Prop-Trader Mode
+    # Modele AI
     ai_mod = st.sidebar.selectbox(
-        "Model AI:",
+        "Model AI (Prop-Trader):",
         ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1-preview"],
     )
 
+    # Suwaki odświeżania
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("⏱ Odświeżanie")
+
+    data_interval_label = st.sidebar.selectbox(
+        "Odświeżanie danych:",
+        ["5s", "10s", "30s", "1m", "5m", "15m"],
+        index=3,
+    )
+    ai_interval_label = st.sidebar.selectbox(
+        "Odświeżanie AI (multi-analiza):",
+        ["30s", "1m", "5m", "15m", "30m"],
+        index=2,
+    )
+
+    def label_to_seconds(label: str) -> int:
+        if label.endswith("s"):
+            return int(label[:-1])
+        if label.endswith("m"):
+            return int(label[:-1]) * 60
+        return 60
+
+    data_interval_sec = label_to_seconds(data_interval_label)
+    ai_interval_sec = label_to_seconds(ai_interval_label)
+
+    # Globalny autorefresh – steruje danymi, AI pilnujemy osobno
+    st_autorefresh(interval=data_interval_sec * 1000, key="auto_refresh")
+
+    # Lista spółek w sidebarze
     if st.session_state.symbols:
         st.sidebar.markdown("---")
         st.sidebar.subheader("Spółki w portfelu")
         for s in st.session_state.symbols:
             st.sidebar.write(f"- {s}")
 
+    # Jeśli nie ma aktywnej spółki – kończymy na info
     if not sym:
-        st.warning("Dodaj spółkę i wybierz ją z listy, aby zobaczyć dane.")
+        st.warning("Dodaj spółkę i wybierz ją z listy, aby zobaczyć dane i analizy.")
         return
 
+    # Dane dla aktywnej spółki
     df = get_price_data(sym, range_p, tf)
     if df.empty:
         st.info("Brak danych dla tego symbolu w wybranym zakresie.")
         return
 
-    tab_price, tab_rsi, tab_fibo, tab_smi, tab_macd, tab_trend, tab_ai, tab_info = st.tabs(
-        ["Wykres", "RSI", "Fibo", "SMI", "MACD", "Trend / SL/TP", "AI Prop", "Info o spółkach"]
+    tab_price, tab_rsi, tab_fibo, tab_smi, tab_macd, tab_trend, tab_ai_chat, tab_ai_multi = st.tabs(
+        [
+            "Wykres",
+            "RSI",
+            "Fibo",
+            "SMI",
+            "MACD",
+            "Trend / SL/TP",
+            "AI Chat (1 spółka)",
+            "AI Multi Verdict (wiele spółek)",
+        ]
     )
 
-    # --- Wykres główny ---
+    # --- Wykres główny + Fibo na wykresie ---
     with tab_price:
-        st.subheader(f"📈 Wykres {sym}")
+        st.subheader(f"📈 Wykres {sym} z poziomami Fibo")
         fig = go.Figure(
             data=[
                 go.Candlestick(
@@ -269,31 +369,51 @@ def main():
                     high=df["High"],
                     low=df["Low"],
                     close=df["Close"],
+                    name="Cena",
                 )
             ]
         )
+
+        levels = fib_levels(df)
+        for name, val in levels.items():
+            fig.add_hline(
+                y=val,
+                line_dash="dot",
+                line_color=NEON_BLUE,
+                annotation_text=name,
+                annotation_position="right",
+            )
+
         fig.update_layout(
             template="plotly_dark",
-            height=500,
-            margin=dict(l=0, r=0, t=20, b=0),
+            height=550,
+            margin=dict(l=0, r=0, t=30, b=0),
         )
         st.plotly_chart(fig, use_container_width=True)
+        st.caption(
+            "Wykres świecowy z poziomami Fibonacciego (ostatnie ~100 świec). Poziomy mogą działać jako wsparcia/opory."
+        )
 
     # --- RSI ---
     with tab_rsi:
-        st.subheader("RSI (14)")
+        st.subheader("RSI (Relative Strength Index)")
         r = rsi(df["Close"]).dropna()
         st.line_chart(r)
-        st.write(f"Ostatnia wartość RSI: **{r.iloc[-1]:.2f}**")
+        st.write(f"Ostatnia wartość RSI(14): **{r.iloc[-1]:.2f}**")
+        st.caption(
+            "RSI mierzy siłę ruchu. Powyżej 70 – wykupienie, poniżej 30 – wyprzedanie (ale zawsze w kontekście trendu)."
+        )
 
-    # --- Fibo ---
+    # --- Fibo (tabela + opis) ---
     with tab_fibo:
-        st.subheader("Poziomy Fibonacciego (ostatnie ~100 świec)")
+        st.subheader("Poziomy Fibonacciego – tabela")
         levels = fib_levels(df)
-        for name, val in levels.items():
-            st.write(f"**{name}**: {val:.2f}")
-        st.info(
-            "Poziomy Fibo pokazują potencjalne strefy wsparcia/oporu na bazie ostatniego większego ruchu."
+        fib_df = pd.DataFrame(
+            {"Poziom": list(levels.keys()), "Cena": [round(v, 4) for v in levels.values()]}
+        )
+        st.table(fib_df)
+        st.caption(
+            "Poziomy Fibo wyznaczają potencjalne strefy reakcji ceny na bazie ostatniego większego ruchu."
         )
 
     # --- SMI ---
@@ -305,14 +425,20 @@ def main():
         st.write(
             f"Ostatni SMI: **{s['SMI'].iloc[-1]:.2f}**, Signal: **{s['Signal'].iloc[-1]:.2f}**"
         )
+        st.caption(
+            "SMI to wskaźnik momentum – pokazuje, jak silny jest ruch względem ostatniego zakresu cen."
+        )
 
     # --- MACD ---
     with tab_macd:
-        st.subheader("MACD")
-        macd_line, signal, hist = macd(df["Close"])
-        m = pd.DataFrame({"MACD": macd_line, "Signal": signal, "Hist": hist}).dropna()
+        st.subheader("MACD (Moving Average Convergence Divergence)")
+        macd_line, signal_line, hist = macd(df["Close"])
+        m = pd.DataFrame({"MACD": macd_line, "Signal": signal_line, "Hist": hist}).dropna()
         st.line_chart(m[["MACD", "Signal"]])
         st.bar_chart(m["Hist"])
+        st.caption(
+            "MACD pokazuje relację dwóch średnich kroczących i momentum trendu. Przecięcia MACD/Signal często sygnalizują zmianę momentum."
+        )
 
     # --- Trend / SL / TP / bid / ask / spread ---
     with tab_trend:
@@ -330,10 +456,10 @@ def main():
             st.write(f"**EMA50:** {info['ema50']:.2f}")
 
         with col_b:
-            st.write("**Scenariusz LONG:**")
+            st.write("**Scenariusz LONG (przykładowy, na bazie ATR):**")
             st.write(f"SL: {info['sl_long']:.2f}")
             st.write(f"TP: {info['tp_long']:.2f}")
-            st.write("**Scenariusz SHORT:**")
+            st.write("**Scenariusz SHORT (przykładowy, na bazie ATR):**")
             st.write(f"SL: {info['sl_short']:.2f}")
             st.write(f"TP: {info['tp_short']:.2f}")
 
@@ -341,34 +467,36 @@ def main():
             st.write(f"**Bid:** {info['bid'] if info['bid'] else 'brak'}")
             st.write(f"**Ask:** {info['ask'] if info['ask'] else 'brak'}")
             if info["spread"] is not None:
-                st.write(f"**Spread:** {info['spread']:.4f}")
+                st.write(f"**Spread (kwotowo):** {info['spread']:.4f}")
 
-    # --- AI Prop-Trader: BUY / SELL / HOLD ---
-    with tab_ai:
-        st.subheader("💬 AI – Prop-Trader (BUY / SELL / HOLD)")
+        st.caption(
+            "Trend i poziomy SL/TP są przykładowe – służą jako punkt wyjścia do własnej oceny ryzyka, nie jako sygnał."
+        )
 
-        if "chat" not in st.session_state:
-            st.session_state.chat = []
+    # --- AI Chat – jedna spółka, wolny czat ---
+    with tab_ai_chat:
+        st.subheader(f"💬 AI – Prop-Trader Chat (tylko {sym})")
 
         for m in st.session_state.chat:
             with st.chat_message(m["role"]):
                 st.write(m["content"])
 
-        if p := st.chat_input("Pytaj AI..."):
-            st.session_state.chat.append({"role": "user", "content": p})
+        user_msg = st.chat_input("Pytaj AI o tę spółkę...")
+        if user_msg:
+            st.session_state.chat.append({"role": "user", "content": user_msg})
 
-            market_ctx = build_market_context(df, sym)
+            market_ctx = build_market_context_single(df, sym)
 
             system_prompt = """
 Jesteś zawodowym prop-traderem. 
-Twoim zadaniem jest na podstawie danych rynkowych wyrazić opinię: BUY / SELL / HOLD.
+Analizujesz TYLKO jedną spółkę na raz (symbol podany w kontekście rynku).
+Mówisz krótko, konkretnie, bez lania wody.
 
 Zasady:
-- pierwsza linijka odpowiedzi: tylko jedno słowo: BUY / SELL / HOLD
-- potem krótko uzasadnienie (max 5–7 zdań)
+- możesz sugerować kierunek (LONG / SHORT / NEUTRAL), ale nie jako poradę inwestycyjną
 - opierasz się na RSI(14), ATR(14), EMA20, EMA50, trendzie oraz ostatnim ruchu ceny
 - możesz odwołać się do poziomów SL/TP, jeśli setup jest sensowny
-- jeśli setup jest słaby – możesz dać HOLD i napisać, czego brakuje
+- unikasz ogólników typu „rynek jest niepewny” – zawsze formułujesz scenariusz A/B
 
 To nie jest porada inwestycyjna, tylko analiza scenariuszy.
 """
@@ -386,26 +514,81 @@ To nie jest porada inwestycyjna, tylko analiza scenariuszy.
                 model=ai_mod,
                 messages=messages,
             )
-
             reply = res.choices[0].message.content
             st.session_state.chat.append({"role": "assistant", "content": reply})
             st.rerun()
 
-    # --- Info o spółkach (szukanie w sieci przez yfinance) ---
-    with tab_info:
-        st.subheader("Informacje o wszystkich dodanych spółkach")
+    # --- AI Multi Verdict – wiele spółek naraz + newsy + zbiorczy werdykt ---
+    with tab_ai_multi:
+        st.subheader("🧠 AI Multi Verdict – analiza wielu spółek naraz")
+
         if not st.session_state.symbols:
-            st.info("Brak spółek w portfelu.")
+            st.info("Brak spółek do analizy.")
         else:
-            for s in st.session_state.symbols:
-                name, sector, website = company_snapshot(s)
-                st.markdown(f"### {s}")
-                st.write(f"**Nazwa:** {name}")
-                st.write(f"**Sektor:** {sector}")
-                st.write(f"**Strona www:** {website}")
-                st.markdown("---")
+            st.write(
+                f"Spółki do analizy: {', '.join(st.session_state.symbols)} (max ~20 realnie sensownie)."
+            )
+
+            now = time.time()
+            auto_run = st.checkbox(
+                "Automatyczna analiza AI zgodnie z suwakiem odświeżania AI",
+                value=False,
+            )
+
+            run_ai_now = st.button("🔍 Uruchom analizę AI teraz")
+
+            should_run_ai = False
+            if run_ai_now:
+                should_run_ai = True
+            elif auto_run and (now - st.session_state.last_ai_run > ai_interval_sec):
+                should_run_ai = True
+
+            if should_run_ai and st.session_state.symbols:
+                multi_ctx = build_multi_context(
+                    st.session_state.symbols, range_p, tf
+                )
+
+                system_prompt_multi = """
+Jesteś zawodowym prop-traderem i risk managerem w desk'u prop-tradingowym.
+Dostajesz dane rynkowe i nagłówki newsów dla wielu spółek naraz.
+
+Twoje zadanie:
+1) Dla każdej spółki wystaw werdykt: BUY / SELL / HOLD.
+2) Zrób tabelę w formie tekstowej (kolumny: Symbol | Werdykt | Confidence(0-100) | Krótki komentarz).
+3) Na końcu daj ZBIORCZY WERDYKT:
+   - TOP 5 najlepszych setupów (krótko dlaczego),
+   - spółki do unikania (krótko dlaczego),
+   - ogólny sentyment (byczy / niedźwiedzi / neutralny).
+
+Nie podajesz linków, nie odsyłasz do stron.
+Nie udzielasz porad inwestycyjnych – to tylko analiza scenariuszy.
+"""
+
+                messages_multi = [
+                    {"role": "system", "content": system_prompt_multi},
+                    {
+                        "role": "system",
+                        "content": "Dane rynkowe i newsy dla wielu spółek:\n"
+                        + multi_ctx,
+                    },
+                ]
+
+                res_multi = client.chat.completions.create(
+                    model=ai_mod,
+                    messages=messages_multi,
+                )
+                st.session_state.ai_multi_result = res_multi.choices[0].message.content
+                st.session_state.last_ai_run = now
+
+            if st.session_state.ai_multi_result:
+                st.markdown("### Werdykt AI:")
+                st.text(st.session_state.ai_multi_result)
+            else:
+                st.info(
+                    "Brak jeszcze analizy AI. Użyj przycisku powyżej lub włącz automatyczną analizę."
+                )
 
 
 if __name__ == "__main__":
     main()
-
+```
