@@ -46,6 +46,7 @@ def compute_metrics(symbol):
     if df.empty or len(df) < 3:
         return {
             "Symbol": symbol,
+            "LastPrice": 0.0,
             "Change": 0.0,
             "Volume": 0.0,
             "ATR": 0.0,
@@ -120,7 +121,7 @@ def compute_metrics(symbol):
     risk_raw = volatility_score
     risk_score = max(0.0, min(100.0, risk_raw))
 
-    # SetupScore v1 (zostaje, NewsScore osobno)
+    # SetupScore v1
     setup = 0.0
     if signal == "BUY":
         setup += 30
@@ -135,6 +136,7 @@ def compute_metrics(symbol):
 
     return {
         "Symbol": symbol,
+        "LastPrice": last,
         "Change": change,
         "Volume": vol_last,
         "ATR": atr,
@@ -146,6 +148,48 @@ def compute_metrics(symbol):
         "RiskScore": risk_score,
         "SetupScore": setup_score,
     }
+
+# --- ENTRY RISK (płynność, spread, slippage) ---
+def compute_entry_risk(volume, spread_pct):
+    if volume >= 2_000_000:
+        liquidity = "HIGH"
+    elif volume >= 500_000:
+        liquidity = "MEDIUM"
+    else:
+        liquidity = "LOW"
+
+    if spread_pct is None:
+        spread_rating = "UNKNOWN"
+    elif spread_pct < 0.5:
+        spread_rating = "GOOD"
+    elif spread_pct < 2:
+        spread_rating = "OK"
+    else:
+        spread_rating = "BAD"
+
+    if liquidity == "HIGH" and (spread_pct is not None and spread_pct < 1):
+        slippage = "LOW"
+    elif liquidity == "MEDIUM" or (spread_pct is not None and 1 <= spread_pct <= 3):
+        slippage = "MEDIUM"
+    else:
+        slippage = "HIGH"
+
+    return liquidity, spread_rating, slippage
+
+# --- SL / TP strefy ---
+def compute_sl_tp(last_price, atr, trend):
+    if last_price is None or atr is None or last_price == 0:
+        return None, None
+
+    sl_zone = (last_price - atr * 1.5, last_price - atr * 1.0)
+    tp_zone = (last_price + atr * 2.0, last_price + atr * 3.0)
+
+    if trend == "UP":
+        tp_zone = (tp_zone[0] * 1.01, tp_zone[1] * 1.02)
+    elif trend == "DOWN":
+        sl_zone = (sl_zone[0] * 0.98, sl_zone[1] * 0.99)
+
+    return sl_zone, tp_zone
 
 # --- Formatowanie paska NewsScore ---
 def format_news_score(value):
@@ -163,6 +207,7 @@ def format_news_score(value):
         icon = "🟢"
     elif score < 60:
         icon = "🟠"
+        # icon stays
     else:
         icon = "🔴"
 
@@ -624,6 +669,13 @@ Bez komentarzy, bez tekstu, bez wyjaśnień.
 
 # --- AI NEWS: Deep Dive News dla jednej spółki ---
 def ai_news_deep_dive(symbol: str, metrics: dict, bid: float | None, ask: float | None, spread_pct: float | None):
+    liquidity, spread_rating, slippage = compute_entry_risk(
+        metrics["Volume"], spread_pct
+    )
+    sl_zone, tp_zone = compute_sl_tp(
+        metrics["LastPrice"], metrics["ATR"], metrics["Trend"]
+    )
+
     text = (
         f"Symbol: {symbol}\n"
         f"SetupScore: {metrics['SetupScore']:.1f}\n"
@@ -638,6 +690,11 @@ def ai_news_deep_dive(symbol: str, metrics: dict, bid: float | None, ask: float 
         f"Bid: {bid if bid is not None else 'brak danych'}\n"
         f"Ask: {ask if ask is not None else 'brak danych'}\n"
         f"SpreadPct: {spread_pct if spread_pct is not None else 'brak danych'}\n"
+        f"Liquidity: {liquidity}\n"
+        f"SpreadRating: {spread_rating}\n"
+        f"SlippageRisk: {slippage}\n"
+        f"SLzone: {sl_zone}\n"
+        f"TPzone: {tp_zone}\n"
     )
 
     system_prompt = """
@@ -659,6 +716,11 @@ Dane wejściowe zawierają:
 - Bid
 - Ask
 - SpreadPct
+- Liquidity
+- SpreadRating
+- SlippageRisk
+- SLzone
+- TPzone
 
 Twoje zadanie:
 
@@ -682,7 +744,7 @@ Twoje zadanie:
        - <0.5% → płynność bardzo dobra,
        - 0.5–2% → płynność umiarkowana,
        - >2% → ryzyko poślizgu,
-   - oceń ryzyko wejścia/wyjścia.
+   - oceń ryzyko wejścia/wyjścia na podstawie Liquidity i SlippageRisk.
 
 5) Scenariusze:
    - byczy, niedźwiedzi, neutralny,
@@ -690,8 +752,9 @@ Twoje zadanie:
    - każdy musi odnosić się do danych.
 
 6) Strefy:
-   - strefa ryzyka (na podstawie ATR, zmienności, trendu),
-   - strefa potencjału (na podstawie momentum, trendu, wolumenu).
+   - strefa ryzyka (SLzone),
+   - strefa potencjału (TPzone),
+   - opisz je w kontekście trendu i zmienności.
 
 ZAKAZY:
 - Zero ogólników.
@@ -991,7 +1054,7 @@ def main():
 
     # --- AI DEEP DIVE ---
     with tab_deep:
-        st.subheader("🧠 AI Deep Dive — TECH + NEWS dla jednej spółki")
+        st.subheader("🧠 AI Deep Dive — TECH + NEWS + Entry Risk / SL-TP")
 
         rows = [compute_metrics(s) for s in st.session_state.symbols]
         deep_df = pd.DataFrame(rows)
@@ -1002,6 +1065,29 @@ def main():
         )
 
         metrics = deep_df[deep_df["Symbol"] == symbol_for_deep].iloc[0].to_dict()
+        bid, ask, spread_pct = get_bid_ask(symbol_for_deep)
+        liquidity, spread_rating, slippage = compute_entry_risk(
+            metrics["Volume"], spread_pct
+        )
+        sl_zone, tp_zone = compute_sl_tp(
+            metrics["LastPrice"], metrics["ATR"], metrics["Trend"]
+        )
+
+        st.markdown("### 📉 Ryzyko wejścia")
+        st.write(f"**Bid:** {bid if bid is not None else 'brak danych'}")
+        st.write(f"**Ask:** {ask if ask is not None else 'brak danych'}")
+        st.write(f"**Spread%:** {spread_pct:.2f}%"
+                 if spread_pct is not None else "**Spread%:** brak danych")
+        st.write(f"**Płynność:** {liquidity}")
+        st.write(f"**Spread rating:** {spread_rating}")
+        st.write(f"**Ryzyko poślizgu:** {slippage}")
+
+        st.markdown("### 🎯 Strefy SL / TP (ATR-based)")
+        if sl_zone and tp_zone:
+            st.write(f"**SL zone:** {sl_zone[0]:.4f} – {sl_zone[1]:.4f}")
+            st.write(f"**TP zone:** {tp_zone[0]:.4f} – {tp_zone[1]:.4f}")
+        else:
+            st.write("Brak danych do wyznaczenia stref SL/TP.")
 
         col_d1, col_d2 = st.columns(2)
         with col_d1:
@@ -1012,16 +1098,15 @@ def main():
         with col_d2:
             if st.button("📰 Generuj AI Deep Dive News"):
                 with st.spinner("AI analizuje news-ryzyko i potencjał wybicia..."):
-                    bid, ask, spread_pct = get_bid_ask(symbol_for_deep)
                     comment_news = ai_news_deep_dive(symbol_for_deep, metrics, bid, ask, spread_pct)
                     st.session_state.ai_news_deep_cache[symbol_for_deep] = comment_news
 
         if symbol_for_deep in st.session_state.ai_deep_dive_cache:
-            st.subheader(f"AI Deep Dive (techniczny) — {symbol_for_deep}")
+            st.subheader(f"🧠 AI TECH — {symbol_for_deep}")
             st.markdown(st.session_state.ai_deep_dive_cache[symbol_for_deep])
 
         if symbol_for_deep in st.session_state.ai_news_deep_cache:
-            st.subheader(f"AI Deep Dive News — {symbol_for_deep}")
+            st.subheader(f"📰 AI NEWS — {symbol_for_deep}")
             st.markdown(st.session_state.ai_news_deep_cache[symbol_for_deep])
 
     # --- MULTI-AI PANEL ---
