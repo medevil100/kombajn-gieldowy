@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import plotly.graph_objects as go
 
 st.set_page_config(page_title="Heatmap Engine", layout="wide")
 
@@ -34,19 +33,25 @@ def build_heatmap(symbols):
 
     return pd.DataFrame(heat_data)
 
-# --- Kolorowanie ---
-def color_map(val):
-    if val > 0:
-        return f"background-color: rgba(0,255,0,{min(abs(val)/10,1)})"
-    elif val < 0:
-        return f"background-color: rgba(255,0,0,{min(abs(val)/10,1)})"
-    return "background-color: rgba(128,128,128,0.3)"
+# --- Stylowanie (jedyna działająca metoda) ---
+def style_heatmap(df):
+    styles = pd.DataFrame("", index=df.index, columns=df.columns)
 
-# --- Główna aplikacja ---
+    for i, row in df.iterrows():
+        val = row["Change"]
+        if val > 0:
+            styles.loc[i, "Change"] = f"background-color: rgba(0,255,0,{min(abs(val)/10,1)})"
+        elif val < 0:
+            styles.loc[i, "Change"] = f"background-color: rgba(255,0,0,{min(abs(val)/10,1)})"
+        else:
+            styles.loc[i, "Change"] = "background-color: rgba(128,128,128,0.3)"
+
+    return df.style.apply(lambda _: styles, axis=None).format({"Change": "{:+.2f}%"})
+
+# --- Aplikacja ---
 def main():
-    st.title("🔥 Heatmapa Rynku — Minimalna Stabilna Wersja")
+    st.title("🔥 Heatmapa Rynku — Stabilna Wersja")
 
-    # Lista spółek
     if "symbols" not in st.session_state:
         st.session_state.symbols = []
 
@@ -65,46 +70,11 @@ def main():
         st.warning("Dodaj spółki, aby kontynuować.")
         return
 
-    # Wybór aktywnej spółki
-    sym = st.sidebar.selectbox("Aktywna spółka:", st.session_state.symbols)
+    st.subheader("🔥 Heatmapa zmian %")
 
-    # Pobranie danych do wykresu
-    df = get_price_data(sym, "1mo", "1d")
-    if df.empty:
-        st.error("Brak danych dla tej spółki.")
-        return
+    heat_df = build_heatmap(st.session_state.symbols)
 
-    # --- TABS ---
-    tab_chart, tab_heatmap = st.tabs(["📈 Wykres", "🔥 Heatmapa"])
-
-    # --- Wykres ---
-    with tab_chart:
-        st.subheader(f"Wykres {sym}")
-        fig = go.Figure(
-            data=[
-                go.Candlestick(
-                    x=df.index,
-                    open=df["Open"],
-                    high=df["High"],
-                    low=df["Low"],
-                    close=df["Close"],
-                )
-            ]
-        )
-        fig.update_layout(template="plotly_dark", height=500)
-        st.plotly_chart(fig, use_container_width=True)
-
-    # --- Heatmapa ---
-    with tab_heatmap:
-        st.subheader("Heatmapa zmian %")
-
-        heat_df = build_heatmap(st.session_state.symbols)
-
-        st.dataframe(
-            heat_df.style
-                .applymap(color_map, subset=["Change"])
-                .format({"Change": "{:+.2f}%"})
-        )
+    st.dataframe(style_heatmap(heat_df))
 
 if __name__ == "__main__":
     main()
