@@ -361,8 +361,8 @@ def main():
     if df.empty:
         st.info("Brak danych dla tego symbolu w wybranym zakresie.")
         return
-
-   tab_price, tab_rsi, tab_fibo, tab_smi, tab_macd, tab_trend, tab_ai_chat, tab_ai_multi, tab_heatmap = st.tabs(
+ tab_price, tab_rsi, tab_fibo, tab_smi, tab_macd, tab_trend, tab_ai_chat, tab_ai_multi, tab_heatmap = st.tabs(
+  
     [
         "Wykres",
         "RSI",
@@ -375,7 +375,6 @@ def main():
         "Heatmapa Rynku"
     ]
 )
-# --- HEATMAPA RYNKU ---
 # --- HEATMAPA RYNKU ---
 with tab_heatmap:
     st.subheader("🔥 Heatmapa Rynku – zmiana % dla wszystkich spółek")
