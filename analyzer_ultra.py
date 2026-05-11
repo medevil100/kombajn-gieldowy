@@ -1,4 +1,4 @@
-```python
+
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -408,4 +408,4 @@ To nie jest porada inwestycyjna, tylko analiza scenariuszy.
 
 if __name__ == "__main__":
     main()
-```
+
