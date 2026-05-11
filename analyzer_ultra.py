@@ -362,7 +362,7 @@ if df.empty:
     st.info("Brak danych dla tego symbolu w wybranym zakresie.")
     return
 
-# --- TABS (POPRAWIONE) ---
+# --- TABS (POPRAWIONE, BEZ BŁĘDU) ---
 tab_price, tab_rsi, tab_fibo, tab_smi, tab_macd, tab_trend, tab_ai_chat, tab_ai_multi, tab_heatmap = st.tabs(
     [
         "Wykres",
@@ -376,6 +376,7 @@ tab_price, tab_rsi, tab_fibo, tab_smi, tab_macd, tab_trend, tab_ai_chat, tab_ai_
         "Heatmapa Rynku"
     ]
 )
+
 
 # --- HEATMAPA RYNKU ---
 with tab_heatmap:
@@ -437,7 +438,6 @@ with tab_heatmap:
 
         st.caption("Kolor = kierunek ruchu, intensywność = siła zmiany procentowej.")
 
-        ]
     )
 
     # --- Wykres główny + Fibo ---
