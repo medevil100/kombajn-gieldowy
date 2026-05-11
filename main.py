@@ -1321,9 +1321,17 @@ body, .stApp {
 }
 </style>
 """, unsafe_allow_html=True)
- 
 
-    )
+            st.dataframe(
+                neutral_df[[
+                    "Symbol", "SetupScore", "Trend", "Signal",
+                    "MomentumScore", "VolatilityScore", "RiskScore", "TrendScore"
+                ]],
+                use_container_width=True
+            )
+
+
+   
         else:
             st.info("Brak NewsScore — kliknij przycisk, aby wygenerować.")
 
