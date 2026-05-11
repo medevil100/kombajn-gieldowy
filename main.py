@@ -1,4 +1,4 @@
-```python
+
 import os
 import pandas as pd
 import yfinance as yf
@@ -895,4 +895,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
+
