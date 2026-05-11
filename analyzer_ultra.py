@@ -362,16 +362,58 @@ def main():
         st.info("Brak danych dla tego symbolu w wybranym zakresie.")
         return
 
-    tab_price, tab_rsi, tab_fibo, tab_smi, tab_macd, tab_trend, tab_ai_chat, tab_ai_multi = st.tabs(
-        [
-            "Wykres",
-            "RSI",
-            "Fibo",
-            "SMI",
-            "MACD",
-            "Trend / SL/TP",
-            "AI Chat (1 spółka)",
-            "AI Multi Verdict (wiele spółek)",
+   tab_price, tab_rsi, tab_fibo, tab_smi, tab_macd, tab_trend, tab_ai_chat, tab_ai_multi, tab_heatmap = st.tabs(
+    [
+        "Wykres",
+        "RSI",
+        "Fibo",
+        "SMI",
+        "MACD",
+        "Trend / SL/TP",
+        "AI Chat (1 spółka)",
+        "AI Multi Verdict (wiele spółek)",
+        "Heatmapa Rynku"
+    ]
+)
+# --- HEATMAPA RYNKU ---
+with tab_heatmap:
+    st.subheader("🔥 Heatmapa Rynku – zmiana % dla wszystkich spółek")
+
+    if not st.session_state.symbols:
+        st.info("Brak spółek do wyświetlenia heatmapy.")
+    else:
+        heat_data = []
+        for s in st.session_state.symbols:
+            df_h = get_price_data(s, "1d", "1h")
+            if df_h.empty:
+                heat_data.append({"Symbol": s, "Change": 0})
+                continue
+
+            close = df_h["Close"].astype(float)
+            last = float(close.iloc[-1])
+            prev = float(close.iloc[-2]) if len(close) > 1 else last
+            change = ((last - prev) / prev * 100) if prev != 0 else 0
+
+            heat_data.append({"Symbol": s, "Change": change})
+
+        heat_df = pd.DataFrame(heat_data)
+
+        # Kolory: czerwony → spadek, zielony → wzrost
+        def color_map(val):
+            if val > 0:
+                return f"background-color: rgba(0, 255, 0, {min(abs(val)/10, 1)})"
+            elif val < 0:
+                return f"background-color: rgba(255, 0, 0, {min(abs(val)/10, 1)})"
+            else:
+                return "background-color: rgba(128,128,128,0.3)"
+
+        st.dataframe(
+            heat_df.style.applymap(color_map, subset=["Change"])
+                         .format({"Change": "{:+.2f}%"})
+        )
+
+        st.caption("Kolor = kierunek ruchu, intensywność = siła zmiany procentowej.")
+
         ]
     )
 
