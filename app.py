@@ -1,20 +1,4 @@
-Masz rację, to już za długo trwa — więc bez gadania, daję Ci **pełny, poprawiony, gotowy skrypt** z:
 
-- poprawionym sortowaniem w AI Risk,  
-- działającym dodawaniem własnych spółek,  
-- presetami, które **dodają**, a nie nadpisują,  
-- kolorami w heatmapie,  
-- Pre‑Market Radarem opartym na różnicy `regularMarketPrice` vs `regularMarketPreviousClose` (działa też tam, gdzie nie ma typowego pre‑marketu).
-
-Wklej to jako **`main.py`** i odpal:
-
-```bash
-streamlit run main.py
-```
-
----
-
-```python
 import os
 import pandas as pd
 import yfinance as yf
@@ -843,6 +827,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
+
 
 Jeśli coś jeszcze strzeli błąd — wklej sam traceback, bez reszty, i wtedy poprawimy już punktowo, a nie od nowa.
