@@ -1,25 +1,46 @@
+Masz, Adam — **pełny KOMBAJN 4.0 w jednym pliku**:  
+Streamlit + Investing.com + świeczki + heatmapa + AI Turbo (bez zewnętrznego API).
+
+Skopiuj to jako `app.py` i odpal:
+
+```bash
+streamlit run app.py
+```
+
+```python
 import streamlit as st
 import pandas as pd
+import numpy as np
 import cloudscraper
 from bs4 import BeautifulSoup
 from datetime import datetime
 import time
+import plotly.graph_objects as go
+import plotly.express as px
 
-# ============================================
-# KONFIGURACJA: TICKERY → URL + ID
-# ============================================
+# =========================
+# KONFIG: TICKERY / ID / TV
+# =========================
 
 INVESTING_URLS = {
     "ATT.WA": "https://www.investing.com/equities/grupa-azoty-sa",
+    # dopisz swoje:
+    # "HRT.WA": "https://www.investing.com/equities/hrt-wa",
 }
 
 INVESTING_IDS = {
     "ATT.WA": 945,
+    # "HRT.WA": 1126841,
 }
 
-# ============================================
+TRADINGVIEW_SYMBOLS = {
+    "ATT.WA": "GPW:ATT",
+    # "HRT.WA": "GPW:HRT",
+}
+
+# =========================
 # SCRAPER: DANE BIEŻĄCE
-# ============================================
+# =========================
 
 def get_investing_live(url: str):
     scraper = cloudscraper.create_scraper(
@@ -38,7 +59,7 @@ def get_investing_live(url: str):
         txt = change_el.text.replace("%", "").replace("\xa0", "").replace(",", ".")
         try:
             change_pct = float(txt)
-        except:
+        except ValueError:
             change_pct = None
 
     stats = {}
@@ -57,15 +78,15 @@ def get_investing_live(url: str):
                 value = float(value[:-1]) * 1_000_000
             else:
                 value = float(value)
-        except:
+        except ValueError:
             pass
         stats[label] = value
 
     return {"price": price, "change_pct": change_pct, "stats": stats}
 
-# ============================================
+# =========================
 # SCRAPER: HISTORIA OHLC
-# ============================================
+# =========================
 
 def get_investing_history(instrument_id: int, start="2020-01-01", end=None):
     if end is None:
@@ -98,9 +119,9 @@ def get_investing_history(instrument_id: int, start="2020-01-01", end=None):
     df = df.sort_values("Date").set_index("Date")
     return df
 
-# ============================================
+# =========================
 # WSKAŹNIKI TECHNICZNE
-# ============================================
+# =========================
 
 def compute_indicators(df: pd.DataFrame):
     out = {}
@@ -127,13 +148,12 @@ def compute_indicators(df: pd.DataFrame):
 
     return out
 
-# ============================================
-# AI TURBO — OPIS TECHNICZNY
-# ============================================
+# =========================
+# AI TURBO — OPIS
+# =========================
 
 def ai_turbo(row):
     txt = []
-
     txt.append(f"{row['Symbol']}: trend {row['Trend']}, sygnał {row['Signal']}, setup {row['SetupScore']:.1f}/100.")
 
     if row["RSI"] < 30:
@@ -155,16 +175,22 @@ def ai_turbo(row):
 
     return " ".join(txt)
 
-# ============================================
+# =========================
 # ANALIZA SYMBOLU
-# ============================================
+# =========================
 
-def analyze_symbol(symbol):
+def analyze_symbol(symbol: str):
     url = INVESTING_URLS.get(symbol)
     inst_id = INVESTING_IDS.get(symbol)
 
+    if not url or not inst_id:
+        return {"Symbol": symbol, "Error": "Brak URL/ID w konfiguracji"}
+
     live = get_investing_live(url)
     df = get_investing_history(inst_id)
+
+    if df.empty:
+        return {"Symbol": symbol, "Error": "Brak danych historycznych"}
 
     ind = compute_indicators(df)
 
@@ -191,37 +217,134 @@ def analyze_symbol(symbol):
         "Signal": signal,
         "Momentum": momentum,
         "SetupScore": setup,
+        "DF": df,
     }
-
     row["AI"] = ai_turbo(row)
     return row
 
-# ============================================
+# =========================
+# WYKRES ŚWIECOWY (Plotly)
+# =========================
+
+def plot_candles(df: pd.DataFrame, symbol: str):
+    fig = go.Figure(data=[
+        go.Candlestick(
+            x=df.index,
+            open=df["Open"],
+            high=df["High"],
+            low=df["Low"],
+            close=df["Close"],
+            name=symbol
+        )
+    ])
+    fig.update_layout(
+        title=f"Wykres świecowy — {symbol}",
+        xaxis_title="Data",
+        yaxis_title="Cena",
+        height=500,
+    )
+    return fig
+
+# =========================
+# HEATMAPA SETUPÓW
+# =========================
+
+def plot_heatmap(df: pd.DataFrame):
+    if df.empty:
+        return go.Figure()
+    heat_df = df.set_index("Symbol")[["SetupScore", "RSI", "Momentum"]]
+    fig = px.imshow(
+        heat_df.T,
+        color_continuous_scale="RdYlGn",
+        aspect="auto",
+        labels=dict(x="Symbol", y="Metryka", color="Wartość"),
+        title="Heatmapa setupów"
+    )
+    return fig
+
+# =========================
+# TRADINGVIEW WIDGET (embed)
+# =========================
+
+def tradingview_widget(symbol: str):
+    tv_symbol = TRADINGVIEW_SYMBOLS.get(symbol)
+    if not tv_symbol:
+        st.info("Brak symbolu TradingView w konfiguracji.")
+        return
+    code = f"""
+    <div class="tradingview-widget-container">
+      <div id="tradingview_chart"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+      <script type="text/javascript">
+      new TradingView.widget({{
+          "width": "100%",
+          "height": 500,
+          "symbol": "{tv_symbol}",
+          "interval": "D",
+          "timezone": "Etc/UTC",
+          "theme": "dark",
+          "style": "1",
+          "locale": "en",
+          "toolbar_bg": "#f1f3f6",
+          "enable_publishing": false,
+          "hide_top_toolbar": false,
+          "hide_legend": false,
+          "save_image": false,
+          "container_id": "tradingview_chart"
+      }});
+      </script>
+    </div>
+    """
+    st.components.v1.html(code, height=520)
+
+# =========================
 # STREAMLIT UI
-# ============================================
+# =========================
 
-st.set_page_config(page_title="KOMBAJN 3.0", layout="wide")
+st.set_page_config(page_title="KOMBAJN 4.0", layout="wide")
+st.title("⚡ KOMBAJN 4.0 — Investing.com + Świeczki + Heatmapa + AI Turbo")
 
-st.title("⚡ KOMBAJN 3.0 — Investing.com + AI Turbo")
+default_syms = ",".join(INVESTING_URLS.keys())
+symbols_input = st.text_input("Tickery (po przecinku):", default_syms)
+symbols = [s.strip() for s in symbols_input.split(",") if s.strip()]
 
-symbols = st.text_input("Podaj tickery (oddzielone przecinkami):", "ATT.WA")
-symbols = [s.strip() for s in symbols.split(",")]
-
-if st.button("Skanuj"):
+if st.button("Skanuj rynek"):
     results = []
     for s in symbols:
         with st.spinner(f"Analizuję {s}..."):
             res = analyze_symbol(s)
             results.append(res)
-            time.sleep(1)
+            time.sleep(0.8)
 
-    df = pd.DataFrame(results).sort_values("SetupScore", ascending=False)
+    df = pd.DataFrame(results)
+    if "Error" in df.columns:
+        df_ok = df[df["Error"].isna()] if df["Error"].notna().any() else df
+    else:
+        df_ok = df
 
-    st.subheader("📊 Ranking setupów")
-    st.dataframe(df)
+    df_ok = df_ok.sort_values("SetupScore", ascending=False)
 
-    st.subheader("🤖 AI Turbo — komentarze")
-    for _, row in df.iterrows():
-        st.write(f"### {row['Symbol']}")
-        st.write(row["AI"])
-        st.write("---")
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        st.subheader("📊 Ranking setupów")
+        st.dataframe(df_ok[["Symbol", "Price", "Change%", "ATR", "EMA20", "EMA50", "RSI", "Trend", "Signal", "Momentum", "SetupScore"]])
+
+        st.subheader("🔥 Heatmapa")
+        st.plotly_chart(plot_heatmap(df_ok), use_container_width=True)
+
+    with col2:
+        st.subheader("🤖 AI Turbo — komentarze")
+        for _, row in df_ok.iterrows():
+            st.markdown(f"**{row['Symbol']}**")
+            st.write(row["AI"])
+            st.write("---")
+
+    st.subheader("📈 Wykres świecowy (Plotly)")
+    selected = st.selectbox("Wybierz symbol do wykresu:", df_ok["Symbol"].tolist())
+    sel_row = next(r for r in results if r["Symbol"] == selected)
+    st.plotly_chart(plot_candles(sel_row["DF"], selected), use_container_width=True)
+
+    st.subheader("📊 TradingView widget")
+    tradingview_widget(selected)
+```
