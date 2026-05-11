@@ -7,7 +7,11 @@ from openai import OpenAI
 
 # ====================== KONFIGURACJA AI ======================
 
-AI_MODEL = "gpt-4o-mini"
+MODEL_TURBO = "gpt-4o"          # AI Turbo 3.0
+MODEL_NEWS = "gpt-4o-mini"      # AI News
+MODEL_RISK = "gpt-4.1"          # AI Risk Check
+MODEL_PATTERN = "gpt-4o-mini"   # AI Pattern Insight
+
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ====================== DANE RYNKOWE ======================
@@ -487,7 +491,7 @@ Zasady:
 - Odpowiadasz po polsku, technicznie, w stylu prop-desk.
 """
     resp = client.chat.completions.create(
-        model=AI_MODEL,
+        model=MODEL_TURBO,
         messages=[{"role": "user", "content": prompt}]
     )
     return resp.choices[0].message.content
@@ -514,7 +518,7 @@ Zasady:
 - Odpowiadasz po polsku, technicznie.
 """
     resp = client.chat.completions.create(
-        model=AI_MODEL,
+        model=MODEL_NEWS,
         messages=[{"role": "user", "content": prompt}]
     )
     return resp.choices[0].message.content
@@ -546,7 +550,7 @@ Styl:
 - Zero wymyślania danych.
 """
     resp = client.chat.completions.create(
-        model=AI_MODEL,
+        model=MODEL_RISK,
         messages=[{"role": "user", "content": prompt}]
     )
     return resp.choices[0].message.content
@@ -588,7 +592,7 @@ Styl:
 - Zero lania wody, zero wymyślania danych.
 """
     resp = client.chat.completions.create(
-        model=AI_MODEL,
+        model=MODEL_PATTERN,
         messages=[{"role": "user", "content": prompt}]
     )
     return resp.choices[0].message.content
@@ -694,12 +698,12 @@ def main():
         hide_index=True,
     )
 
-    # aktualizacja session_state na podstawie WYNIKU edycji (edited)
+    # proste, stabilne mapowanie sektorów z wyniku edycji
     if edited is not None and not edited.empty:
         for _, row in edited.iterrows():
             symbol = row["Symbol"]
             sektor = row["Sektor"]
-            if symbol and isinstance(sektor, str) and sektor.strip():
+            if isinstance(symbol, str) and isinstance(sektor, str) and sektor.strip():
                 st.session_state.sector_map[symbol] = sektor
 
     missing = [s for s in st.session_state.symbols if not st.session_state.sector_map.get(s)]
