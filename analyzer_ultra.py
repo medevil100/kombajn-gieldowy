@@ -1,4 +1,4 @@
-```python
+
 import time
 import streamlit as st
 import pandas as pd
@@ -591,4 +591,4 @@ Nie udzielasz porad inwestycyjnych – to tylko analiza scenariuszy.
 
 if __name__ == "__main__":
     main()
-```
+
