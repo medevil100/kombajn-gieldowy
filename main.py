@@ -1,6 +1,9 @@
+```python
 import os
 import pandas as pd
 import yfinance as yf
+import streamlit as st
+import plotly.graph_objects as go
 from openai import OpenAI
 
 # ============================================================
@@ -15,9 +18,6 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # ============================================================
 
 def get_price_data(symbol: str, period: str = "5d", interval: str = "1h") -> pd.DataFrame:
-    """
-    Pobiera dane OHLCV z yfinance.
-    """
     df = yf.download(symbol, period=period, interval=interval, progress=False)
     if df.empty:
         return pd.DataFrame()
@@ -26,9 +26,6 @@ def get_price_data(symbol: str, period: str = "5d", interval: str = "1h") -> pd.
     return df.astype(float).dropna()
 
 def get_bid_ask(symbol: str):
-    """
-    Pobiera bid/ask i liczy spread w %.
-    """
     try:
         t = yf.Ticker(symbol)
         info = t.info or {}
@@ -43,9 +40,6 @@ def get_bid_ask(symbol: str):
         return None, None, None
 
 def compute_entry_risk(volume: float, spread_pct: float | None):
-    """
-    Ocena wejścia: płynność, jakość spreadu, slippage.
-    """
     if volume >= 2_000_000:
         liquidity = "WYSOKA"
     elif volume >= 500_000:
@@ -76,9 +70,6 @@ def compute_entry_risk(volume: float, spread_pct: float | None):
 # ============================================================
 
 def compute_sl_tp(last_price: float | None, atr: float | None, trend: str):
-    """
-    Wyznacza strefy SL/TP na bazie ATR i kierunku trendu.
-    """
     if last_price is None or atr is None or last_price == 0:
         return None, None
     sl_zone = (last_price - atr * 1.5, last_price - atr * 1.0)
@@ -101,9 +92,6 @@ def compute_trend_evaluation(
     ema50_last: float,
     atr: float,
 ):
-    """
-    Złożona ocena trendu: TrendScore + opis + ryzyko odwrócenia.
-    """
     try:
         mom = max(0.0, min(100.0, float(momentum_score)))
     except Exception:
@@ -179,9 +167,6 @@ def compute_trend_evaluation(
 # ============================================================
 
 def compute_metrics(symbol: str) -> dict:
-    """
-    Główna funkcja licząca metryki dla instrumentu.
-    """
     df = get_price_data(symbol, "5d", "1h")
     if df.empty or len(df) < 3:
         return {
@@ -335,9 +320,6 @@ def compute_metrics(symbol: str) -> dict:
 # ============================================================
 
 def detect_patterns_for_symbol(symbol: str):
-    """
-    Proste patterny: wybicie 20‑dniowego szczytu / dołka.
-    """
     df = get_price_data(symbol, "5d", "1h")
     if df.empty or len(df) < 20:
         return []
@@ -353,10 +335,7 @@ def detect_patterns_for_symbol(symbol: str):
 
     return patterns
 
-def detect_patterns_all(symbols: list[str]) -> dict:
-    """
-    Patterny dla wszystkich symboli.
-    """
+def detect_patterns_all(symbols):
     out = {}
     for s in symbols:
         pats = detect_patterns_for_symbol(s)
@@ -369,10 +348,6 @@ def detect_patterns_all(symbols: list[str]) -> dict:
 # ============================================================
 
 def get_news_for_symbol(symbol: str) -> list[dict]:
-    """
-    Na razie newsy z yfinance.Ticker(symbol).news.
-    Później możesz tu podmienić źródło na Investik Pro.
-    """
     try:
         t = yf.Ticker(symbol)
         news = getattr(t, "news", [])
@@ -391,8 +366,32 @@ def get_news_for_symbol(symbol: str) -> list[dict]:
     except Exception:
         return []
 
-import streamlit as st
-import plotly.graph_objects as go
+# ============================================================
+# ======================  PRE‑MARKET  ========================
+# ============================================================
+
+def get_premarket(symbol: str):
+    try:
+        info = yf.Ticker(symbol).info
+        pre = info.get("preMarketPrice", None)
+        last = info.get("regularMarketPreviousClose", None)
+        if pre and last:
+            return (pre - last) / last * 100
+        return None
+    except Exception:
+        return None
+
+# ============================================================
+# ======================  PROP FILTERY  ======================
+# ============================================================
+
+def apply_prop_filters(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out = out[out["Volume"] > 50_000]
+    if "SpreadPct" in out.columns:
+        out = out[(out["SpreadPct"].isna()) | (out["SpreadPct"] < 5)]
+    out.loc[out["SetupScore"] >= 70, "SetupScore"] += 5
+    return out
 
 # ============================================================
 # ======================  CIEMNY NEON CSS  ===================
@@ -427,7 +426,7 @@ h1, h2, h3, h4 {
 """, unsafe_allow_html=True)
 
 # ============================================================
-# ======================  HEATMAP STYLE  ======================
+# ======================  HEATMAP STYLE  =====================
 # ============================================================
 
 def style_heatmap(df):
@@ -448,7 +447,7 @@ def style_heatmap(df):
     return df.style.apply(color_row, axis=1)
 
 # ============================================================
-# ======================  WYKRES PRO  =========================
+# ======================  WYKRES PRO  ========================
 # ============================================================
 
 def plot_pro_chart(symbol):
@@ -481,219 +480,10 @@ def plot_pro_chart(symbol):
     st.plotly_chart(fig, use_container_width=True)
 
 # ============================================================
-# ======================  UI — MAIN LAYOUT  ==================
-# ============================================================
-
-def render_ui():
-    st.title("🔥 KOMBAJN v4.0 — Ultra Dark Neon + Trend + SL/TP + Bid/Ask + AI + News")
-
-    # ---------------- SESSION STATE ----------------
-    if "symbols" not in st.session_state:
-        st.session_state.symbols = []
-    if "sector_map" not in st.session_state:
-        st.session_state.sector_map = {}
-    if "ai_turbo" not in st.session_state:
-        st.session_state.ai_turbo = ""
-
-    # ---------------- SIDEBAR ----------------
-    st.sidebar.header("⚙️ Ustawienia")
-
-    prop_mode = st.sidebar.selectbox(
-        "Tryb pracy:",
-        ["Standard", "Prop‑Trader Mode"],
-        index=0
-    )
-
-    symbols_input = st.sidebar.text_input("Dodaj tickery (oddzielone przecinkami):")
-
-    if st.sidebar.button("Dodaj"):
-        for raw in symbols_input.split(","):
-            sym = raw.strip().upper()
-            if sym and sym not in st.session_state.symbols:
-                st.session_state.symbols.append(sym)
-
-    if st.sidebar.button("Wyczyść"):
-        st.session_state.symbols = []
-        st.session_state.sector_map = {}
-        st.session_state.ai_turbo = ""
-
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🏭 Przypisanie sektorów")
-
-    for sym in st.session_state.symbols:
-        current = st.session_state.sector_map.get(sym, "Inne")
-        options = ["Technologia", "Finanse", "Energia", "Surowce", "Zdrowie", "Konsumpcja", "Inne"]
-        idx = options.index(current) if current in options else len(options) - 1
-        new_sector = st.sidebar.selectbox(
-            f"Sektor dla {sym}:",
-            options,
-            index=idx,
-            key=f"sector_{sym}"
-        )
-        st.session_state.sector_map[sym] = new_sector
-
-    if not st.session_state.symbols:
-        st.warning("Dodaj spółki w sidebarze, aby rozpocząć.")
-        return
-
-    # ---------------- TABS ----------------
-    tab_heatmap, tab_chart, tab_scanner, tab_sector, tab_premarket = st.tabs([
-        "📊 Heatmapa PRO",
-        "📈 Wykres PRO",
-        "📡 Skaner sygnałów",
-        "🏭 Heatmapa sektorowa",
-        "🌅 Pre‑Market Radar",
-    ])
-
-    # ============================================================
-    # ======================  HEATMAPA PRO  ======================
-    # ============================================================
-
-    with tab_heatmap:
-        st.subheader("📊 Heatmapa PRO + Trend + SL/TP + Bid/Ask")
-
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        df = pd.DataFrame(rows)
-        df = df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
-
-        top_n = min(5, len(df))
-        if top_n > 0:
-            cols = st.columns(top_n)
-            for idx, (_, row) in enumerate(df.head(top_n).iterrows()):
-                with cols[idx]:
-                    if row["SetupScore"] >= 70:
-                        icon = "🟢"
-                    elif row["SetupScore"] >= 50:
-                        icon = "🟡"
-                    else:
-                        icon = "🔴"
-
-                    st.markdown(f"### {icon} {row['Symbol']}")
-                    st.write(f"**Cena:** {row['LastPrice']:.2f}  |  **Zmiana:** {row['Change']:.2f}%")
-                    st.write(f"**Trend:** {row['Trend']} ({row['TrendHealth']}, pewność: {row['TrendConfidence']})")
-
-                    if row["SL_Low"] and row["TP_High"]:
-                        st.markdown(
-                            f"**SL:** <span style='color:#f97316;'>{row['SL_Low']:.2f} – {row['SL_High']:.2f}</span>",
-                            unsafe_allow_html=True
-                        )
-                        st.markdown(
-                            f"**TP:** <span style='color:#22c55e;'>{row['TP_Low']:.2f} – {row['TP_High']:.2f}</span>",
-                            unsafe_allow_html=True
-                        )
-
-                    if row["Bid"] and row["Ask"]:
-                        st.write(
-                            f"**Bid/Ask:** {row['Bid']:.2f} / {row['Ask']:.2f}  "
-                            f"| Spread: {row['SpreadPct']:.2f}% ({row['SpreadRating']}, {row['Liquidity']}, slippage: {row['Slippage']})"
-                        )
-
-                    st.write(f"**Momentum:** {row['MomentumScore']:.1f}  |  **Zmienność:** {row['VolatilityScore']:.1f}")
-                    st.write(f"**SetupScore:** {row['SetupScore']:.1f}  |  **TrendScore:** {row['TrendScore']:.1f}")
-
-        st.markdown("---")
-        st.dataframe(style_heatmap(df), use_container_width=True)
-
-    # ============================================================
-    # ======================  WYKRES PRO  ========================
-    # ============================================================
-
-    with tab_chart:
-        st.subheader("📈 Wykres PRO")
-        symbol_for_chart = st.selectbox(
-            "Wybierz spółkę:",
-            st.session_state.symbols
-        )
-        plot_pro_chart(symbol_for_chart)
-
-    # ============================================================
-    # ======================  SKANER SYGNAŁÓW  ===================
-    # ============================================================
-
-    with tab_scanner:
-        st.subheader("📡 BUY / SELL Radar")
-
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        scan_df = pd.DataFrame(rows)
-
-        if prop_mode == "Prop‑Trader Mode":
-            scan_df = apply_prop_filters(scan_df)
-
-        scan_df = scan_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
-
-        buy_df = scan_df[
-            (scan_df["Signal"] == "BUY") &
-            (scan_df["Trend"] == "UP") &
-            (scan_df["SetupScore"] >= (65 if prop_mode == "Prop‑Trader Mode" else 55))
-        ]
-
-        sell_df = scan_df[
-            (scan_df["Signal"] == "SELL") &
-            (scan_df["Trend"] == "DOWN") &
-            (scan_df["SetupScore"] >= (55 if prop_mode == "Prop‑Trader Mode" else 45))
-        ]
-
-        neutral_df = scan_df[
-            ~scan_df.index.isin(buy_df.index) &
-            ~scan_df.index.isin(sell_df.index)
-        ]
-
-        st.markdown("## 🟢 BUY Radar")
-        st.dataframe(buy_df if not buy_df.empty else pd.DataFrame({"Info": ["Brak sygnałów BUY"]}), use_container_width=True)
-
-        st.markdown("## 🔴 SELL Radar")
-        st.dataframe(sell_df if not sell_df.empty else pd.DataFrame({"Info": ["Brak sygnałów SELL"]}), use_container_width=True)
-
-        st.markdown("## 🟡 Neutral")
-        st.dataframe(neutral_df, use_container_width=True)
-
-    # ============================================================
-    # ======================  SEKTORÓWKA  ========================
-    # ============================================================
-
-    with tab_sector:
-        st.subheader("🏭 Heatmapa sektorowa")
-
-        df_sector = df.copy()
-        df_sector["Sector"] = df_sector["Symbol"].apply(lambda s: st.session_state.sector_map.get(s, "Inne"))
-
-        sector_view = (
-            df_sector.groupby("Sector")["SetupScore"]
-            .mean()
-            .sort_values(ascending=False)
-            .reset_index()
-        )
-
-        st.dataframe(sector_view, use_container_width=True)
-
-    # ============================================================
-    # ======================  PRE‑MARKET  ========================
-    # ============================================================
-
-    with tab_premarket:
-        st.subheader("🌅 Pre‑Market Radar")
-
-        pre_rows = []
-        for s in st.session_state.symbols:
-            ch = get_premarket(s)
-            if ch is not None:
-                pre_rows.append({"Symbol": s, "PreMarketChange": ch})
-
-        if not pre_rows:
-            st.info("Brak danych pre‑market.")
-        else:
-            pre_df = pd.DataFrame(pre_rows).sort_values("PreMarketChange", ascending=False)
-            st.dataframe(pre_df, use_container_width=True)
-# ============================================================
-# ======================  AI FUNKCJE  =========================
+# ======================  AI FUNKCJE  ========================
 # ============================================================
 
 def ai_turbo_v2(df: pd.DataFrame) -> str:
-    """
-    AI Turbo 2.0 — styl „Prop‑Desk Techniczny”.
-    4 style: Scalper / Day‑Trader / Swing / Position.
-    Oparte wyłącznie na danych technicznych z df.
-    """
     records = df[[
         "Symbol", "LastPrice", "Change", "MomentumScore",
         "VolatilityScore", "TrendStrength", "TrendScore",
@@ -720,7 +510,7 @@ Zasady:
 - Używaj języka technicznego: momentum, wybicie, trend, zmienność, ryzyko, przewaga kupujących/sprzedających.
 - Nie pisz podsumowania na końcu.
 
-Format odpowiedzi (dokładnie taki):
+Format odpowiedzi:
 
 SYMBOL
 SCALPER: ...
@@ -737,11 +527,7 @@ Odpowiadaj po polsku.
     )
     return resp.choices[0].message.content
 
-
 def ai_news_summary(symbol: str, raw_news: str) -> str:
-    """
-    AI News — analiza newsów pod trading (sentyment + wpływ na handel).
-    """
     prompt = f"""
 Jesteś traderem intraday z prop‑desku. Analizujesz newsy dla {symbol}.
 
@@ -770,12 +556,7 @@ Zasady:
     )
     return resp.choices[0].message.content
 
-
 def ai_risk_check(df: pd.DataFrame) -> str:
-    """
-    AI Risk Check — ocena ryzyka wejścia na podstawie:
-    SL/TP, spreadu, płynności, trendu, zmienności, setupu.
-    """
     records = df[[
         "Symbol", "LastPrice", "Change", "MomentumScore",
         "VolatilityScore", "TrendStrength", "TrendScore",
@@ -818,11 +599,7 @@ Zasady:
     )
     return resp.choices[0].message.content
 
-
-def ai_pattern_insight(symbols: list[str]) -> str:
-    """
-    AI Pattern Insight — łączy patterny + momentum + trend.
-    """
+def ai_pattern_insight(symbols) -> str:
     pattern_map = detect_patterns_all(symbols)
     rows = [compute_metrics(s) for s in symbols]
     df = pd.DataFrame(rows)
@@ -871,17 +648,10 @@ Zasady:
     return resp.choices[0].message.content
 
 # ============================================================
-# ======================  AI PANEL (4 MODUŁY)  ===============
+# ======================  AI PANEL  ==========================
 # ============================================================
 
 def render_ai_panel():
-    """
-    Zakładka AI PANEL z 4 sub‑zakładkami:
-    - AI Turbo 2.0
-    - AI News
-    - AI Risk Check
-    - AI Pattern Insight
-    """
     if "symbols" not in st.session_state or not st.session_state.symbols:
         st.warning("Najpierw dodaj spółki w sidebarze, żeby użyć AI Panelu.")
         return
@@ -895,74 +665,54 @@ def render_ai_panel():
         "📐 AI Pattern Insight",
     ])
 
-    # ---------------- AI TURBO 2.0 ----------------
     with tab_turbo:
         st.markdown("### ⚡ AI Turbo 2.0 — Scalper / Day / Swing / Position")
-
         rows = [compute_metrics(s) for s in st.session_state.symbols]
         df = pd.DataFrame(rows).sort_values("SetupScore", ascending=False).reset_index(drop=True)
-
         top_n = st.slider("Ile najlepszych setupów analizować?", 1, min(10, len(df)), min(5, len(df)))
         target_df = df.head(top_n)
-
         st.dataframe(target_df, use_container_width=True)
-
         if st.button("Uruchom AI Turbo 2.0"):
             with st.spinner("AI Turbo 2.0 analizuje setupy..."):
                 txt = ai_turbo_v2(target_df)
             st.markdown("#### Werdykt AI")
             st.markdown(txt)
 
-    # ---------------- AI NEWS ----------------
     with tab_news:
         st.markdown("### 📰 AI News — sentyment i wpływ na trading")
-
         symbol_news = st.selectbox(
             "Wybierz spółkę do analizy newsów:",
             st.session_state.symbols,
             key="ai_news_symbol"
         )
-
         if st.button("Pobierz newsy i zrób analizę AI"):
             with st.spinner("Pobieram newsy..."):
                 news_list = get_news_for_symbol(symbol_news)
-
             if not news_list:
                 st.info("Brak newsów (tu możesz później podpiąć Investik Pro).")
             else:
                 st.markdown("#### Surowe newsy")
                 for n in news_list:
                     st.markdown(f"- **{n['title']}** ({n['publisher']})")
-
                 raw_text = "\n".join([n["title"] for n in news_list])
-
                 with st.spinner("AI analizuje newsy..."):
                     summary = ai_news_summary(symbol_news, raw_text)
-
                 st.markdown("#### Werdykt AI (newsowy)")
                 st.markdown(summary)
 
-    # ---------------- AI RISK CHECK ----------------
     with tab_risk:
         st.markdown("### 🛡️ AI Risk Check — ocena ryzyka wejścia")
-
         rows = [compute_metrics(s) for s in st.session_state.symbols]
         df = pd.DataFrame(rows).sort_values("SetupScore", ascending=False).reset_index(drop=True)
-
         st.dataframe(df, use_container_width=True)
-
         if st.button("Przeanalizuj ryzyko wejścia (AI)"):
             with st.spinner("AI ocenia ryzyko..."):
                 txt = ai_risk_check(df)
             st.markdown("#### Werdykt AI (ryzyko)")
             st.markdown(txt)
 
-    # ---------------- AI PATTERN INSIGHT ----------------
     with tab_pattern:
         st.markdown("### 📐 AI Pattern Insight — patterny + momentum + trend")
-
-        st.markdown("Sprawdzam patterny (wybicia) i łączę je z metrykami technicznymi.")
-
         if st.button("Analiza patternów (AI)"):
             with st.spinner("AI analizuje patterny..."):
                 txt = ai_pattern_insight(st.session_state.symbols)
@@ -970,20 +720,18 @@ def render_ai_panel():
             st.markdown(txt)
 
 # ============================================================
-# ======================  FINALNE MAIN  ======================
+# ======================  MAIN APP  ==========================
 # ============================================================
 
 def main():
     st.set_page_config(page_title="KOMBAJN v4.0", layout="wide")
     st.title("🔥 KOMBAJN v4.0 — Ultra Dark Neon + Trend + SL/TP + Bid/Ask + AI + News")
 
-    # Inicjalizacja state
     if "symbols" not in st.session_state:
         st.session_state.symbols = []
     if "sector_map" not in st.session_state:
         st.session_state.sector_map = {}
 
-    # SIDEBAR
     st.sidebar.header("⚙️ Ustawienia")
 
     prop_mode = st.sidebar.selectbox(
@@ -1023,7 +771,6 @@ def main():
         st.warning("Dodaj spółki w sidebarze, aby rozpocząć.")
         return
 
-    # GŁÓWNE ZAKŁADKI (w tym AI PANEL)
     tab_heatmap, tab_chart, tab_scanner, tab_sector, tab_premarket, tab_ai = st.tabs([
         "📊 Heatmapa PRO",
         "📈 Wykres PRO",
@@ -1033,10 +780,8 @@ def main():
         "🤖 AI PANEL",
     ])
 
-    # -------- HEATMAPA PRO --------
     with tab_heatmap:
         st.subheader("📊 Heatmapa PRO + Trend + SL/TP + Bid/Ask")
-
         rows = [compute_metrics(s) for s in st.session_state.symbols]
         df = pd.DataFrame(rows)
         df = df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
@@ -1079,7 +824,6 @@ def main():
         st.markdown("---")
         st.dataframe(style_heatmap(df), use_container_width=True)
 
-    # -------- WYKRES PRO --------
     with tab_chart:
         st.subheader("📈 Wykres PRO")
         symbol_for_chart = st.selectbox(
@@ -1088,16 +832,12 @@ def main():
         )
         plot_pro_chart(symbol_for_chart)
 
-    # -------- SKANER --------
     with tab_scanner:
         st.subheader("📡 BUY / SELL Radar")
-
         rows = [compute_metrics(s) for s in st.session_state.symbols]
         scan_df = pd.DataFrame(rows)
-
         if prop_mode == "Prop‑Trader Mode":
             scan_df = apply_prop_filters(scan_df)
-
         scan_df = scan_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
 
         buy_df = scan_df[
@@ -1105,13 +845,11 @@ def main():
             (scan_df["Trend"] == "UP") &
             (scan_df["SetupScore"] >= (65 if prop_mode == "Prop‑Trader Mode" else 55))
         ]
-
         sell_df = scan_df[
             (scan_df["Signal"] == "SELL") &
             (scan_df["Trend"] == "DOWN") &
             (scan_df["SetupScore"] >= (55 if prop_mode == "Prop‑Trader Mode" else 45))
         ]
-
         neutral_df = scan_df[
             ~scan_df.index.isin(buy_df.index) &
             ~scan_df.index.isin(sell_df.index)
@@ -1126,42 +864,35 @@ def main():
         st.markdown("## 🟡 Neutral")
         st.dataframe(neutral_df, use_container_width=True)
 
-    # -------- SEKTORÓWKA --------
     with tab_sector:
         st.subheader("🏭 Heatmapa sektorowa")
-
         df_sector = df.copy()
         df_sector["Sector"] = df_sector["Symbol"].apply(lambda s: st.session_state.sector_map.get(s, "Inne"))
-
         sector_view = (
             df_sector.groupby("Sector")["SetupScore"]
             .mean()
             .sort_values(ascending=False)
             .reset_index()
         )
-
         st.dataframe(sector_view, use_container_width=True)
 
-    # -------- PRE‑MARKET --------
     with tab_premarket:
         st.subheader("🌅 Pre‑Market Radar")
-
         pre_rows = []
         for s in st.session_state.symbols:
             ch = get_premarket(s)
             if ch is not None:
                 pre_rows.append({"Symbol": s, "PreMarketChange": ch})
-
         if not pre_rows:
             st.info("Brak danych pre‑market.")
         else:
             pre_df = pd.DataFrame(pre_rows).sort_values("PreMarketChange", ascending=False)
             st.dataframe(pre_df, use_container_width=True)
 
-    # -------- AI PANEL --------
     with tab_ai:
         render_ai_panel()
 
 
 if __name__ == "__main__":
     main()
+```
