@@ -1,3 +1,7 @@
+Dobra, jedziemy: **pełny kombajn**, po polsku, ciemny neon, z trendami, SL/TP, Prop‑Mode, heatmapą, pre‑marketem, sektorówką, AI Turbo.  
+Wklej to jako **cały `main.py`** — bez niczego ponad to.
+
+```python
 import os
 import streamlit as st
 import pandas as pd
@@ -9,55 +13,55 @@ from openai import OpenAI
 # ======================  KONFIGURACJA STRONY  ===============
 # ============================================================
 
-st.set_page_config(page_title="KOMBAJN v2.0", layout="wide")
+st.set_page_config(page_title="KOMBAJN v2.1", layout="wide")
 
 # ============================================================
-# ======================  ULTRA DARK CSS  =====================
+# ======================  ULTRA DARK NEON CSS  ===============
 # ============================================================
 
 st.markdown("""
 <style>
 body, .stApp {
-    background-color: #050608 !important;
-    color: #e5e5e5 !important;
+    background-color: #05060a !important;
+    color: #e5e5f5 !important;
     font-family: "Segoe UI", system-ui, sans-serif;
 }
 [data-testid="stSidebar"] {
-    background-color: #050608 !important;
-    border-right: 1px solid #20232a !important;
+    background-color: #05060a !important;
+    border-right: 1px solid #181b24 !important;
 }
 [data-testid="stDataFrame"] {
-    background-color: #050608 !important;
-    border: 1px solid #20232a !important;
+    background-color: #05060a !important;
+    border: 1px solid #181b24 !important;
     border-radius: 6px !important;
-    padding: 8px !important;
+    padding: 6px !important;
 }
 .dataframe tbody tr th, .dataframe tbody tr td {
-    background-color: #0b0d10 !important;
-    color: #e5e5e5 !important;
-    font-size: 15px !important;
-    padding: 6px 10px !important;
-    border-color: #181a1f !important;
+    background-color: #090b12 !important;
+    color: #e5e5f5 !important;
+    font-size: 14px !important;
+    padding: 5px 8px !important;
+    border-color: #181b24 !important;
 }
 .dataframe thead th {
-    background-color: #101218 !important;
-    color: #f5f5f5 !important;
-    font-size: 15px !important;
-    border-bottom: 2px solid #20232a !important;
-    padding: 8px 10px !important;
+    background-color: #101322 !important;
+    color: #f5f5ff !important;
+    font-size: 14px !important;
+    border-bottom: 2px solid #262a3a !important;
+    padding: 6px 8px !important;
 }
 h1, h2, h3, h4 {
-    color: #f5f5f5 !important;
+    color: #f5f5ff !important;
 }
 .stButton>button {
-    background-color: #20232a !important;
-    color: #f5f5f5 !important;
+    background: linear-gradient(90deg, #1f2937, #111827) !important;
+    color: #e5e5ff !important;
     border-radius: 4px !important;
-    border: 1px solid #3a3f4b !important;
+    border: 1px solid #4c1d95 !important;
 }
 .stButton>button:hover {
-    background-color: #2b3040 !important;
-    border-color: #4b5263 !important;
+    background: linear-gradient(90deg, #312e81, #1f2937) !important;
+    border-color: #7c3aed !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -162,9 +166,9 @@ def compute_trend_evaluation(
     )
     trend_score = max(0, min(100, trend_score))
 
-    if trend_score >= 75: health = "SILNY"
-    elif trend_score >= 55: health = "ZDROWY"
-    elif trend_score >= 35: health = "SŁABY"
+    if trend_score >= 75: health = "SILNY TREND"
+    elif trend_score >= 55: health = "ZDROWY TREND"
+    elif trend_score >= 35: health = "SŁABY TREND"
     else: health = "RYZYKO ODWRÓCENIA"
 
     if trend_score >= 70: confidence = "WYSOKIE"
@@ -210,6 +214,10 @@ def compute_metrics(symbol):
             "TrendReversalRisk": "NIEZNANE",
             "TrendComment": "",
             "TrendFlags": [],
+            "SL_Low": None,
+            "SL_High": None,
+            "TP_Low": None,
+            "TP_High": None,
         }
 
     close = df["Close"].astype(float)
@@ -291,6 +299,8 @@ def compute_metrics(symbol):
         atr=atr,
     )
 
+    sl_zone, tp_zone = compute_sl_tp(last, atr, trend)
+
     return {
         "Symbol": symbol,
         "LastPrice": last,
@@ -310,6 +320,10 @@ def compute_metrics(symbol):
         "TrendReversalRisk": trend_eval["TrendReversalRisk"],
         "TrendComment": trend_eval["TrendComment"],
         "TrendFlags": trend_eval["TrendFlags"],
+        "SL_Low": sl_zone[0] if sl_zone else None,
+        "SL_High": sl_zone[1] if sl_zone else None,
+        "TP_Low": tp_zone[0] if tp_zone else None,
+        "TP_High": tp_zone[1] if tp_zone else None,
     }
 
 # ============================================================
@@ -317,11 +331,21 @@ def compute_metrics(symbol):
 # ============================================================
 
 def style_heatmap(df):
-    def color_score(val):
-        if val >= 70: return "background-color: #0f3;"
-        if val >= 50: return "background-color: #ff0;"
-        return "background-color: #f33;"
-    return df.style.applymap(color_score, subset=["SetupScore", "TrendScore"])
+    def color_row(row):
+        styles = []
+        for col in df.columns:
+            if col in ["SetupScore", "TrendScore"]:
+                val = row[col]
+                if val >= 70:
+                    styles.append("background-color: #16a34a; color: #020617;")
+                elif val >= 50:
+                    styles.append("background-color: #eab308; color: #020617;")
+                else:
+                    styles.append("background-color: #dc2626; color: #f9fafb;")
+            else:
+                styles.append("")
+        return styles
+    return df.style.apply(color_row, axis=1)
 
 # ============================================================
 # ======================  WYKRES PRO  =========================
@@ -344,13 +368,14 @@ def plot_pro_chart(symbol):
     ema20 = df["Close"].ewm(span=20, adjust=False).mean()
     ema50 = df["Close"].ewm(span=50, adjust=False).mean()
 
-    fig.add_trace(go.Scatter(x=df.index, y=ema20, mode="lines", name="EMA20"))
-    fig.add_trace(go.Scatter(x=df.index, y=ema50, mode="lines", name="EMA50"))
+    fig.add_trace(go.Scatter(x=df.index, y=ema20, mode="lines", name="EMA20", line=dict(color="#22c55e")))
+    fig.add_trace(go.Scatter(x=df.index, y=ema50, mode="lines", name="EMA50", line=dict(color="#38bdf8")))
 
     fig.update_layout(
         template="plotly_dark",
         height=600,
-        margin=dict(l=10, r=10, t=30, b=10)
+        margin=dict(l=10, r=10, t=30, b=10),
+        xaxis_rangeslider_visible=False,
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -363,9 +388,9 @@ def generate_alerts(df):
     alerts = []
     for _, row in df.iterrows():
         if row["Signal"] == "BUY" and row["SetupScore"] >= 60:
-            alerts.append(f"🟢 BUY: {row['Symbol']} (Setup {row['SetupScore']:.1f})")
+            alerts.append(f"🟢 BUY: {row['Symbol']} (Setup {row['SetupScore']:.1f}, Trend {row['TrendHealth']})")
         if row["Signal"] == "SELL" and row["SetupScore"] >= 50:
-            alerts.append(f"🔴 SELL: {row['Symbol']} (Setup {row['SetupScore']:.1f})")
+            alerts.append(f"🔴 SELL: {row['Symbol']} (Setup {row['SetupScore']:.1f}, Trend {row['TrendHealth']})")
     return alerts
 
 # ============================================================
@@ -402,7 +427,7 @@ def detect_patterns_all(symbols):
 
 def ai_verdict_for_top5(df):
     syms = ", ".join(df["Symbol"].tolist())
-    prompt = f"Analizuj spółki: {syms}. Daj krótki werdykt tradingowy po polsku."
+    prompt = f"Analizuj spółki: {syms}. Daj krótki werdykt tradingowy po polsku, konkretnie, jak prop‑trader."
     resp = client.chat.completions.create(
         model=AI_MODEL,
         messages=[{"role": "user", "content": prompt}]
@@ -410,7 +435,7 @@ def ai_verdict_for_top5(df):
     return resp.choices[0].message.content
 
 def ai_deep_dive(symbol, metrics):
-    prompt = f"Zrób techniczny deep dive dla {symbol} na podstawie danych: {metrics}. Odpowiadaj po polsku."
+    prompt = f"Zrób techniczny deep dive dla {symbol} na podstawie danych: {metrics}. Po polsku, konkretnie."
     resp = client.chat.completions.create(
         model=AI_MODEL,
         messages=[{"role": "user", "content": prompt}]
@@ -434,7 +459,7 @@ def ai_news_score_for_df(df):
 def ai_news_deep_dive(symbol, metrics, bid, ask, spread_pct):
     prompt = (
         f"Analiza newsowa dla {symbol}. Dane: {metrics}, bid={bid}, ask={ask}, "
-        f"spread={spread_pct}. Odpowiadaj po polsku, konkretnie, jak prop‑trader."
+        f"spread={spread_pct}. Po polsku, jak prop‑trader, konkretnie."
     )
     resp = client.chat.completions.create(
         model=AI_MODEL,
@@ -443,7 +468,7 @@ def ai_news_deep_dive(symbol, metrics, bid, ask, spread_pct):
     return resp.choices[0].message.content
 
 def ai_news_radar(df):
-    prompt = f"Zrób News Radar dla tych spółek (po polsku): {df.to_dict()}"
+    prompt = f"Zrób News Radar dla tych spółek (po polsku, krótko i konkretnie): {df.to_dict()}"
     resp = client.chat.completions.create(
         model=AI_MODEL,
         messages=[{"role": "user", "content": prompt}]
@@ -468,11 +493,13 @@ POSITION:
     return resp.choices[0].message.content
 
 # ============================================================
-# ======================  SEKTORÓWKA / PRE‑MARKET  ============
+# ======================  SEKTOR / PRE‑MARKET  ================
 # ============================================================
 
 SECTOR_MAP = {
-    # Możesz uzupełnić pod siebie, ale skaner NIE ma żadnych spółek na sztywno
+    # Możesz uzupełnić pod siebie, np.:
+    # "AAPL": "Technologia",
+    # "MSFT": "Technologia",
 }
 
 def get_sector(symbol):
@@ -505,7 +532,7 @@ def apply_prop_filters(df):
 # ============================================================
 
 def main():
-    st.title("🔥 KOMBAJN v2.0 — Ultra Dark Bloomberg + Prop‑Desk AI")
+    st.title("🔥 KOMBAJN v2.1 — Ultra Dark Neon + Prop‑Desk AI")
 
     if "symbols" not in st.session_state:
         st.session_state.symbols = []
@@ -549,7 +576,7 @@ def main():
 
     # ---------------- HEATMAPA PRO ----------------
     with tab_heatmap:
-        st.subheader("📊 Heatmapa PRO + AI Turbo")
+        st.subheader("📊 Heatmapa PRO + Trend + SL/TP + AI Turbo")
 
         rows = [compute_metrics(s) for s in st.session_state.symbols]
         df = pd.DataFrame(rows)
@@ -567,21 +594,26 @@ def main():
                     else:
                         color = "🔴"
                     st.markdown(f"### {color} {row['Symbol']}")
-                    st.write(f"**SetupScore:** {row['SetupScore']:.1f}")
-                    st.write(f"**Trend:** {row['Trend']}")
+                    st.write(f"**Cena:** {row['LastPrice']:.2f}")
+                    st.write(f"**Zmiana:** {row['Change']:.2f}%")
+                    st.write(f"**Trend:** {row['Trend']} ({row['TrendHealth']})")
                     st.write(f"**Momentum:** {row['MomentumScore']:.1f}")
-                    st.write(f"**Volatility:** {row['VolatilityScore']:.1f}")
+                    st.write(f"**Zmienność:** {row['VolatilityScore']:.1f}")
+                    if row["SL_Low"] and row["TP_High"]:
+                        st.write(f"**SL:** {row['SL_Low']:.2f} – {row['SL_High']:.2f}")
+                        st.write(f"**TP:** {row['TP_Low']:.2f} – {row['TP_High']:.2f}")
 
         st.markdown("---")
 
-        if st.button("⚡ AI Turbo — analiza TOP setupów"):
-            with st.spinner("AI Turbo analizuje setupy..."):
-                st.session_state.ai_turbo = ai_verdict_for_top5(df.head(top_n))
-
-        st.markdown("### ⚡ AI Turbo 2.0 — 4‑stylowy werdykt")
-        if st.button("⚡ AI Turbo 2.0 (Scalper / Day / Swing / Position)"):
-            with st.spinner("AI Turbo 2.0 analizuje setupy..."):
-                st.session_state.ai_turbo = ai_turbo_v2(df.head(top_n))
+        col_ai1, col_ai2 = st.columns(2)
+        with col_ai1:
+            if st.button("⚡ AI Turbo — analiza TOP setupów"):
+                with st.spinner("AI Turbo analizuje setupy..."):
+                    st.session_state.ai_turbo = ai_verdict_for_top5(df.head(top_n))
+        with col_ai2:
+            if st.button("⚡ AI Turbo 2.0 (Scalper / Day / Swing / Position)"):
+                with st.spinner("AI Turbo 2.0 analizuje setupy..."):
+                    st.session_state.ai_turbo = ai_turbo_v2(df.head(top_n))
 
         if st.session_state.ai_turbo:
             st.subheader("Werdykt AI")
@@ -681,3 +713,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
+
+Jak coś jeszcze ma być „bardziej prop”, to wtedy już tylko dopieszczamy logikę, nie walczymy z błędami.
