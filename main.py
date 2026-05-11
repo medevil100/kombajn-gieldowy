@@ -669,40 +669,43 @@ def main():
         st.warning("Dodaj spółki w sidebarze, aby rozpocząć.")
         return
 
-    # ====== PRZYPISYWANIE SEKTORÓW W TABELI ======
-    st.subheader("🏭 Przypisanie sektorów (wymagane)")
+# ====== PRZYPISYWANIE SEKTORÓW W TABELI ======
+st.subheader("🏭 Przypisanie sektorów (wymagane)")
 
-    sector_rows = []
-    for sym in st.session_state.symbols:
-        sector_rows.append({
-            "Symbol": sym,
-            "Sektor": st.session_state.sector_map.get(sym, "")
-        })
+sector_rows = []
+for sym in st.session_state.symbols:
+    sector_rows.append({
+        "Symbol": sym,
+        "Sektor": st.session_state.sector_map.get(sym, "")
+    })
 
-    sector_df = pd.DataFrame(sector_rows)
+sector_df = pd.DataFrame(sector_rows)
 
-    edited = st.data_editor(
-        sector_df,
-        key="sector_editor",
-        use_container_width=True,
-        column_config={
-            "Sektor": st.column_config.SelectboxColumn(
-                "Sektor",
-                options=SECTOR_OPTIONS,
-                required=True,
-            )
-        },
-        hide_index=True,
-    )
+edited = st.data_editor(
+    sector_df,
+    key="sector_editor",
+    use_container_width=True,
+    column_config={
+        "Sektor": st.column_config.SelectboxColumn(
+            "Sektor",
+            options=SECTOR_OPTIONS,
+            required=True,
+        )
+    },
+    hide_index=True,
+)
 
-    # aktualizacja session_state
-    for _, row in edited.iterrows():
+# 🔥 ZAPISUJEMY SEKTORY TYLKO JEŚLI TABELA JEST JUŻ WYPEŁNIONA
+if "sector_editor" in st.session_state:
+    for _, row in st.session_state["sector_editor"].iterrows():
         st.session_state.sector_map[row["Symbol"]] = row["Sektor"]
 
-    missing = [s for s in st.session_state.symbols if not st.session_state.sector_map.get(s)]
-    if missing:
-        st.error(f"Brak przypisanego sektora dla: {', '.join(missing)}")
-        st.stop()
+# 🔥 WALIDACJA — dopiero po aktualizacji
+missing = [s for s in st.session_state.symbols if not st.session_state.sector_map.get(s)]
+if missing:
+    st.error(f"Brak przypisanego sektora dla: {', '.join(missing)}")
+    st.stop()
+
 
     tab_heatmap, tab_chart, tab_scanner, tab_sector, tab_premarket, tab_ai_turbo, tab_ai_news, tab_ai_risk, tab_ai_pattern = st.tabs([
         "📊 Heatmapa PRO",
