@@ -1,5 +1,13 @@
-# kombajn_streamlit_official.py
 
+# kombajn_streamlit_official_v3.py
+Kombajn Scanner — Official v3 (PL)
+- yfinance (oficjalne)
+- period domyślnie 60d, interval domyślnie 60m
+- fallback do 1d jeśli intraday niedostępny
+- odświeżanie ceny pojedynczego tickera
+- czytelna tabela + kolorowy szybki przegląd
+- AI opcjonalne (OpenAI)
+"""
 import os
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -10,8 +18,8 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
-# -------------------- Konfiguracja --------------------
-st.set_page_config(page_title="Kombajn Scanner — Official", layout="wide")
+# ---------------- Konfiguracja ----------------
+st.set_page_config(page_title="Kombajn Scanner — Official v3", layout="wide")
 CHART_DIR = "charts"
 LOG_CSV = "scanner_log.csv"
 os.makedirs(CHART_DIR, exist_ok=True)
@@ -26,7 +34,7 @@ PALETTES = {
     "high-contrast": ['#d62728', '#2ca02c', '#1f77b4', '#ff7f0e', '#9467bd', '#17becf']
 }
 
-# -------------------- Pomocnicze --------------------
+# ---------------- Pomocnicze ----------------
 def safe_float(x) -> Optional[float]:
     try:
         if x is None:
@@ -47,7 +55,7 @@ def append_log_csv(row: Dict[str, Any], filename: str = LOG_CSV):
     except Exception:
         pass
 
-# -------------------- Źródło cen (yfinance) --------------------
+# ---------------- Źródło cen (yfinance) ----------------
 def get_quote_yfinance(ticker: str) -> Dict[str, Optional[float]]:
     try:
         t = yf.Ticker(ticker)
@@ -59,7 +67,7 @@ def get_quote_yfinance(ticker: str) -> Dict[str, Optional[float]]:
     except Exception:
         return {"price": None, "bid": None, "ask": None, "source": "yfinance"}
 
-# -------------------- Wskaźniki --------------------
+# ---------------- Wskaźniki ----------------
 def calculate_rsi(series: pd.Series, window: int = 14) -> pd.Series:
     s = pd.to_numeric(series, errors='coerce')
     if len(s.dropna()) < window:
@@ -92,7 +100,7 @@ def bollinger_bands(series: pd.Series, window=20, n_std=2):
     width = (upper - lower) / ma.replace(0, np.nan)
     return upper.fillna(np.nan), lower.fillna(np.nan), width.fillna(np.nan)
 
-# -------------------- Wykres Plotly --------------------
+# ---------------- Wykres Plotly ----------------
 def make_plotly_chart(df: pd.DataFrame, tp: float, sl: float, palette: List[str]):
     try:
         if isinstance(df.columns, pd.MultiIndex):
@@ -129,30 +137,38 @@ def make_plotly_chart(df: pd.DataFrame, tp: float, sl: float, palette: List[str]
     except Exception:
         return None
 
-# -------------------- AI helper (OpenAI) --------------------
+# ---------------- AI helper (OpenAI) ----------------
 def ai_commentary_for_rows(rows: List[Dict[str, Any]], model: str, openai_key: str) -> str:
     if not openai_key or not model:
         return ""
     try:
         from openai import OpenAI
         client = OpenAI(api_key=openai_key)
-        header = "| TICKER | PRICE | BID | ASK | RSI | ADX | RISK | TP | SL |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|"
+        header = "| TICKER | PRICE | BID | ASK | RSI | ADX | STATUS | TP | SL |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|"
         lines = [header]
         for r in rows:
-            lines.append(f"| {r['ticker']} | {r.get('price')} | {r.get('bid')} | {r.get('ask')} | {r.get('rsi')} | {r.get('adx')} | {r.get('risk_category')} | {r.get('tp_pct')} | {r.get('sl_pct')} |")
+            lines.append(
+                f"| {r['ticker']} | {r.get('price')} | {r.get('bid')} | {r.get('ask')} | "
+                f"{r.get('rsi')} | {r.get('adx')} | {r.get('status')} | {r.get('tp_pct')} | {r.get('sl_pct')} |"
+            )
         table_text = "\n".join(lines)
-        prompt_system = "Jestes ekspertem gieldowym. Otrzymasz tabele w markdown. Dla kazdego wiersza podaj skrocony komentarz i priorytet (BUY/HOLD/SELL). Uzywaj tylko informacji dostarczonych. Nie dawaj polecen kupna/sprzedazy."
+        prompt_system = (
+            "Jestes ekspertem gieldowym. Otrzymasz tabele w markdown. "
+            "Dla kazdego wiersza podaj skrocony komentarz i priorytet (BUY/HOLD/SELL). "
+            "Uzywaj tylko informacji dostarczonych. Nie dawaj polecen kupna/sprzedazy."
+        )
         user_content = f"DANE:\n{table_text}"
         res = client.chat.completions.create(
             model=model,
-            messages=[{"role":"system","content":prompt_system},{"role":"user","content":user_content}],
+            messages=[{"role": "system", "content": prompt_system},
+                      {"role": "user", "content": user_content}],
             max_tokens=500
         )
         return res.choices[0].message.content
     except Exception:
         return ""
 
-# -------------------- Skan i analiza (yfinance only) --------------------
+# ---------------- Skan i analiza ----------------
 def scan_and_analyze(tickers: List[str], tp_pct: float, sl_pct: float, period: str, interval: str, palette_name: str,
                      rsi_threshold: int, rvol_threshold: float) -> (List[Dict[str, Any]], List[str]):
     results = []
@@ -163,14 +179,22 @@ def scan_and_analyze(tickers: List[str], tp_pct: float, sl_pct: float, period: s
             df = yf.download(t, period=period, interval=interval, progress=False)
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(-1)
-            if df is None or df.empty or 'Close' not in df.columns:
-                errors.append(f"{t}: brak danych intraday")
-                continue
-            for col in ['Open','High','Low','Close','Volume']:
+            if df is None or df.empty or 'Close' not in df.columns or df['Close'].dropna().empty:
+                df = yf.download(t, period=period, interval="1d", progress=False)
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(-1)
+                if df is None or df.empty or 'Close' not in df.columns or df['Close'].dropna().empty:
+                    errors.append(f"{t}: brak danych intraday i brak danych dziennych")
+                    continue
+                used_interval = "1d"
+            else:
+                used_interval = interval
+
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
             if df['Close'].dropna().empty:
-                errors.append(f"{t}: brak poprawnych danych Close")
+                errors.append(f"{t}: brak poprawnych danych Close po konwersji")
                 continue
 
             close = df['Close'].dropna()
@@ -178,11 +202,10 @@ def scan_and_analyze(tickers: List[str], tp_pct: float, sl_pct: float, period: s
             macd_line, signal_line, hist = macd(close)
             macd_hist = float(hist.iloc[-1]) if len(hist) else 0.0
 
-            # ADX (bezpiecznie)
             adx = 0.0
             try:
-                if all(c in df.columns for c in ['High','Low','Close']):
-                    tmp = df[['High','Low','Close']].dropna()
+                if all(c in df.columns for c in ['High', 'Low', 'Close']):
+                    tmp = df[['High', 'Low', 'Close']].dropna()
                     if tmp.shape[0] >= 15:
                         high = tmp['High']; low = tmp['Low']; close_col = tmp['Close']
                         plus_dm = high.diff()
@@ -210,7 +233,6 @@ def scan_and_analyze(tickers: List[str], tp_pct: float, sl_pct: float, period: s
             bid = q.get("bid")
             ask = q.get("ask")
 
-            # prosty scoring -> BUY/HOLD/SELL mapping
             score = 0.0
             if rsi < 30:
                 score += 1.0
@@ -220,7 +242,6 @@ def scan_and_analyze(tickers: List[str], tp_pct: float, sl_pct: float, period: s
                 score -= 0.5
             if adx >= 25:
                 score -= 0.3
-            # interpretacja: im mniejszy score -> BUY, sredni -> HOLD, wysoki -> SELL
             if score <= 0.5:
                 status = "BUY"
             elif score <= 1.5:
@@ -228,7 +249,6 @@ def scan_and_analyze(tickers: List[str], tp_pct: float, sl_pct: float, period: s
             else:
                 status = "SELL"
 
-            # trend prosty
             sma5 = sma(close, 5).iloc[-1] if len(close) >= 5 else None
             sma20 = sma(close, 20).iloc[-1] if len(close) >= 20 else None
             if sma5 is not None and sma20 is not None:
@@ -258,7 +278,8 @@ def scan_and_analyze(tickers: List[str], tp_pct: float, sl_pct: float, period: s
                 "df": df,
                 "tp_pct": tp_pct,
                 "sl_pct": sl_pct,
-                "quote_source": q.get("source")
+                "quote_source": q.get("source"),
+                "used_interval": used_interval
             }
             results.append(row)
         except Exception as e:
@@ -266,7 +287,7 @@ def scan_and_analyze(tickers: List[str], tp_pct: float, sl_pct: float, period: s
             continue
     return results, errors
 
-# -------------------- UI helpers --------------------
+# ---------------- UI helpers ----------------
 def color_for_status(status: str):
     if status == "SELL":
         return "#ff4d4d"
@@ -276,16 +297,16 @@ def color_for_status(status: str):
         return "#2ca02c"
     return "#d3d3d3"
 
-# -------------------- Streamlit UI --------------------
+# ---------------- Streamlit UI ----------------
 def main():
-    st.title("Kombajn Scanner — Official (yfinance)")
-    st.markdown("Wklej tickery, ustaw TP/SL i interwał. Wyniki pojawią się poniżej — każda spółka ma: ticker, cena, bid/ask, trend, TP/SL i kolor statusu.")
+    st.title("Kombajn Scanner — Official v3")
+    st.markdown("Ustaw tickery, TP/SL i interwał. Wyniki pojawią się poniżej. Skrypt używa tylko yfinance.")
 
     with st.sidebar:
         st.header("Ustawienia")
         tickers_input = st.text_area("Tickery (oddzielone przecinkiem)", value=",".join(DEFAULT_TICKERS), height=140)
         tickers = [x.strip() for x in tickers_input.split(",") if x.strip()]
-        period = st.selectbox("Okres historyczny", ["60d", "30d", "90d"], index=0)  # domyślnie 60d
+        period = st.selectbox("Okres historyczny", ["60d", "30d", "90d"], index=0)
         interval = st.selectbox("Interwał", ["60m", "30m", "15m"], index=0)
         st.markdown("TP / SL")
         tp_pct = st.slider("Take Profit (%)", 0.5, 20.0, 3.0, 0.5) / 100.0
@@ -303,9 +324,8 @@ def main():
         results, errors = scan_and_analyze(tickers, tp_pct, sl_pct, period, interval, palette_name, rsi_threshold=35, rvol_threshold=3.0)
 
         if not results:
-            st.warning("Brak wyników. Sprawdź tickery i ustawienia okresu/interwału.")
+            st.warning("Brak wyników. Sprawdź tickery i ustawienia.")
         else:
-            # tabela wyników (DataFrame) z kolorami i sortowaniem
             df_table = pd.DataFrame([{
                 "Ticker": r["ticker"],
                 "Cena": r["price"],
@@ -315,28 +335,29 @@ def main():
                 "Status": r["status"],
                 "RSI": r["rsi"],
                 "RVol": r["rvol"],
-                "ADX": r["adx"]
+                "Źródło": r["quote_source"],
+                "Interwał": r["used_interval"]
             } for r in results])
-            # sortowanie domyślne: Status, RSI
             df_table['StatusOrder'] = df_table['Status'].map({"BUY": 0, "HOLD": 1, "SELL": 2}).fillna(3)
             df_table = df_table.sort_values(by=['StatusOrder', 'RSI'], ascending=[True, True]).drop(columns=['StatusOrder'])
             st.markdown("### Tabela wyników (posortowana)")
-            st.dataframe(df_table.style.format({"Cena":"{:.4f}", "Bid":"{:.4f}", "Ask":"{:.4f}"}))
+            st.dataframe(df_table)
 
-            st.markdown("### Szybki przegląd (kolory statusów)")
+            st.markdown("### Szybki przegląd")
             preview_html = []
             for r in results:
                 color = color_for_status(r['status'])
                 preview_html.append(
                     f"<div style='background:{color};padding:8px;border-radius:6px;margin-bottom:6px;'>"
-                    f"<b>{r['ticker']}</b> — Cena: <b>{r['price']}</b> | Bid: {r['bid']} | Ask: {r['ask']} | Trend: {r['trend']} | <b>{r['status']}</b> | TP: {r['tp_pct']*100:.1f}% SL: {r['sl_pct']*100:.1f}%"
+                    f"<b>{r['ticker']}</b> — Cena: <b>{r['price']}</b> | Bid: {r['bid']} | Ask: {r['ask']} | "
+                    f"Trend: {r['trend']} | <b>{r['status']}</b> | TP: {r['tp_pct']*100:.1f}% SL: {r['sl_pct']*100:.1f}%"
                     f"</div>"
                 )
             st.markdown("\n".join(preview_html), unsafe_allow_html=True)
 
             st.markdown("### Szczegóły spółek")
             for r in results:
-                st.markdown(f"#### {r['ticker']}  —  {r.get('quote_source','yfinance')}")
+                st.markdown(f"#### {r['ticker']}  —  {r.get('quote_source','yfinance')}  (interwał: {r.get('used_interval')})")
                 cols = st.columns([1, 2])
                 with cols[0]:
                     st.write(f"**Cena:** {r['price']}")
@@ -344,22 +365,15 @@ def main():
                     st.write(f"**Trend:** {r['trend']}   **Status:** {r['status']}")
                     st.write(f"**RSI:** {r['rsi']}   **RVol:** {r['rvol']}   **ADX:** {r['adx']}")
                     st.write(f"**TP:** {r['tp_pct']*100:.1f}%   **SL:** {r['sl_pct']*100:.1f}%")
-                    # Odśwież cenę pojedynczego tickera
                     if st.button(f"Odśwież cenę {r['ticker']}", key=f"refresh_{r['ticker']}"):
                         q = get_quote_yfinance(r['ticker'])
-                        st.experimental_rerun()
-                    try:
-                        csv_bytes = r['df'].to_csv().encode('utf-8')
-                        st.download_button("Pobierz dane CSV", data=csv_bytes, file_name=f"{r['ticker']}_data.csv", mime="text/csv")
-                    except Exception:
-                        pass
+                        st.write(f"Nowa cena: {q.get('price')} (Bid: {q.get('bid')}, Ask: {q.get('ask')})")
                 with cols[1]:
                     if r['chart'] is not None:
                         st.plotly_chart(r['chart'], use_container_width=True)
                     else:
                         st.write("Brak wykresu (dane niekompletne)")
 
-            # AI podsumowanie
             if use_ai and openai_key_input:
                 st.markdown("### AI - skrócone komentarze")
                 ai_text = ai_commentary_for_rows([
@@ -370,7 +384,7 @@ def main():
                         "ask": r["ask"],
                         "rsi": r["rsi"],
                         "adx": r["adx"],
-                        "risk_category": r["status"],
+                        "status": r["status"],
                         "tp_pct": f"{r['tp_pct']*100:.1f}%",
                         "sl_pct": f"{r['sl_pct']*100:.1f}%"
                     } for r in results
@@ -380,7 +394,6 @@ def main():
                 else:
                     st.warning("AI nie zwróciło odpowiedzi (sprawdź klucz/model).")
 
-            # zapis do CSV
             for r in results:
                 row = {
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -399,15 +412,14 @@ def main():
                 append_log_csv(row)
             st.success("Skan zakończony. Wyniki zapisane do scanner_log.csv")
 
-        # pokaż błędy
         if errors:
             st.markdown("### Błędy i uwagi")
             for e in errors:
                 st.markdown(f"- {e}")
 
     st.markdown("---")
-    st.markdown("Uwaga: ten skrypt korzysta wyłącznie z yfinance jako oficjalnego źródła cen. Jeśli chcesz dodać inne oficjalne API (broker, giełda), podaj klucze i powiem jak zintegrować.")
-    st.markdown("Skrypt nie daje porad inwestycyjnych. Decyzje podejmujesz samodzielnie.")
+    st.markdown("Uwaga: skrypt korzysta wyłącznie z yfinance jako oficjalnego źródła cen.")
+    st.markdown("Decyzje inwestycyjne podejmujesz samodzielnie.")
 
 if __name__ == "__main__":
     main()
