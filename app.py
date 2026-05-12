@@ -11,21 +11,13 @@ import numpy as np
 import requests
 from datetime import datetime
 
-# --- KONFIG ---
+# =========================
+# KONFIG / STYL
+# =========================
+
 DB_FILE = "tickers_db.txt"
-st.set_page_config(page_title="AI ALPHA TERMINAL v14", page_icon="📈", layout="wide")
+st.set_page_config(page_title="AI ALPHA TERMINAL v15 PRO", page_icon="📈", layout="wide")
 
-def load_tickers():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r") as f:
-                content = f.read().strip()
-                return content if content else "PKO.WA, BTC-USD, NVDA, TSLA, BTCUSDT"
-        except:
-            return "PKO.WA, BTC-USD, NVDA, TSLA, BTCUSDT"
-    return "PKO.WA, BTC-USD, NVDA, TSLA, BTCUSDT"
-
-# --- STYLE ---
 st.markdown("""
     <style>
     .stApp { background-color: #050812; color: #c9d1d9; }
@@ -67,127 +59,206 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- WSPÓLNE FUNKCJE TECHNICZNE ---
 
-def compute_indicators(df):
-    df = df.copy()
-    df["EMA20"] = df["Close"].ewm(span=20).mean()
-    df["EMA50"] = df["Close"].ewm(span=50).mean()
-    df["EMA200"] = df["Close"].ewm(span=200).mean()
+# =========================
+# UTILS
+# =========================
 
-    ema12 = df["Close"].ewm(span=12).mean()
-    ema26 = df["Close"].ewm(span=26).mean()
-    df["MACD"] = ema12 - ema26
-    df["MACD_signal"] = df["MACD"].ewm(span=9).mean()
-    df["MACD_hist"] = df["MACD"] - df["MACD_signal"]
-
-    delta = df["Close"].diff()
-    gain = delta.where(delta > 0, 0).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / (loss + 1e-9)
-    df["RSI"] = 100 - (100 / (1 + rs))
-
-    return df
+def load_tickers():
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, "r") as f:
+                content = f.read().strip()
+                return content if content else "PKO.WA, BTC-USD, NVDA, TSLA, BTCUSDT"
+        except:
+            return "PKO.WA, BTC-USD, NVDA, TSLA, BTCUSDT"
+    return "PKO.WA, BTC-USD, NVDA, TSLA, BTCUSDT"
 
 
-def fibo_levels(df):
-    recent = df.tail(120)
-    high = recent["High"].max()
-    low = recent["Low"].min()
-    diff = high - low
-    levels = {
-        "0.0%": high,
-        "23.6%": high - 0.236 * diff,
-        "38.2%": high - 0.382 * diff,
-        "50.0%": high - 0.5 * diff,
-        "61.8%": high - 0.618 * diff,
-        "78.6%": high - 0.786 * diff,
-        "100%": low
-    }
-    return levels, high, low
+class MarketData:
+    @staticmethod
+    def get_yf(symbol, period="250d", interval="1d"):
+        df = yf.download(symbol, period=period, interval=interval, progress=False)
+        if df.empty:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df
 
-def simple_backtest(df, strategy="EMA_CROSS"):
-    df = df.copy()
-    df["ret"] = df["Close"].pct_change().fillna(0)
-
-    if strategy == "EMA_CROSS":
+    @staticmethod
+    def compute_indicators(df):
+        df = df.copy()
         df["EMA20"] = df["Close"].ewm(span=20).mean()
         df["EMA50"] = df["Close"].ewm(span=50).mean()
-        df["signal"] = 0
-        df.loc[df["EMA20"] > df["EMA50"], "signal"] = 1
-        df.loc[df["EMA20"] < df["EMA50"], "signal"] = -1
-    elif strategy == "RSI":
-        df["RSI"] = compute_indicators(df)["RSI"]
-        df["signal"] = 0
-        df.loc[df["RSI"] < 30, "signal"] = 1
-        df.loc[df["RSI"] > 70, "signal"] = -1
-    elif strategy == "MACD":
-        tmp = compute_indicators(df)
-        df["MACD"] = tmp["MACD"]
-        df["MACD_signal"] = tmp["MACD_signal"]
-        df["signal"] = 0
-        df.loc[df["MACD"] > df["MACD_signal"], "signal"] = 1
-        df.loc[df["MACD"] < df["MACD_signal"], "signal"] = -1
-    else:
-        df["signal"] = 0
+        df["EMA200"] = df["Close"].ewm(span=200).mean()
 
-    df["position"] = df["signal"].shift(1).fillna(0)
-    df["strategy"] = df["position"] * df["ret"]
-    equity = (1 + df["strategy"]).cumprod()
-    total_ret = equity.iloc[-1] - 1
-    max_dd = (equity.cummax() - equity).max()
-    trades = (df["position"].diff().abs() > 0).sum()
-    return {
-        "total_return": float(total_ret * 100),
-        "max_drawdown": float(max_dd * 100),
-        "trades": int(trades)
-    }
+        ema12 = df["Close"].ewm(span=12).mean()
+        ema26 = df["Close"].ewm(span=26).mean()
+        df["MACD"] = ema12 - ema26
+        df["MACD_signal"] = df["MACD"].ewm(span=9).mean()
+        df["MACD_hist"] = df["MACD"] - df["MACD_signal"]
 
-def get_yf(symbol, period="250d", interval="1d"):
-    df = yf.download(symbol, period=period, interval=interval, progress=False)
-    if df.empty:
-        return None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df
+        delta = df["Close"].diff()
+        gain = delta.where(delta > 0, 0).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / (loss + 1e-9)
+        df["RSI"] = 100 - (100 / (1 + rs))
 
-def detect_candle_patterns(df):
-    patterns = []
-    last = df.iloc[-1]
-    body = abs(last["Close"] - last["Open"])
-    range_ = last["High"] - last["Low"]
-    upper_wick = last["High"] - max(last["Close"], last["Open"])
-    lower_wick = min(last["Close"], last["Open"]) - last["Low"]
+        return df
 
-    if range_ > 0:
-        if body / range_ < 0.2 and upper_wick / range_ > 0.4 and lower_wick / range_ < 0.2:
-            patterns.append("Spinning Top / możliwa niepewność")
-        if body / range_ < 0.2 and upper_wick / range_ < 0.2 and lower_wick / range_ > 0.4:
-            patterns.append("Młot / potencjalne odwrócenie w górę")
-        if body / range_ < 0.2 and upper_wick / range_ > 0.4 and lower_wick / range_ > 0.4:
-            patterns.append("Doji / silna niepewność")
+    @staticmethod
+    def fibo_levels(df):
+        recent = df.tail(120)
+        high = recent["High"].max()
+        low = recent["Low"].min()
+        diff = high - low
+        levels = {
+            "0.0%": high,
+            "23.6%": high - 0.236 * diff,
+            "38.2%": high - 0.382 * diff,
+            "50.0%": high - 0.5 * diff,
+            "61.8%": high - 0.618 * diff,
+            "78.6%": high - 0.786 * diff,
+            "100%": low
+        }
+        return levels, high, low
 
-    return patterns
+    @staticmethod
+    def simple_backtest(df, strategy="EMA_CROSS"):
+        df = df.copy()
+        df["ret"] = df["Close"].pct_change().fillna(0)
 
-def send_webhook(url, payload: dict):
-    try:
-        r = requests.post(url, json=payload, timeout=3)
-        return r.status_code
-    except:
-        return None
+        if strategy == "EMA_CROSS":
+            df["EMA20"] = df["Close"].ewm(span=20).mean()
+            df["EMA50"] = df["Close"].ewm(span=50).mean()
+            df["signal"] = 0
+            df.loc[df["EMA20"] > df["EMA50"], "signal"] = 1
+            df.loc[df["EMA20"] < df["EMA50"], "signal"] = -1
+        elif strategy == "RSI":
+            df["RSI"] = MarketData.compute_indicators(df)["RSI"]
+            df["signal"] = 0
+            df.loc[df["RSI"] < 30, "signal"] = 1
+            df.loc[df["RSI"] > 70, "signal"] = -1
+        elif strategy == "MACD":
+            tmp = MarketData.compute_indicators(df)
+            df["MACD"] = tmp["MACD"]
+            df["MACD_signal"] = tmp["MACD_signal"]
+            df["signal"] = 0
+            df.loc[df["MACD"] > df["MACD_signal"], "signal"] = 1
+            df.loc[df["MACD"] < df["MACD_signal"], "signal"] = -1
+        else:
+            df["signal"] = 0
 
-def send_telegram(bot_token, chat_id, text):
-    try:
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        r = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=3)
-        return r.status_code
-    except:
-        return None
+        df["position"] = df["signal"].shift(1).fillna(0)
+        df["strategy"] = df["position"] * df["ret"]
+        equity = (1 + df["strategy"]).cumprod()
+        total_ret = equity.iloc[-1] - 1
+        max_dd = (equity.cummax() - equity).max()
+        trades = (df["position"].diff().abs() > 0).sum()
+        return {
+            "total_return": float(total_ret * 100),
+            "max_drawdown": float(max_dd * 100),
+            "trades": int(trades)
+        }
 
-# --- SIDEBAR ---
+    @staticmethod
+    def detect_candle_patterns(df):
+        patterns = []
+        last = df.iloc[-1]
+        body = abs(last["Close"] - last["Open"])
+        range_ = last["High"] - last["Low"]
+        upper_wick = last["High"] - max(last["Close"], last["Open"])
+        lower_wick = min(last["Close"], last["Open"]) - last["Low"]
+
+        if range_ > 0:
+            if body / range_ < 0.2 and upper_wick / range_ > 0.4 and lower_wick / range_ < 0.2:
+                patterns.append("Spinning Top / możliwa niepewność")
+            if body / range_ < 0.2 and upper_wick / range_ < 0.2 and lower_wick / range_ > 0.4:
+                patterns.append("Młot / potencjalne odwrócenie w górę")
+            if body / range_ < 0.2 and upper_wick / range_ > 0.4 and lower_wick / range_ > 0.4:
+                patterns.append("Doji / silna niepewność")
+
+        return patterns
+
+
+class RiskEngine:
+    def __init__(self, account_size: float):
+        self.account_size = account_size
+
+    def position_size_atr(self, price: float, atr: float, risk_pct: float, atr_mult: float = 1.5):
+        stop_distance = atr * atr_mult
+        risk_amount = self.account_size * (risk_pct / 100)
+        size = risk_amount / stop_distance if stop_distance > 0 else 0
+        return {
+            "stop_distance": float(stop_distance),
+            "risk_amount": float(risk_amount),
+            "size": float(size)
+        }
+
+    def compute_r_multiple(self, entry: float, stop: float, target: float, direction: str = "long"):
+        if direction == "long":
+            risk = entry - stop
+            reward = target - entry
+        else:
+            risk = stop - entry
+            reward = entry - target
+        if risk <= 0:
+            return None
+        return reward / risk
+
+
+class AlertEngine:
+    @staticmethod
+    def send_webhook(url, payload: dict):
+        try:
+            r = requests.post(url, json=payload, timeout=3)
+            return r.status_code
+        except:
+            return None
+
+    @staticmethod
+    def send_telegram(bot_token, chat_id, text):
+        try:
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            r = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=3)
+            return r.status_code
+        except:
+            return None
+
+
+class AIClient:
+    def __init__(self, api_key: str, model: str):
+        self.client = OpenAI(api_key=api_key)
+        self.model = model
+
+    def chat(self, prompt: str) -> str:
+        resp = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return resp.choices[0].message.content
+
+    def chat_json(self, prompt: str):
+        raw = self.chat(prompt)
+        try:
+            return json.loads(raw)
+        except:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start != -1 and end != -1:
+                try:
+                    return json.loads(raw[start:end+1])
+                except:
+                    return {"raw": raw}
+            return {"raw": raw}
+
+
+# =========================
+# SIDEBAR
+# =========================
 
 with st.sidebar:
-    st.title("⚙️ TERMINAL v14")
+    st.title("⚙️ TERMINAL v15 PRO")
 
     api_key = st.secrets.get("OPENAI_API_KEY")
     if api_key:
@@ -224,24 +295,27 @@ if not api_key:
     st.info("Wprowadź OpenAI API Key w pasku bocznym lub dodaj do Secrets.")
     st.stop()
 
-client = OpenAI(api_key=api_key)
-tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+ai = AIClient(api_key=api_key, model=ai_model)
 
 if "portfolio" not in st.session_state:
     st.session_state["portfolio"] = []
 if "trades_log" not in st.session_state:
     st.session_state["trades_log"] = []
 
-# --- POBRANIE DANYCH GŁÓWNYCH ---
+tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+
+# =========================
+# POBRANIE DANYCH
+# =========================
 
 data_map = {}
 for sym in tickers:
-    d1d = get_yf(sym, "250d", "1d")
-    d15 = get_yf(sym, "5d", "15m")
+    d1d = MarketData.get_yf(sym, "250d", "1d")
+    d15 = MarketData.get_yf(sym, "5d", "15m")
     if d1d is None or d15 is None:
         continue
-    d1d = compute_indicators(d1d)
-    d15 = compute_indicators(d15)
+    d1d = MarketData.compute_indicators(d1d)
+    d15 = MarketData.compute_indicators(d15)
 
     price = float(d15["Close"].iloc[-1])
     prev_close = float(d1d["Close"].iloc[-2])
@@ -260,8 +334,8 @@ for sym in tickers:
     else:
         rec, rec_col = "CZEKAJ", "#8b949e"
 
-    fibo, fib_high, fib_low = fibo_levels(d1d)
-    bt_ema = simple_backtest(d1d, "EMA_CROSS")
+    fibo, fib_high, fib_low = MarketData.fibo_levels(d1d)
+    bt_ema = MarketData.simple_backtest(d1d, "EMA_CROSS")
 
     data_map[sym] = {
         "symbol": sym,
@@ -275,6 +349,7 @@ for sym in tickers:
         "pivot": pivot,
         "tp": price + atr * 1.5,
         "sl": price - atr * 1.2,
+        "atr": float(atr),
         "df_1d": d1d,
         "df_15": d15,
         "fibo": fibo,
@@ -286,7 +361,10 @@ if not data_map:
     st.stop()
 
 symbols_available = list(data_map.keys())
-# --- LAYOUT: TABS ---
+
+# =========================
+# TABS
+# =========================
 
 tab_main, tab_strategy, tab_lab, tab_auto, tab_multi, tab_orderbook, tab_patterns, tab_portfolio = st.tabs([
     "📊 Główny",
@@ -299,7 +377,9 @@ tab_main, tab_strategy, tab_lab, tab_auto, tab_multi, tab_orderbook, tab_pattern
     "📦 Portfolio & Risk"
 ])
 
-# --- TAB MAIN: HEATMAP + MONITORING + REGIME DETECTOR + SZCZEGÓŁY ---
+# =========================
+# TAB MAIN
+# =========================
 
 with tab_main:
     st.subheader("🧊 HEATMAPA RYNKU")
@@ -327,35 +407,6 @@ with tab_main:
         plot_bgcolor="#020617"
     )
     st.plotly_chart(fig_heat, use_container_width=True)
-
-    # --- AI MARKET REGIME DETECTOR ---
-    st.subheader("🧠 AI Market Regime Detector")
-    sym_reg = st.selectbox("Symbol do analizy fazy rynku", symbols_available, key="reg_sym")
-    df_reg = data_map[sym_reg]["df_1d"].tail(200)
-
-    if st.button("Analizuj fazę rynku (AI)", key="reg_btn"):
-        candles = df_reg[["Open", "High", "Low", "Close"]].to_dict(orient="records")
-        prompt = f"""
-        Masz dane OHLC (ostatnie 200 świec dziennych) dla {sym_reg}: {candles}.
-        Określ fazę rynku (np. trend wzrostowy, trend spadkowy, konsolidacja, wysokie zmienności, niska zmienność).
-        Zwróć krótki opis + etykietę w JSON:
-        {{
-          "regime": "trend_up/trend_down/range/volatile/calm",
-          "description": "krótki opis po polsku"
-        }}
-        """
-        resp = client.chat.completions.create(
-            model=ai_model,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        raw = resp.choices[0].message.content
-        try:
-            reg = json.loads(raw)
-        except:
-            start = raw.find("{")
-            end = raw.rfind("}")
-            reg = json.loads(raw[start:end+1]) if start != -1 and end != -1 else {"raw": raw}
-        st.json(reg)
 
     st.subheader("📊 MONITORING RYNKU")
     data_list = list(data_map.values())
@@ -447,7 +498,9 @@ with tab_main:
 
         st.markdown('</div>', unsafe_allow_html=True)
 
-# --- TAB STRATEGIE & BACKTEST ---
+# =========================
+# TAB STRATEGIE & BACKTEST
+# =========================
 
 with tab_strategy:
     st.subheader("🧮 Panel strategii & Backtest")
@@ -456,7 +509,7 @@ with tab_strategy:
         sym = st.selectbox("Symbol", symbols_available, key="strat_sym")
         strat = st.selectbox("Strategia", ["EMA_CROSS", "RSI", "MACD"], key="strat_type")
         df = data_map[sym]["df_1d"]
-        bt_res = simple_backtest(df, strat)
+        bt_res = MarketData.simple_backtest(df, strat)
         st.write(f"**Wynik backtestu ({strat}):**")
         st.write(f"- Zwrot: {bt_res['total_return']:.2f}%")
         st.write(f"- Max DD: {bt_res['max_drawdown']:.2f}%")
@@ -474,25 +527,16 @@ with tab_strategy:
             - indicators (lista nazw wskaźników)
             Zwróć TYLKO JSON.
             """
-            resp = client.chat.completions.create(
-                model=ai_model,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            raw = resp.choices[0].message.content
-            try:
-                js = json.loads(raw)
-            except:
-                start = raw.find("{")
-                end = raw.rfind("}")
-                js = json.loads(raw[start:end+1]) if start != -1 and end != -1 else {"raw": raw}
+            js = ai.chat_json(prompt)
             st.json(js)
 
-# --- TAB AI STRATEGY LAB (z AUTO‑OPTIMIZER) ---
+# =========================
+# TAB AI STRATEGY LAB
+# =========================
 
 with tab_lab:
     st.subheader("🧪 AI Strategy Lab — generator, tester, Pine Script, Auto‑Optimizer")
 
-    # 1. GENERATOR STRATEGII
     st.markdown("### 🧠 Generuj strategię AI (JSON)")
     if st.button("Generuj strategię AI", key="lab_gen"):
         prompt = """
@@ -506,24 +550,11 @@ with tab_lab:
         - timeframe (np. 1m, 5m, 15m, 1h, 1d)
         Zwróć TYLKO JSON.
         """
-        resp = client.chat.completions.create(
-            model=ai_model,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        raw = resp.choices[0].message.content
-        try:
-            js = json.loads(raw)
-        except:
-            start = raw.find("{")
-            end = raw.rfind("}")
-            js = json.loads(raw[start:end+1]) if start != -1 and end != -1 else {"raw": raw}
-        st.session_state["lab_strategy"] = js
+        st.session_state["lab_strategy"] = ai.chat_json(prompt)
 
-    # 2. PODGLĄD STRATEGII
     if "lab_strategy" in st.session_state:
         st.json(st.session_state["lab_strategy"])
 
-        # 3. EDYTOR STRATEGII
         st.markdown("### ✏️ Edytuj strategię AI")
         edited = st.text_area(
             "Edytuj JSON strategii",
@@ -538,9 +569,7 @@ with tab_lab:
             except:
                 st.error("Błąd w JSON.")
 
-        # 4. TESTER STRATEGII
         st.markdown("### 🧪 Przetestuj strategię AI na danych")
-
         sym_lab = st.selectbox("Symbol", symbols_available, key="lab_sym_test")
         df_lab = data_map[sym_lab]["df_1d"]
 
@@ -549,7 +578,6 @@ with tab_lab:
             df_bt = df_lab.copy()
             df_bt["signal"] = 0
 
-            # --- Interpretacja wskaźników ---
             if "EMA" in " ".join(strat.get("indicators", [])):
                 df_bt["EMA20"] = df_bt["Close"].ewm(span=20).mean()
                 df_bt["EMA50"] = df_bt["Close"].ewm(span=50).mean()
@@ -557,11 +585,10 @@ with tab_lab:
                 df_bt.loc[df_bt["EMA20"] < df_bt["EMA50"], "signal"] = -1
 
             if "RSI" in " ".join(strat.get("indicators", [])):
-                df_bt["RSI"] = compute_indicators(df_bt)["RSI"]
+                df_bt["RSI"] = MarketData.compute_indicators(df_bt)["RSI"]
                 df_bt.loc[df_bt["RSI"] < 30, "signal"] = 1
                 df_bt.loc[df_bt["RSI"] > 70, "signal"] = -1
 
-            # --- Backtest ---
             df_bt["position"] = df_bt["signal"].shift(1).fillna(0)
             df_bt["ret"] = df_bt["Close"].pct_change().fillna(0)
             df_bt["strategy"] = df_bt["position"] * df_bt["ret"]
@@ -571,9 +598,7 @@ with tab_lab:
             st.write(f"Zwrot: {(equity.iloc[-1]-1)*100:.2f}%")
             st.write(f"Max DD: {(equity.cummax()-equity).max()*100:.2f}%")
 
-        # 5. AUTO‑OPTIMIZER
         st.markdown("### 🧬 AI Auto‑Optimizer (popraw strategię)")
-
         if st.button("Optymalizuj strategię AI", key="lab_opt"):
             prompt = f"""
             Masz strategię w JSON i chcesz ją poprawić pod kątem:
@@ -584,122 +609,127 @@ with tab_lab:
             {json.dumps(st.session_state["lab_strategy"], indent=4)}
             Zwróć NOWĄ strategię w tym samym formacie JSON.
             """
-            resp = client.chat.completions.create(
-                model=ai_model,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            raw = resp.choices[0].message.content
-            try:
-                js_opt = json.loads(raw)
-            except:
-                start = raw.find("{")
-                end = raw.rfind("}")
-                js_opt = json.loads(raw[start:end+1]) if start != -1 and end != -1 else {"raw": raw}
-
-            st.session_state["lab_strategy"] = js_opt
+            st.session_state["lab_strategy"] = ai.chat_json(prompt)
             st.success("Strategia zoptymalizowana przez AI.")
-            st.json(js_opt)
+            st.json(st.session_state["lab_strategy"])
 
-        # 6. GENERATOR PINE SCRIPT
         st.markdown("### 📜 Generuj Pine Script z tej strategii")
-
         if st.button("Generuj Pine Script", key="lab_pine"):
             prompt = f"""
             Zamień tę strategię JSON na kod Pine Script v5:
             {json.dumps(st.session_state["lab_strategy"], indent=4)}
             Zwróć TYLKO kod Pine Script.
             """
-            resp = client.chat.completions.create(
-                model=ai_model,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            st.code(resp.choices[0].message.content, language="pine")
+            code = ai.chat(prompt)
+            st.code(code, language="pine")
 
-# --- TAB AI AUTO-TRADER ---
+# =========================
+# TAB AI AUTO-TRADER (z RiskEngine)
+# =========================
 
 with tab_auto:
-    st.subheader("🤖 AI Auto‑Trader (wirtualny)")
-    sym = st.selectbox("Symbol do AI Auto‑Trader", symbols_available, key="auto_sym")
-    d = data_map[sym]
+    st.subheader("🤖 AI Auto‑Trader (wirtualny, z RiskEngine)")
 
-    if st.button("🧠 Generuj sygnał AI (JSON)", key="auto_ai_sig"):
-        prompt = f"""
-        Jesteś agresywnym traderem. Oceń instrument {d['symbol']}:
-        Cena: {d['price']:.2f}
-        Zmiana %: {d['change']:.2f}
-        Trend: {d['trend']}
-        RSI: {d['rsi']:.1f}
-        Pivot: {d['pivot']:.2f}
-        TP: {d['tp']:.2f}
-        SL: {d['sl']:.2f}
-        Zwróć TYLKO JSON:
-        {{
-          "symbol": "...",
-          "bias": "long/short/neutral",
-          "confidence": 1-10,
-          "risk_score": 1-10,
-          "action": "buy/sell/wait",
-          "comment": "krótki komentarz"
-        }}
-        """
-        resp = client.chat.completions.create(
-            model=ai_model,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        raw = resp.choices[0].message.content
-        try:
-            sig = json.loads(raw)
-        except:
-            start = raw.find("{")
-            end = raw.rfind("}")
-            sig = json.loads(raw[start:end+1]) if start != -1 and end != -1 else {"raw": raw}
-        st.session_state["last_ai_signal"] = sig
+    col_a1, col_a2 = st.columns(2)
+    with col_a1:
+        sym = st.selectbox("Symbol do AI Auto‑Trader", symbols_available, key="auto_sym")
+        d = data_map[sym]
 
-        msg = f"AI {sig.get('action','?').upper()} {sym} | bias {sig.get('bias')} | risk {sig.get('risk_score')}"
-        st.session_state["alerts"].append(msg)
-        if webhook_url:
-            send_webhook(webhook_url, {"type": "ai_signal", "symbol": sym, "signal": sig})
-        if tg_token and tg_chat_id:
-            send_telegram(tg_token, tg_chat_id, msg)
+        account_size = st.number_input("Wielkość konta (RiskEngine)", value=10000.0, step=100.0, key="auto_acc")
+        risk_pct = st.slider("Ryzyko na trade (%)", 0.1, 5.0, 1.0, 0.1, key="auto_risk")
+        risk_engine = RiskEngine(account_size)
 
-    if "last_ai_signal" in st.session_state:
-        st.markdown("### Ostatni sygnał AI")
-        st.json(st.session_state["last_ai_signal"])
+        if st.button("🧠 Generuj sygnał AI (JSON)", key="auto_ai_sig"):
+            prompt = f"""
+            Jesteś agresywnym traderem. Oceń instrument {d['symbol']}:
+            Cena: {d['price']:.2f}
+            Zmiana %: {d['change']:.2f}
+            Trend: {d['trend']}
+            RSI: {d['rsi']:.1f}
+            Pivot: {d['pivot']:.2f}
+            TP: {d['tp']:.2f}
+            SL: {d['sl']:.2f}
+            Zwróć TYLKO JSON:
+            {{
+              "symbol": "...",
+              "bias": "long/short/neutral",
+              "confidence": 1-10,
+              "risk_score": 1-10,
+              "action": "buy/sell/wait",
+              "comment": "krótki komentarz"
+            }}
+            """
+            sig = ai.chat_json(prompt)
+            st.session_state["last_ai_signal"] = sig
 
-        col_a1, col_a2 = st.columns(2)
-        with col_a1:
+            msg = f"AI {sig.get('action','?').upper()} {sym} | bias {sig.get('bias')} | risk {sig.get('risk_score')}"
+            st.session_state["alerts"].append(msg)
+            if webhook_url:
+                AlertEngine.send_webhook(webhook_url, {"type": "ai_signal", "symbol": sym, "signal": sig})
+            if tg_token and tg_chat_id:
+                AlertEngine.send_telegram(tg_token, tg_chat_id, msg)
+
+        if "last_ai_signal" in st.session_state:
+            sig = st.session_state["last_ai_signal"]
+            st.markdown("### Ostatni sygnał AI")
+            st.json(sig)
+
+            # RiskEngine: sizing + R-multiple
+            atr = d["atr"]
+            sizing = risk_engine.position_size_atr(
+                price=d["price"],
+                atr=atr,
+                risk_pct=risk_pct,
+                atr_mult=1.5
+            )
+            direction = "long" if sig.get("bias") == "long" else "short"
+            r_mult = risk_engine.compute_r_multiple(
+                entry=d["price"],
+                stop=d["sl"],
+                target=d["tp"],
+                direction=direction
+            )
+
+            st.markdown("### RiskEngine (na podstawie ATR)")
+            st.write(f"ATR(14): {atr:.2f}")
+            st.write(f"Stop distance (1.5 ATR): {sizing['stop_distance']:.2f}")
+            st.write(f"Ryzyko nominalne: {sizing['risk_amount']:.2f}")
+            st.write(f"Proponowany size (szt.): {sizing['size']:.4f}")
+            st.write(f"R-multiple (TP/SL): {r_mult:.2f}" if r_mult is not None else "R-multiple: n/a")
+
             if st.button("📥 Zasymuluj trade (dodaj do logu)", key="auto_add_trade"):
-                sig = st.session_state["last_ai_signal"]
                 trade = {
                     "time": datetime.utcnow().isoformat(),
                     "symbol": sym,
                     "price": d["price"],
                     "action": sig.get("action"),
                     "bias": sig.get("bias"),
-                    "risk": sig.get("risk_score")
+                    "risk": sig.get("risk_score"),
+                    "size": sizing["size"],
+                    "risk_pct": risk_pct,
+                    "r_multiple": r_mult
                 }
                 st.session_state["trades_log"].append(trade)
-        with col_a2:
-            st.write("Log transakcji (ostatnie 10):")
-            st.json(st.session_state["trades_log"][-10:])
 
-    st.markdown("### 🧾 AI → TradingView Pine Script")
-    if st.button("🧠 Generuj Pine Script dla strategii EMA/RSI", key="ai_pine"):
-        prompt = """
-        Napisz strategię w Pine Script v5 dla TradingView.
-        Strategia:
-        - EMA20/EMA50 cross
-        - RSI 14 jako filtr (nie kupuj gdy RSI>70, nie sprzedawaj gdy RSI<30)
-        Zwróć TYLKO kod Pine Script, bez komentarzy tekstowych poza kodem.
-        """
-        resp = client.chat.completions.create(
-            model=ai_model,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        code = resp.choices[0].message.content
-        st.code(code, language="pine")
+    with col_a2:
+        st.write("Log transakcji (ostatnie 10):")
+        st.json(st.session_state["trades_log"][-10:])
 
-# --- TAB MULTI-TIMEFRAME ---
+        st.markdown("### 🧾 AI → TradingView Pine Script")
+        if st.button("🧠 Generuj Pine Script dla strategii EMA/RSI", key="ai_pine"):
+            prompt = """
+            Napisz strategię w Pine Script v5 dla TradingView.
+            Strategia:
+            - EMA20/EMA50 cross
+            - RSI 14 jako filtr (nie kupuj gdy RSI>70, nie sprzedawaj gdy RSI<30)
+            Zwróć TYLKO kod Pine Script, bez komentarzy tekstowych poza kodem.
+            """
+            code = ai.chat(prompt)
+            st.code(code, language="pine")
+
+# =========================
+# TAB MULTI-TIMEFRAME
+# =========================
 
 with tab_multi:
     st.subheader("⏱️ Dashboard Multi‑Timeframe")
@@ -716,11 +746,11 @@ with tab_multi:
     mtf_tabs = st.tabs(list(tf_map.keys()))
     for (tf, (period, interval)), tab in zip(tf_map.items(), mtf_tabs):
         with tab:
-            df = get_yf(sym, period, interval)
+            df = MarketData.get_yf(sym, period, interval)
             if df is None:
                 st.write("Brak danych.")
                 continue
-            df = compute_indicators(df)
+            df = MarketData.compute_indicators(df)
             df = df.tail(200)
 
             fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
@@ -750,7 +780,9 @@ with tab_multi:
             fig.update_yaxes(showgrid=False)
             st.plotly_chart(fig, use_container_width=True)
 
-# --- TAB ORDERBOOK (BINANCE) ---
+# =========================
+# TAB ORDERBOOK
+# =========================
 
 with tab_orderbook:
     st.subheader("📚 Orderbook (Binance spot)")
@@ -789,13 +821,15 @@ with tab_orderbook:
         except Exception as e:
             st.error(f"Błąd pobierania orderbook: {e}")
 
-# --- TAB FORMACJE ŚWIECOWE + AI ---
+# =========================
+# TAB FORMACJE ŚWIECOWE
+# =========================
 
 with tab_patterns:
     st.subheader("🕯️ Formacje świecowe + AI opis")
     sym = st.selectbox("Symbol", symbols_available, key="pat_sym")
     df = data_map[sym]["df_1d"]
-    patterns = detect_candle_patterns(df)
+    patterns = MarketData.detect_candle_patterns(df)
     st.write("Wykryte formacje (heurystycznie):")
     if patterns:
         for p in patterns:
@@ -810,13 +844,12 @@ with tab_patterns:
         Opisz sytuację świecową, potencjalne formacje i co może oznaczać dla agresywnego tradera.
         Krótko, konkretnie, po polsku.
         """
-        resp = client.chat.completions.create(
-            model=ai_model,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        st.info(resp.choices[0].message.content)
+        desc = ai.chat(prompt)
+        st.info(desc)
 
-# --- TAB PORTFOLIO & RISK ---
+# =========================
+# TAB PORTFOLIO & RISK
+# =========================
 
 with tab_portfolio:
     st.subheader("📦 Portfolio & Risk Management (ATR sizing)")
@@ -829,22 +862,27 @@ with tab_portfolio:
         d = data_map[sym]
         df = d["df_1d"]
         atr = (df["High"] - df["Low"]).rolling(14).mean().iloc[-1]
-        stop_distance = atr * 1.5
-        risk_amount = account_size * (risk_pct / 100)
-        position_size = risk_amount / stop_distance if stop_distance > 0 else 0
+
+        risk_engine = RiskEngine(account_size)
+        sizing = risk_engine.position_size_atr(
+            price=d["price"],
+            atr=atr,
+            risk_pct=risk_pct,
+            atr_mult=1.5
+        )
 
         st.write(f"ATR(14): {atr:.2f}")
-        st.write(f"Stop distance (1.5 ATR): {stop_distance:.2f}")
-        st.write(f"Ryzyko nominalne: {risk_amount:.2f}")
-        st.write(f"Proponowany size (szt.): {position_size:.4f}")
+        st.write(f"Stop distance (1.5 ATR): {sizing['stop_distance']:.2f}")
+        st.write(f"Ryzyko nominalne: {sizing['risk_amount']:.2f}")
+        st.write(f"Proponowany size (szt.): {sizing['size']:.4f}")
 
         if st.button("➕ Dodaj pozycję do portfolio", key="add_pos"):
             pos = {
                 "symbol": sym,
                 "price": d["price"],
-                "size": position_size,
+                "size": sizing["size"],
                 "atr": float(atr),
-                "stop_distance": float(stop_distance),
+                "stop_distance": sizing["stop_distance"],
                 "risk_pct": risk_pct
             }
             st.session_state["portfolio"].append(pos)
