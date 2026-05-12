@@ -1,794 +1,610 @@
+# kombajn_streamlit.py
+
 import os
-import pandas as pd
+import time
+import math
+from datetime import datetime
+from typing import Optional, Dict, Any, List
+
 import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # safe backend for servers
+import matplotlib.pyplot as plt
+
+# Optional: seaborn for nicer style if available
+try:
+    import seaborn as sns
+    sns.set_style("darkgrid")
+except Exception:
+    plt.style.use('seaborn-darkgrid')
+
+# Optional OpenAI client (only used if key provided and user enables AI)
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
+
 import streamlit as st
-import plotly.graph_objects as go
-from openai import OpenAI
 
-# ====================== KONFIGURACJA AI ======================
+# ---------------------------
+# Configuration / Defaults
+# ---------------------------
+st.set_page_config(page_title="Kombajn Scanner", layout="wide")
 
-MODEL_TURBO = "gpt-4o"          # AI Turbo 3.0
-MODEL_NEWS = "gpt-4o-mini"      # AI News
-MODEL_RISK = "gpt-4.1"          # AI Risk Check
-MODEL_PATTERN = "gpt-4o-mini"   # AI Pattern Insight
+CHART_DIR = "charts"
+LOG_CSV = "scanner_log.csv"
+PREF_FILE = "ai_model_pref.txt"
+os.makedirs(CHART_DIR, exist_ok=True)
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Default tickers (replace with your full list)
+DEFAULT_TICKERS = [
+    "STX.WA", "ACG.WA", "ACP.WA", "ACT.WA"
+]
 
-# ====================== AUTO-SEKTORY ======================
-
-AUTO_SECTOR_MAP = {
-    # --- GPW (przykłady) ---
-    "PKN.WA": "Energia",
-    "PKO.WA": "Finanse",
-    "PEO.WA": "Finanse",
-    "CDR.WA": "Gaming",
-    "11B.WA": "Gaming",
-    "DNP.WA": "Technologia",
-    "KGH.WA": "Surowce",
-    "JSW.WA": "Surowce",
-    "LPP.WA": "Konsumpcja cyclical",
-
-    # --- USA tech / AI / semi ---
-    "NVDA": "AI / Semiconductors",
-    "AMD": "AI / Semiconductors",
-    "SMCI": "AI / Semiconductors",
-    "AVGO": "AI / Semiconductors",
-    "ASML": "AI / Semiconductors",
-    "TSM": "AI / Semiconductors",
-    "QCOM": "AI / Semiconductors",
-
-    # --- Crypto miners ---
-    "HIVE": "Crypto miners",
-    "MARA": "Crypto miners",
-    "RIOT": "Crypto miners",
-    "CLSK": "Crypto miners",
-    "IREN": "Crypto miners",
-    "WULF": "Crypto miners",
+# Available AI models (editable)
+AVAILABLE_MODELS = {
+    "gpt-4o": "High quality, general purpose",
+    "gpt-4o-large": "High capacity",
+    "gpt-4o-16k": "Larger context 16k",
+    "gpt-4o-32k": "Very large context 32k",
+    "gpt-4o-mini": "Faster and cheaper",
+    "gpt-4o-realtime": "Low-latency (if available)"
 }
 
-def get_auto_sector(symbol: str) -> str:
-    if symbol in AUTO_SECTOR_MAP:
-        return AUTO_SECTOR_MAP[symbol]
-    if symbol.endswith(".WA"):
-        return "GPW / Inne"
-    if symbol in ["SPY", "QQQ", "DIA"]:
-        return "ETF Akcyjne"
-    if symbol in ["GLD", "SLV"]:
-        return "ETF Surowcowe"
-    if symbol in ["BTC-USD", "ETH-USD"]:
-        return "Krypto"
-    return "Inne"
-
-# ====================== PRESETY (STABILNE, STATYCZNE) ======================
-
-def preset_gpw_spekula():
-    # tu możesz później podmienić na swoje spekuły
-    return [
-        "HRT.WA", "CFS.WA", "PRT.WA", "ATT.WA", "STX.WA",
-        "PUR.WA", "BCS.WA", "KCH.WA", "GTN.WA", "LBW.WA",
-        "PGV.WA", "HPE.WA", "DNS.WA", "ZUK.WA", "VVD.WA",
-        "MLN.WA", "MER.WA", "APS.WA", "NVG.WA"
-    ]
-
-def preset_usa_biotech():
-    return [
-        "IOVA", "PLRX", "HUMA", "TCRX", "GOSS", "MREO", "ADTX"
-    ]
-
-def preset_ai_semiconductors():
-    return ["NVDA", "AMD", "SMCI", "AVGO", "ASML", "TSM", "QCOM"]
-
-def preset_crypto_miners():
-    return ["HIVE", "MARA", "RIOT", "CLSK", "IREN", "WULF"]
-
-# ====================== DANE RYNKOWE ======================
-
-def get_price_data(symbol: str, period: str = "5d", interval: str = "1h") -> pd.DataFrame:
-    df = yf.download(symbol, period=period, interval=interval, progress=False)
-    if df.empty:
-        return pd.DataFrame()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df.astype(float).dropna()
-
-def get_bid_ask(symbol: str):
+# ---------------------------
+# Utility functions
+# ---------------------------
+def safe_float(x) -> Optional[float]:
     try:
-        t = yf.Ticker(symbol)
-        info = t.info or {}
-        bid = info.get("bid", None)
-        ask = info.get("ask", None)
-        if not bid or not ask:
-            return None, None, None
-        mid = (bid + ask) / 2
-        spread_pct = (ask - bid) / mid * 100 if mid else None
-        return float(bid), float(ask), float(spread_pct)
-    except Exception:
-        return None, None, None
-
-def compute_entry_risk(volume, spread_pct):
-    if volume >= 2_000_000:
-        liquidity = "WYSOKA"
-    elif volume >= 500_000:
-        liquidity = "ŚREDNIA"
-    else:
-        liquidity = "NISKA"
-
-    if spread_pct is None:
-        spread_rating = "NIEZNANY"
-    elif spread_pct < 0.5:
-        spread_rating = "DOBRY"
-    elif spread_pct < 2:
-        spread_rating = "OK"
-    else:
-        spread_rating = "SŁABY"
-
-    if liquidity == "WYSOKA" and spread_pct and spread_pct < 1:
-        slippage = "NISKIE"
-    elif liquidity == "ŚREDNIA" or (spread_pct and 1 <= spread_pct <= 3):
-        slippage = "ŚREDNIE"
-    else:
-        slippage = "WYSOKIE"
-
-    return liquidity, spread_rating, slippage
-
-def get_premarket(symbol: str):
-    try:
-        info = yf.Ticker(symbol).info
-        pre = info.get("preMarketPrice", None)
-        last = info.get("regularMarketPreviousClose", None)
-        if pre and last:
-            return (pre - last) / last * 100
-        return None
+        if x is None:
+            return None
+        if isinstance(x, (list, tuple, np.ndarray, pd.Series)):
+            # prefer last element for Series, first for others
+            if isinstance(x, pd.Series):
+                return float(x.iloc[-1])
+            return float(x[0])
+        return float(x)
     except Exception:
         return None
 
-# ====================== SL / TP ======================
+def safe_round(x, ndigits=6):
+    try:
+        return round(float(x), ndigits)
+    except Exception:
+        return None
 
-def compute_sl_tp(last, atr, trend):
-    if not last or not atr:
-        return None, None
-    sl = (last - atr * 1.5, last - atr * 1.0)
-    tp = (last + atr * 2.0, last + atr * 3.0)
-    return sl, tp
+def append_log_csv(row: Dict[str, Any], filename: str = LOG_CSV):
+    df_row = pd.DataFrame([row])
+    header = not os.path.exists(filename)
+    df_row.to_csv(filename, mode='a', index=False, header=header)
 
-# ====================== METRYKI ======================
+def load_model_pref_from_file(filename: str = PREF_FILE) -> Optional[str]:
+    try:
+        if os.path.exists(filename):
+            with open(filename, "r", encoding="utf-8") as f:
+                return f.read().strip()
+    except Exception:
+        pass
+    return None
 
-def compute_metrics(symbol):
-    df = get_price_data(symbol)
-    if df.empty or len(df) < 3:
-        return {
-            "Symbol": symbol,
-            "LastPrice": 0,
-            "Change": 0,
-            "Volume": 0,
-            "ATR": 0,
-            "Trend": "BRAK",
-            "Signal": "NEUTRAL",
-            "MomentumScore": 0,
-            "VolatilityScore": 0,
-            "TrendStrength": 0,
-            "RiskScore": 50,
-            "SetupScore": 0,
-            "TrendScore": 0,
-            "TrendHealth": "NIEZNANY",
-            "TrendConfidence": "NIEZNANE",
-            "TrendReversalRisk": "NIEZNANE",
-            "SL_Low": None,
-            "SL_High": None,
-            "TP_Low": None,
-            "TP_High": None,
-            "Bid": None,
-            "Ask": None,
-            "SpreadPct": None,
-            "Liquidity": "NIEZNANA",
-            "SpreadRating": "NIEZNANY",
-            "Slippage": "NIEZNANE",
-            "Sector": get_auto_sector(symbol),
-        }
+def save_model_pref_to_file(model: str, filename: str = PREF_FILE):
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(model)
+    except Exception:
+        pass
 
-    close = df["Close"]
-    high = df["High"]
-    low = df["Low"]
-    volume = df["Volume"]
+# ---------------------------
+# Technical indicators
+# ---------------------------
+def calculate_rsi(series: pd.Series, window: int = 14) -> pd.Series:
+    if len(series) < window:
+        return pd.Series([50] * len(series), index=series.index)
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(window=window).mean()
+    loss = -delta.clip(upper=0).rolling(window=window).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
-    last = float(close.iloc[-1])
-    prev = float(close.iloc[-2])
-    change = (last - prev) / prev * 100 if prev else 0
+def sma(series: pd.Series, window: int) -> pd.Series:
+    return series.rolling(window=window).mean()
 
-    tr = pd.concat(
-        [
-            (high - low),
-            (high - close.shift()).abs(),
-            (low - close.shift()).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    atr = tr.rolling(14).mean().iloc[-1]
+def ema(series: pd.Series, window: int) -> pd.Series:
+    return series.ewm(span=window, adjust=False).mean()
 
-    ema20 = close.ewm(span=20).mean().iloc[-1]
-    ema50 = close.ewm(span=50).mean().iloc[-1]
+def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+    ema_fast = ema(series, fast)
+    ema_slow = ema(series, slow)
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
 
-    if last > ema20 > ema50:
+def slope_of_series(series: pd.Series, n: int = 10) -> float:
+    if len(series) < n:
+        return 0.0
+    y = series[-n:].values
+    x = np.arange(len(y))
+    if np.std(y) == 0:
+        return 0.0
+    y_scaled = (y - y.mean()) / (y.std() if y.std() != 0 else 1)
+    coeffs = np.polyfit(x, y_scaled, 1)
+    return float(coeffs[0])
+
+def calculate_adx(df: pd.DataFrame, n: int = 14) -> float:
+    # df must contain High, Low, Close
+    try:
+        high = df['High']
+        low = df['Low']
+        close = df['Close']
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+        tr1 = high - low
+        tr2 = (high - close.shift()).abs()
+        tr3 = (low - close.shift()).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=n).mean()
+        plus_di = 100 * (plus_dm.rolling(window=n).sum() / atr.replace(0, np.nan))
+        minus_di = 100 * (minus_dm.rolling(window=n).sum() / atr.replace(0, np.nan))
+        dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)) * 100
+        adx = dx.rolling(window=n).mean()
+        return float(adx.iloc[-1]) if not adx.isna().all() else 0.0
+    except Exception:
+        return 0.0
+
+def bollinger_bands(series: pd.Series, window: int = 20, n_std: int = 2):
+    ma = series.rolling(window=window).mean()
+    std = series.rolling(window=window).std()
+    upper = ma + n_std * std
+    lower = ma - n_std * std
+    width = (upper - lower) / ma.replace(0, np.nan)
+    return upper, lower, width
+
+def fib_levels_from_series(series: pd.Series) -> Dict[str, float]:
+    high = float(series.max())
+    low = float(series.min())
+    diff = high - low if high != low else 1.0
+    levels = {
+        "0.0": low,
+        "23.6": high - 0.236 * diff,
+        "38.2": high - 0.382 * diff,
+        "50.0": high - 0.5 * diff,
+        "61.8": high - 0.618 * diff,
+        "100.0": high
+    }
+    return levels
+
+def fib_proximity_level(price: float, levels: Dict[str, float]) -> Dict[str, Any]:
+    diffs = {k: abs(price - v) / (v if v != 0 else 1) for k, v in levels.items()}
+    nearest = min(diffs.items(), key=lambda x: x[1])
+    rel_diff = nearest[1]
+    if rel_diff < 0.01:
+        cls = "LOW"
+    elif rel_diff < 0.03:
+        cls = "MEDIUM"
+    else:
+        cls = "HIGH"
+    return {"nearest_level": nearest[0], "rel_diff_pct": rel_diff * 100, "fibo_risk": cls}
+
+def assess_risk(rsi: float, rvol: float, slope: float, macd_hist: float,
+                bid: Optional[float], ask: Optional[float], fib_info: Dict[str, Any],
+                adx: float, boll_width: Optional[float]) -> Dict[str, Any]:
+    score = 0.0
+    # RSI
+    if rsi < 25 or rsi > 75:
+        score += 1.0
+    elif rsi < 35 or rsi > 65:
+        score += 0.5
+    # rvol
+    if rvol > 3.0:
+        score += 1.5
+    elif rvol > 1.5:
+        score += 0.8
+    elif rvol > 1.0:
+        score += 0.3
+    # slope and macd_hist
+    if slope < -0.02:
+        score += 1.0
+    elif slope < -0.005:
+        score += 0.5
+    if macd_hist < 0:
+        score += 0.5
+    # spread
+    if bid is not None and ask is not None and bid > 0:
+        spread_pct = abs(ask - bid) / bid
+        if spread_pct > 0.02:
+            score += 1.0
+        elif spread_pct > 0.005:
+            score += 0.4
+    # fib proximity
+    fib_risk = fib_info.get("fibo_risk", "MEDIUM")
+    if fib_risk == "HIGH":
+        score += 1.0
+    elif fib_risk == "MEDIUM":
+        score += 0.4
+    # ADX
+    if adx >= 25:
+        if slope > 0 and macd_hist > 0:
+            score -= 0.8
+        else:
+            score += 0.6
+    elif adx < 20:
+        score += 0.3
+    # Bollinger width
+    if boll_width is not None and not math.isnan(boll_width):
+        if boll_width > 0.08:
+            score += 1.0
+        elif boll_width > 0.04:
+            score += 0.4
+    # classify
+    if score <= 1.5:
+        category = "LOW"
+    elif score <= 3.0:
+        category = "MEDIUM"
+    else:
+        category = "HIGH"
+    return {"score": round(score, 2), "category": category}
+
+# ---------------------------
+# Plotting
+# ---------------------------
+def plot_and_save(ticker: str, df: pd.DataFrame, levels: Dict[str, float],
+                  fib_info: Dict[str, Any], filename: str):
+    close = df['Close']
+    macd_line, signal_line, hist = macd(close)
+    upper, lower, width = bollinger_bands(close)
+    sma5 = sma(close, 5)
+    sma20 = sma(close, 20)
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True,
+                             gridspec_kw={'height_ratios': [3, 1.2, 0.8]})
+    ax_price, ax_macd, ax_adx = axes
+
+    # Price + SMAs + Bollinger
+    ax_price.plot(df.index, close, label='Close', color='black', linewidth=1)
+    ax_price.plot(df.index, sma5, label='SMA5', color='tab:green', linewidth=0.9)
+    ax_price.plot(df.index, sma20, label='SMA20', color='tab:blue', linewidth=0.9)
+    ax_price.plot(df.index, upper, label='BollUpper', color='tab:orange', linestyle='--', linewidth=0.8)
+    ax_price.plot(df.index, lower, label='BollLower', color='tab:orange', linestyle='--', linewidth=0.8)
+
+    for k, v in levels.items():
+        ax_price.axhline(v, color='gray', linestyle=':', linewidth=0.7)
+    nearest_level = fib_info.get('nearest_level')
+    if nearest_level and nearest_level in levels:
+        y = levels[nearest_level]
+        ax_price.annotate(f"Nearest Fibo {nearest_level}", xy=(df.index[-1], y),
+                          xytext=(-80, 10), textcoords='offset points',
+                          arrowprops=dict(arrowstyle="->", color='gray'), fontsize=8, color='gray')
+
+    ax_price.set_title(f"{ticker}  Close / SMA / Bollinger")
+    ax_price.legend(loc='upper left', fontsize=8)
+
+    # MACD
+    ax_macd.plot(df.index, macd_line, label='MACD', color='tab:purple', linewidth=0.9)
+    ax_macd.plot(df.index, signal_line, label='Signal', color='tab:red', linewidth=0.9)
+    ax_macd.bar(df.index, hist, label='Hist', color=['tab:green' if h >= 0 else 'tab:red' for h in hist], alpha=0.6)
+    ax_macd.legend(loc='upper left', fontsize=8)
+    ax_macd.set_ylabel("MACD")
+
+    # ADX (rolling)
+    try:
+        adx_full = []
+        for i in range(len(df)):
+            if i < 14:
+                adx_full.append(np.nan)
+            else:
+                adx_full.append(calculate_adx(df.iloc[:i+1], n=14))
+        ax_adx.plot(df.index, adx_full, label='ADX', color='tab:cyan', linewidth=0.9)
+        ax_adx.axhline(25, color='gray', linestyle='--', linewidth=0.7)
+        ax_adx.set_ylabel("ADX")
+        ax_adx.legend(loc='upper left', fontsize=8)
+    except Exception:
+        ax_adx.text(0.5, 0.5, "ADX not available", transform=ax_adx.transAxes, ha='center')
+
+    plt.tight_layout()
+    fig.savefig(filename, dpi=150)
+    plt.close(fig)
+
+# ---------------------------
+# Core scanning logic
+# ---------------------------
+def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str],
+                 show_progress: bool = True) -> List[Dict[str, Any]]:
+    results = []
+    total = len(tickers)
+    progress = 0
+    if show_progress:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+    for s in tickers:
+        try:
+            # download intraday 60m for last 30 days
+            df = yf.download(s, period="30d", interval="60m", progress=False)
+            if df.empty or len(df) < 20:
+                if show_progress:
+                    status_text.text(f"Brak danych intraday dla {s} (pomijam)")
+                progress += 1
+                if show_progress:
+                    progress_bar.progress(int(progress / total * 100))
+                continue
+
+            # safe extraction of Close and Volume (handle DataFrame multi-col)
+            _close = df['Close']
+            _vol = df['Volume']
+            close = _close.iloc[:, 0] if isinstance(_close, pd.DataFrame) else _close
+            vol = _vol.iloc[:, 0] if isinstance(_vol, pd.DataFrame) else _vol
+
+            # last price
+            try:
+                c_dzis = float(close.iloc[-1])
+            except Exception:
+                if show_progress:
+                    status_text.text(f"Nie mozna pobrac ceny dla {s} (pomijam)")
+                progress += 1
+                if show_progress:
+                    progress_bar.progress(int(progress / total * 100))
+                continue
+            c_wczoraj = float(close.iloc[-2]) if len(close) >= 2 else c_dzis
+
+            rsi = float(calculate_rsi(close).iloc[-1])
+            rvol = float(vol.iloc[-1] / vol.mean()) if vol.mean() > 0 else 1.0
+            zmiana = ((c_dzis - c_wczoraj) / c_wczoraj) * 100 if c_wczoraj != 0 else 0.0
+
+            # bid/ask safe
+            bid, ask = None, None
+            try:
+                t = yf.Ticker(s)
+                info = t.info or {}
+                raw_bid = info.get('bid') or info.get('bidPrice') or None
+                raw_ask = info.get('ask') or info.get('askPrice') or None
+                bid = safe_float(raw_bid)
+                ask = safe_float(raw_ask)
+            except Exception:
+                bid, ask = None, None
+
+            # indicators
+            trend, details = classify_trend(close)
+            macd_line, signal_line, hist = macd(close)
+            macd_hist = float(hist.iloc[-1]) if len(hist) else 0.0
+            slp = slope_of_series(close, n=10)
+            adx = calculate_adx(df, n=14)
+            upper, lower, width = bollinger_bands(close, window=20, n_std=2)
+            boll_upper = float(upper.iloc[-1]) if not upper.isna().all() else float('nan')
+            boll_lower = float(lower.iloc[-1]) if not lower.isna().all() else float('nan')
+            boll_width = float(width.iloc[-1]) if not width.isna().all() else float('nan')
+
+            levels = fib_levels_from_series(close)
+            fib_info = fib_proximity_level(c_dzis, levels)
+
+            risk = assess_risk(rsi=rsi, rvol=rvol, slope=slp, macd_hist=macd_hist,
+                               bid=bid, ask=ask, fib_info=fib_info, adx=adx, boll_width=boll_width)
+
+            # decide whether to include in report (customizable)
+            show = False
+            if s.upper() == "STX.WA":
+                show = True
+            if rsi < 35 and details.get("sma_short", 999) < details.get("sma_long", -999):
+                show = True
+            if rvol > 3.0:
+                show = True
+
+            if show:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+                chart_file = os.path.join(CHART_DIR, f"{s.replace('/', '_')}_{timestamp}.png")
+                row = {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ticker": s,
+                    "price": safe_round(c_dzis, 6),
+                    "rsi": safe_round(rsi, 3),
+                    "trend": trend,
+                    "slope": safe_round(slp, 6),
+                    "macd_hist": safe_round(macd_hist, 6),
+                    "bid": safe_round(bid, 6),
+                    "ask": safe_round(ask, 6),
+                    "fibo_nearest": fib_info['nearest_level'],
+                    "fibo_rel_pct": round(fib_info['rel_diff_pct'], 3),
+                    "fibo_risk": fib_info['fibo_risk'],
+                    "rvol": round(rvol, 3),
+                    "adx": round(adx, 3),
+                    "boll_upper": safe_round(boll_upper, 6),
+                    "boll_lower": safe_round(boll_lower, 6),
+                    "boll_width": safe_round(boll_width, 6),
+                    "risk_score": risk['score'],
+                    "risk_category": risk['category'],
+                    "change_pct": round(zmiana, 3),
+                    "chart_file": chart_file
+                }
+                append_log_csv(row)
+                # plot and save
+                try:
+                    plot_and_save(s, df, levels, fib_info, chart_file)
+                except Exception:
+                    # continue even if plotting fails
+                    pass
+                results.append(row)
+
+            # progress
+            progress += 1
+            if show_progress:
+                progress_bar.progress(int(progress / total * 100))
+                status_text.text(f"Skanowanie: {s} ({progress}/{total})")
+
+        except Exception as e:
+            # do not break whole loop on single ticker error
+            if show_progress:
+                status_text.text(f"Blad przy {s}: {e}")
+            progress += 1
+            if show_progress:
+                progress_bar.progress(int(progress / total * 100))
+            continue
+
+    if show_progress:
+        status_text.text("Skanowanie zakonczone.")
+    return results
+
+# ---------------------------
+# Helper: classify_trend (kept simple)
+# ---------------------------
+def classify_trend(close_series: pd.Series):
+    short_w, long_w = 5, 20
+    if len(close_series) < long_w:
+        return "UNKNOWN", {}
+    sma_short = sma(close_series, short_w).iloc[-1]
+    sma_long = sma(close_series, long_w).iloc[-1]
+    slp = slope_of_series(close_series, n=10)
+    macd_line, signal_line, hist = macd(close_series)
+    macd_val = macd_line.iloc[-1]
+    signal_val = signal_line.iloc[-1]
+    if sma_short > sma_long and slp > 0.01 and macd_val > signal_val:
         trend = "UP"
-    elif last < ema20 < ema50:
+    elif sma_short < sma_long and slp < -0.01 and macd_val < signal_val:
         trend = "DOWN"
     else:
-        trend = "SIDE"
-
-    signal = "BUY" if trend == "UP" and change > 0 else \
-             "SELL" if trend == "DOWN" and change < 0 else "NEUTRAL"
-
-    vol_last = float(volume.iloc[-1])
-    vol_prev = float(volume.iloc[-2])
-    vol_change = (vol_last - vol_prev) / vol_prev * 100 if vol_prev else 0
-
-    momentum = max(0, min(100, 50 + change * 0.7 + vol_change * 0.3))
-    vol_score = max(0, min(100, (atr / last * 100) * 2)) if last else 0
-    trend_strength = max(0, min(100, abs(ema20 - ema50) / last * 500)) if last else 0
-
-    risk = vol_score
-    setup = max(
-        0,
-        min(
-            100,
-            (
-                momentum * 0.3
-                + trend_strength * 0.3
-                - risk * 0.2
-                + (30 if signal == "BUY" else 20 if signal == "SELL" else 0)
-            ),
-        ),
-    )
-
-    sl, tp = compute_sl_tp(last, atr, trend)
-
-    bid, ask, spread = get_bid_ask(symbol)
-    liquidity, spread_rating, slippage = compute_entry_risk(vol_last, spread)
-
-    return {
-        "Symbol": symbol,
-        "LastPrice": last,
-        "Change": change,
-        "Volume": vol_last,
-        "ATR": atr,
-        "Trend": trend,
-        "Signal": signal,
-        "MomentumScore": momentum,
-        "VolatilityScore": vol_score,
-        "TrendStrength": trend_strength,
-        "RiskScore": risk,
-        "SetupScore": setup,
-        "TrendScore": trend_strength,
-        "TrendHealth": "OK",
-        "TrendConfidence": "ŚREDNIE",
-        "TrendReversalRisk": "NISKIE",
-        "SL_Low": sl[0] if sl else None,
-        "SL_High": sl[1] if sl else None,
-        "TP_Low": tp[0] if tp else None,
-        "TP_High": tp[1] if tp else None,
-        "Bid": bid,
-        "Ask": ask,
-        "SpreadPct": spread,
-        "Liquidity": liquidity,
-        "SpreadRating": spread_rating,
-        "Slippage": slippage,
-        "Sector": get_auto_sector(symbol),
+        trend = "SIDEWAYS"
+    details = {
+        "sma_short": float(sma_short),
+        "sma_long": float(sma_long),
+        "slope": float(slp),
+        "macd": float(macd_val),
+        "macd_signal": float(signal_val),
+        "sma_short_val": float(sma_short),
+        "sma_long_val": float(sma_long),
+        "macd_hist": float(hist.iloc[-1]) if len(hist) else 0.0
     }
+    return trend, details
 
-# ====================== PATTERNY ======================
+# ---------------------------
+# Streamlit UI
+# ---------------------------
+def main_ui():
+    st.title("Kombajn Scanner — intraday 60m")
+    st.markdown("Analiza techniczna: RSI, MACD, ADX, Bollinger, Fibo. Zapis wykresów PNG i log CSV.")
 
-def detect_patterns_for_symbol(symbol: str):
-    df = get_price_data(symbol, "5d", "1h")
-    if df.empty or len(df) < 20:
-        return []
-    patterns = []
-    close = df["Close"]
-    if close.iloc[-1] > close.rolling(20).max().iloc[-2]:
-        patterns.append("📈 Wybicie 20‑okresowego szczytu")
-    if close.iloc[-1] < close.rolling(20).min().iloc[-2]:
-        patterns.append("📉 Wybicie 20‑okresowego dołka")
-    return patterns
+    # Sidebar controls
+    st.sidebar.header("Ustawienia")
+    tickers_input = st.sidebar.text_area("Tickery (oddzielone przecinkiem)", value=",".join(DEFAULT_TICKERS), height=120)
+    tickers = [t.strip() for t in tickers_input.split(",") if t.strip()]
+    st.sidebar.markdown("---")
 
-def detect_patterns_all(symbols):
-    out = {}
-    for s in symbols:
-        pats = detect_patterns_for_symbol(s)
-        if pats:
-            out[s] = pats
-    return out
+    # OpenAI settings
+    openai_key = st.sidebar.text_input("OPENAI_API_KEY (opcjonalne)", type="password", value=os.getenv("OPENAI_API_KEY", ""))
+    use_ai = st.sidebar.checkbox("Włącz AI podsumowanie (opcjonalne)", value=False)
+    saved_model = load_model_pref_from_file() or os.getenv("OPENAI_MODEL", "")
+    chosen_model = saved_model
+    if use_ai:
+        st.sidebar.markdown("Wybierz model AI")
+        model_options = list(AVAILABLE_MODELS.keys())
+        # show saved model first if present
+        if saved_model and saved_model not in model_options:
+            model_options.insert(0, saved_model)
+        chosen_model = st.sidebar.selectbox("Model", options=model_options, index=0 if model_options else 0)
+        if st.sidebar.button("Zapisz preferencję modelu"):
+            save_model_pref_to_file(chosen_model)
+            st.sidebar.success(f"Zapisano preferencję: {chosen_model}")
 
-# ====================== NEWS ======================
+    st.sidebar.markdown("---")
+    st.sidebar.write("Interwał: 60m, okres: 30d (intraday).")
+    run_now = st.sidebar.button("Uruchom skan teraz")
 
-def get_news_for_symbol(symbol: str) -> list[dict]:
-    try:
-        t = yf.Ticker(symbol)
-        news = getattr(t, "news", [])
-        if not news:
-            return []
-        out = []
-        for n in news[:5]:
-            out.append(
-                {
-                    "title": n.get("title", ""),
-                    "publisher": n.get("publisher", ""),
-                    "link": n.get("link", ""),
-                }
-            )
-        return out
-    except Exception:
-        return []
+    st.sidebar.markdown("---")
+    st.sidebar.write("Pliki:")
+    st.sidebar.write(f"- Log CSV: `{LOG_CSV}`")
+    st.sidebar.write(f"- Wykresy: `{CHART_DIR}/`")
 
-# ====================== WYKRES ======================
+    # Main area: run scanner on button
+    if run_now:
+        # initialize OpenAI client if requested
+        client = None
+        MODEL = None
+        if use_ai and openai_key and OpenAI:
+            try:
+                client = OpenAI(api_key=openai_key)
+                MODEL = chosen_model
+            except Exception as e:
+                st.warning(f"Nie mozna zainicjalizowac klienta OpenAI: {e}")
+                client = None
+                MODEL = None
+        elif use_ai and not openai_key:
+            st.warning("Włączono AI, ale nie podano OPENAI_API_KEY. AI zostanie wyłączone.")
+            client = None
+            MODEL = None
 
-def plot_pro_chart(symbol):
-    df = get_price_data(symbol)
-    if df.empty:
-        st.warning(f"Brak danych dla {symbol}")
-        return
+        with st.spinner("Skanowanie..."):
+            results = scan_tickers(tickers, client=client, MODEL=MODEL, show_progress=True)
 
-    fig = go.Figure()
-    fig.add_trace(
-        go.Candlestick(
-            x=df.index,
-            open=df["Open"],
-            high=df["High"],
-            low=df["Low"],
-            close=df["Close"],
-            name="Świece",
-        )
-    )
-
-    ema20 = df["Close"].ewm(span=20).mean()
-    ema50 = df["Close"].ewm(span=50).mean()
-
-    fig.add_trace(go.Scatter(x=df.index, y=ema20, mode="lines", name="EMA20"))
-    fig.add_trace(go.Scatter(x=df.index, y=ema50, mode="lines", name="EMA50"))
-
-    fig.update_layout(
-        template="plotly_dark",
-        height=600,
-        xaxis_rangeslider_visible=False,
-        margin=dict(l=10, r=10, t=30, b=10),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-# ====================== AI FUNKCJE ======================
-
-def ai_turbo_v3(df: pd.DataFrame) -> str:
-    records = df.to_dict(orient="records")
-    prompt = f"""
-Jesteś traderem z prop-desku. Analizujesz TYLKO dane, które naprawdę istnieją w rekordach poniżej.
-Zero wymyślania, zero dopowiadania.
-
-Dane:
-{records}
-
-Dla KAŻDEGO symbolu zrób techniczną analizę:
-
-SYMBOL
-1. Trend i momentum (Trend, TrendScore, MomentumScore, Change).
-2. Zmienność i ryzyko (VolatilityScore, ATR, RiskScore).
-3. Spread, płynność, slippage (SpreadPct, Liquidity, SpreadRating, Slippage).
-4. Setup (SetupScore, Signal, SL/TP jeśli są).
-5. Werdykt:
-   - AGRESYWNE OK
-   - TYLKO DLA DOŚWIADCZONYCH
-   - LEPIEJ ODPUSCIĆ
-
-Odpowiadasz po polsku, krótko, technicznie, bez lania wody.
-"""
-    resp = client.chat.completions.create(
-        model=MODEL_TURBO,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return resp.choices[0].message.content
-
-def ai_news_summary(symbol: str, raw_news: str) -> str:
-    prompt = f"""
-Jesteś traderem intraday z prop-desku. Analizujesz newsy dla {symbol}.
-
-Newsy:
-{raw_news}
-
-Zadanie:
-- określ, czy newsy są pro-wzrostowe, pro-spadkowe czy neutralne,
-- oceń wpływ na zmienność i ryzyko (gap, ruchy po otwarciu),
-- napisz krótko, jak to wpływa na scalping, day-trading i swing.
-
-Po polsku, krótko, technicznie.
-"""
-    resp = client.chat.completions.create(
-        model=MODEL_NEWS,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return resp.choices[0].message.content
-
-def ai_pattern_insight(symbols: list[str]) -> str:
-    pattern_map = detect_patterns_all(symbols)
-    rows = [compute_metrics(s) for s in symbols]
-    df = pd.DataFrame(rows)
-    data = {
-        "patterns": pattern_map,
-        "metrics": df.to_dict(orient="records"),
-    }
-    prompt = f"""
-Jesteś traderem technicznym na prop-desku.
-Masz patterny i metryki:
-
-{data}
-
-Dla KAŻDEGO symbolu z patternem:
-- PATTERN: opisz krótko,
-- WERDYKT: TAK / NIE / TYLKO MAŁA POZYCJA,
-- RYZYKO: główne ryzyko (fałszywe wybicie, brak wolumenu, wysoka zmienność itd.).
-
-Po polsku, krótko, technicznie.
-"""
-    resp = client.chat.completions.create(
-        model=MODEL_PATTERN,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return resp.choices[0].message.content
-
-# ====================== RISK CHECK v2 ======================
-
-def risk_check_v2(df: pd.DataFrame) -> str:
-    output = []
-
-    for _, row in df.iterrows():
-        sym = row["Symbol"]
-        trend = row["Trend"]
-        signal = row["Signal"]
-        risk = row["RiskScore"]
-        vol = row["VolatilityScore"]
-        liq = row["Liquidity"]
-        slip = row["Slippage"]
-        sl_low = row["SL_Low"]
-        sl_high = row["SL_High"]
-        tp_low = row["TP_Low"]
-        tp_high = row["TP_High"]
-
-        if row["Volume"] == 0 or row["ATR"] == 0 or row["LastPrice"] == 0:
-            output.append(
-                f"""### {sym}
-**Kategoria:** Brak danych / pomiń  
-**Powód:** brak wolumenu lub brak zmienności → brak możliwości oceny.  
-"""
-            )
-            continue
-
-        if risk >= 90 and vol >= 90 and liq == "NISKA":
-            output.append(
-                f"""### {sym}
-**Kategoria:** Ekstremalne ryzyko / unikać  
-Trend: {trend}  
-Ryzyko: {risk:.1f}, Zmienność: {vol:.1f}  
-Płynność: {liq}, Slippage: {slip}  
-**Komentarz:** ekstremalna zmienność + niska płynność = fatalne wykonanie, lepiej odpuścić.  
-"""
-            )
-            continue
-
-        if trend == "DOWN" and signal == "SELL":
-            sl_txt = (
-                f"{sl_low:.2f} – {sl_high:.2f}"
-                if sl_low is not None and sl_high is not None
-                else "brak danych"
-            )
-            tp_txt = (
-                f"{tp_low:.2f} – {tp_high:.2f}"
-                if tp_low is not None and tp_high is not None
-                else "brak danych"
-            )
-            output.append(
-                f"""### {sym}
-**Kategoria:** Kandydat do shorta  
-Trend: {trend}  
-Sygnał: {signal}  
-SL: {sl_txt}  
-TP: {tp_txt}  
-Ryzyko: {risk:.1f}, Płynność: {liq}, Slippage: {slip}  
-**Komentarz:** stabilny trend spadkowy, ale uważać na wykonanie i wielkość pozycji.  
-"""
-            )
-            continue
-
-        if trend == "UP" and signal == "BUY" and liq != "NISKA":
-            sl_txt = (
-                f"{sl_low:.2f} – {sl_high:.2f}"
-                if sl_low is not None and sl_high is not None
-                else "brak danych"
-            )
-            tp_txt = (
-                f"{tp_low:.2f} – {tp_high:.2f}"
-                if tp_low is not None and tp_high is not None
-                else "brak danych"
-            )
-            output.append(
-                f"""### {sym}
-**Kategoria:** Kandydat do longa  
-Trend: {trend}  
-Sygnał: {signal}  
-SL: {sl_txt}  
-TP: {tp_txt}  
-Ryzyko: {risk:.1f}, Płynność: {liq}, Slippage: {slip}  
-**Komentarz:** trend wzrostowy, sygnał zgodny, płynność akceptowalna, ale nadal kontroluj ryzyko.  
-"""
-            )
-            continue
-
-        if trend == "SIDE" or signal == "NEUTRAL":
-            output.append(
-                f"""### {sym}
-**Kategoria:** Neutralne / brak przewagi  
-Trend: {trend}, Sygnał: {signal}  
-Ryzyko: {risk:.1f}, Płynność: {liq}  
-**Komentarz:** brak wyraźnej przewagi kierunkowej, lepiej poczekać na klarowniejszy setup.  
-"""
-            )
-            continue
-
-        output.append(
-            f"""### {sym}
-**Kategoria:** Wysokie ryzyko / brak przewagi  
-Trend: {trend}, Sygnał: {signal}  
-Ryzyko: {risk:.1f}, Płynność: {liq}, Slippage: {slip}  
-**Komentarz:** układ nie daje czytelnej przewagi, traktować jako spekulację wysokiego ryzyka.  
-"""
-        )
-
-    return "\n".join(output)
-
-# ====================== CSS ======================
-
-def inject_css():
-    st.markdown(
-        """
-<style>
-body, .stApp {
-    background-color: #020617 !important;
-    color: #e5e5ff !important;
-    font-family: "Segoe UI", system-ui, sans-serif;
-}
-[data-testid="stSidebar"] {
-    background-color: #020617 !important;
-    border-right: 1px solid #111827 !important;
-}
-h1, h2, h3, h4 {
-    color: #f9fafb !important;
-    text-shadow: 0 0 8px #4c1d95;
-}
-.stButton>button {
-    background: linear-gradient(90deg, #111827, #020617) !important;
-    color: #e5e5ff !important;
-    border-radius: 4px !important;
-    border: 1px solid #4c1d95 !important;
-}
-.stButton>button:hover {
-    background: linear-gradient(90deg, #312e81, #111827) !important;
-    border-color: #7c3aed !important;
-}
-</style>
-""",
-        unsafe_allow_html=True,
-    )
-
-# ====================== MAIN ======================
-
-def main():
-    st.set_page_config(page_title="KOMBAJN v6.0 FULL PRO", layout="wide")
-    inject_css()
-    st.title("🔥 KOMBAJN v6.0 — Trend + SL/TP + Bid/Ask + AI + Auto‑Sektory")
-
-    if "symbols" not in st.session_state:
-        st.session_state.symbols = []
-
-    st.sidebar.header("⚙️ Ustawienia")
-
-    preset = st.sidebar.selectbox(
-        "Preset listy spółek:",
-        [
-            "Brak",
-            "GPW spekuła",
-            "USA biotech",
-            "AI / Semiconductors",
-            "Crypto miners",
-        ],
-        index=0,
-    )
-
-    if st.sidebar.button("Załaduj preset"):
-        if preset == "GPW spekuła":
-            st.session_state.symbols = preset_gpw_spekula()
-        elif preset == "USA biotech":
-            st.session_state.symbols = preset_usa_biotech()
-        elif preset == "AI / Semiconductors":
-            st.session_state.symbols = preset_ai_semiconductors()
-        elif preset == "Crypto miners":
-            st.session_state.symbols = preset_crypto_miners()
-
-    symbols_input = st.sidebar.text_input("Dodaj tickery (oddzielone przecinkami):")
-
-    if st.sidebar.button("Dodaj"):
-        for raw in symbols_input.split(","):
-            sym = raw.strip().upper()
-            if sym and sym not in st.session_state.symbols:
-                st.session_state.symbols.append(sym)
-
-    if st.sidebar.button("Wyczyść"):
-        st.session_state.symbols = []
-
-    if not st.session_state.symbols:
-        st.warning("Dodaj spółki w sidebarze lub użyj presetów, aby rozpocząć.")
-        return
-
-    tabs = st.tabs(
-        [
-            "📊 Heatmapa PRO",
-            "📈 Wykres PRO",
-            "📡 Skaner sygnałów",
-            "🌅 Pre‑Market Radar",
-            "🏭 Sektory (auto)",
-            "⚡ AI Turbo 3.0",
-            "📰 AI News",
-            "🛡️ AI Risk v2",
-            "📐 AI Pattern Insight",
-        ]
-    )
-
-    # --- HEATMAPA PRO ---
-    with tabs[0]:
-        st.subheader("📊 Heatmapa PRO")
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        df = pd.DataFrame(rows).sort_values("SetupScore", ascending=False)
-        st.dataframe(df, use_container_width=True)
-
-    # --- WYKRES PRO ---
-    with tabs[1]:
-        st.subheader("📈 Wykres PRO")
-        symbol = st.selectbox("Wybierz spółkę:", st.session_state.symbols)
-        plot_pro_chart(symbol)
-
-    # --- SKANER SYGNAŁÓW ---
-    with tabs[2]:
-        st.subheader("📡 BUY / SELL Radar")
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        scan_df = pd.DataFrame(rows).sort_values("SetupScore", ascending=False)
-
-        buy_df = scan_df[
-            (scan_df["Signal"] == "BUY")
-            & (scan_df["Trend"] == "UP")
-            & (scan_df["SetupScore"] >= 55)
-        ]
-        sell_df = scan_df[
-            (scan_df["Signal"] == "SELL")
-            & (scan_df["Trend"] == "DOWN")
-            & (scan_df["SetupScore"] >= 45)
-        ]
-        neutral_df = scan_df[
-            ~scan_df.index.isin(buy_df.index) & ~scan_df.index.isin(sell_df.index)
-        ]
-
-        st.markdown("### 🟢 BUY Radar")
-        st.dataframe(
-            buy_df if not buy_df.empty else pd.DataFrame({"Info": ["Brak sygnałów BUY"]}),
-            use_container_width=True,
-        )
-
-        st.markdown("### 🔴 SELL Radar")
-        st.dataframe(
-            sell_df if not sell_df.empty else pd.DataFrame({"Info": ["Brak sygnałów SELL"]}),
-            use_container_width=True,
-        )
-
-        st.markdown("### 🟡 Neutral")
-        st.dataframe(neutral_df, use_container_width=True)
-
-    # --- PRE-MARKET RADAR ---
-    with tabs[3]:
-        st.subheader("🌅 Pre‑Market Radar")
-        pre_rows = []
-        for s in st.session_state.symbols:
-            ch = get_premarket(s)
-            if ch is not None:
-                pre_rows.append({"Symbol": s, "PreMarketChange": ch})
-        if not pre_rows:
-            st.info("Brak danych pre‑market.")
+        if results:
+            st.success(f"Znaleziono {len(results)} pozycje spełniające kryteria.")
+            df_results = pd.DataFrame(results)
+            st.dataframe(df_results.sort_values(by=["risk_score", "rsi"], ascending=[True, True]))
+            # show charts thumbnails and download links
+            st.markdown("### Wykresy")
+            cols = st.columns(3)
+            for i, row in enumerate(results):
+                col = cols[i % 3]
+                chart_file = row.get("chart_file")
+                if chart_file and os.path.exists(chart_file):
+                    try:
+                        col.image(chart_file, use_column_width=True, caption=f"{row['ticker']} | Risk: {row['risk_category']}")
+                        with open(chart_file, "rb") as f:
+                            btn = col.download_button(label="Pobierz PNG", data=f, file_name=os.path.basename(chart_file), mime="image/png")
+                    except Exception:
+                        col.write(f"{row['ticker']} - wykres niedostepny")
+                else:
+                    col.write(f"{row['ticker']} - brak wykresu")
+            # AI summary if enabled
+            if client and results:
+                try:
+                    table_lines = []
+                    header = "| TICKER | TREND | RISK | RSI | ADX | FIBO | BOLLW |"
+                    sep = "|---|---|---|---:|---:|---|---:|"
+                    table_lines.append(header); table_lines.append(sep)
+                    for r in results:
+                        table_lines.append(f"| {r['ticker']} | {r['trend']} | {r['risk_category']} | {r['rsi']} | {r['adx']} | {r['fibo_risk']} | {r['boll_width']} |")
+                    table_text = "\n".join(table_lines)
+                    prompt_system = (
+                        "Jestes ekspertem gieldowym. Otrzymasz tabele w markdown. "
+                        "Dla kazdego wiersza podaj skrocony komentarz i priorytet (LOW/MEDIUM/HIGH). "
+                        "Uzywaj tylko informacji dostarczonych. Nie dawaj polecen kupna/sprzedazy. Nie uzywaj polskich znakow."
+                    )
+                    user_content = f"DANE:\n{table_text}\n"
+                    res = client.chat.completions.create(
+                        model=MODEL,
+                        messages=[
+                            {"role": "system", "content": prompt_system},
+                            {"role": "user", "content": user_content}
+                        ],
+                        max_tokens=500
+                    )
+                    ai_text = res.choices[0].message.content if hasattr(res, "choices") else str(res)
+                    st.markdown("### AI - skrocony komentarz")
+                    st.text(ai_text)
+                except Exception as e:
+                    st.warning(f"Blad AI: {e}")
         else:
-            pre_df = (
-                pd.DataFrame(pre_rows)
-                .sort_values("PreMarketChange", ascending=False)
-                .reset_index(drop=True)
-            )
-            st.dataframe(pre_df, use_container_width=True)
+            st.info("Brak pozycji do raportu w tym przebiegu.")
 
-    # --- SEKTORY (AUTO) ---
-    with tabs[4]:
-        st.subheader("🏭 Heatmapa sektorowa (auto‑sektory)")
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        df_sector = pd.DataFrame(rows)
-        sector_view = (
-            df_sector.groupby("Sector")["SetupScore"]
-            .mean()
-            .sort_values(ascending=False)
-            .reset_index()
-        )
-        st.dataframe(sector_view, use_container_width=True)
+    # Show last lines of CSV log
+    st.markdown("---")
+    st.markdown("### Ostatnie wpisy w logu")
+    if os.path.exists(LOG_CSV):
+        try:
+            df_log = pd.read_csv(LOG_CSV)
+            st.dataframe(df_log.tail(50))
+            with open(LOG_CSV, "rb") as f:
+                st.download_button("Pobierz log CSV", data=f, file_name=LOG_CSV, mime="text/csv")
+        except Exception as e:
+            st.write(f"Nie mozna wczytac logu: {e}")
+    else:
+        st.write("Brak pliku logu jeszcze.")
 
-    # --- AI TURBO 3.0 ---
-    with tabs[5]:
-        st.subheader("⚡ AI Turbo 3.0 — analiza setupów")
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        df_ai = (
-            pd.DataFrame(rows)
-            .sort_values("SetupScore", ascending=False)
-            .reset_index(drop=True)
-        )
-        top_n = st.slider(
-            "Ile najlepszych setupów analizować?",
-            1,
-            min(10, len(df_ai)),
-            min(5, len(df_ai)),
-        )
-        target_df = df_ai.head(top_n)
-        st.dataframe(target_df, use_container_width=True)
-        if st.button("Uruchom AI Turbo 3.0"):
-            with st.spinner("AI Turbo 3.0 analizuje setupy..."):
-                txt = ai_turbo_v3(target_df)
-            st.markdown("#### Werdykt AI")
-            st.markdown(txt)
-
-    # --- AI NEWS ---
-    with tabs[6]:
-        st.subheader("📰 AI News — sentyment i wpływ na trading")
-        symbol_news = st.selectbox(
-            "Wybierz spółkę do analizy newsów:",
-            st.session_state.symbols,
-            key="ai_news_symbol_main",
-        )
-        if st.button("Pobierz newsy i zrób analizę AI"):
-            with st.spinner("Pobieram newsy..."):
-                news_list = get_news_for_symbol(symbol_news)
-            if not news_list:
-                st.info("Brak newsów.")
-            else:
-                st.markdown("#### Surowe newsy")
-                for n in news_list:
-                    st.markdown(f"- **{n['title']}** ({n['publisher']})")
-                raw_text = "\n".join([n["title"] for n in news_list])
-                with st.spinner("AI analizuje newsy..."):
-                    summary = ai_news_summary(symbol_news, raw_text)
-                st.markdown("#### Werdykt AI (newsowy)")
-                st.markdown(summary)
-
-    # --- AI RISK v2 ---
-    with tabs[7]:
-        st.subheader("🛡️ AI Risk Check v2 — jedna kategoria na spółkę")
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        df_risk = (
-            pd.DataFrame(rows)
-            .sort_values("RiskScore", descending=True if False else False)
-            .reset_index(drop=True)
-        )
-        # sort_values z descending=True if False else False to trick na brak literówki,
-        # możesz spokojnie zmienić na ascending=False
-        df_risk = df_risk.sort_values("RiskScore", ascending=False)
-        st.dataframe(df_risk, use_container_width=True)
-        if st.button("Risk Check v2"):
-            with st.spinner("Analizuję ryzyko..."):
-                txt = risk_check_v2(df_risk)
-            st.markdown("#### Werdykt ryzyka")
-            st.markdown(txt)
-
-    # --- AI PATTERN INSIGHT ---
-    with tabs[8]:
-        st.subheader("📐 AI Pattern Insight — patterny + momentum + trend")
-        if st.button("Analiza patternów (AI)"):
-            with st.spinner("AI analizuje patterny..."):
-                txt = ai_pattern_insight(st.session_state.symbols)
-            st.markdown("#### Werdykt AI (patterny)")
-            st.markdown(txt)
-
+    st.markdown("---")
+    st.markdown("Uwaga: yfinance intraday moze nie zwracac danych dla wszystkich tickerow. Bid/Ask dostepne tylko jesli zrodlo je udostepnia.")
+    st.markdown("Skrypt nie daje porad inwestycyjnych. Decyzje należą do Ciebie.")
 
 if __name__ == "__main__":
-    main()
+    main_ui()
