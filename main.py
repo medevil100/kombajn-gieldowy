@@ -1,16 +1,4 @@
 # kombajn_streamlit_final.py
-"""
-Kombajn Scanner (final) - PL
-- intraday 60m, okres 30d (możesz zmienić)
-- RSI, MACD, ADX, Bollinger, Fibo
-- TP/SL (rysowane jako poziome linie)
-- sanitacja danych (konwersja do numeric)
-- wymuszone kolory wykresów
-- zapis wykresów PNG i log CSV
-- opcjonalne AI z wyborem modelu
-Uruchom: streamlit run kombajn_streamlit_final.py
-"""
-
 import os
 import math
 from datetime import datetime
