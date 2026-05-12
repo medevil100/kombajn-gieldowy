@@ -1,76 +1,70 @@
-# kombajn_streamlit_final_with_ui_settings.py
+```python
+# kombajn_streamlit_allinone.py
+"""
+Kombajn Scanner — All-in-One (PL)
+- Streamlit UI z panelem ustawień (TP/SL, okres, interwał, paleta kolorów)
+- Kolorowe wykresy Plotly (interaktywne)
+- Dane: yfinance (główne). Fallback: Finnhub / AlphaVantage (jeśli podasz klucze)
+- Dodatkowy fallback scraping: Radar.pl i Biznes.pl (opcjonalnie, włącz w UI)
+- Bid/Ask/Price: yfinance.info, fallback do Finnhub/AlphaVantage/scraping
+- Sanitacja danych, TP/SL, wykresy, CSV log, plot_errors.log
+- AI: opcjonalne podsumowanie per-spółka (wymaga OPENAI_API_KEY)
+Uruchom: streamlit run kombajn_streamlit_allinone.py
+"""
 
 import os
+import re
+import time
 import math
 from datetime import datetime
+from functools import lru_cache
 from typing import Optional, Dict, Any, List
 
-import yfinance as yf
+import requests
 import pandas as pd
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')  # bezpieczny backend
-import matplotlib.pyplot as plt
-from matplotlib import rcParams
-from cycler import cycler
-
-# Opcjonalnie seaborn (nie wymagane)
-try:
-    import seaborn as sns
-    _HAS_SEABORN = True
-except Exception:
-    _HAS_SEABORN = False
-
+import yfinance as yf
+import plotly.graph_objects as go
 import streamlit as st
+from bs4 import BeautifulSoup
 
-# ---------------- Konfiguracja pliku i katalogów ----------------
-st.set_page_config(page_title="Kombajn Scanner (UI ustawienia)", layout="wide")
-
+# -------------------- Konfiguracja pliku/katalogów --------------------
+st.set_page_config(page_title="Kombajn Scanner — All-in-One", layout="wide")
 CHART_DIR = "charts"
 LOG_CSV = "scanner_log.csv"
-PREF_FILE = "ai_model_pref.txt"
 PLOT_ERRORS = "plot_errors.log"
+PREF_FILE = "ai_model_pref.txt"
 os.makedirs(CHART_DIR, exist_ok=True)
 
-# Domyślne tickery (wklej swoją listę)
-DEFAULT_TICKERS = [
-    "CFS.WA", "MER.WA", "HUMA", "STX.WA", "NVG.WA", "TCRX", "HPE.WA", "PLRX"
-]
+# -------------------- Domyślne ustawienia --------------------
+DEFAULT_TICKERS = ["CFS.WA", "MER.WA", "HUMA", "STX.WA", "NVG.WA", "TCRX", "HPE.WA", "PLRX"]
+AVAILABLE_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]
 
-# Lista modeli AI (możesz dopisać inne)
-AVAILABLE_MODELS = [
-    "gpt-4o",
-    "gpt-4o-large",
-    "gpt-4o-16k",
-    "gpt-4o-32k",
-    "gpt-4o-mini",
-    "gpt-4o-mini-2024",
-    "gpt-4o-realtime",
-    "gpt-3.5-turbo"
-]
+# Klucze z env (opcjonalne)
+ALPHAVANTAGE_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "")
+FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "")
+OPENAI_KEY_ENV = os.getenv("OPENAI_API_KEY", "")
 
-# ---------------- Funkcje pomocnicze ----------------
-def apply_color_palette(palette_name: str):
-    """Ustaw rcParams zgodnie z wybraną paletą."""
-    palettes = {
-        "standard": ['#d62728', '#ff7f0e', '#2ca02c', '#1f77b4', '#9467bd', '#17becf'],
-        "warm": ['#d62728', '#ff7f0e', '#ffbb78', '#ff9896', '#e377c2', '#8c564b'],
-        "cool": ['#1f77b4', '#17becf', '#2ca02c', '#9467bd', '#7f7f7f', '#bcbd22'],
-        "high-contrast": ['#d62728', '#2ca02c', '#1f77b4', '#ff7f0e', '#9467bd', '#17becf']
-    }
-    colors = palettes.get(palette_name, palettes["standard"])
-    rcParams['axes.prop_cycle'] = cycler(color=colors)
-    rcParams['figure.facecolor'] = 'white'
-    rcParams['axes.facecolor'] = 'white'
-    rcParams['savefig.facecolor'] = 'white'
-    rcParams['savefig.transparent'] = False
-    rcParams['lines.linewidth'] = 1.0
-    rcParams['font.size'] = 9
-    rcParams['legend.frameon'] = False
-    rcParams['image.cmap'] = 'viridis'
+# Scraping settings
+SCRAPE_TIMEOUT = 8
+SCRAPE_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; KombajnScanner/1.0)"}
+SCRAPE_DELAY = 1.0
 
-# Domyślna paleta
-apply_color_palette("standard")
+# Palety kolorów
+PALETTES = {
+    "standard": ['#d62728', '#ff7f0e', '#2ca02c', '#1f77b4', '#9467bd', '#17becf'],
+    "warm": ['#d62728', '#ff7f0e', '#ffbb78', '#ff9896', '#e377c2', '#8c564b'],
+    "cool": ['#1f77b4', '#17becf', '#2ca02c', '#9467bd', '#7f7f7f', '#bcbd22'],
+    "high-contrast": ['#d62728', '#2ca02c', '#1f77b4', '#ff7f0e', '#9467bd', '#17becf']
+}
+
+# -------------------- Pomocnicze --------------------
+def log_error(msg: str):
+    try:
+        with open(PLOT_ERRORS, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().isoformat()} - {msg}\n")
+    except Exception:
+        pass
 
 def safe_float(x) -> Optional[float]:
     try:
@@ -84,46 +78,166 @@ def safe_float(x) -> Optional[float]:
     except Exception:
         return None
 
-def safe_round(x, ndigits=6):
+def append_log_csv(row: Dict[str, Any], filename: str = LOG_CSV):
     try:
-        return round(float(x), ndigits)
+        df_row = pd.DataFrame([row])
+        header = not os.path.exists(filename)
+        df_row.to_csv(filename, mode='a', index=False, header=header)
+    except Exception as e:
+        log_error(f"CSV write error: {e}")
+
+# -------------------- Scraping helpers (Radar.pl, Biznes.pl) --------------------
+@lru_cache(maxsize=1024)
+def _cached_get(url: str):
+    try:
+        time.sleep(SCRAPE_DELAY)
+        r = requests.get(url, headers=SCRAPE_HEADERS, timeout=SCRAPE_TIMEOUT)
+        r.raise_for_status()
+        return r.text
+    except Exception as e:
+        log_error(f"HTTP error for {url}: {e}")
+        return None
+
+def _extract_number_from_text(text: str):
+    if not text:
+        return None
+    text = text.replace('\xa0', ' ')
+    m = re.search(r'([0-9]{1,3}(?:[ \u00A0][0-9]{3})*(?:[.,][0-9]+)?)', text)
+    if not m:
+        return None
+    num = m.group(1)
+    num = num.replace(' ', '').replace('\u00A0', '').replace(',', '.')
+    try:
+        return float(num)
     except Exception:
         return None
 
-def append_log_csv(row: Dict[str, Any], filename: str = LOG_CSV):
-    df_row = pd.DataFrame([row])
-    header = not os.path.exists(filename)
-    df_row.to_csv(filename, mode='a', index=False, header=header)
+def quote_from_radarpl(ticker: str) -> Dict[str, Optional[float]]:
+    url_candidates = [
+        f"https://www.radar.pl/{ticker}",
+        f"https://www.radar.pl/spolka/{ticker}",
+        f"https://www.radar.pl/akcje/{ticker}"
+    ]
+    for url in url_candidates:
+        html = _cached_get(url)
+        if not html:
+            continue
+        soup = BeautifulSoup(html, "lxml")
+        meta_price = soup.find("meta", {"property": "og:price:amount"}) or soup.find("meta", {"name": "price"})
+        if meta_price and meta_price.get("content"):
+            p = _extract_number_from_text(meta_price.get("content"))
+            if p:
+                return {"price": p, "bid": None, "ask": None, "source": "radar.pl-meta"}
+        candidates = soup.find_all(attrs={"class": re.compile(r"(price|cena|kurs|quote)", re.I)})
+        for c in candidates:
+            txt = c.get_text(" ", strip=True)
+            p = _extract_number_from_text(txt)
+            if p:
+                return {"price": p, "bid": None, "ask": None, "source": url}
+        p = _extract_number_from_text(soup.get_text(" ", strip=True)[:4000])
+        if p:
+            return {"price": p, "bid": None, "ask": None, "source": url}
+    return {"price": None, "bid": None, "ask": None, "source": "radar.pl"}
 
-def load_model_pref_from_file(filename: str = PREF_FILE) -> Optional[str]:
+def quote_from_biznespl(ticker: str) -> Dict[str, Optional[float]]:
+    url_candidates = [
+        f"https://www.biznes.pl/{ticker}",
+        f"https://www.biznes.pl/gielda/{ticker}",
+        f"https://www.biznes.pl/akcje/{ticker}"
+    ]
+    for url in url_candidates:
+        html = _cached_get(url)
+        if not html:
+            continue
+        soup = BeautifulSoup(html, "lxml")
+        meta_price = soup.find("meta", {"property": "og:price:amount"}) or soup.find("meta", {"name": "price"})
+        if meta_price and meta_price.get("content"):
+            p = _extract_number_from_text(meta_price.get("content"))
+            if p:
+                return {"price": p, "bid": None, "ask": None, "source": "biznes.pl-meta"}
+        candidates = soup.find_all(attrs={"class": re.compile(r"(price|cena|kurs|quote)", re.I)})
+        for c in candidates:
+            txt = c.get_text(" ", strip=True)
+            p = _extract_number_from_text(txt)
+            if p:
+                return {"price": p, "bid": None, "ask": None, "source": url}
+        p = _extract_number_from_text(soup.get_text(" ", strip=True)[:4000])
+        if p:
+            return {"price": p, "bid": None, "ask": None, "source": url}
+    return {"price": None, "bid": None, "ask": None, "source": "biznes.pl"}
+
+# -------------------- Quote sources: yfinance, Finnhub, AlphaVantage, scraping --------------------
+def quote_from_yfinance(ticker: str) -> Dict[str, Optional[float]]:
     try:
-        if os.path.exists(filename):
-            with open(filename, "r", encoding="utf-8") as f:
-                return f.read().strip()
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+        bid = safe_float(info.get("bid") or info.get("bidPrice"))
+        ask = safe_float(info.get("ask") or info.get("askPrice"))
+        price = safe_float(info.get("regularMarketPrice") or info.get("previousClose") or info.get("currentPrice"))
+        return {"price": price, "bid": bid, "ask": ask, "source": "yfinance"}
+    except Exception as e:
+        log_error(f"yfinance quote error {ticker}: {e}")
+        return {"price": None, "bid": None, "ask": None, "source": "yfinance"}
+
+def quote_from_alphavantage(ticker: str) -> Dict[str, Optional[float]]:
+    if not ALPHAVANTAGE_KEY:
+        return {"price": None, "bid": None, "ask": None, "source": "alphavantage"}
+    try:
+        url = "https://www.alphavantage.co/query"
+        params = {"function": "GLOBAL_QUOTE", "symbol": ticker, "apikey": ALPHAVANTAGE_KEY}
+        r = requests.get(url, params=params, timeout=10)
+        data = r.json().get("Global Quote", {})
+        price = safe_float(data.get("05. price"))
+        return {"price": price, "bid": None, "ask": None, "source": "alphavantage"}
+    except Exception as e:
+        log_error(f"AlphaVantage quote error {ticker}: {e}")
+        return {"price": None, "bid": None, "ask": None, "source": "alphavantage"}
+
+def quote_from_finnhub(ticker: str) -> Dict[str, Optional[float]]:
+    if not FINNHUB_KEY:
+        return {"price": None, "bid": None, "ask": None, "source": "finnhub"}
+    try:
+        url = "https://finnhub.io/api/v1/quote"
+        params = {"symbol": ticker, "token": FINNHUB_KEY}
+        r = requests.get(url, params=params, timeout=10)
+        j = r.json()
+        price = safe_float(j.get("c"))
+        return {"price": price, "bid": None, "ask": None, "source": "finnhub"}
+    except Exception as e:
+        log_error(f"Finnhub quote error {ticker}: {e}")
+        return {"price": None, "bid": None, "ask": None, "source": "finnhub"}
+
+def get_best_quote(ticker: str, allow_scrape: bool = False) -> Dict[str, Optional[float]]:
+    q = quote_from_yfinance(ticker)
+    if q["price"] is not None:
+        return q
+    q = quote_from_finnhub(ticker)
+    if q["price"] is not None:
+        return q
+    q = quote_from_alphavantage(ticker)
+    if q["price"] is not None:
+        return q
+    if allow_scrape:
+        q = quote_from_radarpl(ticker)
+        if q["price"] is not None:
+            return q
+        q = quote_from_biznespl(ticker)
+        if q["price"] is not None:
+            return q
+    try:
+        df = yf.download(ticker, period="7d", interval="1d", progress=False)
+        if not df.empty and 'Close' in df.columns:
+            return {"price": float(df['Close'].iloc[-1]), "bid": None, "ask": None, "source": "yfinance-history-fallback"}
     except Exception:
         pass
-    return None
+    return {"price": None, "bid": None, "ask": None, "source": "none"}
 
-def save_model_pref_to_file(model: str, filename: str = PREF_FILE):
-    try:
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(model)
-    except Exception:
-        pass
-
-def log_plot_error(ticker: str, err: Exception):
-    try:
-        with open(PLOT_ERRORS, "a", encoding="utf-8") as f:
-            f.write(f"{datetime.now().isoformat()} - Plot error for {ticker}: {repr(err)}\n")
-    except Exception:
-        pass
-
-# ---------------- Wskaźniki techniczne ----------------
+# -------------------- Wskaźniki i analiza --------------------
 def calculate_rsi(series: pd.Series, window: int = 14) -> pd.Series:
-    series = pd.to_numeric(series, errors='coerce')
-    if len(series.dropna()) < window:
-        return pd.Series([50] * len(series), index=series.index)
-    delta = series.diff()
+    s = pd.to_numeric(series, errors='coerce')
+    if len(s.dropna()) < window:
+        return pd.Series([50]*len(s), index=s.index)
+    delta = s.diff()
     gain = delta.clip(lower=0).rolling(window=window).mean()
     loss = -delta.clip(upper=0).rolling(window=window).mean()
     rs = gain / loss
@@ -133,61 +247,16 @@ def calculate_rsi(series: pd.Series, window: int = 14) -> pd.Series:
 def sma(series: pd.Series, window: int) -> pd.Series:
     return pd.to_numeric(series, errors='coerce').rolling(window=window).mean()
 
-def ema(series: pd.Series, window: int) -> pd.Series:
-    return pd.to_numeric(series, errors='coerce').ewm(span=window, adjust=False).mean()
-
-def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
-    s = pd.to_numeric(series, errors='coerce').dropna()
-    if len(s) < slow:
-        idx = series.index
-        return pd.Series([np.nan]*len(idx), index=idx), pd.Series([np.nan]*len(idx), index=idx), pd.Series([0]*len(idx), index=idx)
-    ema_fast = ema(series, fast)
-    ema_slow = ema(series, slow)
+def macd(series: pd.Series, fast=12, slow=26, signal=9):
+    s = pd.to_numeric(series, errors='coerce')
+    ema_fast = s.ewm(span=fast, adjust=False).mean()
+    ema_slow = s.ewm(span=slow, adjust=False).mean()
     macd_line = ema_fast - ema_slow
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     hist = macd_line - signal_line
     return macd_line.fillna(0), signal_line.fillna(0), hist.fillna(0)
 
-def slope_of_series(series: pd.Series, n: int = 10) -> float:
-    s = pd.to_numeric(series, errors='coerce').dropna()
-    if len(s) < n:
-        return 0.0
-    y = s[-n:].values
-    x = np.arange(len(y))
-    if np.std(y) == 0:
-        return 0.0
-    y_scaled = (y - y.mean()) / (y.std() if y.std() != 0 else 1)
-    coeffs = np.polyfit(x, y_scaled, 1)
-    return float(coeffs[0])
-
-def calculate_adx(df: pd.DataFrame, n: int = 14) -> float:
-    try:
-        for col in ['High', 'Low', 'Close']:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-        if df[['High','Low','Close']].dropna().shape[0] < n:
-            return 0.0
-        high = df['High']
-        low = df['Low']
-        close = df['Close']
-        plus_dm = high.diff()
-        minus_dm = -low.diff()
-        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-        tr1 = high - low
-        tr2 = (high - close.shift()).abs()
-        tr3 = (low - close.shift()).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(window=n).mean()
-        plus_di = 100 * (plus_dm.rolling(window=n).sum() / atr.replace(0, np.nan))
-        minus_di = 100 * (minus_dm.rolling(window=n).sum() / atr.replace(0, np.nan))
-        dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)) * 100
-        adx = dx.rolling(window=n).mean()
-        return float(adx.iloc[-1]) if not adx.isna().all() else 0.0
-    except Exception:
-        return 0.0
-
-def bollinger_bands(series: pd.Series, window: int = 20, n_std: int = 2):
+def bollinger_bands(series: pd.Series, window=20, n_std=2):
     s = pd.to_numeric(series, errors='coerce')
     ma = s.rolling(window=window).mean()
     std = s.rolling(window=window).std()
@@ -196,456 +265,259 @@ def bollinger_bands(series: pd.Series, window: int = 20, n_std: int = 2):
     width = (upper - lower) / ma.replace(0, np.nan)
     return upper.fillna(np.nan), lower.fillna(np.nan), width.fillna(np.nan)
 
-def fib_levels_from_series(series: pd.Series) -> Dict[str, float]:
+def fib_levels(series: pd.Series):
     s = pd.to_numeric(series, errors='coerce').dropna()
     if s.empty:
-        return {"0.0": 0.0, "23.6": 0.0, "38.2": 0.0, "50.0": 0.0, "61.8": 0.0, "100.0": 0.0}
-    high = float(s.max())
-    low = float(s.min())
-    diff = high - low if high != low else 1.0
-    levels = {
-        "0.0": low,
-        "23.6": high - 0.236 * diff,
-        "38.2": high - 0.382 * diff,
-        "50.0": high - 0.5 * diff,
-        "61.8": high - 0.618 * diff,
-        "100.0": high
-    }
-    return levels
+        return {}
+    high = float(s.max()); low = float(s.min()); diff = high - low if high != low else 1.0
+    return {"0.0": low, "23.6": high - 0.236*diff, "38.2": high - 0.382*diff, "50.0": high - 0.5*diff, "61.8": high - 0.618*diff, "100.0": high}
 
-def fib_proximity_level(price: float, levels: Dict[str, float]) -> Dict[str, Any]:
+# -------------------- Wykresy Plotly --------------------
+def make_plotly_chart(ticker: str, df: pd.DataFrame, tp: float, sl: float, palette: List[str]):
     try:
-        diffs = {k: abs(price - v) / (v if v != 0 else 1) for k, v in levels.items()}
-        nearest = min(diffs.items(), key=lambda x: x[1])
-        rel_diff = nearest[1]
-        if rel_diff < 0.01:
-            cls = "LOW"
-        elif rel_diff < 0.03:
-            cls = "MEDIUM"
-        else:
-            cls = "HIGH"
-        return {"nearest_level": nearest[0], "rel_diff_pct": rel_diff * 100, "fibo_risk": cls}
-    except Exception:
-        return {"nearest_level": None, "rel_diff_pct": 999.0, "fibo_risk": "MEDIUM"}
-
-def assess_risk(rsi: float, rvol: float, slope: float, macd_hist: float,
-                bid: Optional[float], ask: Optional[float], fib_info: Dict[str, Any],
-                adx: float, boll_width: Optional[float]) -> Dict[str, Any]:
-    score = 0.0
-    if rsi is None:
-        rsi = 50.0
-    if rsi < 25 or rsi > 75:
-        score += 1.0
-    elif rsi < 35 or rsi > 65:
-        score += 0.5
-    if rvol > 3.0:
-        score += 1.5
-    elif rvol > 1.5:
-        score += 0.8
-    elif rvol > 1.0:
-        score += 0.3
-    if slope < -0.02:
-        score += 1.0
-    elif slope < -0.005:
-        score += 0.5
-    if macd_hist < 0:
-        score += 0.5
-    if bid is not None and ask is not None and bid > 0:
-        spread_pct = abs(ask - bid) / bid
-        if spread_pct > 0.02:
-            score += 1.0
-        elif spread_pct > 0.005:
-            score += 0.4
-    fib_risk = fib_info.get("fibo_risk", "MEDIUM")
-    if fib_risk == "HIGH":
-        score += 1.0
-    elif fib_risk == "MEDIUM":
-        score += 0.4
-    if adx >= 25:
-        if slope > 0 and macd_hist > 0:
-            score -= 0.8
-        else:
-            score += 0.6
-    elif adx < 20:
-        score += 0.3
-    if boll_width is not None and not math.isnan(boll_width):
-        if boll_width > 0.08:
-            score += 1.0
-        elif boll_width > 0.04:
-            score += 0.4
-    if score <= 1.5:
-        category = "LOW"
-    elif score <= 3.0:
-        category = "MEDIUM"
-    else:
-        category = "HIGH"
-    return {"score": round(score, 2), "category": category}
-
-# ---------------- Rysowanie wykresów (z TP/SL) ----------------
-def plot_and_save(ticker: str, df: pd.DataFrame, levels: Dict[str, float],
-                  fib_info: Dict[str, Any], filename: str,
-                  tp_pct: float = 0.03, sl_pct: float = 0.02) -> Optional[str]:
-    try:
-        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-        if df['Close'].dropna().empty:
-            raise ValueError("Brak danych Close po konwersji numeric")
-
-        close = df['Close']
-        last_price = float(pd.to_numeric(close.iloc[-1], errors='coerce'))
-        macd_line, signal_line, hist = macd(close)
-        hist = pd.to_numeric(hist, errors='coerce').fillna(0).values
+        df = df.copy()
+        df.index = pd.to_datetime(df.index)
+        close = pd.to_numeric(df['Close'], errors='coerce')
         upper, lower, width = bollinger_bands(close)
         sma5 = sma(close, 5)
         sma20 = sma(close, 20)
+        macd_line, signal_line, hist = macd(close)
 
-        tp_level = last_price * (1 + tp_pct)
-        sl_level = last_price * (1 - sl_pct)
+        last_price = float(close.iloc[-1])
+        tp_level = last_price * (1 + tp)
+        sl_level = last_price * (1 - sl)
 
-        fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True,
-                                 gridspec_kw={'height_ratios': [3, 1.2, 0.8]})
-        ax_price, ax_macd, ax_adx = axes
-
-        # Wymuszone kolory linii (jawne)
-        ax_price.plot(df.index, close, label='Close', color='#111111', linewidth=1.2)
-        ax_price.plot(df.index, sma5, label='SMA5', color='#2ca02c', linewidth=0.9)
-        ax_price.plot(df.index, sma20, label='SMA20', color='#1f77b4', linewidth=0.9)
-        ax_price.plot(df.index, upper, label='BollUpper', color='#ff7f0e', linestyle='--', linewidth=0.9)
-        ax_price.plot(df.index, lower, label='BollLower', color='#ff7f0e', linestyle='--', linewidth=0.9)
-
-        # TP/SL jako poziome linie
-        ax_price.axhline(tp_level, color='#2ca02c', linestyle='-.', linewidth=1.0, label=f'TP {tp_pct*100:.1f}%')
-        ax_price.axhline(sl_level, color='#d62728', linestyle='-.', linewidth=1.0, label=f'SL {sl_pct*100:.1f}%')
-
-        for k, v in levels.items():
-            ax_price.axhline(v, color='gray', linestyle=':', linewidth=0.7)
-        nearest_level = fib_info.get('nearest_level')
-        if nearest_level and nearest_level in levels:
-            y = levels[nearest_level]
-            ax_price.annotate(f"Nearest Fibo {nearest_level}", xy=(df.index[-1], y),
-                              xytext=(-80, 10), textcoords='offset points',
-                              arrowprops=dict(arrowstyle="->", color='gray'), fontsize=8, color='gray')
-
-        ax_price.set_title(f"{ticker}  Close / SMA / Bollinger")
-        ax_price.legend(loc='upper left', fontsize=8)
-
-        # MACD
-        ax_macd.plot(df.index, macd_line, label='MACD', color='#9467bd', linewidth=0.9)
-        ax_macd.plot(df.index, signal_line, label='Signal', color='#d62728', linewidth=0.9)
-        colors = ['#2ca02c' if h >= 0 else '#d62728' for h in hist]
-        ax_macd.bar(df.index, hist, label='Hist', color=colors, alpha=0.6)
-        ax_macd.legend(loc='upper left', fontsize=8)
-        ax_macd.set_ylabel("MACD")
-
-        # ADX rolling
-        try:
-            adx_full = []
-            for i in range(len(df)):
-                if i < 14:
-                    adx_full.append(np.nan)
-                else:
-                    adx_full.append(calculate_adx(df.iloc[:i+1], n=14))
-            ax_adx.plot(df.index, adx_full, label='ADX', color='#17becf', linewidth=0.9)
-            ax_adx.axhline(25, color='gray', linestyle='--', linewidth=0.7)
-            ax_adx.set_ylabel("ADX")
-            ax_adx.legend(loc='upper left', fontsize=8)
-        except Exception:
-            ax_adx.text(0.5, 0.5, "ADX niedostepny", transform=ax_adx.transAxes, ha='center')
-
-        plt.tight_layout()
-        fig.savefig(filename, dpi=150)
-        plt.close(fig)
-        return filename
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=df.index, y=close, mode='lines', name='Close', line=dict(color=palette[0])))
+        fig.add_trace(go.Scatter(x=df.index, y=sma5, mode='lines', name='SMA5', line=dict(color=palette[2])))
+        fig.add_trace(go.Scatter(x=df.index, y=sma20, mode='lines', name='SMA20', line=dict(color=palette[3])))
+        fig.add_trace(go.Scatter(x=df.index, y=upper, mode='lines', name='BollUpper', line=dict(color=palette[1], dash='dash')))
+        fig.add_trace(go.Scatter(x=df.index, y=lower, mode='lines', name='BollLower', line=dict(color=palette[1], dash='dash')))
+        fig.add_hline(y=tp_level, line=dict(color=palette[2], dash='dot'), annotation_text=f"TP {tp*100:.1f}%")
+        fig.add_hline(y=sl_level, line=dict(color=palette[0], dash='dot'), annotation_text=f"SL {sl*100:.1f}%")
+        fig.update_layout(height=420, margin=dict(l=20, r=20, t=30, b=20), template="plotly_white")
+        return fig
     except Exception as e:
-        log_plot_error(ticker, e)
+        log_error(f"make_plotly_chart {ticker}: {e}")
         return None
 
-# ---------------- Skanowanie ----------------
-def classify_trend(close_series: pd.Series):
-    short_w, long_w = 5, 20
-    s = pd.to_numeric(close_series, errors='coerce')
-    if len(s.dropna()) < long_w:
-        return "UNKNOWN", {}
-    sma_short = sma(s, short_w).iloc[-1]
-    sma_long = sma(s, long_w).iloc[-1]
-    slp = slope_of_series(s, n=10)
-    macd_line, signal_line, hist = macd(s)
-    macd_val = macd_line.iloc[-1] if len(macd_line.dropna()) else 0.0
-    signal_val = signal_line.iloc[-1] if len(signal_line.dropna()) else 0.0
-    if sma_short > sma_long and slp > 0.01 and macd_val > signal_val:
-        trend = "UP"
-    elif sma_short < sma_long and slp < -0.01 and macd_val < signal_val:
-        trend = "DOWN"
-    else:
-        trend = "SIDEWAYS"
-    details = {
-        "sma_short": float(sma_short) if not pd.isna(sma_short) else None,
-        "sma_long": float(sma_long) if not pd.isna(sma_long) else None,
-        "slope": float(slp),
-        "macd": float(macd_val),
-        "macd_signal": float(signal_val),
-        "macd_hist": float(hist.iloc[-1]) if len(hist.dropna()) else 0.0
-    }
-    return trend, details
+# -------------------- AI helper (optional) --------------------
+def ai_commentary_for_rows(rows: List[Dict[str, Any]], model: str, openai_key: str) -> str:
+    if not openai_key or not model:
+        return ""
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=openai_key)
+        header = "| TICKER | PRICE | BID | ASK | RSI | ADX | RISK | TP | SL |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|"
+        lines = [header]
+        for r in rows:
+            lines.append(f"| {r['ticker']} | {r.get('price')} | {r.get('bid')} | {r.get('ask')} | {r.get('rsi')} | {r.get('adx')} | {r.get('risk_category')} | {r.get('tp_pct')} | {r.get('sl_pct')} |")
+        table_text = "\n".join(lines)
+        prompt_system = "Jestes ekspertem gieldowym. Otrzymasz tabele w markdown. Dla kazdego wiersza podaj skrocony komentarz i priorytet (LOW/MEDIUM/HIGH). Uzywaj tylko informacji dostarczonych. Nie dawaj polecen kupna/sprzedazy."
+        user_content = f"DANE:\n{table_text}"
+        res = client.chat.completions.create(
+            model=model,
+            messages=[{"role":"system","content":prompt_system},{"role":"user","content":user_content}],
+            max_tokens=500
+        )
+        return res.choices[0].message.content
+    except Exception as e:
+        log_error(f"AI error: {e}")
+        return ""
 
-def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str],
-                 show_progress: bool = True, tp_pct: float = 0.03, sl_pct: float = 0.02,
-                 period: str = "30d", interval: str = "60m") -> List[Dict[str, Any]]:
+# -------------------- Główna logika skanera --------------------
+def scan_and_analyze(tickers: List[str], tp_pct: float, sl_pct: float, period: str, interval: str, palette_name: str,
+                     rsi_threshold: int, rvol_threshold: float, allow_scrape: bool) -> List[Dict[str, Any]]:
     results = []
-    total = len(tickers)
-    progress = 0
-    if show_progress:
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-    for s in tickers:
+    palette = PALETTES.get(palette_name, PALETTES["standard"])
+    for t in tickers:
         try:
-            df = yf.download(s, period=period, interval=interval, progress=False)
-            if not df.empty:
-                for col in ['Open','High','Low','Close','Volume']:
-                    if col in df.columns:
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-            if df.empty or df['Close'].dropna().empty or len(df.dropna()) < 10:
-                if show_progress:
-                    status_text.text(f"Brak danych intraday dla {s} (pomijam)")
-                progress += 1
-                if show_progress:
-                    progress_bar.progress(int(progress / total * 100))
+            df = yf.download(t, period=period, interval=interval, progress=False)
+            if df is None or df.empty or 'Close' not in df.columns:
+                log_error(f"No intraday data for {t}")
                 continue
-
-            close = df['Close']
-            vol = df['Volume'] if 'Volume' in df.columns else pd.Series([np.nan]*len(close), index=close.index)
-
-            try:
-                c_dzis = float(pd.to_numeric(close.iloc[-1], errors='coerce'))
-            except Exception:
-                if show_progress:
-                    status_text.text(f"Nie można pobrać ceny dla {s} (pomijam)")
-                progress += 1
-                if show_progress:
-                    progress_bar.progress(int(progress / total * 100))
+            for col in ['Open','High','Low','Close','Volume']:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+            close = df['Close'].dropna()
+            if close.empty:
+                log_error(f"No close after sanitize for {t}")
                 continue
-            c_wczoraj = float(pd.to_numeric(close.iloc[-2], errors='coerce')) if len(close) >= 2 else c_dzis
 
             rsi = float(calculate_rsi(close).iloc[-1])
-            rvol = float(pd.to_numeric(vol.iloc[-1], errors='coerce') / vol.mean()) if vol.mean() and not np.isnan(vol.mean()) else 1.0
-            zmiana = ((c_dzis - c_wczoraj) / c_wczoraj) * 100 if c_wczoraj != 0 else 0.0
-
-            # bid/ask safe
-            bid, ask = None, None
-            try:
-                t = yf.Ticker(s)
-                info = t.info or {}
-                raw_bid = info.get('bid') or info.get('bidPrice') or None
-                raw_ask = info.get('ask') or info.get('askPrice') or None
-                bid = safe_float(raw_bid)
-                ask = safe_float(raw_ask)
-            except Exception:
-                bid, ask = None, None
-
-            trend, details = classify_trend(close)
             macd_line, signal_line, hist = macd(close)
-            macd_hist = float(pd.to_numeric(hist.iloc[-1], errors='coerce')) if len(hist) else 0.0
-            slp = slope_of_series(close, n=10)
-            adx = calculate_adx(df, n=14)
-            upper, lower, width = bollinger_bands(close, window=20, n_std=2)
-            boll_upper = float(upper.iloc[-1]) if not upper.isna().all() else float('nan')
-            boll_lower = float(lower.iloc[-1]) if not lower.isna().all() else float('nan')
-            boll_width = float(width.iloc[-1]) if not width.isna().all() else float('nan')
+            macd_hist = float(hist.iloc[-1]) if len(hist) else 0.0
+            adx = 0.0
+            try:
+                tmp = df[['High','Low','Close']].copy()
+                # local ADX calculation
+                high = tmp['High']; low = tmp['Low']; close_col = tmp['Close']
+                plus_dm = high.diff()
+                minus_dm = -low.diff()
+                plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+                minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+                tr1 = high - low
+                tr2 = (high - close_col.shift()).abs()
+                tr3 = (low - close_col.shift()).abs()
+                tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+                atr = tr.rolling(window=14).mean()
+                plus_di = 100 * (plus_dm.rolling(window=14).sum() / atr.replace(0, np.nan))
+                minus_di = 100 * (minus_dm.rolling(window=14).sum() / atr.replace(0, np.nan))
+                dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)) * 100
+                adx_series = dx.rolling(window=14).mean()
+                adx = float(adx_series.iloc[-1]) if not adx_series.isna().all() else 0.0
+            except Exception:
+                adx = 0.0
 
-            levels = fib_levels_from_series(close)
-            fib_info = fib_proximity_level(c_dzis, levels)
+            rvol = float(df['Volume'].iloc[-1] / (df['Volume'].mean() if df['Volume'].mean() else 1.0))
 
-            risk = assess_risk(rsi=rsi, rvol=rvol, slope=slp, macd_hist=macd_hist,
-                               bid=bid, ask=ask, fib_info=fib_info, adx=adx, boll_width=boll_width)
+            q = get_best_quote(t, allow_scrape=allow_scrape)
+            price = q.get("price") or float(close.iloc[-1])
+            bid = q.get("bid")
+            ask = q.get("ask")
 
-            # kryteria raportu (dostosuj)
-            show = False
-            if s.upper() == "STX.WA":
-                show = True
-            if rsi < 35 and details.get("sma_short", 999) < details.get("sma_long", -999):
-                show = True
+            levels = fib_levels(close)
+
+            risk_score = 0.0
+            if rsi < 25 or rsi > 75:
+                risk_score += 1.0
             if rvol > 3.0:
-                show = True
+                risk_score += 1.0
+            if adx < 20:
+                risk_score += 0.5
+            if macd_hist < 0:
+                risk_score += 0.5
+            if risk_score <= 1.0:
+                risk_cat = "LOW"
+            elif risk_score <= 2.5:
+                risk_cat = "MEDIUM"
+            else:
+                risk_cat = "HIGH"
 
-            if show:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-                chart_file = os.path.join(CHART_DIR, f"{s.replace('/', '_')}_{timestamp}.png")
-                row = {
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "ticker": s,
-                    "price": safe_round(c_dzis, 6),
-                    "rsi": safe_round(rsi, 3),
-                    "trend": trend,
-                    "slope": safe_round(slp, 6),
-                    "macd_hist": safe_round(macd_hist, 6),
-                    "bid": safe_round(bid, 6),
-                    "ask": safe_round(ask, 6),
-                    "fibo_nearest": fib_info['nearest_level'],
-                    "fibo_rel_pct": round(fib_info['rel_diff_pct'], 3),
-                    "fibo_risk": fib_info['fibo_risk'],
-                    "rvol": round(rvol, 3),
-                    "adx": round(adx, 3),
-                    "boll_upper": safe_round(boll_upper, 6),
-                    "boll_lower": safe_round(boll_lower, 6),
-                    "boll_width": safe_round(boll_width, 6),
-                    "risk_score": risk['score'],
-                    "risk_category": risk['category'],
-                    "change_pct": round(zmiana, 3),
-                    "chart_file": chart_file
-                }
-                append_log_csv(row)
-                saved = plot_and_save(s, df, levels, fib_info, chart_file, tp_pct=tp_pct, sl_pct=sl_pct)
-                if saved is None:
-                    row["chart_file"] = None
-                results.append(row)
+            show_flag = (rsi < rsi_threshold) or (rvol > rvol_threshold) or True  # show all but mark thresholds
 
-            progress += 1
-            if show_progress:
-                progress_bar.progress(int(progress / total * 100))
-                status_text.text(f"Skanowanie: {s} ({progress}/{total})")
+            fig = make_plotly_chart(t, df, tp_pct, sl_pct, palette)
 
+            row = {
+                "ticker": t,
+                "price": safe_float(price),
+                "bid": safe_float(bid),
+                "ask": safe_float(ask),
+                "rsi": round(rsi, 2),
+                "rvol": round(rvol, 2),
+                "adx": round(adx, 2),
+                "macd_hist": round(macd_hist, 4),
+                "risk_score": round(risk_score, 2),
+                "risk_category": risk_cat,
+                "levels": levels,
+                "chart": fig,
+                "df": df,
+                "tp_pct": tp_pct,
+                "sl_pct": sl_pct,
+                "show": show_flag,
+                "quote_source": q.get("source")
+            }
+            results.append(row)
         except Exception as e:
-            if show_progress:
-                status_text.text(f"Błąd przy {s}: {e}")
-            log_plot_error(s, e)
-            progress += 1
-            if show_progress:
-                progress_bar.progress(int(progress / total * 100))
+            log_error(f"scan error {t}: {e}")
             continue
-
-    if show_progress:
-        status_text.text("Skanowanie zakończone.")
     return results
 
-# ---------------- Interfejs Streamlit (PL) ----------------
-def main_ui():
-    st.title("Kombajn Scanner — intraday 60m (UI ustawienia)")
-    st.markdown("Analiza techniczna: RSI, MACD, ADX, Bollinger, Fibo. TP/SL i paleta kolorów w panelu bocznym.")
+# -------------------- Streamlit UI --------------------
+def main():
+    st.title("Kombajn Scanner — All-in-One")
+    st.markdown("Panel ustawień po lewej. Wklej tickery, ustaw TP/SL, okres i interwał. Kliknij Uruchom skan.")
 
-    st.sidebar.header("Ustawienia skanera")
-    tickers_input = st.sidebar.text_area("Tickery (oddzielone przecinkiem)", value=",".join(DEFAULT_TICKERS), height=140)
-    tickers = [t.strip() for t in tickers_input.split(",") if t.strip()]
+    with st.sidebar:
+        st.header("Ustawienia skanera")
+        tickers_input = st.text_area("Tickery (oddzielone przecinkiem)", value=",".join(DEFAULT_TICKERS), height=140)
+        tickers = [x.strip() for x in tickers_input.split(",") if x.strip()]
+        period = st.selectbox("Okres historyczny", ["30d", "60d", "90d"], index=0)
+        interval = st.selectbox("Interwał", ["60m", "30m", "15m"], index=0)
+        st.markdown("### TP / SL")
+        tp_pct = st.slider("Take Profit (%)", 0.5, 20.0, 3.0, 0.5) / 100.0
+        sl_pct = st.slider("Stop Loss (%)", 0.5, 20.0, 2.0, 0.5) / 100.0
+        st.markdown("### Filtry (oznaczenia)")
+        rsi_threshold = st.slider("Pokaż jeśli RSI <", 10, 50, 35)
+        rvol_threshold = st.slider("Pokaż jeśli RVol >", 1.0, 10.0, 3.0, 0.1)
+        palette_name = st.selectbox("Paleta kolorów", list(PALETTES.keys()), index=0)
+        st.markdown("### Źródła i AI")
+        allow_scrape = st.checkbox("Włącz scraping Radar.pl / Biznes.pl (fallback)", value=False)
+        openai_key_input = st.text_input("OPENAI_API_KEY (opcjonalne)", type="password", value=OPENAI_KEY_ENV)
+        use_ai = st.checkbox("Włącz AI podsumowanie", value=False)
+        model_choice = st.selectbox("Model AI", AVAILABLE_MODELS, index=0)
+        st.markdown("---")
+        st.write(f"Log CSV: `{LOG_CSV}`")
+        st.write(f"Wykresy: `{CHART_DIR}/`")
+        st.write(f"Błędy: `{PLOT_ERRORS}`")
+        run = st.button("Uruchom skan teraz")
 
-    st.sidebar.markdown("### Parametry interwału i okresu")
-    period = st.sidebar.selectbox("Okres historyczny", options=["30d", "60d", "90d"], index=0)
-    interval = st.sidebar.selectbox("Interwał", options=["60m", "30m", "15m"], index=0)
+    if run:
+        st.info("Skanowanie... poczekaj chwilę.")
+        results = scan_and_analyze(tickers, tp_pct, sl_pct, period, interval, palette_name, rsi_threshold, rvol_threshold, allow_scrape)
 
-    st.sidebar.markdown("### TP / SL (procenty)")
-    tp_pct = st.sidebar.slider("Take Profit (%)", min_value=0.5, max_value=20.0, value=3.0, step=0.5) / 100.0
-    sl_pct = st.sidebar.slider("Stop Loss (%)", min_value=0.5, max_value=20.0, value=2.0, step=0.5) / 100.0
-
-    st.sidebar.markdown("### Filtry i progi")
-    rsi_threshold = st.sidebar.slider("RSI próg (pokazuj jeśli RSI <)", min_value=10, max_value=50, value=35, step=1)
-    rvol_threshold = st.sidebar.slider("RVol próg (pokazuj jeśli >)", min_value=1.0, max_value=10.0, value=3.0, step=0.1)
-
-    st.sidebar.markdown("### Wygląd wykresów")
-    palette = st.sidebar.selectbox("Paleta kolorów", options=["standard", "warm", "cool", "high-contrast"], index=0)
-    apply_color_palette(palette)
-
-    st.sidebar.markdown("### AI (opcjonalne)")
-    openai_key = st.sidebar.text_input("OPENAI_API_KEY (opcjonalne)", type="password", value=os.getenv("OPENAI_API_KEY", ""))
-    use_ai = st.sidebar.checkbox("Włącz AI podsumowanie (opcjonalne)", value=False)
-    saved_model = load_model_pref_from_file() or os.getenv("OPENAI_MODEL", "")
-    chosen_model = saved_model if saved_model in AVAILABLE_MODELS else AVAILABLE_MODELS[0] if AVAILABLE_MODELS else None
-    if use_ai:
-        chosen_model = st.sidebar.selectbox("Model AI", options=AVAILABLE_MODELS, index=AVAILABLE_MODELS.index(chosen_model) if chosen_model in AVAILABLE_MODELS else 0)
-        if st.sidebar.button("Zapisz preferencję modelu"):
-            save_model_pref_to_file(chosen_model)
-            st.sidebar.success(f"Zapisano preferencję: {chosen_model}")
-
-    st.sidebar.markdown("---")
-    st.sidebar.write(f"Log CSV: `{LOG_CSV}`")
-    st.sidebar.write(f"Wykresy: `{CHART_DIR}/`")
-    st.sidebar.write(f"Błędy rysowania: `{PLOT_ERRORS}`")
-
-    run_now = st.sidebar.button("Uruchom skan teraz")
-
-    # Krótkie przypomnienie (minimalne)
-    st.markdown("Uwaga: yfinance intraday może nie zwracać danych dla wszystkich tickerów. Bid/Ask dostępne tylko jeśli źródło je udostępnia.")
-    st.markdown("Nie jestem doradcą finansowym; decyzje podejmujesz samodzielnie.")
-
-    if run_now:
-        client = None
-        MODEL = None
-        if use_ai and openai_key:
-            try:
-                from openai import OpenAI as _OpenAI
-                client = _OpenAI(api_key=openai_key)
-                MODEL = chosen_model
-            except Exception as e:
-                st.warning(f"Nie można zainicjalizować klienta OpenAI: {e}")
-                client = None
-                MODEL = None
-        elif use_ai and not openai_key:
-            st.warning("Włączono AI, ale nie podano OPENAI_API_KEY. AI zostanie wyłączone.")
-            client = None
-            MODEL = None
-
-        with st.spinner("Skanowanie..."):
-            results = scan_tickers(tickers, client=client, MODEL=MODEL, show_progress=True,
-                                   tp_pct=tp_pct, sl_pct=sl_pct, period=period, interval=interval)
-
-        if results:
-            st.success(f"Znaleziono {len(results)} pozycje spełniające kryteria.")
-            df_results = pd.DataFrame(results)
-            st.dataframe(df_results.sort_values(by=["risk_score", "rsi"], ascending=[True, True]))
-
-            st.markdown("### Wykresy i status")
-            cols = st.columns(3)
-            for i, row in enumerate(results):
-                col = cols[i % 3]
-                chart_file = row.get("chart_file")
-                if chart_file and os.path.exists(chart_file):
-                    try:
-                        col.image(chart_file, use_column_width=True, caption=f"{row['ticker']} | Risk: {row['risk_category']}")
-                        with open(chart_file, "rb") as f:
-                            col.download_button(label="Pobierz PNG", data=f, file_name=os.path.basename(chart_file), mime="image/png")
-                    except Exception:
-                        col.write(f"{row['ticker']} - wykres niedostępny")
-                else:
-                    col.write(f"{row['ticker']} - brak wykresu")
-                    if os.path.exists(PLOT_ERRORS):
-                        try:
-                            with open(PLOT_ERRORS, "r", encoding="utf-8") as f:
-                                lines = f.readlines()[-200:]
-                                for ln in lines[-20:]:
-                                    if row['ticker'] in ln:
-                                        col.text(ln.strip())
-                        except Exception:
-                            pass
-
-            # AI podsumowanie
-            if client and results:
+        for r in results:
+            col1, col2 = st.columns([1,2])
+            with col1:
+                st.subheader(r["ticker"])
+                st.write(f"**Cena:** {r['price']}")
+                st.write(f"**Bid:** {r['bid']}   **Ask:** {r['ask']}")
+                st.write(f"**Źródło ceny:** {r.get('quote_source')}")
+                st.write(f"**RSI:** {r['rsi']}   **RVol:** {r['rvol']}   **ADX:** {r['adx']}")
+                st.write(f"**MACD hist:** {r['macd_hist']}   **Ryzyko:** {r['risk_category']} ({r['risk_score']})")
+                st.write(f"**TP:** {r['tp_pct']*100:.1f}%   **SL:** {r['sl_pct']*100:.1f}%")
+                if r['levels']:
+                    lv = ", ".join([f"{k}:{v:.2f}" for k,v in r['levels'].items()])
+                    st.write("**Fibo:** " + lv)
                 try:
-                    table_lines = []
-                    header = "| TICKER | TREND | RISK | RSI | ADX | FIBO | BOLLW |"
-                    sep = "|---|---|---|---:|---:|---|---:|"
-                    table_lines.append(header); table_lines.append(sep)
-                    for r in results:
-                        table_lines.append(f"| {r['ticker']} | {r['trend']} | {r['risk_category']} | {r['rsi']} | {r['adx']} | {r['fibo_risk']} | {r['boll_width']} |")
-                    table_text = "\n".join(table_lines)
-                    prompt_system = (
-                        "Jestes ekspertem gieldowym. Otrzymasz tabele w markdown. "
-                        "Dla kazdego wiersza podaj skrocony komentarz i priorytet (LOW/MEDIUM/HIGH). "
-                        "Uzywaj tylko informacji dostarczonych. Nie dawaj polecen kupna/sprzedazy. Nie uzywaj polskich znakow."
-                    )
-                    user_content = f"DANE:\n{table_text}\n"
-                    res = client.chat.completions.create(
-                        model=MODEL,
-                        messages=[
-                            {"role": "system", "content": prompt_system},
-                            {"role": "user", "content": user_content}
-                        ],
-                        max_tokens=500
-                    )
-                    ai_text = res.choices[0].message.content if hasattr(res, "choices") else str(res)
-                    st.markdown("### AI - skrócony komentarz")
-                    st.text(ai_text)
-                except Exception as e:
-                    st.warning(f"Błąd AI: {e}")
-        else:
-            st.info("Brak pozycji do raportu w tym przebiegu.")
+                    csv_bytes = r['df'].to_csv().encode('utf-8')
+                    st.download_button("Pobierz dane CSV", data=csv_bytes, file_name=f"{r['ticker']}_data.csv", mime="text/csv")
+                except Exception:
+                    pass
+            with col2:
+                if r['chart'] is not None:
+                    st.plotly_chart(r['chart'], use_container_width=True)
+                else:
+                    st.write("Brak wykresu (sprawdź plot_errors.log)")
+
+        if use_ai and openai_key_input:
+            st.markdown("### AI - skrócone komentarze")
+            ai_text = ai_commentary_for_rows([
+                {
+                    "ticker": r["ticker"],
+                    "price": r["price"],
+                    "bid": r["bid"],
+                    "ask": r["ask"],
+                    "rsi": r["rsi"],
+                    "adx": r["adx"],
+                    "risk_category": r["risk_category"],
+                    "tp_pct": f"{r['tp_pct']*100:.1f}%",
+                    "sl_pct": f"{r['sl_pct']*100:.1f}%"
+                } for r in results
+            ], model_choice, openai_key_input)
+            if ai_text:
+                st.text(ai_text)
+            else:
+                st.warning("AI nie zwróciło odpowiedzi (sprawdź klucz/model).")
+
+        for r in results:
+            row = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "ticker": r["ticker"],
+                "price": r["price"],
+                "bid": r["bid"],
+                "ask": r["ask"],
+                "rsi": r["rsi"],
+                "rvol": r["rvol"],
+                "adx": r["adx"],
+                "risk_score": r["risk_score"],
+                "risk_category": r["risk_category"],
+                "tp_pct": r["tp_pct"],
+                "sl_pct": r["sl_pct"]
+            }
+            append_log_csv(row)
+
+        st.success("Skan zakończony. Sprawdź wykresy i log CSV.")
 
     st.markdown("---")
     st.markdown("### Ostatnie wpisy w logu")
@@ -660,8 +532,5 @@ def main_ui():
     else:
         st.write("Brak pliku logu jeszcze.")
 
-    st.markdown("---")
-    st.markdown("Jeśli wykresy nie powstają, sprawdź plik plot_errors.log, zwiększ okres (np. '60d') lub zmień interwał.")
-
 if __name__ == "__main__":
-    main_ui()
+    main()
