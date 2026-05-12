@@ -13,7 +13,7 @@ from datetime import datetime
 
 # --- KONFIG ---
 DB_FILE = "tickers_db.txt"
-st.set_page_config(page_title="AI ALPHA TERMINAL v13", page_icon="📈", layout="wide")
+st.set_page_config(page_title="AI ALPHA TERMINAL v14", page_icon="📈", layout="wide")
 
 def load_tickers():
     if os.path.exists(DB_FILE):
@@ -75,7 +75,7 @@ def compute_indicators(df):
     df["EMA50"] = df["Close"].ewm(span=50).mean()
     df["EMA200"] = df["Close"].ewm(span=200).mean()
 
-    ema12 = df["Close"].ewm(span=12).mean()
+    ema12 = df["Close"].ewm(span=12).).mean()
     ema26 = df["Close"].ewm(span=26).mean()
     df["MACD"] = ema12 - ema26
     df["MACD_signal"] = df["MACD"].ewm(span=9).mean()
@@ -151,7 +151,6 @@ def get_yf(symbol, period="250d", interval="1d"):
     return df
 
 def detect_candle_patterns(df):
-    # bardzo proste heurystyki
     patterns = []
     last = df.iloc[-1]
     body = abs(last["Close"] - last["Open"])
@@ -169,8 +168,6 @@ def detect_candle_patterns(df):
 
     return patterns
 
-# --- ALERTY PUSH (WEBHOOK / TELEGRAM / EMAIL PLACEHOLDER) ---
-
 def send_webhook(url, payload: dict):
     try:
         r = requests.post(url, json=payload, timeout=3)
@@ -186,12 +183,10 @@ def send_telegram(bot_token, chat_id, text):
     except:
         return None
 
-# email – zostawiam jako placeholder (SMTP zależne od usera)
-
 # --- SIDEBAR ---
 
 with st.sidebar:
-    st.title("⚙️ TERMINAL v13")
+    st.title("⚙️ TERMINAL v14")
 
     api_key = st.secrets.get("OPENAI_API_KEY")
     if api_key:
@@ -200,6 +195,8 @@ with st.sidebar:
         api_key = st.text_input("OpenAI Key", type="password")
         if not api_key:
             st.warning("Dodaj klucz w Secrets lub wpisz go tutaj.")
+
+    ai_model = st.selectbox("Model AI", ["gpt-4o", "gpt-4o-mini"], index=0)
 
     tickers_input = st.text_area("Symbole (przecinek)", value=load_tickers())
     if st.button("Zapisz listę"):
@@ -222,8 +219,6 @@ with st.sidebar:
 
 st_autorefresh(interval=refresh * 1000, key="fsh")
 
-# --- GŁÓWNA LOGIKA ---
-
 if not api_key:
     st.info("Wprowadź OpenAI API Key w pasku bocznym lub dodaj do Secrets.")
     st.stop()
@@ -232,7 +227,7 @@ client = OpenAI(api_key=api_key)
 tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
 if "portfolio" not in st.session_state:
-    st.session_state["portfolio"] = []  # list of dicts
+    st.session_state["portfolio"] = []
 if "trades_log" not in st.session_state:
     st.session_state["trades_log"] = []
 
@@ -290,12 +285,12 @@ if not data_map:
     st.stop()
 
 symbols_available = list(data_map.keys())
-
 # --- LAYOUT: TABS ---
 
-tab_main, tab_strategy, tab_auto, tab_multi, tab_orderbook, tab_patterns, tab_portfolio = st.tabs([
+tab_main, tab_strategy, tab_lab, tab_auto, tab_multi, tab_orderbook, tab_patterns, tab_portfolio = st.tabs([
     "📊 Główny",
     "🧮 Strategie & Backtest",
+    "🧪 AI Strategy Lab",
     "🤖 AI Auto‑Trader",
     "⏱️ Multi‑Timeframe",
     "📚 Orderbook (Binance)",
@@ -303,7 +298,7 @@ tab_main, tab_strategy, tab_auto, tab_multi, tab_orderbook, tab_patterns, tab_po
     "📦 Portfolio & Risk"
 ])
 
-# --- TAB MAIN: HEATMAP + MONITORING + SZCZEGÓŁY ---
+# --- TAB MAIN: HEATMAP + MONITORING + REGIME DETECTOR + SZCZEGÓŁY ---
 
 with tab_main:
     st.subheader("🧊 HEATMAPA RYNKU")
@@ -331,6 +326,35 @@ with tab_main:
         plot_bgcolor="#020617"
     )
     st.plotly_chart(fig_heat, use_container_width=True)
+
+    # --- AI MARKET REGIME DETECTOR ---
+    st.subheader("🧠 AI Market Regime Detector")
+    sym_reg = st.selectbox("Symbol do analizy fazy rynku", symbols_available, key="reg_sym")
+    df_reg = data_map[sym_reg]["df_1d"].tail(200)
+
+    if st.button("Analizuj fazę rynku (AI)", key="reg_btn"):
+        candles = df_reg[["Open", "High", "Low", "Close"]].to_dict(orient="records")
+        prompt = f"""
+        Masz dane OHLC (ostatnie 200 świec dziennych) dla {sym_reg}: {candles}.
+        Określ fazę rynku (np. trend wzrostowy, trend spadkowy, konsolidacja, wysokie zmienności, niska zmienność).
+        Zwróć krótki opis + etykietę w JSON:
+        {{
+          "regime": "trend_up/trend_down/range/volatile/calm",
+          "description": "krótki opis po polsku"
+        }}
+        """
+        resp = client.chat.completions.create(
+            model=ai_model,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = resp.choices[0].message.content
+        try:
+            reg = json.loads(raw)
+        except:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            reg = json.loads(raw[start:end+1]) if start != -1 and end != -1 else {"raw": raw}
+        st.json(reg)
 
     st.subheader("📊 MONITORING RYNKU")
     data_list = list(data_map.values())
@@ -439,7 +463,7 @@ with tab_strategy:
 
     with col_s2:
         if st.button("🧠 AI: wygeneruj strategię (JSON)", key="ai_strategy_json"):
-            prompt = f"""
+            prompt = """
             Wygeneruj agresywną strategię tradingową w formacie JSON.
             Pola:
             - name (string)
@@ -450,7 +474,7 @@ with tab_strategy:
             Zwróć TYLKO JSON.
             """
             resp = client.chat.completions.create(
-                model="gpt-4o",
+                model=ai_model,
                 messages=[{"role": "user", "content": prompt}]
             )
             raw = resp.choices[0].message.content
@@ -462,6 +486,121 @@ with tab_strategy:
                 js = json.loads(raw[start:end+1]) if start != -1 and end != -1 else {"raw": raw}
             st.json(js)
 
+# --- TAB AI STRATEGY LAB (z AUTO‑OPTIMIZER) ---
+
+with tab_lab:
+    st.subheader("🧪 AI Strategy Lab — generator, tester, Pine Script, Auto‑Optimizer")
+
+    # 1. GENERATOR STRATEGII
+    st.markdown("### 🧠 Generuj strategię AI (JSON)")
+    if st.button("Generuj strategię AI", key="lab_gen"):
+        prompt = """
+        Wygeneruj agresywną strategię tradingową w formacie JSON.
+        Pola:
+        - name
+        - description
+        - entry_rules (lista)
+        - exit_rules (lista)
+        - indicators (lista)
+        - timeframe (np. 1m, 5m, 15m, 1h, 1d)
+        Zwróć TYLKO JSON.
+        """
+        resp = client.chat.completions.create(
+            model=ai_model,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = resp.choices[0].message.content
+        try:
+            js = json.loads(raw)
+        except:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            js = json.loads(raw[start:end+1]) if start != -1 and end != -1 else {"raw": raw}
+        st.session_state["lab_strategy"] = js
+
+    if "lab_strategy" in st.session_state:
+        st.json(st.session_state["lab_strategy"])
+
+        # 2. EDYTOR
+        st.markdown("### ✏️ Edytuj strategię AI")
+        edited = st.text_area("Edytuj JSON strategii", json.dumps(st.session_state["lab_strategy"], indent=4), height=260)
+        if st.button("Zapisz zmiany", key="lab_save"):
+            try:
+                st.session_state["lab_strategy"] = json.loads(edited)
+                st.success("Zapisano strategię.")
+            except:
+                st.error("Błąd w JSON.")
+
+        # 3. TESTER
+        st.markdown("### 🧪 Przetestuj strategię AI na danych")
+        sym_lab = st.selectbox("Symbol", symbols_available, key="lab_sym")
+        df_lab = data_map[sym_lab]["df_1d"]
+
+        if st.button("Uruchom backtest AI", key="lab_bt"):
+            strat = st.session_state["lab_strategy"]
+            df_bt = df_lab.copy()
+            df_bt["signal"] = 0
+
+            if "EMA" in " ".join(strat.get("indicators", [])):
+                df_bt["EMA20"] = df_bt["Close"].ewm(span=20).mean()
+                df_bt["EMA50"] = df_bt["Close"].ewm(span=50).mean()
+                df_bt.loc[df_bt["EMA20"] > df_bt["EMA50"], "signal"] = 1
+                df_bt.loc[df_bt["EMA20"] < df_bt["EMA50"], "signal"] = -1
+
+            if "RSI" in " ".join(strat.get("indicators", [])):
+                df_bt["RSI"] = compute_indicators(df_bt)["RSI"]
+                df_bt.loc[df_bt["RSI"] < 30, "signal"] = 1
+                df_bt.loc[df_bt["RSI"] > 70, "signal"] = -1
+
+            df_bt["position"] = df_bt["signal"].shift(1).fillna(0)
+            df_bt["ret"] = df_bt["Close"].pct_change().fillna(0)
+            df_bt["strategy"] = df_bt["position"] * df_bt["ret"]
+            equity = (1 + df_bt["strategy"]).cumprod()
+
+            st.line_chart(equity)
+            st.write(f"Zwrot: {(equity.iloc[-1]-1)*100:.2f}%")
+            st.write(f"Max DD: {(equity.cummax()-equity).max()*100:.2f}%")
+
+        # 4. AUTO‑OPTIMIZER
+        st.markdown("### 🧬 AI Auto‑Optimizer (popraw strategię)")
+        if st.button("Optymalizuj strategię AI", key="lab_opt"):
+            prompt = f"""
+            Masz strategię w JSON oraz chcesz ją poprawić pod kątem:
+            - lepszego stosunku zysku do ryzyka
+            - mniejszego DD
+            - bardziej agresywnego wejścia, ale kontrolowanego ryzyka.
+            Strategia:
+            {json.dumps(st.session_state["lab_strategy"], indent=4)}
+            Zwróć NOWĄ strategię w tym samym formacie JSON, tylko lepiej zoptymalizowaną.
+            """
+            resp = client.chat.completions.create(
+                model=ai_model,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            raw = resp.choices[0].message.content
+            try:
+                js_opt = json.loads(raw)
+            except:
+                start = raw.find("{")
+                end = raw.rfind("}")
+                js_opt = json.loads(raw[start:end+1]) if start != -1 and end != -1 else {"raw": raw}
+            st.session_state["lab_strategy"] = js_opt
+            st.success("Strategia zoptymalizowana przez AI.")
+            st.json(js_opt)
+
+        # 5. PINE SCRIPT
+        st.markdown("### 📜 Generuj Pine Script z tej strategii")
+        if st.button("Generuj Pine Script", key="lab_pine"):
+            prompt = f"""
+            Zamień tę strategię JSON na kod Pine Script v5:
+            {json.dumps(st.session_state["lab_strategy"], indent=4)}
+            Zwróć TYLKO kod Pine Script.
+            """
+            resp = client.chat.completions.create(
+                model=ai_model,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            st.code(resp.choices[0].message.content, language="pine")
 # --- TAB AI AUTO-TRADER ---
 
 with tab_auto:
@@ -490,7 +629,7 @@ with tab_auto:
         }}
         """
         resp = client.chat.completions.create(
-            model="gpt-4o",
+            model=ai_model,
             messages=[{"role": "user", "content": prompt}]
         )
         raw = resp.choices[0].message.content
@@ -502,7 +641,6 @@ with tab_auto:
             sig = json.loads(raw[start:end+1]) if start != -1 and end != -1 else {"raw": raw}
         st.session_state["last_ai_signal"] = sig
 
-        # log + ewentualny push
         msg = f"AI {sig.get('action','?').upper()} {sym} | bias {sig.get('bias')} | risk {sig.get('risk_score')}"
         st.session_state["alerts"].append(msg)
         if webhook_url:
@@ -533,7 +671,7 @@ with tab_auto:
 
     st.markdown("### 🧾 AI → TradingView Pine Script")
     if st.button("🧠 Generuj Pine Script dla strategii EMA/RSI", key="ai_pine"):
-        prompt = f"""
+        prompt = """
         Napisz strategię w Pine Script v5 dla TradingView.
         Strategia:
         - EMA20/EMA50 cross
@@ -541,7 +679,7 @@ with tab_auto:
         Zwróć TYLKO kod Pine Script, bez komentarzy tekstowych poza kodem.
         """
         resp = client.chat.completions.create(
-            model="gpt-4o",
+            model=ai_model,
             messages=[{"role": "user", "content": prompt}]
         )
         code = resp.choices[0].message.content
@@ -659,7 +797,7 @@ with tab_patterns:
         Krótko, konkretnie, po polsku.
         """
         resp = client.chat.completions.create(
-            model="gpt-4o",
+            model=ai_model,
             messages=[{"role": "user", "content": prompt}]
         )
         st.info(resp.choices[0].message.content)
@@ -706,4 +844,3 @@ with tab_portfolio:
 
         total_risk = sum(p["risk_pct"] for p in st.session_state["portfolio"])
         st.markdown(f"**Łączne ryzyko (suma %):** {total_risk:.2f}%")
-
