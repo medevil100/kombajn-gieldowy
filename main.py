@@ -1,7 +1,11 @@
-# kombajn_streamlit.py
+# kombajn_streamlit_pl.py
+"""
+Kombajn Scanner (PL)
+Intraday 60m, RSI/MACD/ADX/Bollinger/Fibo, zapis wykresow PNG, log CSV, opcjonalne AI.
+Uruchom: streamlit run kombajn_streamlit_pl.py
+"""
 
 import os
-import time
 import math
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -10,30 +14,32 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')  # safe backend for servers
+# Bezpieczny backend (serwer)
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib import rcParams
+from cycler import cycler
 
-# Optional: seaborn for nicer style if available
-# Bezpieczne ustawienie stylu wykresów
+# Wymuszone ustawienia kolorow i wygladu wykresow (zapobiega grayscale)
+rcParams['axes.prop_cycle'] = cycler(color=['#d62728', '#ff7f0e', '#2ca02c', '#1f77b4', '#9467bd', '#17becf'])
+rcParams['figure.facecolor'] = 'white'
+rcParams['axes.facecolor'] = 'white'
+rcParams['savefig.facecolor'] = 'white'
+rcParams['savefig.transparent'] = False
+rcParams['lines.linewidth'] = 1.0
+rcParams['font.size'] = 9
+rcParams['legend.frameon'] = False
+rcParams['image.cmap'] = 'viridis'
+
+# Opcjonalnie seaborn - tylko jesli zainstalowany (nie wymagane)
 try:
     import seaborn as sns
     sns.set_style("darkgrid")
+    _HAS_SEABORN = True
 except Exception:
-    import matplotlib.pyplot as plt
-    # wybierz pierwszy dostępny przyjazny styl lub domyślny
-    preferred = None
-    for s in ("seaborn-darkgrid", "seaborn", "ggplot", "dark_background"):
-        if s in plt.style.available:
-            preferred = s
-            break
-    if preferred:
-        plt.style.use(preferred)
-    else:
-        # fallback: domyślny styl matplotlib
-        plt.style.use('default')
+    _HAS_SEABORN = False
 
-
-# Optional OpenAI client (only used if key provided and user enables AI)
+# OpenAI opcjonalne
 try:
     from openai import OpenAI
 except Exception:
@@ -41,40 +47,36 @@ except Exception:
 
 import streamlit as st
 
-# ---------------------------
-# Configuration / Defaults
-# ---------------------------
-st.set_page_config(page_title="Kombajn Scanner", layout="wide")
+# ---------------- Konfiguracja ----------------
+st.set_page_config(page_title="Kombajn Scanner (PL)", layout="wide")
 
 CHART_DIR = "charts"
 LOG_CSV = "scanner_log.csv"
 PREF_FILE = "ai_model_pref.txt"
 os.makedirs(CHART_DIR, exist_ok=True)
 
-# Default tickers (replace with your full list)
+# Domyślne tickery (wklej swoją listę)
 DEFAULT_TICKERS = [
     "STX.WA", "ACG.WA", "ACP.WA", "ACT.WA"
 ]
 
-# Available AI models (editable)
-AVAILABLE_MODELS = {
-    "gpt-4o": "High quality, general purpose",
-    "gpt-4o-large": "High capacity",
-    "gpt-4o-16k": "Larger context 16k",
-    "gpt-4o-32k": "Very large context 32k",
-    "gpt-4o-mini": "Faster and cheaper",
-    "gpt-4o-realtime": "Low-latency (if available)"
-}
+# Lista modeli AI (możesz dopisać własne nazwy)
+AVAILABLE_MODELS = [
+    "gpt-4o",
+    "gpt-4o-large",
+    "gpt-4o-16k",
+    "gpt-4o-32k",
+    "gpt-4o-mini",
+    "gpt-4o-mini-2024",
+    "gpt-4o-realtime"
+]
 
-# ---------------------------
-# Utility functions
-# ---------------------------
+# ---------------- Funkcje pomocnicze ----------------
 def safe_float(x) -> Optional[float]:
     try:
         if x is None:
             return None
         if isinstance(x, (list, tuple, np.ndarray, pd.Series)):
-            # prefer last element for Series, first for others
             if isinstance(x, pd.Series):
                 return float(x.iloc[-1])
             return float(x[0])
@@ -109,9 +111,7 @@ def save_model_pref_to_file(model: str, filename: str = PREF_FILE):
     except Exception:
         pass
 
-# ---------------------------
-# Technical indicators
-# ---------------------------
+# ---------------- Wskaźniki techniczne ----------------
 def calculate_rsi(series: pd.Series, window: int = 14) -> pd.Series:
     if len(series) < window:
         return pd.Series([50] * len(series), index=series.index)
@@ -148,7 +148,6 @@ def slope_of_series(series: pd.Series, n: int = 10) -> float:
     return float(coeffs[0])
 
 def calculate_adx(df: pd.DataFrame, n: int = 14) -> float:
-    # df must contain High, Low, Close
     try:
         high = df['High']
         low = df['Low']
@@ -208,39 +207,33 @@ def assess_risk(rsi: float, rvol: float, slope: float, macd_hist: float,
                 bid: Optional[float], ask: Optional[float], fib_info: Dict[str, Any],
                 adx: float, boll_width: Optional[float]) -> Dict[str, Any]:
     score = 0.0
-    # RSI
     if rsi < 25 or rsi > 75:
         score += 1.0
     elif rsi < 35 or rsi > 65:
         score += 0.5
-    # rvol
     if rvol > 3.0:
         score += 1.5
     elif rvol > 1.5:
         score += 0.8
     elif rvol > 1.0:
         score += 0.3
-    # slope and macd_hist
     if slope < -0.02:
         score += 1.0
     elif slope < -0.005:
         score += 0.5
     if macd_hist < 0:
         score += 0.5
-    # spread
     if bid is not None and ask is not None and bid > 0:
         spread_pct = abs(ask - bid) / bid
         if spread_pct > 0.02:
             score += 1.0
         elif spread_pct > 0.005:
             score += 0.4
-    # fib proximity
     fib_risk = fib_info.get("fibo_risk", "MEDIUM")
     if fib_risk == "HIGH":
         score += 1.0
     elif fib_risk == "MEDIUM":
         score += 0.4
-    # ADX
     if adx >= 25:
         if slope > 0 and macd_hist > 0:
             score -= 0.8
@@ -248,13 +241,11 @@ def assess_risk(rsi: float, rvol: float, slope: float, macd_hist: float,
             score += 0.6
     elif adx < 20:
         score += 0.3
-    # Bollinger width
     if boll_width is not None and not math.isnan(boll_width):
         if boll_width > 0.08:
             score += 1.0
         elif boll_width > 0.04:
             score += 0.4
-    # classify
     if score <= 1.5:
         category = "LOW"
     elif score <= 3.0:
@@ -263,69 +254,101 @@ def assess_risk(rsi: float, rvol: float, slope: float, macd_hist: float,
         category = "HIGH"
     return {"score": round(score, 2), "category": category}
 
-# ---------------------------
-# Plotting
-# ---------------------------
+# ---------------- Rysowanie wykresow ----------------
 def plot_and_save(ticker: str, df: pd.DataFrame, levels: Dict[str, float],
-                  fib_info: Dict[str, Any], filename: str):
-    close = df['Close']
-    macd_line, signal_line, hist = macd(close)
-    upper, lower, width = bollinger_bands(close)
-    sma5 = sma(close, 5)
-    sma20 = sma(close, 20)
-
-    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True,
-                             gridspec_kw={'height_ratios': [3, 1.2, 0.8]})
-    ax_price, ax_macd, ax_adx = axes
-
-    # Price + SMAs + Bollinger
-    ax_price.plot(df.index, close, label='Close', color='black', linewidth=1)
-    ax_price.plot(df.index, sma5, label='SMA5', color='tab:green', linewidth=0.9)
-    ax_price.plot(df.index, sma20, label='SMA20', color='tab:blue', linewidth=0.9)
-    ax_price.plot(df.index, upper, label='BollUpper', color='tab:orange', linestyle='--', linewidth=0.8)
-    ax_price.plot(df.index, lower, label='BollLower', color='tab:orange', linestyle='--', linewidth=0.8)
-
-    for k, v in levels.items():
-        ax_price.axhline(v, color='gray', linestyle=':', linewidth=0.7)
-    nearest_level = fib_info.get('nearest_level')
-    if nearest_level and nearest_level in levels:
-        y = levels[nearest_level]
-        ax_price.annotate(f"Nearest Fibo {nearest_level}", xy=(df.index[-1], y),
-                          xytext=(-80, 10), textcoords='offset points',
-                          arrowprops=dict(arrowstyle="->", color='gray'), fontsize=8, color='gray')
-
-    ax_price.set_title(f"{ticker}  Close / SMA / Bollinger")
-    ax_price.legend(loc='upper left', fontsize=8)
-
-    # MACD
-    ax_macd.plot(df.index, macd_line, label='MACD', color='tab:purple', linewidth=0.9)
-    ax_macd.plot(df.index, signal_line, label='Signal', color='tab:red', linewidth=0.9)
-    ax_macd.bar(df.index, hist, label='Hist', color=['tab:green' if h >= 0 else 'tab:red' for h in hist], alpha=0.6)
-    ax_macd.legend(loc='upper left', fontsize=8)
-    ax_macd.set_ylabel("MACD")
-
-    # ADX (rolling)
+                  fib_info: Dict[str, Any], filename: str) -> Optional[str]:
     try:
-        adx_full = []
-        for i in range(len(df)):
-            if i < 14:
-                adx_full.append(np.nan)
-            else:
-                adx_full.append(calculate_adx(df.iloc[:i+1], n=14))
-        ax_adx.plot(df.index, adx_full, label='ADX', color='tab:cyan', linewidth=0.9)
-        ax_adx.axhline(25, color='gray', linestyle='--', linewidth=0.7)
-        ax_adx.set_ylabel("ADX")
-        ax_adx.legend(loc='upper left', fontsize=8)
-    except Exception:
-        ax_adx.text(0.5, 0.5, "ADX not available", transform=ax_adx.transAxes, ha='center')
+        close = df['Close']
+        macd_line, signal_line, hist = macd(close)
+        upper, lower, width = bollinger_bands(close)
+        sma5 = sma(close, 5)
+        sma20 = sma(close, 20)
 
-    plt.tight_layout()
-    fig.savefig(filename, dpi=150)
-    plt.close(fig)
+        fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True,
+                                 gridspec_kw={'height_ratios': [3, 1.2, 0.8]})
+        ax_price, ax_macd, ax_adx = axes
 
-# ---------------------------
-# Core scanning logic
-# ---------------------------
+        # Wymuszone kolory linii
+        ax_price.plot(df.index, close, label='Close', color='#111111', linewidth=1.2)
+        ax_price.plot(df.index, sma5, label='SMA5', color='#2ca02c', linewidth=0.9)
+        ax_price.plot(df.index, sma20, label='SMA20', color='#1f77b4', linewidth=0.9)
+        ax_price.plot(df.index, upper, label='BollUpper', color='#ff7f0e', linestyle='--', linewidth=0.9)
+        ax_price.plot(df.index, lower, label='BollLower', color='#ff7f0e', linestyle='--', linewidth=0.9)
+
+        for k, v in levels.items():
+            ax_price.axhline(v, color='gray', linestyle=':', linewidth=0.7)
+        nearest_level = fib_info.get('nearest_level')
+        if nearest_level and nearest_level in levels:
+            y = levels[nearest_level]
+            ax_price.annotate(f"Nearest Fibo {nearest_level}", xy=(df.index[-1], y),
+                              xytext=(-80, 10), textcoords='offset points',
+                              arrowprops=dict(arrowstyle="->", color='gray'), fontsize=8, color='gray')
+
+        ax_price.set_title(f"{ticker}  Close / SMA / Bollinger")
+        ax_price.legend(loc='upper left', fontsize=8)
+
+        # MACD
+        ax_macd.plot(df.index, macd_line, label='MACD', color='#9467bd', linewidth=0.9)
+        ax_macd.plot(df.index, signal_line, label='Signal', color='#d62728', linewidth=0.9)
+        colors = ['#2ca02c' if h >= 0 else '#d62728' for h in hist]
+        ax_macd.bar(df.index, hist, label='Hist', color=colors, alpha=0.6)
+        ax_macd.legend(loc='upper left', fontsize=8)
+        ax_macd.set_ylabel("MACD")
+
+        # ADX rolling
+        try:
+            adx_full = []
+            for i in range(len(df)):
+                if i < 14:
+                    adx_full.append(np.nan)
+                else:
+                    adx_full.append(calculate_adx(df.iloc[:i+1], n=14))
+            ax_adx.plot(df.index, adx_full, label='ADX', color='#17becf', linewidth=0.9)
+            ax_adx.axhline(25, color='gray', linestyle='--', linewidth=0.7)
+            ax_adx.set_ylabel("ADX")
+            ax_adx.legend(loc='upper left', fontsize=8)
+        except Exception:
+            ax_adx.text(0.5, 0.5, "ADX niedostepny", transform=ax_adx.transAxes, ha='center')
+
+        plt.tight_layout()
+        fig.savefig(filename, dpi=150)
+        plt.close(fig)
+        return filename
+    except Exception as e:
+        try:
+            with open("plot_errors.log", "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now().isoformat()} - Plot error for {ticker}: {e}\n")
+        except Exception:
+            pass
+        return None
+
+# ---------------- Logika skanowania ----------------
+def classify_trend(close_series: pd.Series):
+    short_w, long_w = 5, 20
+    if len(close_series) < long_w:
+        return "UNKNOWN", {}
+    sma_short = sma(close_series, short_w).iloc[-1]
+    sma_long = sma(close_series, long_w).iloc[-1]
+    slp = slope_of_series(close_series, n=10)
+    macd_line, signal_line, hist = macd(close_series)
+    macd_val = macd_line.iloc[-1]
+    signal_val = signal_line.iloc[-1]
+    if sma_short > sma_long and slp > 0.01 and macd_val > signal_val:
+        trend = "UP"
+    elif sma_short < sma_long and slp < -0.01 and macd_val < signal_val:
+        trend = "DOWN"
+    else:
+        trend = "SIDEWAYS"
+    details = {
+        "sma_short": float(sma_short),
+        "sma_long": float(sma_long),
+        "slope": float(slp),
+        "macd": float(macd_val),
+        "macd_signal": float(signal_val),
+        "macd_hist": float(hist.iloc[-1]) if len(hist) else 0.0
+    }
+    return trend, details
+
 def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str],
                  show_progress: bool = True) -> List[Dict[str, Any]]:
     results = []
@@ -336,7 +359,6 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
         status_text = st.empty()
     for s in tickers:
         try:
-            # download intraday 60m for last 30 days
             df = yf.download(s, period="30d", interval="60m", progress=False)
             if df.empty or len(df) < 20:
                 if show_progress:
@@ -346,13 +368,11 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
                     progress_bar.progress(int(progress / total * 100))
                 continue
 
-            # safe extraction of Close and Volume (handle DataFrame multi-col)
             _close = df['Close']
             _vol = df['Volume']
             close = _close.iloc[:, 0] if isinstance(_close, pd.DataFrame) else _close
             vol = _vol.iloc[:, 0] if isinstance(_vol, pd.DataFrame) else _vol
 
-            # last price
             try:
                 c_dzis = float(close.iloc[-1])
             except Exception:
@@ -368,7 +388,6 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
             rvol = float(vol.iloc[-1] / vol.mean()) if vol.mean() > 0 else 1.0
             zmiana = ((c_dzis - c_wczoraj) / c_wczoraj) * 100 if c_wczoraj != 0 else 0.0
 
-            # bid/ask safe
             bid, ask = None, None
             try:
                 t = yf.Ticker(s)
@@ -380,7 +399,6 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
             except Exception:
                 bid, ask = None, None
 
-            # indicators
             trend, details = classify_trend(close)
             macd_line, signal_line, hist = macd(close)
             macd_hist = float(hist.iloc[-1]) if len(hist) else 0.0
@@ -397,7 +415,6 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
             risk = assess_risk(rsi=rsi, rvol=rvol, slope=slp, macd_hist=macd_hist,
                                bid=bid, ask=ask, fib_info=fib_info, adx=adx, boll_width=boll_width)
 
-            # decide whether to include in report (customizable)
             show = False
             if s.upper() == "STX.WA":
                 show = True
@@ -433,89 +450,45 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
                     "chart_file": chart_file
                 }
                 append_log_csv(row)
-                # plot and save
-                try:
-                    plot_and_save(s, df, levels, fib_info, chart_file)
-                except Exception:
-                    # continue even if plotting fails
-                    pass
+                saved = plot_and_save(s, df, levels, fib_info, chart_file)
+                if saved is None:
+                    row["chart_file"] = None
                 results.append(row)
 
-            # progress
             progress += 1
             if show_progress:
                 progress_bar.progress(int(progress / total * 100))
                 status_text.text(f"Skanowanie: {s} ({progress}/{total})")
 
         except Exception as e:
-            # do not break whole loop on single ticker error
             if show_progress:
-                status_text.text(f"Blad przy {s}: {e}")
+                status_text.text(f"Błąd przy {s}: {e}")
             progress += 1
             if show_progress:
                 progress_bar.progress(int(progress / total * 100))
             continue
 
     if show_progress:
-        status_text.text("Skanowanie zakonczone.")
+        status_text.text("Skanowanie zakończone.")
     return results
 
-# ---------------------------
-# Helper: classify_trend (kept simple)
-# ---------------------------
-def classify_trend(close_series: pd.Series):
-    short_w, long_w = 5, 20
-    if len(close_series) < long_w:
-        return "UNKNOWN", {}
-    sma_short = sma(close_series, short_w).iloc[-1]
-    sma_long = sma(close_series, long_w).iloc[-1]
-    slp = slope_of_series(close_series, n=10)
-    macd_line, signal_line, hist = macd(close_series)
-    macd_val = macd_line.iloc[-1]
-    signal_val = signal_line.iloc[-1]
-    if sma_short > sma_long and slp > 0.01 and macd_val > signal_val:
-        trend = "UP"
-    elif sma_short < sma_long and slp < -0.01 and macd_val < signal_val:
-        trend = "DOWN"
-    else:
-        trend = "SIDEWAYS"
-    details = {
-        "sma_short": float(sma_short),
-        "sma_long": float(sma_long),
-        "slope": float(slp),
-        "macd": float(macd_val),
-        "macd_signal": float(signal_val),
-        "sma_short_val": float(sma_short),
-        "sma_long_val": float(sma_long),
-        "macd_hist": float(hist.iloc[-1]) if len(hist) else 0.0
-    }
-    return trend, details
-
-# ---------------------------
-# Streamlit UI
-# ---------------------------
+# ---------------- Interfejs Streamlit (PL) ----------------
 def main_ui():
     st.title("Kombajn Scanner — intraday 60m")
     st.markdown("Analiza techniczna: RSI, MACD, ADX, Bollinger, Fibo. Zapis wykresów PNG i log CSV.")
 
-    # Sidebar controls
     st.sidebar.header("Ustawienia")
-    tickers_input = st.sidebar.text_area("Tickery (oddzielone przecinkiem)", value=",".join(DEFAULT_TICKERS), height=120)
+    tickers_input = st.sidebar.text_area("Tickery (oddzielone przecinkiem)", value=",".join(DEFAULT_TICKERS), height=140)
     tickers = [t.strip() for t in tickers_input.split(",") if t.strip()]
-    st.sidebar.markdown("---")
 
-    # OpenAI settings
+    st.sidebar.markdown("---")
     openai_key = st.sidebar.text_input("OPENAI_API_KEY (opcjonalne)", type="password", value=os.getenv("OPENAI_API_KEY", ""))
     use_ai = st.sidebar.checkbox("Włącz AI podsumowanie (opcjonalne)", value=False)
     saved_model = load_model_pref_from_file() or os.getenv("OPENAI_MODEL", "")
-    chosen_model = saved_model
+    chosen_model = saved_model if saved_model in AVAILABLE_MODELS else AVAILABLE_MODELS[0] if AVAILABLE_MODELS else None
     if use_ai:
         st.sidebar.markdown("Wybierz model AI")
-        model_options = list(AVAILABLE_MODELS.keys())
-        # show saved model first if present
-        if saved_model and saved_model not in model_options:
-            model_options.insert(0, saved_model)
-        chosen_model = st.sidebar.selectbox("Model", options=model_options, index=0 if model_options else 0)
+        chosen_model = st.sidebar.selectbox("Model", options=AVAILABLE_MODELS, index=AVAILABLE_MODELS.index(chosen_model) if chosen_model in AVAILABLE_MODELS else 0)
         if st.sidebar.button("Zapisz preferencję modelu"):
             save_model_pref_to_file(chosen_model)
             st.sidebar.success(f"Zapisano preferencję: {chosen_model}")
@@ -525,13 +498,10 @@ def main_ui():
     run_now = st.sidebar.button("Uruchom skan teraz")
 
     st.sidebar.markdown("---")
-    st.sidebar.write("Pliki:")
-    st.sidebar.write(f"- Log CSV: `{LOG_CSV}`")
-    st.sidebar.write(f"- Wykresy: `{CHART_DIR}/`")
+    st.sidebar.write(f"Log CSV: `{LOG_CSV}`")
+    st.sidebar.write(f"Wykresy: `{CHART_DIR}/`")
 
-    # Main area: run scanner on button
     if run_now:
-        # initialize OpenAI client if requested
         client = None
         MODEL = None
         if use_ai and openai_key and OpenAI:
@@ -539,7 +509,7 @@ def main_ui():
                 client = OpenAI(api_key=openai_key)
                 MODEL = chosen_model
             except Exception as e:
-                st.warning(f"Nie mozna zainicjalizowac klienta OpenAI: {e}")
+                st.warning(f"Nie można zainicjalizować klienta OpenAI: {e}")
                 client = None
                 MODEL = None
         elif use_ai and not openai_key:
@@ -554,8 +524,8 @@ def main_ui():
             st.success(f"Znaleziono {len(results)} pozycje spełniające kryteria.")
             df_results = pd.DataFrame(results)
             st.dataframe(df_results.sort_values(by=["risk_score", "rsi"], ascending=[True, True]))
-            # show charts thumbnails and download links
-            st.markdown("### Wykresy")
+
+            st.markdown("### Wykresy i status")
             cols = st.columns(3)
             for i, row in enumerate(results):
                 col = cols[i % 3]
@@ -564,12 +534,22 @@ def main_ui():
                     try:
                         col.image(chart_file, use_column_width=True, caption=f"{row['ticker']} | Risk: {row['risk_category']}")
                         with open(chart_file, "rb") as f:
-                            btn = col.download_button(label="Pobierz PNG", data=f, file_name=os.path.basename(chart_file), mime="image/png")
+                            col.download_button(label="Pobierz PNG", data=f, file_name=os.path.basename(chart_file), mime="image/png")
                     except Exception:
-                        col.write(f"{row['ticker']} - wykres niedostepny")
+                        col.write(f"{row['ticker']} - wykres niedostępny")
                 else:
                     col.write(f"{row['ticker']} - brak wykresu")
-            # AI summary if enabled
+                    if os.path.exists("plot_errors.log"):
+                        try:
+                            with open("plot_errors.log", "r", encoding="utf-8") as f:
+                                lines = f.readlines()[-50:]
+                                for ln in lines[-10:]:
+                                    if row['ticker'] in ln:
+                                        col.text(ln.strip())
+                        except Exception:
+                            pass
+
+            # AI podsumowanie
             if client and results:
                 try:
                     table_lines = []
@@ -594,14 +574,13 @@ def main_ui():
                         max_tokens=500
                     )
                     ai_text = res.choices[0].message.content if hasattr(res, "choices") else str(res)
-                    st.markdown("### AI - skrocony komentarz")
+                    st.markdown("### AI - skrócony komentarz")
                     st.text(ai_text)
                 except Exception as e:
-                    st.warning(f"Blad AI: {e}")
+                    st.warning(f"Błąd AI: {e}")
         else:
             st.info("Brak pozycji do raportu w tym przebiegu.")
 
-    # Show last lines of CSV log
     st.markdown("---")
     st.markdown("### Ostatnie wpisy w logu")
     if os.path.exists(LOG_CSV):
@@ -611,12 +590,12 @@ def main_ui():
             with open(LOG_CSV, "rb") as f:
                 st.download_button("Pobierz log CSV", data=f, file_name=LOG_CSV, mime="text/csv")
         except Exception as e:
-            st.write(f"Nie mozna wczytac logu: {e}")
+            st.write(f"Nie można wczytać logu: {e}")
     else:
         st.write("Brak pliku logu jeszcze.")
 
     st.markdown("---")
-    st.markdown("Uwaga: yfinance intraday moze nie zwracac danych dla wszystkich tickerow. Bid/Ask dostepne tylko jesli zrodlo je udostepnia.")
+    st.markdown("Uwaga: yfinance intraday może nie zwracać danych dla wszystkich tickerów. Bid/Ask dostępne tylko jeśli źródło je udostępnia.")
     st.markdown("Skrypt nie daje porad inwestycyjnych. Decyzje należą do Ciebie.")
 
 if __name__ == "__main__":
