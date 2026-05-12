@@ -1,17 +1,3 @@
-```python
-# kombajn_streamlit_allinone.py
-"""
-Kombajn Scanner — All-in-One (PL)
-- Streamlit UI z panelem ustawień (TP/SL, okres, interwał, paleta kolorów)
-- Kolorowe wykresy Plotly (interaktywne)
-- Dane: yfinance (główne). Fallback: Finnhub / AlphaVantage (jeśli podasz klucze)
-- Dodatkowy fallback scraping: Radar.pl i Biznes.pl (opcjonalnie, włącz w UI)
-- Bid/Ask/Price: yfinance.info, fallback do Finnhub/AlphaVantage/scraping
-- Sanitacja danych, TP/SL, wykresy, CSV log, plot_errors.log
-- AI: opcjonalne podsumowanie per-spółka (wymaga OPENAI_API_KEY)
-Uruchom: streamlit run kombajn_streamlit_allinone.py
-"""
-
 import os
 import re
 import time
