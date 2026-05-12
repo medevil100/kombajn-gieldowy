@@ -1,4 +1,5 @@
-# kombajn_streamlit_final.py
+# kombajn_streamlit_final_with_ui_settings.py
+
 import os
 import math
 from datetime import datetime
@@ -13,34 +14,17 @@ import matplotlib.pyplot as plt
 from matplotlib import rcParams
 from cycler import cycler
 
-# Wymuszone ustawienia kolorów (zapobiega grayscale)
-rcParams['axes.prop_cycle'] = cycler(color=['#d62728', '#ff7f0e', '#2ca02c', '#1f77b4', '#9467bd', '#17becf'])
-rcParams['figure.facecolor'] = 'white'
-rcParams['axes.facecolor'] = 'white'
-rcParams['savefig.facecolor'] = 'white'
-rcParams['savefig.transparent'] = False
-rcParams['lines.linewidth'] = 1.0
-rcParams['font.size'] = 9
-rcParams['legend.frameon'] = False
-rcParams['image.cmap'] = 'viridis'
-
 # Opcjonalnie seaborn (nie wymagane)
 try:
     import seaborn as sns
-    sns.set_style("darkgrid")
+    _HAS_SEABORN = True
 except Exception:
-    pass
-
-# OpenAI opcjonalne
-try:
-    from openai import OpenAI
-except Exception:
-    OpenAI = None
+    _HAS_SEABORN = False
 
 import streamlit as st
 
-# ---------------- Konfiguracja ----------------
-st.set_page_config(page_title="Kombajn Scanner (final)", layout="wide")
+# ---------------- Konfiguracja pliku i katalogów ----------------
+st.set_page_config(page_title="Kombajn Scanner (UI ustawienia)", layout="wide")
 
 CHART_DIR = "charts"
 LOG_CSV = "scanner_log.csv"
@@ -53,7 +37,7 @@ DEFAULT_TICKERS = [
     "CFS.WA", "MER.WA", "HUMA", "STX.WA", "NVG.WA", "TCRX", "HPE.WA", "PLRX"
 ]
 
-# Rozszerzona lista modeli AI (możesz dopisać inne)
+# Lista modeli AI (możesz dopisać inne)
 AVAILABLE_MODELS = [
     "gpt-4o",
     "gpt-4o-large",
@@ -65,7 +49,29 @@ AVAILABLE_MODELS = [
     "gpt-3.5-turbo"
 ]
 
-# ---------------- Pomocnicze ----------------
+# ---------------- Funkcje pomocnicze ----------------
+def apply_color_palette(palette_name: str):
+    """Ustaw rcParams zgodnie z wybraną paletą."""
+    palettes = {
+        "standard": ['#d62728', '#ff7f0e', '#2ca02c', '#1f77b4', '#9467bd', '#17becf'],
+        "warm": ['#d62728', '#ff7f0e', '#ffbb78', '#ff9896', '#e377c2', '#8c564b'],
+        "cool": ['#1f77b4', '#17becf', '#2ca02c', '#9467bd', '#7f7f7f', '#bcbd22'],
+        "high-contrast": ['#d62728', '#2ca02c', '#1f77b4', '#ff7f0e', '#9467bd', '#17becf']
+    }
+    colors = palettes.get(palette_name, palettes["standard"])
+    rcParams['axes.prop_cycle'] = cycler(color=colors)
+    rcParams['figure.facecolor'] = 'white'
+    rcParams['axes.facecolor'] = 'white'
+    rcParams['savefig.facecolor'] = 'white'
+    rcParams['savefig.transparent'] = False
+    rcParams['lines.linewidth'] = 1.0
+    rcParams['font.size'] = 9
+    rcParams['legend.frameon'] = False
+    rcParams['image.cmap'] = 'viridis'
+
+# Domyślna paleta
+apply_color_palette("standard")
+
 def safe_float(x) -> Optional[float]:
     try:
         if x is None:
@@ -112,7 +118,7 @@ def log_plot_error(ticker: str, err: Exception):
     except Exception:
         pass
 
-# ---------------- Wskaźniki ----------------
+# ---------------- Wskaźniki techniczne ----------------
 def calculate_rsi(series: pd.Series, window: int = 14) -> pd.Series:
     series = pd.to_numeric(series, errors='coerce')
     if len(series.dropna()) < window:
@@ -279,11 +285,7 @@ def assess_risk(rsi: float, rvol: float, slope: float, macd_hist: float,
 def plot_and_save(ticker: str, df: pd.DataFrame, levels: Dict[str, float],
                   fib_info: Dict[str, Any], filename: str,
                   tp_pct: float = 0.03, sl_pct: float = 0.02) -> Optional[str]:
-    """
-    tp_pct, sl_pct: domyślne procenty TP i SL względem ostatniej ceny (3% TP, 2% SL)
-    """
     try:
-        # sanitacja kolumn numerycznych
         for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -298,7 +300,6 @@ def plot_and_save(ticker: str, df: pd.DataFrame, levels: Dict[str, float],
         sma5 = sma(close, 5)
         sma20 = sma(close, 20)
 
-        # TP/SL poziomy
         tp_level = last_price * (1 + tp_pct)
         sl_level = last_price * (1 - sl_pct)
 
@@ -306,7 +307,7 @@ def plot_and_save(ticker: str, df: pd.DataFrame, levels: Dict[str, float],
                                  gridspec_kw={'height_ratios': [3, 1.2, 0.8]})
         ax_price, ax_macd, ax_adx = axes
 
-        # Wymuszone kolory linii
+        # Wymuszone kolory linii (jawne)
         ax_price.plot(df.index, close, label='Close', color='#111111', linewidth=1.2)
         ax_price.plot(df.index, sma5, label='SMA5', color='#2ca02c', linewidth=0.9)
         ax_price.plot(df.index, sma20, label='SMA20', color='#1f77b4', linewidth=0.9)
@@ -389,7 +390,8 @@ def classify_trend(close_series: pd.Series):
     return trend, details
 
 def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str],
-                 show_progress: bool = True, tp_pct: float = 0.03, sl_pct: float = 0.02) -> List[Dict[str, Any]]:
+                 show_progress: bool = True, tp_pct: float = 0.03, sl_pct: float = 0.02,
+                 period: str = "30d", interval: str = "60m") -> List[Dict[str, Any]]:
     results = []
     total = len(tickers)
     progress = 0
@@ -398,8 +400,7 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
         status_text = st.empty()
     for s in tickers:
         try:
-            df = yf.download(s, period="30d", interval="60m", progress=False)
-            # sanitacja: konwertuj kolumny numeric
+            df = yf.download(s, period=period, interval=interval, progress=False)
             if not df.empty:
                 for col in ['Open','High','Low','Close','Volume']:
                     if col in df.columns:
@@ -494,7 +495,7 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
                     "chart_file": chart_file
                 }
                 append_log_csv(row)
-                saved = plot_and_save(s, df, levels, fib_info, chart_file, tp_pct=0.03, sl_pct=0.02)
+                saved = plot_and_save(s, df, levels, fib_info, chart_file, tp_pct=tp_pct, sl_pct=sl_pct)
                 if saved is None:
                     row["chart_file"] = None
                 results.append(row)
@@ -519,41 +520,58 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
 
 # ---------------- Interfejs Streamlit (PL) ----------------
 def main_ui():
-    st.title("Kombajn Scanner — intraday 60m (final)")
-    st.markdown("Analiza techniczna: RSI, MACD, ADX, Bollinger, Fibo. Zapis wykresów PNG i log CSV. TP/SL rysowane automatycznie.")
+    st.title("Kombajn Scanner — intraday 60m (UI ustawienia)")
+    st.markdown("Analiza techniczna: RSI, MACD, ADX, Bollinger, Fibo. TP/SL i paleta kolorów w panelu bocznym.")
 
-    st.sidebar.header("Ustawienia")
-    tickers_input = st.sidebar.text_area("Tickery (oddzielone przecinkiem)", value=",".join(DEFAULT_TICKERS), height=160)
+    st.sidebar.header("Ustawienia skanera")
+    tickers_input = st.sidebar.text_area("Tickery (oddzielone przecinkiem)", value=",".join(DEFAULT_TICKERS), height=140)
     tickers = [t.strip() for t in tickers_input.split(",") if t.strip()]
 
-    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Parametry interwału i okresu")
+    period = st.sidebar.selectbox("Okres historyczny", options=["30d", "60d", "90d"], index=0)
+    interval = st.sidebar.selectbox("Interwał", options=["60m", "30m", "15m"], index=0)
+
+    st.sidebar.markdown("### TP / SL (procenty)")
+    tp_pct = st.sidebar.slider("Take Profit (%)", min_value=0.5, max_value=20.0, value=3.0, step=0.5) / 100.0
+    sl_pct = st.sidebar.slider("Stop Loss (%)", min_value=0.5, max_value=20.0, value=2.0, step=0.5) / 100.0
+
+    st.sidebar.markdown("### Filtry i progi")
+    rsi_threshold = st.sidebar.slider("RSI próg (pokazuj jeśli RSI <)", min_value=10, max_value=50, value=35, step=1)
+    rvol_threshold = st.sidebar.slider("RVol próg (pokazuj jeśli >)", min_value=1.0, max_value=10.0, value=3.0, step=0.1)
+
+    st.sidebar.markdown("### Wygląd wykresów")
+    palette = st.sidebar.selectbox("Paleta kolorów", options=["standard", "warm", "cool", "high-contrast"], index=0)
+    apply_color_palette(palette)
+
+    st.sidebar.markdown("### AI (opcjonalne)")
     openai_key = st.sidebar.text_input("OPENAI_API_KEY (opcjonalne)", type="password", value=os.getenv("OPENAI_API_KEY", ""))
     use_ai = st.sidebar.checkbox("Włącz AI podsumowanie (opcjonalne)", value=False)
     saved_model = load_model_pref_from_file() or os.getenv("OPENAI_MODEL", "")
     chosen_model = saved_model if saved_model in AVAILABLE_MODELS else AVAILABLE_MODELS[0] if AVAILABLE_MODELS else None
     if use_ai:
-        st.sidebar.markdown("Wybierz model AI")
-        chosen_model = st.sidebar.selectbox("Model", options=AVAILABLE_MODELS, index=AVAILABLE_MODELS.index(chosen_model) if chosen_model in AVAILABLE_MODELS else 0)
+        chosen_model = st.sidebar.selectbox("Model AI", options=AVAILABLE_MODELS, index=AVAILABLE_MODELS.index(chosen_model) if chosen_model in AVAILABLE_MODELS else 0)
         if st.sidebar.button("Zapisz preferencję modelu"):
             save_model_pref_to_file(chosen_model)
             st.sidebar.success(f"Zapisano preferencję: {chosen_model}")
-
-    st.sidebar.markdown("---")
-    st.sidebar.write("Interwał: 60m, okres: 30d (intraday).")
-    st.sidebar.write("Jeśli ADX=0 lub brak wykresu, spróbuj zwiększyć okres do 60d w kodzie.")
-    run_now = st.sidebar.button("Uruchom skan teraz")
 
     st.sidebar.markdown("---")
     st.sidebar.write(f"Log CSV: `{LOG_CSV}`")
     st.sidebar.write(f"Wykresy: `{CHART_DIR}/`")
     st.sidebar.write(f"Błędy rysowania: `{PLOT_ERRORS}`")
 
+    run_now = st.sidebar.button("Uruchom skan teraz")
+
+    # Krótkie przypomnienie (minimalne)
+    st.markdown("Uwaga: yfinance intraday może nie zwracać danych dla wszystkich tickerów. Bid/Ask dostępne tylko jeśli źródło je udostępnia.")
+    st.markdown("Nie jestem doradcą finansowym; decyzje podejmujesz samodzielnie.")
+
     if run_now:
         client = None
         MODEL = None
-        if use_ai and openai_key and OpenAI:
+        if use_ai and openai_key:
             try:
-                client = OpenAI(api_key=openai_key)
+                from openai import OpenAI as _OpenAI
+                client = _OpenAI(api_key=openai_key)
                 MODEL = chosen_model
             except Exception as e:
                 st.warning(f"Nie można zainicjalizować klienta OpenAI: {e}")
@@ -565,7 +583,8 @@ def main_ui():
             MODEL = None
 
         with st.spinner("Skanowanie..."):
-            results = scan_tickers(tickers, client=client, MODEL=MODEL, show_progress=True)
+            results = scan_tickers(tickers, client=client, MODEL=MODEL, show_progress=True,
+                                   tp_pct=tp_pct, sl_pct=sl_pct, period=period, interval=interval)
 
         if results:
             st.success(f"Znaleziono {len(results)} pozycje spełniające kryteria.")
@@ -642,9 +661,7 @@ def main_ui():
         st.write("Brak pliku logu jeszcze.")
 
     st.markdown("---")
-    st.markdown("Uwaga: yfinance intraday może nie zwracać danych dla wszystkich tickerów. Bid/Ask dostępne tylko jeśli źródło je udostępnia.")
     st.markdown("Jeśli wykresy nie powstają, sprawdź plik plot_errors.log, zwiększ okres (np. '60d') lub zmień interwał.")
-    st.markdown("Skrypt nie daje porad inwestycyjnych. Decyzje należą do Ciebie.")
 
 if __name__ == "__main__":
     main_ui()
