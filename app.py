@@ -406,7 +406,7 @@ with tab_main:
         paper_bgcolor="#020617",
         plot_bgcolor="#020617"
     )
-    st.plotly_chart(fig_heat, use_container_width=True)
+    st.plotly_chart(fig_heat, use_container_width=True, key="heatmap_main")
 
     st.subheader("📊 MONITORING RYNKU")
     data_list = list(data_map.values())
@@ -494,7 +494,7 @@ with tab_main:
             )
             fig.update_xaxes(showgrid=False)
             fig.update_yaxes(showgrid=False)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=f"detail_{d['symbol']}")
 
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -594,7 +594,7 @@ with tab_lab:
             df_bt["strategy"] = df_bt["position"] * df_bt["ret"]
             equity = (1 + df_bt["strategy"]).cumprod()
 
-            st.line_chart(equity)
+            st.line_chart(equity, key=f"lab_bt_{sym_lab}")
             st.write(f"Zwrot: {(equity.iloc[-1]-1)*100:.2f}%")
             st.write(f"Max DD: {(equity.cummax()-equity).max()*100:.2f}%")
 
@@ -674,7 +674,6 @@ with tab_auto:
             st.markdown("### Ostatni sygnał AI")
             st.json(sig)
 
-            # RiskEngine: sizing + R-multiple
             atr = d["atr"]
             sizing = risk_engine.position_size_atr(
                 price=d["price"],
@@ -778,7 +777,7 @@ with tab_multi:
             )
             fig.update_xaxes(showgrid=False)
             fig.update_yaxes(showgrid=False)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=f"mtf_{sym}_{tf}")
 
 # =========================
 # TAB ORDERBOOK
@@ -817,7 +816,7 @@ with tab_orderbook:
                 xaxis_title="Price",
                 yaxis_title="Qty"
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=f"orderbook_{sym}_{depth_limit}")
         except Exception as e:
             st.error(f"Błąd pobierania orderbook: {e}")
 
