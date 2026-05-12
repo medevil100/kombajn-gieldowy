@@ -1,6 +1,5 @@
 
 # kombajn_streamlit_official_v3.py
-Kombajn Scanner — Official v3 (PL)
 - yfinance (oficjalne)
 - period domyślnie 60d, interval domyślnie 60m
 - fallback do 1d jeśli intraday niedostępny
