@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 from openai import OpenAI
 import yfinance as yf
@@ -16,7 +17,7 @@ from datetime import datetime
 # =========================
 
 DB_FILE = "tickers_db.txt"
-st.set_page_config(page_title="AI ALPHA TERMINAL v15 PRO", page_icon="📈", layout="wide")
+st.set_page_config(page_title="AI ALPHA TERMINAL v15 PRO PL", page_icon="📈", layout="wide")
 
 st.markdown("""
     <style>
@@ -258,7 +259,7 @@ class AIClient:
 # =========================
 
 with st.sidebar:
-    st.title("⚙️ TERMINAL v15 PRO")
+    st.title("⚙️ TERMINAL v15 PRO PL")
 
     api_key = st.secrets.get("OPENAI_API_KEY")
     if api_key:
@@ -301,6 +302,14 @@ if "portfolio" not in st.session_state:
     st.session_state["portfolio"] = []
 if "trades_log" not in st.session_state:
     st.session_state["trades_log"] = []
+if "lab_strategy" not in st.session_state:
+    st.session_state["lab_strategy"] = None
+if "lab_desc" not in st.session_state:
+    st.session_state["lab_desc"] = None
+if "last_ai_signal" not in st.session_state:
+    st.session_state["last_ai_signal"] = None
+if "auto_analysis" not in st.session_state:
+    st.session_state["auto_analysis"] = None
 
 tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
@@ -516,15 +525,19 @@ with tab_strategy:
         st.write(f"- Liczba transakcji: {bt_res['trades']}")
 
     with col_s2:
-        if st.button("🧠 AI: wygeneruj strategię (JSON)", key="ai_strategy_json"):
+        if st.button("🧠 AI: wygeneruj strategię (JSON, PL)", key="ai_strategy_json"):
             prompt = """
-            Wygeneruj agresywną strategię tradingową w formacie JSON.
+            Wygeneruj agresywną strategię tradingową w formacie JSON po polsku.
+            Wszystkie pola muszą być po polsku.
+
             Pola:
-            - name (string)
-            - description (string)
-            - entry_rules (lista krótkich zasad)
-            - exit_rules (lista krótkich zasad)
-            - indicators (lista nazw wskaźników)
+            - name (string, po polsku)
+            - description (string, po polsku)
+            - entry_rules (lista krótkich zasad po polsku)
+            - exit_rules (lista krótkich zasad po polsku)
+            - indicators (lista nazw wskaźników po polsku lub standardowych nazw angielskich)
+            - timeframe (np. 1m, 5m, 15m, 1h, 1d)
+
             Zwróć TYLKO JSON.
             """
             js = ai.chat_json(prompt)
@@ -535,30 +548,33 @@ with tab_strategy:
 # =========================
 
 with tab_lab:
-    st.subheader("🧪 AI Strategy Lab — generator, tester, Pine Script, Auto‑Optimizer")
+    st.subheader("🧪 AI Strategy Lab — generator, tester, Pine Script, Auto‑Optimizer (PL)")
 
-    st.markdown("### 🧠 Generuj strategię AI (JSON)")
+    st.markdown("### 🧠 Generuj strategię AI (JSON, PL)")
     if st.button("Generuj strategię AI", key="lab_gen"):
         prompt = """
-        Wygeneruj agresywną strategię tradingową w formacie JSON.
+        Wygeneruj agresywną strategię tradingową w formacie JSON po polsku.
+        Wszystkie pola muszą być po polsku.
+
         Pola:
-        - name
-        - description
-        - entry_rules (lista)
-        - exit_rules (lista)
-        - indicators (lista)
+        - name (string, po polsku)
+        - description (string, po polsku)
+        - entry_rules (lista krótkich zasad po polsku)
+        - exit_rules (lista krótkich zasad po polsku)
+        - indicators (lista nazw wskaźników po polsku lub standardowych nazw angielskich)
         - timeframe (np. 1m, 5m, 15m, 1h, 1d)
+
         Zwróć TYLKO JSON.
         """
         st.session_state["lab_strategy"] = ai.chat_json(prompt)
 
-    if "lab_strategy" in st.session_state:
+    if st.session_state["lab_strategy"]:
         st.json(st.session_state["lab_strategy"])
 
-        st.markdown("### ✏️ Edytuj strategię AI")
+        st.markdown("### ✏️ Edytuj strategię AI (JSON)")
         edited = st.text_area(
             "Edytuj JSON strategii",
-            json.dumps(st.session_state["lab_strategy"], indent=4),
+            json.dumps(st.session_state["lab_strategy"], indent=4, ensure_ascii=False),
             height=260,
             key="lab_editor"
         )
@@ -598,16 +614,18 @@ with tab_lab:
             st.write(f"Zwrot: {(equity.iloc[-1]-1)*100:.2f}%")
             st.write(f"Max DD: {(equity.cummax()-equity).max()*100:.2f}%")
 
-        st.markdown("### 🧬 AI Auto‑Optimizer (popraw strategię)")
+        st.markdown("### 🧬 AI Auto‑Optimizer (popraw strategię, PL)")
         if st.button("Optymalizuj strategię AI", key="lab_opt"):
             prompt = f"""
-            Masz strategię w JSON i chcesz ją poprawić pod kątem:
+            Masz strategię w JSON (po polsku) i chcesz ją poprawić pod kątem:
             - lepszego stosunku zysku do ryzyka
             - mniejszego DD
             - bardziej agresywnych wejść, ale kontrolowanego ryzyka
+
             Strategia:
-            {json.dumps(st.session_state["lab_strategy"], indent=4)}
-            Zwróć NOWĄ strategię w tym samym formacie JSON.
+            {json.dumps(st.session_state["lab_strategy"], indent=4, ensure_ascii=False)}
+
+            Zwróć NOWĄ strategię w tym samym formacie JSON, również po polsku.
             """
             st.session_state["lab_strategy"] = ai.chat_json(prompt)
             st.success("Strategia zoptymalizowana przez AI.")
@@ -616,19 +634,23 @@ with tab_lab:
         st.markdown("### 📜 Generuj Pine Script z tej strategii")
         if st.button("Generuj Pine Script", key="lab_pine"):
             prompt = f"""
-            Zamień tę strategię JSON na kod Pine Script v5:
-            {json.dumps(st.session_state["lab_strategy"], indent=4)}
+            Zamień tę strategię JSON na kod Pine Script v5.
+            Strategia jest opisana po polsku, ale kod ma być standardowy.
+
+            Strategia JSON:
+            {json.dumps(st.session_state["lab_strategy"], indent=4, ensure_ascii=False)}
+
             Zwróć TYLKO kod Pine Script.
             """
             code = ai.chat(prompt)
             st.code(code, language="pine")
 
 # =========================
-# TAB AI AUTO-TRADER (z RiskEngine)
+# TAB AI AUTO-TRADER (z RiskEngine, PL + zapis analizy)
 # =========================
 
 with tab_auto:
-    st.subheader("🤖 AI Auto‑Trader (wirtualny, z RiskEngine)")
+    st.subheader("🤖 AI Auto‑Trader (wirtualny, z RiskEngine, PL)")
 
     col_a1, col_a2 = st.columns(2)
     with col_a1:
@@ -639,28 +661,49 @@ with tab_auto:
         risk_pct = st.slider("Ryzyko na trade (%)", 0.1, 5.0, 1.0, 0.1, key="auto_risk")
         risk_engine = RiskEngine(account_size)
 
-        if st.button("🧠 Generuj sygnał AI (JSON)", key="auto_ai_sig"):
+        st.markdown("### 🧠 Generuj sygnał AI (JSON, PL)")
+        if st.button("Generuj sygnał AI", key="auto_ai_sig"):
             prompt = f"""
-            Jesteś agresywnym traderem. Oceń instrument {d['symbol']}:
-            Cena: {d['price']:.2f}
-            Zmiana %: {d['change']:.2f}
-            Trend: {d['trend']}
-            RSI: {d['rsi']:.1f}
-            Pivot: {d['pivot']:.2f}
-            TP: {d['tp']:.2f}
-            SL: {d['sl']:.2f}
-            Zwróć TYLKO JSON:
+            Jesteś agresywnym traderem. Oceń instrument {d['symbol']}.
+
+            Dane:
+            - Cena: {d['price']:.2f}
+            - Zmiana % (D1): {d['change']:.2f}
+            - Trend (SMA200): {d['trend']}
+            - RSI (15m): {d['rsi']:.1f}
+            - Pivot (D1): {d['pivot']:.2f}
+            - TP (propozycja): {d['tp']:.2f}
+            - SL (propozycja): {d['sl']:.2f}
+
+            Zwróć TYLKO JSON po polsku w formacie:
             {{
               "symbol": "...",
-              "bias": "long/short/neutral",
-              "confidence": 1-10,
-              "risk_score": 1-10,
-              "action": "buy/sell/wait",
-              "comment": "krótki komentarz"
+              "bias": "long" lub "short" lub "neutral",
+              "confidence": liczba 1-10,
+              "risk_score": liczba 1-10,
+              "action": "kup", "sprzedaj" lub "czekaj",
+              "comment": "krótki komentarz po polsku"
             }}
             """
             sig = ai.chat_json(prompt)
             st.session_state["last_ai_signal"] = sig
+
+            # zapis analizy tekstowej (ładny opis)
+            desc_prompt = f"""
+            Na podstawie tego sygnału AI (JSON, po polsku):
+
+            {json.dumps(sig, indent=2, ensure_ascii=False)}
+
+            Napisz krótki, konkretny komentarz po polsku dla tradera:
+            - co AI sugeruje (kupno/sprzedaż/obserwacja),
+            - jaki jest bias (long/short),
+            - jak duże jest ryzyko,
+            - na co uważać.
+
+            Maksymalnie 4-5 zdań.
+            """
+            analysis_text = ai.chat(desc_prompt)
+            st.session_state["auto_analysis"] = analysis_text
 
             msg = f"AI {sig.get('action','?').upper()} {sym} | bias {sig.get('bias')} | risk {sig.get('risk_score')}"
             st.session_state["alerts"].append(msg)
@@ -669,10 +712,14 @@ with tab_auto:
             if tg_token and tg_chat_id:
                 AlertEngine.send_telegram(tg_token, tg_chat_id, msg)
 
-        if "last_ai_signal" in st.session_state:
+        if st.session_state["last_ai_signal"]:
             sig = st.session_state["last_ai_signal"]
-            st.markdown("### Ostatni sygnał AI")
+            st.markdown("### Ostatni sygnał AI (JSON)")
             st.json(sig)
+
+            if st.session_state["auto_analysis"]:
+                st.markdown("### Komentarz AI (PL)")
+                st.info(st.session_state["auto_analysis"])
 
             atr = d["atr"]
             sizing = risk_engine.position_size_atr(
@@ -714,14 +761,17 @@ with tab_auto:
         st.write("Log transakcji (ostatnie 10):")
         st.json(st.session_state["trades_log"][-10:])
 
-        st.markdown("### 🧾 AI → TradingView Pine Script")
-        if st.button("🧠 Generuj Pine Script dla strategii EMA/RSI", key="ai_pine"):
+        st.markdown("### 🧾 AI → TradingView Pine Script (PL opis, kod standard)")
+        if st.button("Generuj Pine Script dla strategii EMA/RSI", key="ai_pine"):
             prompt = """
             Napisz strategię w Pine Script v5 dla TradingView.
-            Strategia:
-            - EMA20/EMA50 cross
-            - RSI 14 jako filtr (nie kupuj gdy RSI>70, nie sprzedawaj gdy RSI<30)
-            Zwróć TYLKO kod Pine Script, bez komentarzy tekstowych poza kodem.
+
+            Opis strategii (po polsku):
+            - Użyj przecięcia EMA20/EMA50 jako głównego sygnału.
+            - RSI 14 jako filtr: nie kupuj gdy RSI > 70, nie sprzedawaj gdy RSI < 30.
+            - Dodaj parametry wejściowe (input) dla długości EMA i poziomów RSI.
+
+            Zwróć TYLKO kod Pine Script, bez dodatkowego tekstu poza kodem.
             """
             code = ai.chat(prompt)
             st.code(code, language="pine")
@@ -825,7 +875,7 @@ with tab_orderbook:
 # =========================
 
 with tab_patterns:
-    st.subheader("🕯️ Formacje świecowe + AI opis")
+    st.subheader("🕯️ Formacje świecowe + AI opis (PL)")
     sym = st.selectbox("Symbol", symbols_available, key="pat_sym")
     df = data_map[sym]["df_1d"]
     patterns = MarketData.detect_candle_patterns(df)
@@ -851,7 +901,7 @@ with tab_patterns:
 # =========================
 
 with tab_portfolio:
-    st.subheader("📦 Portfolio & Risk Management (ATR sizing)")
+    st.subheader("📦 Portfolio & Risk Management (ATR sizing, PL)")
 
     col_p1, col_p2 = st.columns(2)
     with col_p1:
@@ -895,3 +945,4 @@ with tab_portfolio:
 
         total_risk = sum(p["risk_pct"] for p in st.session_state["portfolio"])
         st.markdown(f"**Łączne ryzyko (suma %):** {total_risk:.2f}%")
+```
