@@ -1,4 +1,4 @@
-```python
+
 import streamlit as st
 from openai import OpenAI
 import yfinance as yf
@@ -945,4 +945,4 @@ with tab_portfolio:
 
         total_risk = sum(p["risk_pct"] for p in st.session_state["portfolio"])
         st.markdown(f"**Łączne ryzyko (suma %):** {total_risk:.2f}%")
-```
+
