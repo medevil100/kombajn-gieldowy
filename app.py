@@ -75,7 +75,7 @@ def compute_indicators(df):
     df["EMA50"] = df["Close"].ewm(span=50).mean()
     df["EMA200"] = df["Close"].ewm(span=200).mean()
 
-    ema12 = df["Close"].ewm(span=12).).mean()
+    ema12 = df["Close"].ewm(span=12).mean()
     ema26 = df["Close"].ewm(span=26).mean()
     df["MACD"] = ema12 - ema26
     df["MACD_signal"] = df["MACD"].ewm(span=9).mean()
@@ -88,6 +88,7 @@ def compute_indicators(df):
     df["RSI"] = 100 - (100 / (1 + rs))
 
     return df
+
 
 def fibo_levels(df):
     recent = df.tail(120)
