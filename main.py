@@ -1,10 +1,4 @@
-# kombajn_streamlit_pl.py
-"""
-Kombajn Scanner (PL)
-Intraday 60m, RSI/MACD/ADX/Bollinger/Fibo, zapis wykresow PNG, log CSV, opcjonalne AI.
-Uruchom: streamlit run kombajn_streamlit_pl.py
-"""
-
+# kombajn_streamlit_final.py
 import os
 import math
 from datetime import datetime
@@ -14,13 +8,12 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib
-# Bezpieczny backend (serwer)
-matplotlib.use('Agg')
+matplotlib.use('Agg')  # bezpieczny backend
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
 from cycler import cycler
 
-# Wymuszone ustawienia kolorow i wygladu wykresow (zapobiega grayscale)
+# Wymuszone ustawienia kolorow (zapobiega grayscale)
 rcParams['axes.prop_cycle'] = cycler(color=['#d62728', '#ff7f0e', '#2ca02c', '#1f77b4', '#9467bd', '#17becf'])
 rcParams['figure.facecolor'] = 'white'
 rcParams['axes.facecolor'] = 'white'
@@ -31,13 +24,12 @@ rcParams['font.size'] = 9
 rcParams['legend.frameon'] = False
 rcParams['image.cmap'] = 'viridis'
 
-# Opcjonalnie seaborn - tylko jesli zainstalowany (nie wymagane)
+# Opcjonalnie seaborn (nie wymagane)
 try:
     import seaborn as sns
     sns.set_style("darkgrid")
-    _HAS_SEABORN = True
 except Exception:
-    _HAS_SEABORN = False
+    pass
 
 # OpenAI opcjonalne
 try:
@@ -48,19 +40,20 @@ except Exception:
 import streamlit as st
 
 # ---------------- Konfiguracja ----------------
-st.set_page_config(page_title="Kombajn Scanner (PL)", layout="wide")
+st.set_page_config(page_title="Kombajn Scanner (final)", layout="wide")
 
 CHART_DIR = "charts"
 LOG_CSV = "scanner_log.csv"
 PREF_FILE = "ai_model_pref.txt"
+PLOT_ERRORS = "plot_errors.log"
 os.makedirs(CHART_DIR, exist_ok=True)
 
-# Domyślne tickery (wklej swoją listę)
+# Domyslne tickery (wklej swoja liste)
 DEFAULT_TICKERS = [
-    "STX.WA", "ACG.WA", "ACP.WA", "ACT.WA"
+    "CFS.WA", "MER.WA", "HUMA", "STX.WA", "NVG.WA", "TCRX", "HPE.WA", "PLRX"
 ]
 
-# Lista modeli AI (możesz dopisać własne nazwy)
+# Rozszerzona lista modeli AI (mozesz dopisac inne)
 AVAILABLE_MODELS = [
     "gpt-4o",
     "gpt-4o-large",
@@ -68,17 +61,18 @@ AVAILABLE_MODELS = [
     "gpt-4o-32k",
     "gpt-4o-mini",
     "gpt-4o-mini-2024",
-    "gpt-4o-realtime"
+    "gpt-4o-realtime",
+    "gpt-3.5-turbo"
 ]
 
-# ---------------- Funkcje pomocnicze ----------------
+# ---------------- Pomocnicze ----------------
 def safe_float(x) -> Optional[float]:
     try:
         if x is None:
             return None
         if isinstance(x, (list, tuple, np.ndarray, pd.Series)):
             if isinstance(x, pd.Series):
-                return float(x.iloc[-1])
+                return float(pd.to_numeric(x.iloc[-1], errors='coerce'))
             return float(x[0])
         return float(x)
     except Exception:
@@ -111,35 +105,49 @@ def save_model_pref_to_file(model: str, filename: str = PREF_FILE):
     except Exception:
         pass
 
-# ---------------- Wskaźniki techniczne ----------------
+def log_plot_error(ticker: str, err: Exception):
+    try:
+        with open(PLOT_ERRORS, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().isoformat()} - Plot error for {ticker}: {repr(err)}\n")
+    except Exception:
+        pass
+
+# ---------------- Wskaźniki ----------------
 def calculate_rsi(series: pd.Series, window: int = 14) -> pd.Series:
-    if len(series) < window:
+    series = pd.to_numeric(series, errors='coerce')
+    if len(series.dropna()) < window:
         return pd.Series([50] * len(series), index=series.index)
     delta = series.diff()
     gain = delta.clip(lower=0).rolling(window=window).mean()
     loss = -delta.clip(upper=0).rolling(window=window).mean()
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return rsi.fillna(50)
 
 def sma(series: pd.Series, window: int) -> pd.Series:
-    return series.rolling(window=window).mean()
+    return pd.to_numeric(series, errors='coerce').rolling(window=window).mean()
 
 def ema(series: pd.Series, window: int) -> pd.Series:
-    return series.ewm(span=window, adjust=False).mean()
+    return pd.to_numeric(series, errors='coerce').ewm(span=window, adjust=False).mean()
 
 def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+    s = pd.to_numeric(series, errors='coerce').dropna()
+    if len(s) < slow:
+        # zwroc serie z NaN o odpowiedniej dlugosci
+        idx = series.index
+        return pd.Series([np.nan]*len(idx), index=idx), pd.Series([np.nan]*len(idx), index=idx), pd.Series([0]*len(idx), index=idx)
     ema_fast = ema(series, fast)
     ema_slow = ema(series, slow)
     macd_line = ema_fast - ema_slow
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     hist = macd_line - signal_line
-    return macd_line, signal_line, hist
+    return macd_line.fillna(0), signal_line.fillna(0), hist.fillna(0)
 
 def slope_of_series(series: pd.Series, n: int = 10) -> float:
-    if len(series) < n:
+    s = pd.to_numeric(series, errors='coerce').dropna()
+    if len(s) < n:
         return 0.0
-    y = series[-n:].values
+    y = s[-n:].values
     x = np.arange(len(y))
     if np.std(y) == 0:
         return 0.0
@@ -149,6 +157,12 @@ def slope_of_series(series: pd.Series, n: int = 10) -> float:
 
 def calculate_adx(df: pd.DataFrame, n: int = 14) -> float:
     try:
+        # sanitacja kolumn
+        for col in ['High', 'Low', 'Close']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        if df[['High','Low','Close']].dropna().shape[0] < n:
+            return 0.0
         high = df['High']
         low = df['Low']
         close = df['Close']
@@ -170,16 +184,20 @@ def calculate_adx(df: pd.DataFrame, n: int = 14) -> float:
         return 0.0
 
 def bollinger_bands(series: pd.Series, window: int = 20, n_std: int = 2):
-    ma = series.rolling(window=window).mean()
-    std = series.rolling(window=window).std()
+    s = pd.to_numeric(series, errors='coerce')
+    ma = s.rolling(window=window).mean()
+    std = s.rolling(window=window).std()
     upper = ma + n_std * std
     lower = ma - n_std * std
     width = (upper - lower) / ma.replace(0, np.nan)
-    return upper, lower, width
+    return upper.fillna(np.nan), lower.fillna(np.nan), width.fillna(np.nan)
 
 def fib_levels_from_series(series: pd.Series) -> Dict[str, float]:
-    high = float(series.max())
-    low = float(series.min())
+    s = pd.to_numeric(series, errors='coerce').dropna()
+    if s.empty:
+        return {"0.0": 0.0, "23.6": 0.0, "38.2": 0.0, "50.0": 0.0, "61.8": 0.0, "100.0": 0.0}
+    high = float(s.max())
+    low = float(s.min())
     diff = high - low if high != low else 1.0
     levels = {
         "0.0": low,
@@ -192,21 +210,26 @@ def fib_levels_from_series(series: pd.Series) -> Dict[str, float]:
     return levels
 
 def fib_proximity_level(price: float, levels: Dict[str, float]) -> Dict[str, Any]:
-    diffs = {k: abs(price - v) / (v if v != 0 else 1) for k, v in levels.items()}
-    nearest = min(diffs.items(), key=lambda x: x[1])
-    rel_diff = nearest[1]
-    if rel_diff < 0.01:
-        cls = "LOW"
-    elif rel_diff < 0.03:
-        cls = "MEDIUM"
-    else:
-        cls = "HIGH"
-    return {"nearest_level": nearest[0], "rel_diff_pct": rel_diff * 100, "fibo_risk": cls}
+    try:
+        diffs = {k: abs(price - v) / (v if v != 0 else 1) for k, v in levels.items()}
+        nearest = min(diffs.items(), key=lambda x: x[1])
+        rel_diff = nearest[1]
+        if rel_diff < 0.01:
+            cls = "LOW"
+        elif rel_diff < 0.03:
+            cls = "MEDIUM"
+        else:
+            cls = "HIGH"
+        return {"nearest_level": nearest[0], "rel_diff_pct": rel_diff * 100, "fibo_risk": cls}
+    except Exception:
+        return {"nearest_level": None, "rel_diff_pct": 999.0, "fibo_risk": "MEDIUM"}
 
 def assess_risk(rsi: float, rvol: float, slope: float, macd_hist: float,
                 bid: Optional[float], ask: Optional[float], fib_info: Dict[str, Any],
                 adx: float, boll_width: Optional[float]) -> Dict[str, Any]:
     score = 0.0
+    if rsi is None:
+        rsi = 50.0
     if rsi < 25 or rsi > 75:
         score += 1.0
     elif rsi < 35 or rsi > 65:
@@ -258,8 +281,17 @@ def assess_risk(rsi: float, rvol: float, slope: float, macd_hist: float,
 def plot_and_save(ticker: str, df: pd.DataFrame, levels: Dict[str, float],
                   fib_info: Dict[str, Any], filename: str) -> Optional[str]:
     try:
+        # sanitacja kolumn numerycznych
+        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        if df['Close'].dropna().empty:
+            raise ValueError("Brak danych Close po konwersji numeric")
+
         close = df['Close']
         macd_line, signal_line, hist = macd(close)
+        # upewnij sie, ze hist jest numeric
+        hist = pd.to_numeric(hist, errors='coerce').fillna(0).values
         upper, lower, width = bollinger_bands(close)
         sma5 = sma(close, 5)
         sma20 = sma(close, 20)
@@ -315,24 +347,21 @@ def plot_and_save(ticker: str, df: pd.DataFrame, levels: Dict[str, float],
         plt.close(fig)
         return filename
     except Exception as e:
-        try:
-            with open("plot_errors.log", "a", encoding="utf-8") as f:
-                f.write(f"{datetime.now().isoformat()} - Plot error for {ticker}: {e}\n")
-        except Exception:
-            pass
+        log_plot_error(ticker, e)
         return None
 
-# ---------------- Logika skanowania ----------------
+# ---------------- Skanowanie ----------------
 def classify_trend(close_series: pd.Series):
     short_w, long_w = 5, 20
-    if len(close_series) < long_w:
+    s = pd.to_numeric(close_series, errors='coerce')
+    if len(s.dropna()) < long_w:
         return "UNKNOWN", {}
-    sma_short = sma(close_series, short_w).iloc[-1]
-    sma_long = sma(close_series, long_w).iloc[-1]
-    slp = slope_of_series(close_series, n=10)
-    macd_line, signal_line, hist = macd(close_series)
-    macd_val = macd_line.iloc[-1]
-    signal_val = signal_line.iloc[-1]
+    sma_short = sma(s, short_w).iloc[-1]
+    sma_long = sma(s, long_w).iloc[-1]
+    slp = slope_of_series(s, n=10)
+    macd_line, signal_line, hist = macd(s)
+    macd_val = macd_line.iloc[-1] if len(macd_line.dropna()) else 0.0
+    signal_val = signal_line.iloc[-1] if len(signal_line.dropna()) else 0.0
     if sma_short > sma_long and slp > 0.01 and macd_val > signal_val:
         trend = "UP"
     elif sma_short < sma_long and slp < -0.01 and macd_val < signal_val:
@@ -340,12 +369,12 @@ def classify_trend(close_series: pd.Series):
     else:
         trend = "SIDEWAYS"
     details = {
-        "sma_short": float(sma_short),
-        "sma_long": float(sma_long),
+        "sma_short": float(sma_short) if not pd.isna(sma_short) else None,
+        "sma_long": float(sma_long) if not pd.isna(sma_long) else None,
         "slope": float(slp),
         "macd": float(macd_val),
         "macd_signal": float(signal_val),
-        "macd_hist": float(hist.iloc[-1]) if len(hist) else 0.0
+        "macd_hist": float(hist.iloc[-1]) if len(hist.dropna()) else 0.0
     }
     return trend, details
 
@@ -360,7 +389,12 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
     for s in tickers:
         try:
             df = yf.download(s, period="30d", interval="60m", progress=False)
-            if df.empty or len(df) < 20:
+            # sanitacja: konwertuj kolumny numeric
+            if not df.empty:
+                for col in ['Open','High','Low','Close','Volume']:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+            if df.empty or df['Close'].dropna().empty or len(df.dropna()) < 10:
                 if show_progress:
                     status_text.text(f"Brak danych intraday dla {s} (pomijam)")
                 progress += 1
@@ -368,13 +402,11 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
                     progress_bar.progress(int(progress / total * 100))
                 continue
 
-            _close = df['Close']
-            _vol = df['Volume']
-            close = _close.iloc[:, 0] if isinstance(_close, pd.DataFrame) else _close
-            vol = _vol.iloc[:, 0] if isinstance(_vol, pd.DataFrame) else _vol
+            close = df['Close']
+            vol = df['Volume'] if 'Volume' in df.columns else pd.Series([np.nan]*len(close), index=close.index)
 
             try:
-                c_dzis = float(close.iloc[-1])
+                c_dzis = float(pd.to_numeric(close.iloc[-1], errors='coerce'))
             except Exception:
                 if show_progress:
                     status_text.text(f"Nie mozna pobrac ceny dla {s} (pomijam)")
@@ -382,12 +414,13 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
                 if show_progress:
                     progress_bar.progress(int(progress / total * 100))
                 continue
-            c_wczoraj = float(close.iloc[-2]) if len(close) >= 2 else c_dzis
+            c_wczoraj = float(pd.to_numeric(close.iloc[-2], errors='coerce')) if len(close) >= 2 else c_dzis
 
             rsi = float(calculate_rsi(close).iloc[-1])
-            rvol = float(vol.iloc[-1] / vol.mean()) if vol.mean() > 0 else 1.0
+            rvol = float(pd.to_numeric(vol.iloc[-1], errors='coerce') / vol.mean()) if vol.mean() and not np.isnan(vol.mean()) else 1.0
             zmiana = ((c_dzis - c_wczoraj) / c_wczoraj) * 100 if c_wczoraj != 0 else 0.0
 
+            # bid/ask safe
             bid, ask = None, None
             try:
                 t = yf.Ticker(s)
@@ -401,7 +434,7 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
 
             trend, details = classify_trend(close)
             macd_line, signal_line, hist = macd(close)
-            macd_hist = float(hist.iloc[-1]) if len(hist) else 0.0
+            macd_hist = float(pd.to_numeric(hist.iloc[-1], errors='coerce')) if len(hist) else 0.0
             slp = slope_of_series(close, n=10)
             adx = calculate_adx(df, n=14)
             upper, lower, width = bollinger_bands(close, window=20, n_std=2)
@@ -415,6 +448,7 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
             risk = assess_risk(rsi=rsi, rvol=rvol, slope=slp, macd_hist=macd_hist,
                                bid=bid, ask=ask, fib_info=fib_info, adx=adx, boll_width=boll_width)
 
+            # kryteria raportu (dostosuj)
             show = False
             if s.upper() == "STX.WA":
                 show = True
@@ -463,6 +497,7 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
         except Exception as e:
             if show_progress:
                 status_text.text(f"Błąd przy {s}: {e}")
+            log_plot_error(s, e)
             progress += 1
             if show_progress:
                 progress_bar.progress(int(progress / total * 100))
@@ -474,11 +509,11 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
 
 # ---------------- Interfejs Streamlit (PL) ----------------
 def main_ui():
-    st.title("Kombajn Scanner — intraday 60m")
+    st.title("Kombajn Scanner — intraday 60m (final)")
     st.markdown("Analiza techniczna: RSI, MACD, ADX, Bollinger, Fibo. Zapis wykresów PNG i log CSV.")
 
     st.sidebar.header("Ustawienia")
-    tickers_input = st.sidebar.text_area("Tickery (oddzielone przecinkiem)", value=",".join(DEFAULT_TICKERS), height=140)
+    tickers_input = st.sidebar.text_area("Tickery (oddzielone przecinkiem)", value=",".join(DEFAULT_TICKERS), height=160)
     tickers = [t.strip() for t in tickers_input.split(",") if t.strip()]
 
     st.sidebar.markdown("---")
@@ -495,11 +530,13 @@ def main_ui():
 
     st.sidebar.markdown("---")
     st.sidebar.write("Interwał: 60m, okres: 30d (intraday).")
+    st.sidebar.write("Jeśli ADX=0 lub brak wykresu, spróbuj zwiększyć okres do 60d w kodzie.")
     run_now = st.sidebar.button("Uruchom skan teraz")
 
     st.sidebar.markdown("---")
     st.sidebar.write(f"Log CSV: `{LOG_CSV}`")
     st.sidebar.write(f"Wykresy: `{CHART_DIR}/`")
+    st.sidebar.write(f"Błędy rysowania: `{PLOT_ERRORS}`")
 
     if run_now:
         client = None
@@ -539,11 +576,12 @@ def main_ui():
                         col.write(f"{row['ticker']} - wykres niedostępny")
                 else:
                     col.write(f"{row['ticker']} - brak wykresu")
-                    if os.path.exists("plot_errors.log"):
+                    if os.path.exists(PLOT_ERRORS):
                         try:
-                            with open("plot_errors.log", "r", encoding="utf-8") as f:
-                                lines = f.readlines()[-50:]
-                                for ln in lines[-10:]:
+                            with open(PLOT_ERRORS, "r", encoding="utf-8") as f:
+                                lines = f.readlines()[-200:]
+                                # pokaż ostatnie linie dotyczące tego tickera
+                                for ln in lines[-20:]:
                                     if row['ticker'] in ln:
                                         col.text(ln.strip())
                         except Exception:
@@ -596,6 +634,7 @@ def main_ui():
 
     st.markdown("---")
     st.markdown("Uwaga: yfinance intraday może nie zwracać danych dla wszystkich tickerów. Bid/Ask dostępne tylko jeśli źródło je udostępnia.")
+    st.markdown("Jeśli wykresy nie powstają, sprawdź plik plot_errors.log, zwiększ okres (np. '60d') lub zmień interwał.")
     st.markdown("Skrypt nie daje porad inwestycyjnych. Decyzje należą do Ciebie.")
 
 if __name__ == "__main__":
