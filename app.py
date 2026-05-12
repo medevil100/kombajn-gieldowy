@@ -519,12 +519,18 @@ with tab_lab:
             js = json.loads(raw[start:end+1]) if start != -1 and end != -1 else {"raw": raw}
         st.session_state["lab_strategy"] = js
 
+    # 2. PODGLĄD STRATEGII
     if "lab_strategy" in st.session_state:
         st.json(st.session_state["lab_strategy"])
 
-        # 2. EDYTOR
+        # 3. EDYTOR STRATEGII
         st.markdown("### ✏️ Edytuj strategię AI")
-        edited = st.text_area("Edytuj JSON strategii", json.dumps(st.session_state["lab_strategy"], indent=4), height=260)
+        edited = st.text_area(
+            "Edytuj JSON strategii",
+            json.dumps(st.session_state["lab_strategy"], indent=4),
+            height=260,
+            key="lab_editor"
+        )
         if st.button("Zapisz zmiany", key="lab_save"):
             try:
                 st.session_state["lab_strategy"] = json.loads(edited)
@@ -532,17 +538,18 @@ with tab_lab:
             except:
                 st.error("Błąd w JSON.")
 
-        # 3. TESTER
+        # 4. TESTER STRATEGII
         st.markdown("### 🧪 Przetestuj strategię AI na danych")
-               sym_lab = st.selectbox("Symbol", symbols_available, key="lab_sym_test")
-                df_lab = data_map[sym_lab]["df_1d"] 
-        
+
+        sym_lab = st.selectbox("Symbol", symbols_available, key="lab_sym_test")
+        df_lab = data_map[sym_lab]["df_1d"]
 
         if st.button("Uruchom backtest AI", key="lab_bt"):
             strat = st.session_state["lab_strategy"]
             df_bt = df_lab.copy()
             df_bt["signal"] = 0
 
+            # --- Interpretacja wskaźników ---
             if "EMA" in " ".join(strat.get("indicators", [])):
                 df_bt["EMA20"] = df_bt["Close"].ewm(span=20).mean()
                 df_bt["EMA50"] = df_bt["Close"].ewm(span=50).mean()
@@ -554,6 +561,7 @@ with tab_lab:
                 df_bt.loc[df_bt["RSI"] < 30, "signal"] = 1
                 df_bt.loc[df_bt["RSI"] > 70, "signal"] = -1
 
+            # --- Backtest ---
             df_bt["position"] = df_bt["signal"].shift(1).fillna(0)
             df_bt["ret"] = df_bt["Close"].pct_change().fillna(0)
             df_bt["strategy"] = df_bt["position"] * df_bt["ret"]
@@ -563,17 +571,18 @@ with tab_lab:
             st.write(f"Zwrot: {(equity.iloc[-1]-1)*100:.2f}%")
             st.write(f"Max DD: {(equity.cummax()-equity).max()*100:.2f}%")
 
-        # 4. AUTO‑OPTIMIZER
+        # 5. AUTO‑OPTIMIZER
         st.markdown("### 🧬 AI Auto‑Optimizer (popraw strategię)")
+
         if st.button("Optymalizuj strategię AI", key="lab_opt"):
             prompt = f"""
-            Masz strategię w JSON oraz chcesz ją poprawić pod kątem:
+            Masz strategię w JSON i chcesz ją poprawić pod kątem:
             - lepszego stosunku zysku do ryzyka
             - mniejszego DD
-            - bardziej agresywnego wejścia, ale kontrolowanego ryzyka.
+            - bardziej agresywnych wejść, ale kontrolowanego ryzyka
             Strategia:
             {json.dumps(st.session_state["lab_strategy"], indent=4)}
-            Zwróć NOWĄ strategię w tym samym formacie JSON, tylko lepiej zoptymalizowaną.
+            Zwróć NOWĄ strategię w tym samym formacie JSON.
             """
             resp = client.chat.completions.create(
                 model=ai_model,
@@ -586,12 +595,14 @@ with tab_lab:
                 start = raw.find("{")
                 end = raw.rfind("}")
                 js_opt = json.loads(raw[start:end+1]) if start != -1 and end != -1 else {"raw": raw}
+
             st.session_state["lab_strategy"] = js_opt
             st.success("Strategia zoptymalizowana przez AI.")
             st.json(js_opt)
 
-        # 5. PINE SCRIPT
+        # 6. GENERATOR PINE SCRIPT
         st.markdown("### 📜 Generuj Pine Script z tej strategii")
+
         if st.button("Generuj Pine Script", key="lab_pine"):
             prompt = f"""
             Zamień tę strategię JSON na kod Pine Script v5:
@@ -603,6 +614,7 @@ with tab_lab:
                 messages=[{"role": "user", "content": prompt}]
             )
             st.code(resp.choices[0].message.content, language="pine")
+
 # --- TAB AI AUTO-TRADER ---
 
 with tab_auto:
