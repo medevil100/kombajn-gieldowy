@@ -1,4 +1,16 @@
 # kombajn_streamlit_final.py
+"""
+Kombajn Scanner (final) - PL
+- intraday 60m, okres 30d (możesz zmienić)
+- RSI, MACD, ADX, Bollinger, Fibo
+- TP/SL (rysowane jako poziome linie)
+- sanitacja danych (konwersja do numeric)
+- wymuszone kolory wykresów
+- zapis wykresów PNG i log CSV
+- opcjonalne AI z wyborem modelu
+Uruchom: streamlit run kombajn_streamlit_final.py
+"""
+
 import os
 import math
 from datetime import datetime
@@ -13,7 +25,7 @@ import matplotlib.pyplot as plt
 from matplotlib import rcParams
 from cycler import cycler
 
-# Wymuszone ustawienia kolorow (zapobiega grayscale)
+# Wymuszone ustawienia kolorów (zapobiega grayscale)
 rcParams['axes.prop_cycle'] = cycler(color=['#d62728', '#ff7f0e', '#2ca02c', '#1f77b4', '#9467bd', '#17becf'])
 rcParams['figure.facecolor'] = 'white'
 rcParams['axes.facecolor'] = 'white'
@@ -48,12 +60,12 @@ PREF_FILE = "ai_model_pref.txt"
 PLOT_ERRORS = "plot_errors.log"
 os.makedirs(CHART_DIR, exist_ok=True)
 
-# Domyslne tickery (wklej swoja liste)
+# Domyślne tickery (wklej swoją listę)
 DEFAULT_TICKERS = [
     "CFS.WA", "MER.WA", "HUMA", "STX.WA", "NVG.WA", "TCRX", "HPE.WA", "PLRX"
 ]
 
-# Rozszerzona lista modeli AI (mozesz dopisac inne)
+# Rozszerzona lista modeli AI (możesz dopisać inne)
 AVAILABLE_MODELS = [
     "gpt-4o",
     "gpt-4o-large",
@@ -133,7 +145,6 @@ def ema(series: pd.Series, window: int) -> pd.Series:
 def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
     s = pd.to_numeric(series, errors='coerce').dropna()
     if len(s) < slow:
-        # zwroc serie z NaN o odpowiedniej dlugosci
         idx = series.index
         return pd.Series([np.nan]*len(idx), index=idx), pd.Series([np.nan]*len(idx), index=idx), pd.Series([0]*len(idx), index=idx)
     ema_fast = ema(series, fast)
@@ -157,7 +168,6 @@ def slope_of_series(series: pd.Series, n: int = 10) -> float:
 
 def calculate_adx(df: pd.DataFrame, n: int = 14) -> float:
     try:
-        # sanitacja kolumn
         for col in ['High', 'Low', 'Close']:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -277,9 +287,13 @@ def assess_risk(rsi: float, rvol: float, slope: float, macd_hist: float,
         category = "HIGH"
     return {"score": round(score, 2), "category": category}
 
-# ---------------- Rysowanie wykresow ----------------
+# ---------------- Rysowanie wykresów (z TP/SL) ----------------
 def plot_and_save(ticker: str, df: pd.DataFrame, levels: Dict[str, float],
-                  fib_info: Dict[str, Any], filename: str) -> Optional[str]:
+                  fib_info: Dict[str, Any], filename: str,
+                  tp_pct: float = 0.03, sl_pct: float = 0.02) -> Optional[str]:
+    """
+    tp_pct, sl_pct: domyślne procenty TP i SL względem ostatniej ceny (3% TP, 2% SL)
+    """
     try:
         # sanitacja kolumn numerycznych
         for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
@@ -289,12 +303,16 @@ def plot_and_save(ticker: str, df: pd.DataFrame, levels: Dict[str, float],
             raise ValueError("Brak danych Close po konwersji numeric")
 
         close = df['Close']
+        last_price = float(pd.to_numeric(close.iloc[-1], errors='coerce'))
         macd_line, signal_line, hist = macd(close)
-        # upewnij sie, ze hist jest numeric
         hist = pd.to_numeric(hist, errors='coerce').fillna(0).values
         upper, lower, width = bollinger_bands(close)
         sma5 = sma(close, 5)
         sma20 = sma(close, 20)
+
+        # TP/SL poziomy
+        tp_level = last_price * (1 + tp_pct)
+        sl_level = last_price * (1 - sl_pct)
 
         fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True,
                                  gridspec_kw={'height_ratios': [3, 1.2, 0.8]})
@@ -306,6 +324,10 @@ def plot_and_save(ticker: str, df: pd.DataFrame, levels: Dict[str, float],
         ax_price.plot(df.index, sma20, label='SMA20', color='#1f77b4', linewidth=0.9)
         ax_price.plot(df.index, upper, label='BollUpper', color='#ff7f0e', linestyle='--', linewidth=0.9)
         ax_price.plot(df.index, lower, label='BollLower', color='#ff7f0e', linestyle='--', linewidth=0.9)
+
+        # TP/SL jako poziome linie
+        ax_price.axhline(tp_level, color='#2ca02c', linestyle='-.', linewidth=1.0, label=f'TP {tp_pct*100:.1f}%')
+        ax_price.axhline(sl_level, color='#d62728', linestyle='-.', linewidth=1.0, label=f'SL {sl_pct*100:.1f}%')
 
         for k, v in levels.items():
             ax_price.axhline(v, color='gray', linestyle=':', linewidth=0.7)
@@ -379,7 +401,7 @@ def classify_trend(close_series: pd.Series):
     return trend, details
 
 def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str],
-                 show_progress: bool = True) -> List[Dict[str, Any]]:
+                 show_progress: bool = True, tp_pct: float = 0.03, sl_pct: float = 0.02) -> List[Dict[str, Any]]:
     results = []
     total = len(tickers)
     progress = 0
@@ -409,7 +431,7 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
                 c_dzis = float(pd.to_numeric(close.iloc[-1], errors='coerce'))
             except Exception:
                 if show_progress:
-                    status_text.text(f"Nie mozna pobrac ceny dla {s} (pomijam)")
+                    status_text.text(f"Nie można pobrać ceny dla {s} (pomijam)")
                 progress += 1
                 if show_progress:
                     progress_bar.progress(int(progress / total * 100))
@@ -484,7 +506,7 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
                     "chart_file": chart_file
                 }
                 append_log_csv(row)
-                saved = plot_and_save(s, df, levels, fib_info, chart_file)
+                saved = plot_and_save(s, df, levels, fib_info, chart_file, tp_pct=0.03, sl_pct=0.02)
                 if saved is None:
                     row["chart_file"] = None
                 results.append(row)
@@ -510,7 +532,7 @@ def scan_tickers(tickers: List[str], client: Optional[Any], MODEL: Optional[str]
 # ---------------- Interfejs Streamlit (PL) ----------------
 def main_ui():
     st.title("Kombajn Scanner — intraday 60m (final)")
-    st.markdown("Analiza techniczna: RSI, MACD, ADX, Bollinger, Fibo. Zapis wykresów PNG i log CSV.")
+    st.markdown("Analiza techniczna: RSI, MACD, ADX, Bollinger, Fibo. Zapis wykresów PNG i log CSV. TP/SL rysowane automatycznie.")
 
     st.sidebar.header("Ustawienia")
     tickers_input = st.sidebar.text_area("Tickery (oddzielone przecinkiem)", value=",".join(DEFAULT_TICKERS), height=160)
@@ -580,7 +602,6 @@ def main_ui():
                         try:
                             with open(PLOT_ERRORS, "r", encoding="utf-8") as f:
                                 lines = f.readlines()[-200:]
-                                # pokaż ostatnie linie dotyczące tego tickera
                                 for ln in lines[-20:]:
                                     if row['ticker'] in ln:
                                         col.text(ln.strip())
