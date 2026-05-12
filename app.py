@@ -534,8 +534,9 @@ with tab_lab:
 
         # 3. TESTER
         st.markdown("### 🧪 Przetestuj strategię AI na danych")
-        sym_lab = st.selectbox("Symbol", symbols_available, key="lab_sym")
-        df_lab = data_map[sym_lab]["df_1d"]
+       sym_lab = st.selectbox("Symbol", symbols_available, key="lab_sym_test")
+
+         df_lab = data_map[sym_lab]["df_1d"]
 
         if st.button("Uruchom backtest AI", key="lab_bt"):
             strat = st.session_state["lab_strategy"]
