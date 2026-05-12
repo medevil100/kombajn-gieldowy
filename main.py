@@ -1,7 +1,8 @@
+
+# kombajn_streamlit_onefile.py
 import os
 import re
 import time
-import math
 from datetime import datetime
 from functools import lru_cache
 from typing import Optional, Dict, Any, List
@@ -14,29 +15,24 @@ import plotly.graph_objects as go
 import streamlit as st
 from bs4 import BeautifulSoup
 
-# -------------------- Konfiguracja pliku/katalogów --------------------
-st.set_page_config(page_title="Kombajn Scanner — All-in-One", layout="wide")
+# -------------------- Konfiguracja --------------------
+st.set_page_config(page_title="Kombajn Scanner", layout="wide")
 CHART_DIR = "charts"
 LOG_CSV = "scanner_log.csv"
 PLOT_ERRORS = "plot_errors.log"
-PREF_FILE = "ai_model_pref.txt"
 os.makedirs(CHART_DIR, exist_ok=True)
 
-# -------------------- Domyślne ustawienia --------------------
 DEFAULT_TICKERS = ["CFS.WA", "MER.WA", "HUMA", "STX.WA", "NVG.WA", "TCRX", "HPE.WA", "PLRX"]
 AVAILABLE_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]
 
-# Klucze z env (opcjonalne)
 ALPHAVANTAGE_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "")
 FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "")
 OPENAI_KEY_ENV = os.getenv("OPENAI_API_KEY", "")
 
-# Scraping settings
 SCRAPE_TIMEOUT = 8
 SCRAPE_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; KombajnScanner/1.0)"}
 SCRAPE_DELAY = 1.0
 
-# Palety kolorów
 PALETTES = {
     "standard": ['#d62728', '#ff7f0e', '#2ca02c', '#1f77b4', '#9467bd', '#17becf'],
     "warm": ['#d62728', '#ff7f0e', '#ffbb78', '#ff9896', '#e377c2', '#8c564b'],
@@ -72,7 +68,7 @@ def append_log_csv(row: Dict[str, Any], filename: str = LOG_CSV):
     except Exception as e:
         log_error(f"CSV write error: {e}")
 
-# -------------------- Scraping helpers (Radar.pl, Biznes.pl) --------------------
+# -------------------- Scraping helpers --------------------
 @lru_cache(maxsize=1024)
 def _cached_get(url: str):
     try:
@@ -152,7 +148,7 @@ def quote_from_biznespl(ticker: str) -> Dict[str, Optional[float]]:
             return {"price": p, "bid": None, "ask": None, "source": url}
     return {"price": None, "bid": None, "ask": None, "source": "biznes.pl"}
 
-# -------------------- Quote sources: yfinance, Finnhub, AlphaVantage, scraping --------------------
+# -------------------- Quote sources --------------------
 def quote_from_yfinance(ticker: str) -> Dict[str, Optional[float]]:
     try:
         t = yf.Ticker(ticker)
@@ -218,7 +214,7 @@ def get_best_quote(ticker: str, allow_scrape: bool = False) -> Dict[str, Optiona
         pass
     return {"price": None, "bid": None, "ask": None, "source": "none"}
 
-# -------------------- Wskaźniki i analiza --------------------
+# -------------------- Wskaźniki --------------------
 def calculate_rsi(series: pd.Series, window: int = 14) -> pd.Series:
     s = pd.to_numeric(series, errors='coerce')
     if len(s.dropna()) < window:
@@ -287,6 +283,31 @@ def make_plotly_chart(ticker: str, df: pd.DataFrame, tp: float, sl: float, palet
         log_error(f"make_plotly_chart {ticker}: {e}")
         return None
 
+# -------------------- News scraping (Google News heuristic) --------------------
+def search_news_google(ticker: str, limit: int = 5) -> List[Dict[str, str]]:
+    try:
+        query = requests.utils.requote_uri(f"{ticker} news")
+        url = f"https://www.google.com/search?q={query}&tbm=nws"
+        html = _cached_get(url)
+        if not html:
+            return []
+        soup = BeautifulSoup(html, "lxml")
+        items = []
+        for g in soup.select("div.dbsr")[:limit]:
+            a = g.find("a")
+            title = g.find("div", {"role": "heading"})
+            snippet = g.find("div", {"class": "Y3v8qd"})
+            link = a['href'] if a else None
+            items.append({
+                "title": title.get_text(strip=True) if title else "",
+                "snippet": snippet.get_text(strip=True) if snippet else "",
+                "link": link or ""
+            })
+        return items
+    except Exception as e:
+        log_error(f"news search error {ticker}: {e}")
+        return []
+
 # -------------------- AI helper (optional) --------------------
 def ai_commentary_for_rows(rows: List[Dict[str, Any]], model: str, openai_key: str) -> str:
     if not openai_key or not model:
@@ -311,7 +332,7 @@ def ai_commentary_for_rows(rows: List[Dict[str, Any]], model: str, openai_key: s
         log_error(f"AI error: {e}")
         return ""
 
-# -------------------- Główna logika skanera --------------------
+# -------------------- Skan i analiza --------------------
 def scan_and_analyze(tickers: List[str], tp_pct: float, sl_pct: float, period: str, interval: str, palette_name: str,
                      rsi_threshold: int, rvol_threshold: float, allow_scrape: bool) -> List[Dict[str, Any]]:
     results = []
@@ -333,10 +354,11 @@ def scan_and_analyze(tickers: List[str], tp_pct: float, sl_pct: float, period: s
             rsi = float(calculate_rsi(close).iloc[-1])
             macd_line, signal_line, hist = macd(close)
             macd_hist = float(hist.iloc[-1]) if len(hist) else 0.0
+
+            # ADX local
             adx = 0.0
             try:
                 tmp = df[['High','Low','Close']].copy()
-                # local ADX calculation
                 high = tmp['High']; low = tmp['Low']; close_col = tmp['Close']
                 plus_dm = high.diff()
                 minus_dm = -low.diff()
@@ -364,6 +386,7 @@ def scan_and_analyze(tickers: List[str], tp_pct: float, sl_pct: float, period: s
 
             levels = fib_levels(close)
 
+            # risk simple
             risk_score = 0.0
             if rsi < 25 or rsi > 75:
                 risk_score += 1.0
@@ -380,7 +403,18 @@ def scan_and_analyze(tickers: List[str], tp_pct: float, sl_pct: float, period: s
             else:
                 risk_cat = "HIGH"
 
-            show_flag = (rsi < rsi_threshold) or (rvol > rvol_threshold) or True  # show all but mark thresholds
+            # trend simple
+            sma5 = sma(close, 5).iloc[-1] if len(close) >= 5 else None
+            sma20 = sma(close, 20).iloc[-1] if len(close) >= 20 else None
+            if sma5 is not None and sma20 is not None:
+                if sma5 > sma20:
+                    trend = "UP"
+                elif sma5 < sma20:
+                    trend = "DOWN"
+                else:
+                    trend = "SIDEWAYS"
+            else:
+                trend = "UNKNOWN"
 
             fig = make_plotly_chart(t, df, tp_pct, sl_pct, palette)
 
@@ -395,12 +429,13 @@ def scan_and_analyze(tickers: List[str], tp_pct: float, sl_pct: float, period: s
                 "macd_hist": round(macd_hist, 4),
                 "risk_score": round(risk_score, 2),
                 "risk_category": risk_cat,
+                "trend": trend,
                 "levels": levels,
                 "chart": fig,
                 "df": df,
                 "tp_pct": tp_pct,
                 "sl_pct": sl_pct,
-                "show": show_flag,
+                "show": True,
                 "quote_source": q.get("source")
             }
             results.append(row)
@@ -409,63 +444,97 @@ def scan_and_analyze(tickers: List[str], tp_pct: float, sl_pct: float, period: s
             continue
     return results
 
-# -------------------- Streamlit UI --------------------
+# -------------------- UI --------------------
+def color_for_row(r: Dict[str, Any]):
+    # priority: SELL (risk HIGH & trend DOWN) -> red; LOW risk & trend UP -> green; neutral -> gray
+    if r['risk_category'] == "HIGH" and r['trend'] == "DOWN":
+        return "#ff4d4d"  # strong red
+    if r['risk_category'] == "LOW" and r['trend'] == "UP":
+        return "#2ca02c"  # green
+    if r['trend'] == "UP":
+        return "#8fd19e"  # light green
+    if r['trend'] == "DOWN":
+        return "#ffb3b3"  # light red
+    return "#d3d3d3"  # gray
+
 def main():
     st.title("Kombajn Scanner — All-in-One")
-    st.markdown("Panel ustawień po lewej. Wklej tickery, ustaw TP/SL, okres i interwał. Kliknij Uruchom skan.")
+    st.markdown("Wklej tickery, ustaw TP/SL i interwał. Wyniki pojawią się poniżej — każda spółka ma: ticker, cena, bid/ask, trend, TP/SL i kolor statusu.")
 
     with st.sidebar:
-        st.header("Ustawienia skanera")
+        st.header("Ustawienia")
         tickers_input = st.text_area("Tickery (oddzielone przecinkiem)", value=",".join(DEFAULT_TICKERS), height=140)
         tickers = [x.strip() for x in tickers_input.split(",") if x.strip()]
         period = st.selectbox("Okres historyczny", ["30d", "60d", "90d"], index=0)
         interval = st.selectbox("Interwał", ["60m", "30m", "15m"], index=0)
-        st.markdown("### TP / SL")
+        st.markdown("TP / SL")
         tp_pct = st.slider("Take Profit (%)", 0.5, 20.0, 3.0, 0.5) / 100.0
         sl_pct = st.slider("Stop Loss (%)", 0.5, 20.0, 2.0, 0.5) / 100.0
-        st.markdown("### Filtry (oznaczenia)")
+        st.markdown("Filtry (oznaczenia)")
         rsi_threshold = st.slider("Pokaż jeśli RSI <", 10, 50, 35)
         rvol_threshold = st.slider("Pokaż jeśli RVol >", 1.0, 10.0, 3.0, 0.1)
         palette_name = st.selectbox("Paleta kolorów", list(PALETTES.keys()), index=0)
-        st.markdown("### Źródła i AI")
         allow_scrape = st.checkbox("Włącz scraping Radar.pl / Biznes.pl (fallback)", value=False)
         openai_key_input = st.text_input("OPENAI_API_KEY (opcjonalne)", type="password", value=OPENAI_KEY_ENV)
         use_ai = st.checkbox("Włącz AI podsumowanie", value=False)
         model_choice = st.selectbox("Model AI", AVAILABLE_MODELS, index=0)
-        st.markdown("---")
-        st.write(f"Log CSV: `{LOG_CSV}`")
-        st.write(f"Wykresy: `{CHART_DIR}/`")
-        st.write(f"Błędy: `{PLOT_ERRORS}`")
         run = st.button("Uruchom skan teraz")
 
     if run:
         st.info("Skanowanie... poczekaj chwilę.")
         results = scan_and_analyze(tickers, tp_pct, sl_pct, period, interval, palette_name, rsi_threshold, rvol_threshold, allow_scrape)
 
+        # Top summary table (compact, color-coded)
+        st.markdown("### Szybki przegląd")
+        rows_md = []
         for r in results:
-            col1, col2 = st.columns([1,2])
-            with col1:
-                st.subheader(r["ticker"])
+            color = color_for_row(r)
+            badge = ""
+            if r['risk_category'] == "HIGH":
+                badge = "🔴 SELL"
+            elif r['risk_category'] == "MEDIUM":
+                badge = "🟠 NEUTRAL"
+            else:
+                badge = "🟢 LOW"
+            rows_md.append(f"<div style='background:{color};padding:8px;border-radius:6px;margin-bottom:6px;'>"
+                           f"<b>{r['ticker']}</b> — Cena: <b>{r['price']}</b> | Bid: {r['bid']} | Ask: {r['ask']} | Trend: {r['trend']} | {badge} | TP: {r['tp_pct']*100:.1f}% SL: {r['sl_pct']*100:.1f}%"
+                           f"</div>")
+        st.markdown("\n".join(rows_md), unsafe_allow_html=True)
+
+        st.markdown("### Szczegóły spółek")
+        for r in results:
+            st.markdown(f"#### {r['ticker']} — {r['quote_source']}")
+            cols = st.columns([1, 2])
+            with cols[0]:
                 st.write(f"**Cena:** {r['price']}")
                 st.write(f"**Bid:** {r['bid']}   **Ask:** {r['ask']}")
-                st.write(f"**Źródło ceny:** {r.get('quote_source')}")
+                st.write(f"**Trend:** {r['trend']}   **Ryzyko:** {r['risk_category']} ({r['risk_score']})")
                 st.write(f"**RSI:** {r['rsi']}   **RVol:** {r['rvol']}   **ADX:** {r['adx']}")
-                st.write(f"**MACD hist:** {r['macd_hist']}   **Ryzyko:** {r['risk_category']} ({r['risk_score']})")
                 st.write(f"**TP:** {r['tp_pct']*100:.1f}%   **SL:** {r['sl_pct']*100:.1f}%")
                 if r['levels']:
                     lv = ", ".join([f"{k}:{v:.2f}" for k,v in r['levels'].items()])
                     st.write("**Fibo:** " + lv)
+                # news button
+                if st.button(f"Sprawdź wiadomości: {r['ticker']}", key=f"news_{r['ticker']}"):
+                    news = search_news_google(r['ticker'], limit=5)
+                    if news:
+                        for n in news:
+                            st.markdown(f"- [{n['title']}]({n['link']})  \n  {n['snippet']}")
+                    else:
+                        st.write("Brak wyników wiadomości.")
+                # download CSV
                 try:
                     csv_bytes = r['df'].to_csv().encode('utf-8')
                     st.download_button("Pobierz dane CSV", data=csv_bytes, file_name=f"{r['ticker']}_data.csv", mime="text/csv")
                 except Exception:
                     pass
-            with col2:
+            with cols[1]:
                 if r['chart'] is not None:
                     st.plotly_chart(r['chart'], use_container_width=True)
                 else:
                     st.write("Brak wykresu (sprawdź plot_errors.log)")
 
+        # AI summary
         if use_ai and openai_key_input:
             st.markdown("### AI - skrócone komentarze")
             ai_text = ai_commentary_for_rows([
@@ -486,6 +555,7 @@ def main():
             else:
                 st.warning("AI nie zwróciło odpowiedzi (sprawdź klucz/model).")
 
+        # Save summary to CSV log (optional)
         for r in results:
             row = {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -503,20 +573,19 @@ def main():
             }
             append_log_csv(row)
 
-        st.success("Skan zakończony. Sprawdź wykresy i log CSV.")
+        st.success("Skan zakończony.")
 
     st.markdown("---")
-    st.markdown("### Ostatnie wpisy w logu")
-    if os.path.exists(LOG_CSV):
+    st.markdown("### Ostatnie błędy (tail plot_errors.log)")
+    if os.path.exists(PLOT_ERRORS):
         try:
-            df_log = pd.read_csv(LOG_CSV)
-            st.dataframe(df_log.tail(50))
-            with open(LOG_CSV, "rb") as f:
-                st.download_button("Pobierz log CSV", data=f, file_name=LOG_CSV, mime="text/csv")
-        except Exception as e:
-            st.write(f"Nie można wczytać logu: {e}")
+            with open(PLOT_ERRORS, "r", encoding="utf-8") as f:
+                lines = f.readlines()[-30:]
+                st.text("".join(lines[-10:]))
+        except Exception:
+            st.write("Brak dostępu do logu błędów.")
     else:
-        st.write("Brak pliku logu jeszcze.")
+        st.write("Brak błędów zarejestrowanych.")
 
 if __name__ == "__main__":
     main()
