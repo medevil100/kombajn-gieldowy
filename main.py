@@ -14,11 +14,24 @@ matplotlib.use('Agg')  # safe backend for servers
 import matplotlib.pyplot as plt
 
 # Optional: seaborn for nicer style if available
+# Bezpieczne ustawienie stylu wykresów
 try:
     import seaborn as sns
     sns.set_style("darkgrid")
 except Exception:
-    plt.style.use('seaborn-darkgrid')
+    import matplotlib.pyplot as plt
+    # wybierz pierwszy dostępny przyjazny styl lub domyślny
+    preferred = None
+    for s in ("seaborn-darkgrid", "seaborn", "ggplot", "dark_background"):
+        if s in plt.style.available:
+            preferred = s
+            break
+    if preferred:
+        plt.style.use(preferred)
+    else:
+        # fallback: domyślny styl matplotlib
+        plt.style.use('default')
+
 
 # Optional OpenAI client (only used if key provided and user enables AI)
 try:
