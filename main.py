@@ -1,12 +1,4 @@
 
-# kombajn_streamlit_official_v3.py
-- yfinance (oficjalne)
-- period domyślnie 60d, interval domyślnie 60m
-- fallback do 1d jeśli intraday niedostępny
-- odświeżanie ceny pojedynczego tickera
-- czytelna tabela + kolorowy szybki przegląd
-- AI opcjonalne (OpenAI)
-"""
 import os
 from datetime import datetime
 from typing import Optional, Dict, Any, List
