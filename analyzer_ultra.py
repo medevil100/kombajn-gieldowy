@@ -459,7 +459,6 @@ tab_main, tab_strategy, tab_lab, tab_auto, tab_multi, tab_orderbook, tab_pattern
     ]
 )
 
-)
 
 # --- 12. TAB: GŁÓWNY ---
 
