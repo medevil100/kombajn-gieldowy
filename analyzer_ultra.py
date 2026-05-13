@@ -276,7 +276,17 @@ with st.sidebar:
         if not api_key:
             st.warning("Dodaj klucz w Secrets lub wpisz go tutaj.")
 
-    HRT.WA,CFS.WA,PRT.WA,ATT.WA,STX.WA,PUR.WA,BCS.WA,KCH.WA,GTN.WA,LBW.WA,PGV.WA,HPE.WA,DNS.WA,ZUK.WA,VVD.WA,HIVE,MLN.WA,MER.WA,APS.WA,NVG.WA,IOVA,PLRX,HUMA,TCRX,GOSS,MREO,ADTX
+   ai_model = st.selectbox(
+    "Model AI",
+    [
+        "gpt-4o-mini",
+        "gpt-4o",
+        "gpt-4.1",
+        "gpt-4.1-large",
+    ],
+    index=1,
+)
+
     tickers_input = st.text_area("Symbole (przecinek)", value=load_tickers())
     if st.button("Zapisz listę"):
         with open(DB_FILE, "w") as f:
