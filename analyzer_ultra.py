@@ -1311,7 +1311,6 @@ with col_v1:
     sym_v2 = st.selectbox("Symbol do Auto‑Trader v2", symbols_available, key="auto_v2_sym")
     d_v2 = data_map[sym_v2]
 
-    # dane 15m / 1d
     df15_v2 = d_v2["df_15"].tail(200)
     df1d_v2 = d_v2["df_1d"].tail(200)
 
@@ -1349,68 +1348,15 @@ with col_v1:
         row=1,
         col=1,
     )
-    fig_v2.add_trace(
-        go.Scatter(
-            x=df15_v2.index,
-            y=df15_v2["EMA20"],
-            line=dict(color="#38bdf8", width=1.1),
-            name="EMA20",
-        ),
-        row=1,
-        col=1,
-    )
-    fig_v2.add_trace(
-        go.Scatter(
-            x=df15_v2.index,
-            y=df15_v2["EMA50"],
-            line=dict(color="#a855f7", width=1.0),
-            name="EMA50",
-        ),
-        row=1,
-        col=1,
-    )
-    fig_v2.add_trace(
-        go.Bar(
-            x=df15_v2.index,
-            y=df15_v2["Volume"],
-            marker_color="#4b5563",
-            name="Volume",
-        ),
-        row=2,
-        col=1,
-    )
-    fig_v2.add_trace(
-        go.Scatter(
-            x=df15_v2.index,
-            y=df15_v2["MACD"],
-            line=dict(color="#22c55e", width=1),
-            name="MACD",
-        ),
-        row=3,
-        col=1,
-    )
-    fig_v2.add_trace(
-        go.Scatter(
-            x=df15_v2.index,
-            y=df15_v2["MACD_signal"],
-            line=dict(color="#ef4444", width=1),
-            name="Signal",
-        ),
-        row=3,
-        col=1,
-    )
-    fig_v2.add_trace(
-        go.Bar(
-            x=df15_v2.index,
-            y=df15_v2["MACD_hist"],
-            marker_color=np.where(df15_v2["MACD_hist"] >= 0, "#22c55e", "#ef4444"),
-            name="Hist",
-        ),
-        row=3,
-        col=1,
-    )
 
-    # SL/TP 1‑2‑3 na wykresie (jeśli są w session_state)
+    fig_v2.add_trace(go.Scatter(x=df15_v2.index, y=df15_v2["EMA20"], line=dict(color="#38bdf8", width=1.1), name="EMA20"), row=1, col=1)
+    fig_v2.add_trace(go.Scatter(x=df15_v2.index, y=df15_v2["EMA50"], line=dict(color="#a855f7", width=1.0), name="EMA50"), row=1, col=1)
+    fig_v2.add_trace(go.Bar(x=df15_v2.index, y=df15_v2["Volume"], marker_color="#4b5563", name="Volume"), row=2, col=1)
+    fig_v2.add_trace(go.Scatter(x=df15_v2.index, y=df15_v2["MACD"], line=dict(color="#22c55e", width=1), name="MACD"), row=3, col=1)
+    fig_v2.add_trace(go.Scatter(x=df15_v2.index, y=df15_v2["MACD_signal"], line=dict(color="#ef4444", width=1), name="Signal"), row=3, col=1)
+    fig_v2.add_trace(go.Bar(x=df15_v2.index, y=df15_v2["MACD_hist"], marker_color=np.where(df15_v2["MACD_hist"] >= 0, "#22c55e", "#ef4444"), name="Hist"), row=3, col=1)
+
+    # --- SL/TP 1‑2‑3 NA WYKRESIE ---
     if "auto_v2_levels" in st.session_state and st.session_state["auto_v2_levels"].get(sym_v2):
         lv = st.session_state["auto_v2_levels"][sym_v2]
 
@@ -1438,14 +1384,8 @@ with col_v1:
         xaxis_rangeslider_visible=False,
         paper_bgcolor="#020617",
         plot_bgcolor="#020617",
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-        ),
     )
+
     fig_v2.update_xaxes(showgrid=False)
     fig_v2.update_yaxes(showgrid=False)
 
@@ -1453,76 +1393,80 @@ with col_v1:
 
 with col_v2:
     st.markdown("### Parametry / AI decyzja")
-    st.write("… (tu zostaje Twój istniejący panel AI / przyciski / logika)")
+    st.write("… (tu zostaje Twój panel AI)")
 
-    # Przygotowanie danych OHLC dla AI
+# Przygotowanie danych OHLC dla AI
 daily_ohlc = df1d_v2[["Open", "High", "Low", "Close"]].reset_index().to_dict(orient="records")
 intr_ohlc = df15_v2[["Open", "High", "Low", "Close"]].reset_index().to_dict(orient="records")
 
+prompt = f"""
+Jesteś zaawansowanym traderem i risk managerem.
 
-        prompt = f"""
-        Jesteś zaawansowanym traderem i risk managerem.
+Masz dane dla instrumentu {sym_v2}:
+- Cena bieżąca: {price:.2f}
+- Zmiana D1: {change:.2f}%
+- RSI (15m): {rsi:.1f}
+- ATR (D1): {atr:.2f}
+- Trend (SMA200): {trend}
+- Styl wejścia: {trade_style}
 
-        Masz dane dla instrumentu {sym_v2}:
-        - Cena bieżąca: {price:.2f}
-        - Zmiana D1: {change:.2f}%
-        - RSI (15m): {rsi:.1f}
-        - ATR (D1): {atr:.2f}
-        - Trend (SMA200): {trend}
-        - Styl wejścia: {trade_style}
+Dane świec:
+- Ostatnie świece dzienne (D1): {daily_ohlc}
+- Ostatnie świece 15m: {intr_ohlc}
 
-        Dane świec:
-        - Ostatnie świece dzienne (D1): {daily_ohlc}
-        - Ostatnie świece 15m: {intr_ohlc}
+Oceń, czy to jest dobry moment na wejście dla stylu: {trade_style}.
+Następnie zaproponuj poziomy SL/TP 1-2-3.
 
-        Oceń, czy to jest dobry moment na wejście dla stylu: {trade_style}.
-        Następnie zaproponuj poziomy SL/TP 1-2-3.
+Zwróć TYLKO JSON po polsku w formacie:
+{
+  "symbol": "...",
+  "is_good_moment": true lub false,
+  "reason": "krótko po polsku dlaczego tak/nie",
+  "recommended_style": "scalping" lub "day trading" lub "swing trading",
+  "bias": "long" lub "short" lub "neutral",
+  "sl_levels": {
+    "sl1": liczba,
+    "sl2": liczba,
+    "sl3": liczba
+  },
+  "tp_levels": {
+    "tp1": liczba,
+    "tp2": liczba,
+    "tp3": liczba
+  },
+  "comment": "krótki komentarz po polsku dla tradera (3-5 zdań)",
+  "tactical_hint": "konkretna sugestia"
+}
+"""
 
-        Zwróć TYLKO JSON po polsku w formacie:
-        {{
-          "symbol": "...",
-          "is_good_moment": true lub false,
-          "reason": "krótko po polsku dlaczego tak/nie",
-          "recommended_style": "scalping" lub "day trading" lub "swing trading",
-          "bias": "long" lub "short" lub "neutral",
-          "sl_levels": {{
-            "sl1": liczba,
-            "sl2": liczba,
-            "sl3": liczba
-          }},
-          "tp_levels": {{
-            "tp1": liczba,
-            "tp2": liczba,
-            "tp3": liczba
-          }},
-          "comment": "krótki komentarz po polsku dla tradera (3-5 zdań)",
-          "tactical_hint": "konkretna sugestia: np. 'to nie jest dobry moment, jeśli już to tylko scalping z małą pozycją'"
-        }}
-        """
-        res = ai.chat_json(prompt)
-        st.session_state["auto_v2_levels"][sym_v2] = {
-            "sl1": float(res["sl_levels"]["sl1"]),
-            "sl2": float(res["sl_levels"]["sl2"]),
-            "sl3": float(res["sl_levels"]["sl3"]),
-            "tp1": float(res["tp_levels"]["tp1"]),
-            "tp2": float(res["tp_levels"]["tp2"]),
-            "tp3": float(res["tp_levels"]["tp3"]),
-            "bias": res.get("bias", "neutral"),
-            "is_good_moment": res.get("is_good_moment", False),
-        }
-        st.session_state["auto_v2_comment"][sym_v2] = res
-        st.session_state["auto_v2_mode"][sym_v2] = trade_style
+res = ai.chat_json(prompt)
 
-        st.success("AI wyliczyło poziomy SL/TP 1‑2‑3 i oceniło moment wejścia.")
-        st.json(res)
+st.session_state["auto_v2_levels"][sym_v2] = {
+    "sl1": float(res["sl_levels"]["sl1"]),
+    "sl2": float(res["sl_levels"]["sl2"]),
+    "sl3": float(res["sl_levels"]["sl3"]),
+    "tp1": float(res["tp_levels"]["tp1"]),
+    "tp2": float(res["tp_levels"]["tp2"]),
+    "tp3": float(res["tp_levels"]["tp3"]),
+    "bias": res.get("bias", "neutral"),
+    "is_good_moment": res.get("is_good_moment", False),
+}
 
-    if st.session_state["auto_v2_comment"].get(sym_v2):
-        res = st.session_state["auto_v2_comment"][sym_v2]
-        st.markdown("### Komentarz AI (PL)")
-        st.info(res.get("comment", ""))
+st.session_state["auto_v2_comment"][sym_v2] = res
+st.session_state["auto_v2_mode"][sym_v2] = trade_style
 
-        st.markdown("### Taktyczna sugestia AI")
-        st.warning(res.get("tactical_hint", ""))
+st.success("AI wyliczyło poziomy SL/TP 1‑2‑3 i oceniło moment wejścia.")
+st.json(res)
+
+if st.session_state["auto_v2_comment"].get(sym_v2):
+    res = st.session_state["auto_v2_comment"][sym_v2]
+    st.markdown("### Komentarz AI (PL)")
+    st.info(res.get("comment", ""))
+
+    st.markdown("### Taktyczna sugestia AI")
+    st.warning(res.get("tactical_hint", ""))
+
+
 
         lv = st.session_state["auto_v2_levels"][sym_v2]
         st.markdown("### Poziomy SL/TP 1‑2‑3 (AI)")
