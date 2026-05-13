@@ -1709,3 +1709,32 @@ with tab_risk_ai:
         if "ai_hedge" in st.session_state:
             st.markdown("### Komentarz AI (Hedge)")
             st.info(st.session_state["ai_hedge"].get("global_comment", ""))
+# --- AUTO‑FIX TABS v16.4 ---
+# Usuwa duplikaty tabów i wymusza jedną poprawną definicję
+
+def ensure_single_tabs():
+    """
+    Ten patch gwarantuje, że w aplikacji istnieje TYLKO jedna definicja st.tabs().
+    Jeśli przypadkiem w kodzie pojawiły się 2 lub więcej definicji,
+    ta funkcja nadpisze je jedną poprawną wersją.
+    """
+
+    # Definicja JEDYNEGO poprawnego zestawu tabów
+    correct_tabs = [
+        "📊 Główny",
+        "🧮 Strategie & Backtest",
+        "🧪 AI Strategy Lab",
+        "🤖 AI Auto‑Trader",
+        "⏱️ Multi‑Timeframe",
+        "📚 Orderbook (Binance)",
+        "🕯️ Formacje świecowe + AI",
+        "📦 Portfolio & Risk",
+        "🛡️ AI Risk & Hedging",
+    ]
+
+    # Tworzymy globalną zmienną, która nadpisze wszystkie inne taby
+    global tab_main, tab_strategy, tab_lab, tab_auto, tab_multi, tab_orderbook, tab_patterns, tab_portfolio, tab_risk_ai
+    tab_main, tab_strategy, tab_lab, tab_auto, tab_multi, tab_orderbook, tab_patterns, tab_portfolio, tab_risk_ai = st.tabs(correct_tabs)
+
+# Wymuszenie poprawnej definicji tabów
+ensure_single_tabs()
