@@ -12,6 +12,38 @@ from plotly.subplots import make_subplots
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 from openai import OpenAI
+
+# --- PATCH v16.5: TRWAŁE USTAWIENIA + AUTO‑REFRESH ---
+
+import time
+
+# --- trwałe ustawienia (inicjalizacja tylko raz) ---
+defaults = {
+    "account_size_v2": 10000.0,
+    "risk_pct_v2": 1.0,
+    "auto_refresh_minutes": 5,
+    "last_refresh": time.time(),
+}
+
+for key, val in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
+
+# --- slider auto‑refresh (1–15 min) ---
+st.sidebar.markdown("### 🔄 Auto‑refresh")
+st.session_state["auto_refresh_minutes"] = st.sidebar.slider(
+    "Częstotliwość odświeżania (minuty)",
+    1, 15,
+    st.session_state["auto_refresh_minutes"],
+    key="refresh_slider"
+)
+
+# --- mechanizm auto‑refresh ---
+elapsed = time.time() - st.session_state["last_refresh"]
+if elapsed > st.session_state["auto_refresh_minutes"] * 60:
+    st.session_state["last_refresh"] = time.time()
+    st.experimental_rerun()
+
 # --- INIT SESSION STATE FOR MODULES 21+22 ---
 for key, default in {
     "auto_v2_levels": {},
