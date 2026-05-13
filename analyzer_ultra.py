@@ -1279,3 +1279,289 @@ with col_patt2:
         """
         patt_desc = ai.chat(desc_prompt)
         st.info(patt_desc)
+# --- 22. AUTO-TRADER v2: AI + SL/TP 1-2-3 NA WYKRESIE ---
+
+st.markdown("---")
+st.subheader("🤖 AI Auto‑Trader v2 — SL/TP 1‑2‑3 + kontekst wykresu (PL)")
+
+col_v1, col_v2 = st.columns([2, 1])
+
+with col_v1:
+    sym_v2 = st.selectbox("Symbol do Auto‑Trader v2", symbols_available, key="auto_v2_sym")
+    d_v2 = data_map[sym_v2]
+    df15_v2 = d_v2["df_15"].tail(200)
+    df1d_v2 = d_v2["df_1d"].tail(200)
+
+    # Podstawowe dane
+    price = d_v2["price"]
+    atr = d_v2["atr"]
+    rsi = d_v2["rsi"]
+    change = d_v2["change"]
+    trend = d_v2["trend"]
+
+    st.markdown(f"**{sym_v2}** — cena: `{price:.2f}`, zmiana D1: `{change:.2f}%`, RSI(15m): `{rsi:.1f}`, trend: `{trend}`")
+    st.markdown("### Wykres 15m z kontekstem")
+
+    fig_v2 = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.55, 0.2, 0.25],
+        vertical_spacing=0.03,
+    )
+
+    fig_v2.add_trace(
+        go.Candlestick(
+            x=df15_v2.index,
+            open=df15_v2["Open"],
+            high=df15_v2["High"],
+            low=df15_v2["Low"],
+            close=df15_v2["Close"],
+            increasing_line_color="#22c55e",
+            decreasing_line_color="#ef4444",
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
+    fig_v2.add_trace(
+        go.Scatter(
+            x=df15_v2.index,
+            y=df15_v2["EMA20"],
+            line=dict(color="#38bdf8", width=1.1),
+            name="EMA20",
+        ),
+        row=1,
+        col=1,
+    )
+    fig_v2.add_trace(
+        go.Scatter(
+            x=df15_v2.index,
+            y=df15_v2["EMA50"],
+            line=dict(color="#a855f7", width=1.0),
+            name="EMA50",
+        ),
+        row=1,
+        col=1,
+    )
+    fig_v2.add_trace(
+        go.Bar(x=df15_v2.index, y=df15_v2["Volume"], marker_color="#4b5563", name="Volume"),
+        row=2,
+        col=1,
+    )
+    fig_v2.add_trace(
+        go.Scatter(
+            x=df15_v2.index,
+            y=df15_v2["MACD"],
+            line=dict(color="#22c55e", width=1),
+            name="MACD",
+        ),
+        row=3,
+        col=1,
+    )
+    fig_v2.add_trace(
+        go.Scatter(
+            x=df15_v2.index,
+            y=df15_v2["MACD_signal"],
+            line=dict(color="#ef4444", width=1),
+            name="Signal",
+        ),
+        row=3,
+        col=1,
+    )
+    fig_v2.add_trace(
+        go.Bar(
+            x=df15_v2.index,
+            y=df15_v2["MACD_hist"],
+            marker_color=np.where(df15_v2["MACD_hist"] >= 0, "#22c55e", "#ef4444"),
+            name="Hist",
+        ),
+        row=3,
+        col=1,
+    )
+
+    fig_v2.update_layout(
+        template="plotly_dark",
+        height=420,
+        margin=dict(l=0, r=0, t=10, b=0),
+        xaxis_rangeslider_visible=False,
+        paper_bgcolor="#020617",
+        plot_bgcolor="#020617",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+        ),
+    )
+    fig_v2.update_xaxes(showgrid=False)
+    fig_v2.update_yaxes(showgrid=False)
+
+    # Jeśli mamy już wyliczone poziomy SL/TP, dorysujemy je na wykresie
+    if "auto_v2_levels" in st.session_state and st.session_state["auto_v2_levels"].get(sym_v2):
+        lv = st.session_state["auto_v2_levels"][sym_v2]
+        last_x = df15_v2.index[-1]
+
+        def add_hline(y, name, color):
+            fig_v2.add_hline(
+                y=y,
+                line=dict(color=color, width=1, dash="dot"),
+                annotation_text=name,
+                annotation_position="top left",
+                annotation_font_color=color,
+            )
+
+        add_hline(lv["sl1"], "SL1", "#f97316")
+        add_hline(lv["sl2"], "SL2", "#fb923c")
+        add_hline(lv["sl3"], "SL3", "#ef4444")
+        add_hline(lv["tp1"], "TP1", "#22c55e")
+        add_hline(lv["tp2"], "TP2", "#16a34a")
+        add_hline(lv["tp3"], "TP3", "#15803d")
+
+    st.plotly_chart(fig_v2, use_container_width=True, key=f"auto_v2_chart_{sym_v2}")
+
+with col_v2:
+    if "auto_v2_levels" not in st.session_state:
+        st.session_state["auto_v2_levels"] = {}
+    if "auto_v2_comment" not in st.session_state:
+        st.session_state["auto_v2_comment"] = {}
+    if "auto_v2_mode" not in st.session_state:
+        st.session_state["auto_v2_mode"] = {}
+
+    st.markdown("### 🧠 AI: czy to dobry moment na wejście?")
+    trade_style = st.selectbox(
+        "Styl wejścia",
+        ["scalping", "day trading", "swing trading"],
+        key="auto_v2_style",
+    )
+
+    account_size_v2 = st.number_input("Wielkość konta (Auto‑Trader v2)", value=10000.0, step=100.0, key="auto_v2_acc")
+    risk_pct_v2 = st.slider("Ryzyko na trade (%)", 0.1, 5.0, 1.0, 0.1, key="auto_v2_risk")
+    risk_engine_v2 = RiskEngine(account_size_v2)
+
+    if st.button("Analiza AI + SL/TP 1‑2‑3", key="auto_v2_btn"):
+        # Dane wejściowe dla AI
+        daily_ohlc = df1d_v2[["Open", "High", "Low", "Close"]].reset_index().to_dict(orient="records")
+        intr_ohlc = df15_v2[["Open", "High", "Low", "Close", "Volume"]].reset_index().to_dict(orient="records")
+
+        prompt = f"""
+        Jesteś zaawansowanym traderem i risk managerem.
+
+        Masz dane dla instrumentu {sym_v2}:
+        - Cena bieżąca: {price:.2f}
+        - Zmiana D1: {change:.2f}%
+        - RSI (15m): {rsi:.1f}
+        - ATR (D1): {atr:.2f}
+        - Trend (SMA200): {trend}
+        - Styl wejścia: {trade_style}
+
+        Dane świec:
+        - Ostatnie świece dzienne (D1): {daily_ohlc}
+        - Ostatnie świece 15m: {intr_ohlc}
+
+        Oceń, czy to jest dobry moment na wejście dla stylu: {trade_style}.
+        Następnie zaproponuj poziomy SL/TP 1-2-3.
+
+        Zwróć TYLKO JSON po polsku w formacie:
+        {{
+          "symbol": "...",
+          "is_good_moment": true lub false,
+          "reason": "krótko po polsku dlaczego tak/nie",
+          "recommended_style": "scalping" lub "day trading" lub "swing trading",
+          "bias": "long" lub "short" lub "neutral",
+          "sl_levels": {{
+            "sl1": liczba,
+            "sl2": liczba,
+            "sl3": liczba
+          }},
+          "tp_levels": {{
+            "tp1": liczba,
+            "tp2": liczba,
+            "tp3": liczba
+          }},
+          "comment": "krótki komentarz po polsku dla tradera (3-5 zdań)",
+          "tactical_hint": "konkretna sugestia: np. 'to nie jest dobry moment, jeśli już to tylko scalping z małą pozycją'"
+        }}
+        """
+        res = ai.chat_json(prompt)
+        st.session_state["auto_v2_levels"][sym_v2] = {
+            "sl1": float(res["sl_levels"]["sl1"]),
+            "sl2": float(res["sl_levels"]["sl2"]),
+            "sl3": float(res["sl_levels"]["sl3"]),
+            "tp1": float(res["tp_levels"]["tp1"]),
+            "tp2": float(res["tp_levels"]["tp2"]),
+            "tp3": float(res["tp_levels"]["tp3"]),
+            "bias": res.get("bias", "neutral"),
+            "is_good_moment": res.get("is_good_moment", False),
+        }
+        st.session_state["auto_v2_comment"][sym_v2] = res
+        st.session_state["auto_v2_mode"][sym_v2] = trade_style
+
+        st.success("AI wyliczyło poziomy SL/TP 1‑2‑3 i oceniło moment wejścia.")
+        st.json(res)
+
+    if st.session_state["auto_v2_comment"].get(sym_v2):
+        res = st.session_state["auto_v2_comment"][sym_v2]
+        st.markdown("### Komentarz AI (PL)")
+        st.info(res.get("comment", ""))
+
+        st.markdown("### Taktyczna sugestia AI")
+        st.warning(res.get("tactical_hint", ""))
+
+        lv = st.session_state["auto_v2_levels"][sym_v2]
+        st.markdown("### Poziomy SL/TP 1‑2‑3 (AI)")
+        st.write(f"SL1: {lv['sl1']:.2f} | SL2: {lv['sl2']:.2f} | SL3: {lv['sl3']:.2f}")
+        st.write(f"TP1: {lv['tp1']:.2f} | TP2: {lv['tp2']:.2f} | TP3: {lv['tp3']:.2f}")
+        st.write(f"Bias: {lv['bias']} | Dobry moment?: {'TAK' if lv['is_good_moment'] else 'NIE'}")
+
+        # RiskEngine na podstawie SL2 (główny stop)
+        main_stop = lv["sl2"] if lv["bias"] == "long" else lv["tp2"]
+        stop_distance = abs(price - main_stop)
+        risk_amount = account_size_v2 * (risk_pct_v2 / 100)
+        size = risk_amount / stop_distance if stop_distance > 0 else 0
+
+        st.markdown("### RiskEngine (Auto‑Trader v2)")
+        st.write(f"Stop distance (główny): {stop_distance:.2f}")
+        st.write(f"Ryzyko nominalne: {risk_amount:.2f}")
+        st.write(f"Proponowany size (szt.): {size:.4f}")
+
+        # R-multiple dla TP2 względem SL2
+        if lv["bias"] == "long":
+            risk = price - lv["sl2"]
+            reward = lv["tp2"] - price
+        elif lv["bias"] == "short":
+            risk = lv["sl2"] - price
+            reward = price - lv["tp2"]
+        else:
+            risk = 0
+            reward = 0
+        r_mult = reward / risk if risk > 0 else None
+        st.write(f"R-multiple (TP2/SL2): {r_mult:.2f}" if r_mult else "R-multiple: n/a")
+
+        if st.button("📥 Zasymuluj trade Auto‑Trader v2", key=f"auto_v2_trade_{sym_v2}"):
+            trade = {
+                "time": datetime.utcnow().isoformat(),
+                "symbol": sym_v2,
+                "price": price,
+                "style": st.session_state["auto_v2_mode"][sym_v2],
+                "bias": lv["bias"],
+                "is_good_moment": lv["is_good_moment"],
+                "sl1": lv["sl1"],
+                "sl2": lv["sl2"],
+                "sl3": lv["sl3"],
+                "tp1": lv["tp1"],
+                "tp2": lv["tp2"],
+                "tp3": lv["tp3"],
+                "size": size,
+                "risk_pct": risk_pct_v2,
+                "r_multiple": r_mult,
+            }
+            st.session_state["trades_log"].append(trade)
+            msg = f"Auto‑Trader v2 {sym_v2} | {lv['bias']} | good={lv['is_good_moment']} | style={st.session_state['auto_v2_mode'][sym_v2]}"
+            st.session_state["alerts"].append(msg)
+            if webhook_url:
+                AlertEngine.send_webhook(webhook_url, {"type": "auto_trader_v2", "trade": trade})
+            if tg_token and tg_chat_id:
+                AlertEngine.send_telegram(tg_token, tg_chat_id, msg)
+            st.success("Trade zapisany w logu (wirtualnie).")
