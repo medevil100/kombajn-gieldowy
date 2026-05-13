@@ -268,6 +268,7 @@ class AIClient:
 with st.sidebar:
     st.title("⚙️ TERMINAL v16 PRO PL")
 
+    # --- API KEY ---
     api_key = st.secrets.get("OPENAI_API_KEY")
     if api_key:
         st.success("✅ OpenAI (Secrets)")
@@ -276,43 +277,52 @@ with st.sidebar:
         if not api_key:
             st.warning("Dodaj klucz w Secrets lub wpisz go tutaj.")
 
-ai_model = st.selectbox(
-    "Model AI",
-    [
-        "gpt-4o-mini",
-        "gpt-4o",
-        "gpt-4.1",
-        "gpt-4.1-large",
-    ],
-    index=1,
-)
+    # --- WYBÓR MODELU AI ---
+    ai_model = st.selectbox(
+        "Model AI",
+        [
+            "gpt-4o-mini",
+            "gpt-4o",
+            "gpt-4.1",
+            "gpt-4.1-large",
+        ],
+        index=1,
+    )
 
+    # --- LISTA TICKERÓW ---
     tickers_input = st.text_area("Symbole (przecinek)", value=load_tickers())
     if st.button("Zapisz listę"):
         with open(DB_FILE, "w") as f:
             f.write(tickers_input)
         st.rerun()
 
+    # --- AUTOREFRESH ---
     refresh = st.select_slider("Odśwież (s)", options=[30, 60, 300], value=60)
 
+    # --- ALERTY ---
     st.markdown("### 🔔 Alerty (log)")
     if "alerts" not in st.session_state:
         st.session_state["alerts"] = []
     for a in st.session_state["alerts"][-10:][::-1]:
         st.markdown(f"- <span class='neon-pill'>{a}</span>", unsafe_allow_html=True)
 
+    # --- PUSH CONFIG ---
     st.markdown("### 🌐 Push config")
     webhook_url = st.text_input("Webhook URL (opcjonalnie)")
     tg_token = st.text_input("Telegram Bot Token (opcjonalnie)", type="password")
     tg_chat_id = st.text_input("Telegram Chat ID (opcjonalnie)")
 
+# --- AUTOREFRESH ---
 st_autorefresh(interval=refresh * 1000, key="auto_refresh_v16")
 
+# --- API KEY CHECK ---
 if not api_key:
     st.info("Wprowadź OpenAI API Key w pasku bocznym lub dodaj do Secrets.")
     st.stop()
 
+# --- AI CLIENT ---
 ai = AIClient(api_key=api_key, model=ai_model)
+
 
 # --- 9. INICJALIZACJA SESSION_STATE ---
 
