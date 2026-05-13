@@ -1,5 +1,15 @@
 
 # --- 1. KONFIGURACJA / IMPORTY ---
+# --- 22. AUTO-TRADER v2 ---
+# Inicjalizacja struktur w session_state
+if "auto_v2_levels" not in st.session_state:
+    st.session_state["auto_v2_levels"] = {}
+
+if "auto_v2_comment" not in st.session_state:
+    st.session_state["auto_v2_comment"] = {}
+
+if "auto_v2_mode" not in st.session_state:
+    st.session_state["auto_v2_mode"] = {}
 
 import os
 import json
