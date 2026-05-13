@@ -44,11 +44,6 @@ st.session_state["auto_refresh_minutes"] = st.sidebar.slider(
     key=auto_key("refresh_slider_minutes"),
 )
 
-elapsed = time.time() - st.session_state["last_refresh"]
-if elapsed > st.session_state["auto_refresh_minutes"] * 60:
-    st.session_state["last_refresh"] = time.time()
-    st.experimental_rerun()
-
 # --- INIT SESSION STATE FOR MODULES 21+22 ---
 for key, default in {
     "auto_v2_levels": {},
