@@ -12,6 +12,23 @@ from plotly.subplots import make_subplots
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 from openai import OpenAI
+# --- AUTO‑KEY ENGINE v16.7 ---
+import uuid
+
+def auto_key(base: str) -> str:
+    """
+    Generuje stabilny, unikalny key dla elementów Streamlit.
+    - Każdy 'base' ma własny unikalny identyfikator.
+    - Nie zmienia się przy refreshu.
+    - Nie powoduje duplikatów.
+    """
+    if "auto_keys" not in st.session_state:
+        st.session_state["auto_keys"] = {}
+
+    if base not in st.session_state["auto_keys"]:
+        st.session_state["auto_keys"][base] = f"{base}_{uuid.uuid4().hex[:8]}"
+
+    return st.session_state["auto_keys"][base]
 
 # --- PATCH v16.5: TRWAŁE USTAWIENIA + AUTO‑REFRESH ---
 
