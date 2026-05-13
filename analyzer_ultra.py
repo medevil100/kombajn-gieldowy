@@ -445,7 +445,7 @@ with tab_portfolio:
     st.write("Portfolio, RiskEngine i przyszły AI Portfolio Optimizer dojdą w części 3.")
 # --- 11. TABS / GŁÓWNY DASHBOARD ---
 
-tab_main, tab_strategy, tab_lab, tab_auto, tab_multi, tab_orderbook, tab_patterns, tab_portfolio = st.tabs(
+tab_main, tab_strategy, tab_lab, tab_auto, tab_multi, tab_orderbook, tab_patterns, tab_portfolio, tab_risk_ai = st.tabs(
     [
         "📊 Główny",
         "🧮 Strategie & Backtest",
@@ -455,7 +455,10 @@ tab_main, tab_strategy, tab_lab, tab_auto, tab_multi, tab_orderbook, tab_pattern
         "📚 Orderbook (Binance)",
         "🕯️ Formacje świecowe + AI",
         "📦 Portfolio & Risk",
+        "🛡️ AI Risk & Hedging",
     ]
+)
+
 )
 
 # --- 12. TAB: GŁÓWNY ---
@@ -1584,3 +1587,126 @@ with col_v2:
             if tg_token and tg_chat_id:
                 AlertEngine.send_telegram(tg_token, tg_chat_id, msg)
             st.success("Trade zapisany w logu (wirtualnie).")
+# --- 23. TAB: AI RISK MATRIX & AUTO-HEDGING ---
+
+with tab_risk_ai:
+    st.subheader("🛡️ AI Risk Matrix & Auto‑Hedging (PL)")
+
+    if "portfolio" not in st.session_state or len(st.session_state["portfolio"]) == 0:
+        st.info("Brak pozycji w wirtualnym portfolio. Dodaj coś w zakładce 📦 Portfolio & Risk.")
+    else:
+        port = st.session_state["portfolio"]
+        st.markdown("### Aktualne portfolio (input dla AI)")
+        st.json(port)
+
+        # prosty risk snapshot
+        total_risk_pct = sum(p.get("risk_pct", 0) for p in port)
+        symbols_in_port = list({p["symbol"] for p in port})
+
+        st.markdown(f"**Łączne ryzyko (suma %):** {total_risk_pct:.2f}%")
+        st.markdown(f"**Liczba instrumentów w portfelu:** {len(symbols_in_port)}")
+
+        # przygotowanie danych dla AI
+        port_compact = []
+        for p in port:
+            sym = p["symbol"]
+            d = data_map.get(sym)
+            if not d:
+                continue
+            port_compact.append(
+                {
+                    "symbol": sym,
+                    "price": float(d["price"]),
+                    "size": float(p["size"]),
+                    "risk_pct": float(p.get("risk_pct", 0)),
+                    "atr": float(p.get("atr", d.get("atr", 0))),
+                    "trend": d.get("trend", ""),
+                    "change_d1": float(d.get("change", 0)),
+                }
+            )
+
+        st.markdown("### 🧠 AI Risk Matrix (ocena portfela)")
+
+        if st.button("Analizuj ryzyko portfela AI", key="ai_risk_matrix_btn"):
+            prompt = f"""
+            Jesteś zaawansowanym risk managerem.
+
+            Masz portfel (lista pozycji, po polsku, uproszczona):
+            {json.dumps(port_compact, indent=2, ensure_ascii=False)}
+
+            Oceń:
+            - koncentrację ryzyka (czy za dużo w jednym kierunku / sektorze / instrumencie),
+            - ogólny poziom ryzyka (niski / umiarkowany / wysoki),
+            - czy portfel jest bardziej pro‑risk (long beta) czy defensywny,
+            - które pozycje są najbardziej ryzykowne.
+
+            Zwróć TYLKO JSON po polsku w formacie:
+            {{
+              "risk_level": "niski" lub "umiarkowany" lub "wysoki",
+              "concentration_comment": "krótki komentarz po polsku",
+              "top_risk_positions": [
+                {{
+                  "symbol": "...",
+                  "reason": "dlaczego jest ryzykowna (po polsku)"
+                }}
+              ],
+              "beta_bias": "pro‑risk" lub "neutralny" lub "defensywny",
+              "summary": "krótkie podsumowanie po polsku (3-5 zdań)"
+            }}
+            """
+            risk_json = ai.chat_json(prompt)
+            st.session_state["ai_risk_matrix"] = risk_json
+            st.json(risk_json)
+
+        if "ai_risk_matrix" in st.session_state:
+            st.markdown("### Komentarz AI (Risk Matrix)")
+            st.info(st.session_state["ai_risk_matrix"].get("summary", ""))
+
+        st.markdown("---")
+        st.markdown("### 🧠 AI Auto‑Hedging (propozycja zabezpieczenia)")
+
+        hedge_notional = st.number_input(
+            "Docelowa wielkość hedge (w % wartości portfela, orientacyjnie)",
+            min_value=5.0,
+            max_value=100.0,
+            value=30.0,
+            step=5.0,
+            key="hedge_notional_pct",
+        )
+
+        if st.button("Generuj propozycję hedge AI", key="ai_hedge_btn"):
+            prompt = f"""
+            Jesteś zaawansowanym traderem i risk managerem.
+
+            Masz portfel:
+            {json.dumps(port_compact, indent=2, ensure_ascii=False)}
+
+            Chcesz zaproponować hedge na poziomie około {hedge_notional:.1f}% wartości portfela.
+
+            Zaproponuj:
+            - jaki instrument lub instrumenty użyć do hedge (np. short indeksu, ETF, kontrakt futures, opcje),
+            - w jakim kierunku (short/long),
+            - orientacyjną wielkość (w % portfela),
+            - w jakich warunkach hedge powinien być aktywny (np. tylko przy spadku indeksu o X%).
+
+            Zwróć TYLKO JSON po polsku w formacie:
+            {{
+              "hedge_idea": [
+                {{
+                  "instrument": "np. short S&P500 futures / short DAX ETF / long VIX",
+                  "direction": "long" lub "short",
+                  "notional_pct": liczba (procent portfela),
+                  "condition": "kiedy hedge ma być aktywny (po polsku)",
+                  "comment": "krótki komentarz po polsku"
+                }}
+              ],
+              "global_comment": "krótkie podsumowanie po polsku (3-5 zdań)"
+            }}
+            """
+            hedge_json = ai.chat_json(prompt)
+            st.session_state["ai_hedge"] = hedge_json
+            st.json(hedge_json)
+
+        if "ai_hedge" in st.session_state:
+            st.markdown("### Komentarz AI (Hedge)")
+            st.info(st.session_state["ai_hedge"].get("global_comment", ""))
