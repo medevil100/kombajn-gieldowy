@@ -1455,9 +1455,10 @@ with col_v2:
     st.markdown("### Parametry / AI decyzja")
     st.write("… (tu zostaje Twój istniejący panel AI / przyciski / logika)")
 
-        # Dane wejściowe dla AI
-        daily_ohlc = df1d_v2[["Open", "High", "Low", "Close"]].reset_index().to_dict(orient="records")
-        intr_ohlc = df15_v2[["Open", "High", "Low", "Close", "Volume"]].reset_index().to_dict(orient="records")
+    # Przygotowanie danych OHLC dla AI
+daily_ohlc = df1d_v2[["Open", "High", "Low", "Close"]].reset_index().to_dict(orient="records")
+intr_ohlc = df15_v2[["Open", "High", "Low", "Close"]].reset_index().to_dict(orient="records")
+
 
         prompt = f"""
         Jesteś zaawansowanym traderem i risk managerem.
