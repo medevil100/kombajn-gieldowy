@@ -405,7 +405,7 @@ tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 data_map: dict[str, dict] = {}
 for sym in tickers:
     d1d = MarketData.get_yf(sym, "250d", "1d")
-    d15 = MarketData.get_yf(sym, "5d", "15m")   # ← TU BYŁ BŁĄD — BRAKOWAŁO ")"
+    d15 = MarketData.get_yf(sym, "5d", "15m")
     if d1d is None or d15 is None:
         continue
 
@@ -458,6 +458,7 @@ if not data_map:
     st.stop()
 
 symbols_available = list(data_map.keys())
+
 
 
 # --- 11. TABS / GŁÓWNY DASHBOARD ---
