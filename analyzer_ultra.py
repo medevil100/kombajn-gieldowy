@@ -1099,3 +1099,183 @@ with tab_portfolio:
 
         total_risk = sum(p["risk_pct"] for p in st.session_state["portfolio"])
         st.markdown(f"**Łączne ryzyko (suma %):** {total_risk:.2f}%")
+# --- 20. MODUŁ AI: MARKET REGIME DETECTOR PRO ---
+
+st.markdown("---")
+st.subheader("🧭 AI Market Regime Detector PRO")
+
+col_r1, col_r2 = st.columns(2)
+
+with col_r1:
+    sym_reg = st.selectbox("Symbol do analizy reżimu rynku", symbols_available, key="regime_sym")
+    d_reg = data_map[sym_reg]
+    df_reg = d_reg["df_1d"]
+
+    # proste metryki reżimu
+    close = df_reg["Close"]
+    sma200 = close.rolling(200).mean()
+    sma50 = close.rolling(50).mean()
+    ret_5 = close.pct_change(5)
+    ret_20 = close.pct_change(20)
+    vol_20 = close.pct_change().rolling(20).std()
+
+    last_price = float(close.iloc[-1])
+    last_sma200 = float(sma200.iloc[-1])
+    last_sma50 = float(sma50.iloc[-1])
+    last_ret_5 = float(ret_5.iloc[-1])
+    last_ret_20 = float(ret_20.iloc[-1])
+    last_vol_20 = float(vol_20.iloc[-1])
+
+    trend = "hossa" if last_price > last_sma200 else "bessa"
+    momentum = "dodatnie" if last_ret_20 > 0 else "ujemne"
+    vol_level = "wysoka" if last_vol_20 > vol_20.median() else "niska/średnia"
+
+    st.markdown("### Metryki reżimu (surowe)")
+    st.write(f"Trend (SMA200): **{trend}**")
+    st.write(f"Momentum 20 dni: **{last_ret_20*100:.2f}%** ({momentum})")
+    st.write(f"Zmienność 20 dni (σ): **{last_vol_20*100:.2f}%** ({vol_level})")
+    st.write(f"SMA50 vs SMA200: {'byczo' if last_sma50 > last_sma200 else 'niedźwiedzio'}")
+
+with col_r2:
+    st.markdown("### 🧠 AI ocena reżimu rynku (JSON + komentarz PL)")
+    if st.button("Analizuj reżim rynku AI", key="regime_ai_btn"):
+        prompt = f"""
+        Jesteś zaawansowanym analitykiem rynku.
+
+        Dane dla instrumentu {sym_reg}:
+        - Trend (SMA200): {trend}
+        - Cena vs SMA200: {last_price:.2f} vs {last_sma200:.2f}
+        - Cena vs SMA50: {last_price:.2f} vs {last_sma50:.2f}
+        - Momentum 5 dni: {last_ret_5*100:.2f}%
+        - Momentum 20 dni: {last_ret_20*100:.2f}%
+        - Zmienność 20 dni (odchylenie standardowe zwrotów): {last_vol_20*100:.2f}%
+        - Poziom zmienności: {vol_level}
+
+        Oceń reżim rynku i zwróć TYLKO JSON po polsku w formacie:
+        {{
+          "symbol": "...",
+          "trend": "hossa" lub "bessa" lub "konsolidacja",
+          "momentum": "dodatnie" lub "ujemne" lub "neutralne",
+          "volatility": "wysoka" lub "średnia" lub "niska",
+          "regime_type": "trend-following" lub "mean-reversion" lub "mieszany",
+          "bias": "agresywny long" lub "ostrożny long" lub "agresywny short" lub "ostrożny short" lub "flat",
+          "risk_level": "wysokie" lub "umiarkowane" lub "niskie",
+          "comment": "krótki komentarz po polsku dla tradera",
+          "tactical_hint": "krótka wskazówka jak grać ten reżim (np. kupuj wybicia, graj mean-reversion, unikaj lewara)"
+        }}
+        """
+        regime_json = ai.chat_json(prompt)
+        st.json(regime_json)
+
+        # komentarz tekstowy
+        desc_prompt = f"""
+        Na podstawie tego JSON-a (po polsku):
+
+        {json.dumps(regime_json, indent=2, ensure_ascii=False)}
+
+        Napisz krótki komentarz (3-5 zdań) po polsku:
+        - jaki jest reżim rynku,
+        - jaki bias (long/short/flat),
+        - jak agresywnie można grać,
+        - na co szczególnie uważać.
+        """
+        regime_desc = ai.chat(desc_prompt)
+        st.info(regime_desc)
+
+
+# --- 21. MODUŁ AI: PATTERN RECOGNITION PRO ---
+
+st.markdown("---")
+st.subheader("📈 AI Pattern Recognition PRO")
+
+col_patt1, col_patt2 = st.columns(2)
+
+with col_patt1:
+    sym_pat = st.selectbox("Symbol do AI Pattern Recognition", symbols_available, key="pat_ai_sym")
+    d_pat = data_map[sym_pat]
+    df_daily = d_pat["df_1d"].tail(200)
+    df_intraday = d_pat["df_15"].tail(200)
+
+    st.markdown("### Dane wejściowe (skrót)")
+    st.write(f"Ostatnie świece D1: {len(df_daily)}")
+    st.write(f"Ostatnie świece 15m: {len(df_intraday)}")
+
+    st.dataframe(df_daily[["Open", "High", "Low", "Close"]].tail(5))
+
+with col_patt2:
+    st.markdown("### 🧠 AI: wykryj formacje (harmoniczne, klasyczne, świecowe, wolumenowe)")
+    if st.button("Analizuj formacje AI", key="pat_ai_btn"):
+        daily_ohlc = df_daily[["Open", "High", "Low", "Close"]].reset_index().to_dict(orient="records")
+        intr_ohlc = df_intraday[["Open", "High", "Low", "Close", "Volume"]].reset_index().to_dict(orient="records")
+
+        prompt = f"""
+        Jesteś zaawansowanym systemem rozpoznawania formacji.
+
+        Masz dane:
+        - Świece dzienne (D1) dla {sym_pat}: {daily_ohlc}
+        - Świece intraday (15m) dla {sym_pat}: {intr_ohlc}
+
+        Wykryj:
+        - formacje harmoniczne (np. Gartley, Bat, Crab),
+        - formacje klasyczne (flagi, trójkąty, kanały, głowa z ramionami),
+        - formacje wolumenowe (np. VCP, akumulacja/dystrybucja w stylu Wyckoff),
+        - formacje świecowe (engulfing, pin bar, fakey, inside bar).
+
+        Zwróć TYLKO JSON po polsku w formacie:
+        {{
+          "symbol": "...",
+          "harmonic_patterns": [
+            {{
+              "name": "Gartley" lub inna,
+              "timeframe": "D1" lub "15m",
+              "direction": "bycza" lub "niedźwiedzia",
+              "confidence": 1-10,
+              "comment": "krótki opis po polsku"
+            }}
+          ],
+          "classical_patterns": [
+            {{
+              "name": "flaga", "trójkąt", "kanał", "RGR", "odwrócony RGR" itd.,
+              "timeframe": "D1" lub "15m",
+              "direction": "kontynuacja" lub "odwrócenie",
+              "confidence": 1-10,
+              "comment": "krótki opis po polsku"
+            }}
+          ],
+          "volume_patterns": [
+            {{
+              "name": "VCP", "akumulacja", "dystrybucja" itd.,
+              "timeframe": "D1" lub "15m",
+              "confidence": 1-10,
+              "comment": "krótki opis po polsku"
+            }}
+          ],
+          "candle_patterns": [
+            {{
+              "name": "bullish engulfing", "pin bar", "inside bar" itd.,
+              "timeframe": "D1" lub "15m",
+              "direction": "bycza" lub "niedźwiedzia",
+              "confidence": 1-10,
+              "comment": "krótki opis po polsku"
+            }}
+          ],
+          "summary": "krótkie podsumowanie po polsku: co to oznacza dla agresywnego tradera",
+          "tactical_hint": "konkretna sugestia: graj wybicia, graj mean-reversion, poczekaj na potwierdzenie itd."
+        }}
+        """
+        patt_json = ai.chat_json(prompt)
+        st.json(patt_json)
+
+        desc_prompt = f"""
+        Na podstawie tego JSON-a (po polsku):
+
+        {json.dumps(patt_json, indent=2, ensure_ascii=False)}
+
+        Napisz krótki komentarz (3-6 zdań) po polsku:
+        - jakie najważniejsze formacje widzisz,
+        - czy przewaga jest po stronie byków czy niedźwiedzi,
+        - czy lepiej grać wybicia czy powroty do średniej,
+        - czy ryzyko jest wysokie czy umiarkowane.
+        """
+        patt_desc = ai.chat(desc_prompt)
+        st.info(patt_desc)
