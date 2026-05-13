@@ -1393,13 +1393,19 @@ with col_v1:
 
 with col_v2:
     st.markdown("### Parametry / AI decyzja")
-    st.write("… (tu zostaje Twój panel AI)")
 
-# Przygotowanie danych OHLC dla AI
-daily_ohlc = df1d_v2[["Open", "High", "Low", "Close"]].reset_index().to_dict(orient="records")
-intr_ohlc = df15_v2[["Open", "High", "Low", "Close"]].reset_index().to_dict(orient="records")
+    trade_style = st.selectbox(
+        "Styl wejścia",
+        ["scalping", "day trading", "swing trading"],
+        key="auto_v2_style",
+    )
 
-prompt = f"""
+    if st.button("Analizuj AI i wylicz SL/TP", key="auto_v2_btn"):
+        # Przygotowanie danych OHLC dla AI
+        daily_ohlc = df1d_v2[["Open", "High", "Low", "Close"]].reset_index().to_dict(orient="records")
+        intr_ohlc = df15_v2[["Open", "High", "Low", "Close"]].reset_index().to_dict(orient="records")
+
+        prompt = f"""
 Jesteś zaawansowanym traderem i risk managerem.
 
 Masz dane dla instrumentu {sym_v2}:
@@ -1421,54 +1427,49 @@ Zwróć TYLKO JSON po polsku w formacie:
 {
   "symbol": "...",
   "is_good_moment": true lub false,
-  "reason": "krótko po polsku dlaczego tak/nie",
-  "recommended_style": "scalping" lub "day trading" lub "swing trading",
-  "bias": "long" lub "short" lub "neutral",
-  "sl_levels": {
-    "sl1": liczba,
-    "sl2": liczba,
-    "sl3": liczba
-  },
-  "tp_levels": {
-    "tp1": liczba,
-    "tp2": liczba,
-    "tp3": liczba
-  },
-  "comment": "krótki komentarz po polsku dla tradera (3-5 zdań)",
-  "tactical_hint": "konkretna sugestia"
+  "reason": "...",
+  "recommended_style": "...",
+  "bias": "...",
+  "sl_levels": {"sl1":0,"sl2":0,"sl3":0},
+  "tp_levels": {"tp1":0,"tp2":0,"tp3":0},
+  "comment": "...",
+  "tactical_hint": "..."
 }
 """
 
-res = ai.chat_json(prompt)
+        res = ai.chat_json(prompt)
 
-st.session_state["auto_v2_levels"][sym_v2] = {
-    "sl1": float(res["sl_levels"]["sl1"]),
-    "sl2": float(res["sl_levels"]["sl2"]),
-    "sl3": float(res["sl_levels"]["sl3"]),
-    "tp1": float(res["tp_levels"]["tp1"]),
-    "tp2": float(res["tp_levels"]["tp2"]),
-    "tp3": float(res["tp_levels"]["tp3"]),
-    "bias": res.get("bias", "neutral"),
-    "is_good_moment": res.get("is_good_moment", False),
-}
+        st.session_state["auto_v2_levels"][sym_v2] = {
+            "sl1": float(res["sl_levels"]["sl1"]),
+            "sl2": float(res["sl_levels"]["sl2"]),
+            "sl3": float(res["sl_levels"]["sl3"]),
+            "tp1": float(res["tp_levels"]["tp1"]),
+            "tp2": float(res["tp_levels"]["tp2"]),
+            "tp3": float(res["tp_levels"]["tp3"]),
+            "bias": res.get("bias", "neutral"),
+            "is_good_moment": res.get("is_good_moment", False),
+        }
 
-st.session_state["auto_v2_comment"][sym_v2] = res
-st.session_state["auto_v2_mode"][sym_v2] = trade_style
+        st.session_state["auto_v2_comment"][sym_v2] = res
+        st.session_state["auto_v2_mode"][sym_v2] = trade_style
 
-st.success("AI wyliczyło poziomy SL/TP 1‑2‑3 i oceniło moment wejścia.")
-st.json(res)
+        st.success("AI wyliczyło poziomy SL/TP 1‑2‑3 i oceniło moment wejścia.")
+        st.json(res)
 
-if st.session_state["auto_v2_comment"].get(sym_v2):
-    res = st.session_state["auto_v2_comment"][sym_v2]
-    st.markdown("### Komentarz AI (PL)")
-    st.info(res.get("comment", ""))
+    # --- Komentarz AI + taktyka ---
+    if st.session_state["auto_v2_comment"].get(sym_v2):
+        res = st.session_state["auto_v2_comment"][sym_v2]
 
-    st.markdown("### Taktyczna sugestia AI")
-    st.warning(res.get("tactical_hint", ""))
+        st.markdown("### Komentarz AI (PL)")
+        st.info(res.get("comment", ""))
 
+        st.markdown("### Taktyczna sugestia AI")
+        st.warning(res.get("tactical_hint", ""))
 
-
+    # --- Wyświetlanie poziomów SL/TP ---
+    if "auto_v2_levels" in st.session_state and st.session_state["auto_v2_levels"].get(sym_v2):
         lv = st.session_state["auto_v2_levels"][sym_v2]
+
         st.markdown("### Poziomy SL/TP 1‑2‑3 (AI)")
         st.write(f"SL1: {lv['sl1']:.2f} | SL2: {lv['sl2']:.2f} | SL3: {lv['sl3']:.2f}")
         st.write(f"TP1: {lv['tp1']:.2f} | TP2: {lv['tp2']:.2f} | TP3: {lv['tp3']:.2f}")
