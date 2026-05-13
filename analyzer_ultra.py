@@ -405,7 +405,7 @@ tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 data_map: dict[str, dict] = {}
 for sym in tickers:
     d1d = MarketData.get_yf(sym, "250d", "1d")
-    d15 = MarketData.get_yf(sym, "5d", "15m"
+    d15 = MarketData.get_yf(sym, "5d", "15m")   # ← TU BYŁ BŁĄD — BRAKOWAŁO ")"
     if d1d is None or d15 is None:
         continue
 
@@ -421,22 +421,6 @@ for sym in tickers:
     atr = (d1d["High"] - d1d["Low"]).rolling(14).mean().iloc[-1]
     pivot = (d1d["High"].iloc[-2] + d1d["Low"].iloc[-2] + d1d["Close"].iloc[-2]) / 3
     rsi = float(d15["RSI"].iloc[-1])
-
- if rsi < 32:
-    rec, rec_col = "KUPUJ", "#22c55e"
-elif rsi > 68:
-    rec, rec_col = "SPRZEDAJ", "#ef4444"
-else:
-    rec, rec_col = "CZEKAJ", "#8b949e"
-    fibo, fib_high, fib_low = MarketData.fibo_levels(d1d)
-    bt_ema = MarketData.simple_backtest(d1d, "EMA_CROSS")
-
-    data_map[sym] = {
-        "symbol": sym,
-        "price": price,
-        "change": change_pct,
-        "rsi": rsi,
-            rsi = float(d15["RSI"].iloc[-1])
 
     # --- POPRAWNA LOGIKA RSI ---
     if rsi < 32:
@@ -469,24 +453,12 @@ else:
         "backtest_ema": bt_ema,
     }
 
-        "rec_col": rec_col,
-        "trend": trend_label,
-        "trend_col": trend_color,
-        "pivot": pivot,
-        "tp": price + atr * 1.5,
-        "sl": price - atr * 1.2,
-        "atr": float(atr),
-        "df_1d": d1d,
-        "df_15": d15,
-        "fibo": fibo,
-        "backtest_ema": bt_ema,
-    }
-
 if not data_map:
     st.error("Brak danych dla podanych symboli.")
     st.stop()
 
 symbols_available = list(data_map.keys())
+
 
 # --- 11. TABS / GŁÓWNY DASHBOARD ---
 
