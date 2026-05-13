@@ -700,7 +700,8 @@ with tab_lab:
         sym_lab = st.selectbox("Symbol", symbols_available, key=auto_key("lab_sym_test"))
         df_lab = data_map[sym_lab]["df_1d"]
 
-        if st.button("Uruchom backtest AI", key=auto_key("lab_bt")):
+        st.line_chart(equity)
+
             strat = st.session_state["lab_strategy"]
             df_bt = df_lab.copy()
             df_bt["signal"] = 0
