@@ -3,7 +3,6 @@
 import os
 import json
 from datetime import datetime
-
 import numpy as np
 import pandas as pd
 import requests
@@ -1129,6 +1128,7 @@ with tab_portfolio:
 
         total_risk = sum(p["risk_pct"] for p in st.session_state["portfolio"])
         st.markdown(f"**Łączne ryzyko (suma %):** {total_risk:.2f}%")
+
 # --- 20. MODUŁ AI: MARKET REGIME DETECTOR PRO ---
 
 st.markdown("---")
@@ -1141,7 +1141,6 @@ with col_r1:
     d_reg = data_map[sym_reg]
     df_reg = d_reg["df_1d"]
 
-    # proste metryki reżimu
     close = df_reg["Close"]
     sma200 = close.rolling(200).mean()
     sma50 = close.rolling(50).mean()
@@ -1170,47 +1169,48 @@ with col_r2:
     st.markdown("### 🧠 AI ocena reżimu rynku (JSON + komentarz PL)")
     if st.button("Analizuj reżim rynku AI", key="regime_ai_btn"):
         prompt = f"""
-        Jesteś zaawansowanym analitykiem rynku.
+Jesteś zaawansowanym analitykiem rynku.
 
-        Dane dla instrumentu {sym_reg}:
-        - Trend (SMA200): {trend}
-        - Cena vs SMA200: {last_price:.2f} vs {last_sma200:.2f}
-        - Cena vs SMA50: {last_price:.2f} vs {last_sma50:.2f}
-        - Momentum 5 dni: {last_ret_5*100:.2f}%
-        - Momentum 20 dni: {last_ret_20*100:.2f}%
-        - Zmienność 20 dni (odchylenie standardowe zwrotów): {last_vol_20*100:.2f}%
-        - Poziom zmienności: {vol_level}
+Dane dla instrumentu {sym_reg}:
+- Trend (SMA200): {trend}
+- Cena vs SMA200: {last_price:.2f} vs {last_sma200:.2f}
+- Cena vs SMA50: {last_price:.2f} vs {last_sma50:.2f}
+- Momentum 5 dni: {last_ret_5*100:.2f}%
+- Momentum 20 dni: {last_ret_20*100:.2f}%
+- Zmienność 20 dni (odchylenie standardowe zwrotów): {last_vol_20*100:.2f}%
+- Poziom zmienności: {vol_level}
 
-        Oceń reżim rynku i zwróć TYLKO JSON po polsku w formacie:
-        {{
-          "symbol": "...",
-          "trend": "hossa" lub "bessa" lub "konsolidacja",
-          "momentum": "dodatnie" lub "ujemne" lub "neutralne",
-          "volatility": "wysoka" lub "średnia" lub "niska",
-          "regime_type": "trend-following" lub "mean-reversion" lub "mieszany",
-          "bias": "agresywny long" lub "ostrożny long" lub "agresywny short" lub "ostrożny short" lub "flat",
-          "risk_level": "wysokie" lub "umiarkowane" lub "niskie",
-          "comment": "krótki komentarz po polsku dla tradera",
-          "tactical_hint": "krótka wskazówka jak grać ten reżim (np. kupuj wybicia, graj mean-reversion, unikaj lewara)"
-        }}
-        """
+Oceń reżim rynku i zwróć TYLKO JSON po polsku w formacie:
+{{
+  "symbol": "...",
+  "trend": "hossa" lub "bessa" lub "konsolidacja",
+  "momentum": "dodatnie" lub "ujemne" lub "neutralne",
+  "volatility": "wysoka" lub "średnia" lub "niska",
+  "regime_type": "trend-following" lub "mean-reversion" lub "mieszany",
+  "bias": "agresywny long" lub "ostrożny long" lub "agresywny short" lub "ostrożny short" lub "flat",
+  "risk_level": "wysokie" lub "umiarkowane" lub "niskie",
+  "comment": "krótki komentarz po polsku dla tradera",
+  "tactical_hint": "krótka wskazówka jak grać ten reżim (np. kupuj wybicia, graj mean-reversion, unikaj lewara)"
+}}
+"""
         regime_json = ai.chat_json(prompt)
         st.json(regime_json)
 
-        # komentarz tekstowy
         desc_prompt = f"""
-        Na podstawie tego JSON-a (po polsku):
+Na podstawie tego JSON-a (po polsku):
 
-        {json.dumps(regime_json, indent=2, ensure_ascii=False)}
+{json.dumps(regime_json, indent=2, ensure_ascii=False)}
 
-        Napisz krótki komentarz (3-5 zdań) po polsku:
-        - jaki jest reżim rynku,
-        - jaki bias (long/short/flat),
-        - jak agresywnie można grać,
-        - na co szczególnie uważać.
-        """
+Napisz krótki komentarz (3-5 zdań) po polsku:
+- jaki jest reżim rynku,
+- jaki bias (long/short/flat),
+- jak agresywnie można grać,
+- na co szczególnie uważać.
+"""
         regime_desc = ai.chat(desc_prompt)
         st.info(regime_desc)
+
+# --- 21. MODUŁ AI: PATTERN RECOGNITION PRO ---
 
 st.markdown("---")
 st.subheader("📈 AI Pattern Recognition PRO")
@@ -1244,27 +1244,72 @@ Masz dane:
 - Świece intraday (15m) dla {sym_pat}: {intr_ohlc}
 
 Wykryj:
-- formacje harmoniczne,
-- formacje klasyczne,
-- formacje wolumenowe,
-- formacje świecowe.
+- formacje harmoniczne (np. Gartley, Bat, Crab),
+- formacje klasyczne (flagi, trójkąty, kanały, głowa z ramionami),
+- formacje wolumenowe (np. VCP, akumulacja/dystrybucja w stylu Wyckoff),
+- formacje świecowe (engulfing, pin bar, fakey, inside bar).
 
-Zwróć TYLKO JSON po polsku.
-        """
-
+Zwróć TYLKO JSON po polsku w formacie:
+{{
+  "symbol": "...",
+  "harmonic_patterns": [
+    {{
+      "name": "Gartley" lub inna,
+      "timeframe": "D1" lub "15m",
+      "direction": "bycza" lub "niedźwiedzia",
+      "confidence": 1-10,
+      "comment": "krótki opis po polsku"
+    }}
+  ],
+  "classical_patterns": [
+    {{
+      "name": "flaga", "trójkąt", "kanał", "RGR", "odwrócony RGR" itd.,
+      "timeframe": "D1" lub "15m",
+      "direction": "kontynuacja" lub "odwrócenie",
+      "confidence": 1-10,
+      "comment": "krótki opis po polsku"
+    }}
+  ],
+  "volume_patterns": [
+    {{
+      "name": "VCP", "akumulacja", "dystrybucja" itd.,
+      "timeframe": "D1" lub "15m",
+      "confidence": 1-10,
+      "comment": "krótki opis po polsku"
+    }}
+  ],
+  "candle_patterns": [
+    {{
+      "name": "bullish engulfing", "pin bar", "inside bar" itd.,
+      "timeframe": "D1" lub "15m",
+      "direction": "bycza" lub "niedźwiedzia",
+      "confidence": 1-10,
+      "comment": "krótki opis po polsku"
+    }}
+  ],
+  "summary": "krótkie podsumowanie po polsku: co to oznacza dla agresywnego tradera",
+  "tactical_hint": "konkretna sugestia: graj wybicia, graj mean-reversion, poczekaj na potwierdzenie itd."
+}}
+"""
         patt_json = ai.chat_json(prompt)
         st.json(patt_json)
 
         desc_prompt = f"""
-Na podstawie tego JSON-a:
+Na podstawie tego JSON-a (po polsku):
 
 {json.dumps(patt_json, indent=2, ensure_ascii=False)}
 
-Napisz krótki komentarz (3–6 zdań) po polsku.
-        """
-
+Napisz krótki komentarz (3-6 zdań) po polsku:
+- jakie najważniejsze formacje widzisz,
+- czy przewaga jest po stronie byków czy niedźwiedzi,
+- czy lepiej grać wybicia czy powroty do średniej,
+- czy ryzyko jest wysokie czy umiarkowane.
+"""
         patt_desc = ai.chat(desc_prompt)
         st.info(patt_desc)
+
+# --- 22. AUTO-TRADER v2: AI + SL/TP 1-2-3 NA WYKRESIE ---
+
 st.markdown("---")
 st.subheader("🤖 AI Auto‑Trader v2 — SL/TP 1‑2‑3 + kontekst wykresu (PL)")
 
@@ -1312,14 +1357,67 @@ with col_v1:
         col=1,
     )
 
-    fig_v2.add_trace(go.Scatter(x=df15_v2.index, y=df15_v2["EMA20"], line=dict(color="#38bdf8", width=1.1)), row=1, col=1)
-    fig_v2.add_trace(go.Scatter(x=df15_v2.index, y=df15_v2["EMA50"], line=dict(color="#a855f7", width=1.0)), row=1, col=1)
-    fig_v2.add_trace(go.Bar(x=df15_v2.index, y=df15_v2["Volume"], marker_color="#4b5563"), row=2, col=1)
-    fig_v2.add_trace(go.Scatter(x=df15_v2.index, y=df15_v2["MACD"], line=dict(color="#22c55e", width=1)), row=3, col=1)
-    fig_v2.add_trace(go.Scatter(x=df15_v2.index, y=df15_v2["MACD_signal"], line=dict(color="#ef4444", width=1)), row=3, col=1)
-    fig_v2.add_trace(go.Bar(x=df15_v2.index, y=df15_v2["MACD_hist"], marker_color=np.where(df15_v2["MACD_hist"] >= 0, "#22c55e", "#ef4444")), row=3, col=1)
+    fig_v2.add_trace(
+        go.Scatter(
+            x=df15_v2.index,
+            y=df15_v2["EMA20"],
+            line=dict(color="#38bdf8", width=1.1),
+            name="EMA20",
+        ),
+        row=1,
+        col=1,
+    )
+    fig_v2.add_trace(
+        go.Scatter(
+            x=df15_v2.index,
+            y=df15_v2["EMA50"],
+            line=dict(color="#a855f7", width=1.0),
+            name="EMA50",
+        ),
+        row=1,
+        col=1,
+    )
+    fig_v2.add_trace(
+        go.Bar(
+            x=df15_v2.index,
+            y=df15_v2["Volume"],
+            marker_color="#4b5563",
+            name="Volume",
+        ),
+        row=2,
+        col=1,
+    )
+    fig_v2.add_trace(
+        go.Scatter(
+            x=df15_v2.index,
+            y=df15_v2["MACD"],
+            line=dict(color="#22c55e", width=1),
+            name="MACD",
+        ),
+        row=3,
+        col=1,
+    )
+    fig_v2.add_trace(
+        go.Scatter(
+            x=df15_v2.index,
+            y=df15_v2["MACD_signal"],
+            line=dict(color="#ef4444", width=1),
+            name="Signal",
+        ),
+        row=3,
+        col=1,
+    )
+    fig_v2.add_trace(
+        go.Bar(
+            x=df15_v2.index,
+            y=df15_v2["MACD_hist"],
+            marker_color=np.where(df15_v2["MACD_hist"] >= 0, "#22c55e", "#ef4444"),
+            name="Hist",
+        ),
+        row=3,
+        col=1,
+    )
 
-    # --- SL/TP 1‑2‑3 NA WYKRESIE ---
     if st.session_state["auto_v2_levels"].get(sym_v2):
         lv = st.session_state["auto_v2_levels"][sym_v2]
 
@@ -1379,27 +1477,42 @@ Dane świec:
 - D1: {daily_ohlc}
 - 15m: {intr_ohlc}
 
-Zwróć TYLKO JSON.
-        """
-
+Zwróć TYLKO JSON w formacie:
+{{
+  "symbol": "{sym_v2}",
+  "is_good_moment": true lub false,
+  "reason": "krótko po polsku",
+  "recommended_style": "scalping" lub "day trading" lub "swing trading",
+  "bias": "long" lub "short" lub "neutral",
+  "sl_levels": {{"sl1": liczba, "sl2": liczba, "sl3": liczba}},
+  "tp_levels": {{"tp1": liczba, "tp2": liczba, "tp3": liczba}},
+  "comment": "krótki komentarz po polsku",
+  "tactical_hint": "krótka taktyczna sugestia po polsku"
+}}
+"""
         res = ai.chat_json(prompt)
 
-        st.session_state["auto_v2_levels"][sym_v2] = {
-            "sl1": float(res["sl_levels"]["sl1"]),
-            "sl2": float(res["sl_levels"]["sl2"]),
-            "sl3": float(res["sl_levels"]["sl3"]),
-            "tp1": float(res["tp_levels"]["tp1"]),
-            "tp2": float(res["tp_levels"]["tp2"]),
-            "tp3": float(res["tp_levels"]["tp3"]),
-            "bias": res.get("bias", "neutral"),
-            "is_good_moment": res.get("is_good_moment", False),
-        }
+        # prosta walidacja, żeby nie wywalić się na złym JSON
+        if not isinstance(res, dict) or "sl_levels" not in res or "tp_levels" not in res:
+            st.error("AI zwróciło niepoprawny JSON dla SL/TP. Spróbuj ponownie.")
+            st.json(res)
+        else:
+            st.session_state["auto_v2_levels"][sym_v2] = {
+                "sl1": float(res["sl_levels"]["sl1"]),
+                "sl2": float(res["sl_levels"]["sl2"]),
+                "sl3": float(res["sl_levels"]["sl3"]),
+                "tp1": float(res["tp_levels"]["tp1"]),
+                "tp2": float(res["tp_levels"]["tp2"]),
+                "tp3": float(res["tp_levels"]["tp3"]),
+                "bias": res.get("bias", "neutral"),
+                "is_good_moment": res.get("is_good_moment", False),
+            }
 
-        st.session_state["auto_v2_comment"][sym_v2] = res
-        st.session_state["auto_v2_mode"][sym_v2] = trade_style
+            st.session_state["auto_v2_comment"][sym_v2] = res
+            st.session_state["auto_v2_mode"][sym_v2] = trade_style
 
-        st.success("AI wyliczyło poziomy SL/TP 1‑2‑3.")
-        st.json(res)
+            st.success("AI wyliczyło poziomy SL/TP 1‑2‑3.")
+            st.json(res)
 
     if st.session_state["auto_v2_comment"].get(sym_v2):
         res = st.session_state["auto_v2_comment"][sym_v2]
@@ -1468,6 +1581,9 @@ Zwróć TYLKO JSON.
                 AlertEngine.send_telegram(tg_token, tg_chat_id, msg)
 
             st.success("Trade zapisany w logu (wirtualnie).")
+
+# --- 23. TAB: AI RISK MATRIX & AUTO-HEDGING ---
+
 with tab_risk_ai:
     st.subheader("🛡️ AI Risk Matrix & Auto‑Hedging (PL)")
 
@@ -1512,7 +1628,7 @@ Masz portfel:
 {json.dumps(port_compact, indent=2, ensure_ascii=False)}
 
 Zwróć TYLKO JSON.
-            """
+"""
             risk_json = ai.chat_json(prompt)
             st.session_state["ai_risk_matrix"] = risk_json
             st.json(risk_json)
@@ -1541,7 +1657,6 @@ Masz portfel:
 {json.dumps(port_compact, indent=2, ensure_ascii=False)}
 
 Zwróć TYLKO JSON.
-            """
+"""
             hedge_json = ai.chat_json(prompt)
             st.session_state["ai_hedge"] = hedge_json
-
