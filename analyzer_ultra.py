@@ -1401,9 +1401,29 @@ with col_v1:
 
     st.plotly_chart(fig_v2, use_container_width=True, key=f"auto_v2_chart_{sym_v2}")
 
-with col_v2:
-    st.markdown("### Parametry / AI decyzja")
+st.markdown("---")
+st.subheader("🤖 AI Auto‑Trader v2 — SL/TP 1‑2‑3 + kontekst wykresu (PL)")
 
+col_v1, col_v2 = st.columns([2, 1])
+
+with col_v1:
+    sym_v2 = st.selectbox("Symbol do Auto‑Trader v2", symbols_available, key="auto_v2_sym")
+    d_v2 = data_map[sym_v2]
+
+    df15_v2 = d_v2["df_15"].tail(200)
+    df1d_v2 = d_v2["df_1d"].tail(200)
+
+    price = d_v2["price"]
+    atr = d_v2["atr"]
+    rsi = d_v2["rsi"]
+    change = d_v2["change"]
+    trend = d_v2["trend"]
+
+    st.markdown(
+        f"**{sym_v2}** — cena: `{price:.2f}`, zmiana D1: `{change:.2f}%`, "
+        f"RSI(15m): `{rsi:.1f}`, trend: `{trend}`"
+    )
+    st.markdown("### Wykres 15m z kontekstem")
     # --- BRAKUJĄCE ZMIENNE (NAPRAWA NameError) ---
     account_size_v2 = st.number_input(
         "Wielkość konta (Auto‑Trader v2)",
