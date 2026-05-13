@@ -13,6 +13,39 @@ from streamlit_autorefresh import st_autorefresh
 from openai import OpenAI
 import uuid
 import time
+# --- v16.9: MOBILE VIEW + PAGE CONFIG ---
+st.set_page_config(
+    page_title="Kombajn Giełdowy",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+st.markdown("""
+<style>
+@media (max-width: 768px) {
+    .block-container {
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
+        padding-top: 0.5rem;
+    }
+    .stButton>button {
+        width: 100%;
+        font-size: 1.1rem;
+        padding: 0.8rem;
+    }
+    .stSelectbox, .stTextInput, .stNumberInput {
+        font-size: 1.1rem;
+    }
+    .stTabs [data-baseweb="tab"] {
+        font-size: 1.1rem;
+        padding: 0.6rem;
+    }
+    .stDataFrame {
+        font-size: 0.9rem;
+    }
+}
+</style>
+""", unsafe_allow_html=True)
 
 # --- AUTO‑KEY ENGINE v16.8 ---
 def auto_key(base: str) -> str:
