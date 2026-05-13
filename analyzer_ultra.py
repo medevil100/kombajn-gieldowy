@@ -1,7 +1,3 @@
-Jadymy. **Część 1/3 — od importów do AI Strategy Lab (włącznie)**.  
-Wklejasz to jako początek pliku `analyzer_ultra.py` **ZAMIast** obecnego początku do końca sekcji `# --- 14. TAB: AI STRATEGY LAB ---`.
-
-```python
 # --- 1. KONFIGURACJA / IMPORTY ---
 import os
 import json
@@ -786,8 +782,6 @@ with tab_lab:
             """
             code = ai.chat(prompt)
             st.code(code, language="pine")
-```
 
-Jak wkleisz i odpali się bez błędów — daj „**lecimy część 2**” i puszczam kolejną.
 
 koniec
