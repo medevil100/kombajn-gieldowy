@@ -1421,7 +1421,7 @@ with col_v1:
 
     # Jeśli mamy już wyliczone poziomy SL/TP, dorysujemy je na wykresie
     if "auto_v2_levels" in st.session_state and st.session_state["auto_v2_levels"].get(sym_v2):
-    lv = st.session_state["auto_v2_levels"][sym_v2]
+        lv = st.session_state["auto_v2_levels"][sym_v2]
 
     def add_level(y, label, color):
         fig_v2.add_hline(
