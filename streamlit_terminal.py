@@ -734,16 +734,8 @@ with tab_portfolio:
 
         total_risk = sum(p["risk_pct"] for p in st.session_state["portfolio"])
         st.markdown(f"**Łączne ryzyko (suma %):** {total_risk:.2f}%")
-Adam — **pełna część 3/3**, czysta, kompletna, gotowa do wklejenia **od razu po części 2**.  
-To jest finalny blok Twojego terminala v16.9 PRO PL.
 
-Wklejasz **1:1**, nic nie dopisujesz, nic nie usuwasz.
 
----
-
-# ✅ **CZĘŚĆ 3/3 — Market Regime Detector PRO + Auto‑Trader v2 + AI Risk Matrix & Hedging**
-
-```python
 # --- 20. MODUŁ AI: MARKET REGIME DETECTOR PRO ---
 
 st.markdown("---")
