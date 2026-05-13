@@ -1,998 +1,792 @@
-import streamlit as st
+# --- 1. KONFIGURACJA / IMPORTY ---
+import os
+import json
+from datetime import datetime
+import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 from openai import OpenAI
+import uuid
+import time
 
-st.set_page_config(page_title="Heatmap PRO", layout="wide")
+# --- v16.9: MOBILE VIEW + PAGE CONFIG ---
+st.set_page_config(
+    page_title="Kombajn Giełdowy",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# --- OpenAI config ---
-AI_MODEL = "gpt-4o-mini"
-client = OpenAI()  # API key z sekreta / env
+st.markdown("""
+<style>
+@media (max-width: 768px) {
+    .block-container {
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
+        padding-top: 0.5rem;
+    }
+    .stButton>button {
+        width: 100%;
+        font-size: 1.1rem;
+        padding: 0.8rem;
+    }
+    .stSelectbox, .stTextInput, .stNumberInput {
+        font-size: 1.1rem;
+    }
+    .stTabs [data-baseweb="tab"] {
+        font-size: 1.1rem;
+        padding: 0.6rem;
+    }
+    .stDataFrame {
+        font-size: 0.9rem;
+    }
+}
+</style>
+""", unsafe_allow_html=True)
 
-# --- Pobieranie danych cenowych ---
-def get_price_data(symbol, period="5d", interval="1h"):
-    df = yf.download(symbol, period=period, interval=interval, progress=False)
-    if df.empty:
-        return pd.DataFrame()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df.astype(float).dropna()
+# --- AUTO‑KEY ENGINE v16.8 ---
+def auto_key(base: str) -> str:
+    if "auto_keys" not in st.session_state:
+        st.session_state["auto_keys"] = {}
+    if base not in st.session_state["auto_keys"]:
+        st.session_state["auto_keys"][base] = f"{base}_{uuid.uuid4().hex[:8]}"
+    return st.session_state["auto_keys"][base]
 
-# --- Pobieranie BID / ASK (jeśli dostępne) ---
-def get_bid_ask(symbol: str):
-    try:
-        t = yf.Ticker(symbol)
-        info = t.info or {}
-        bid = info.get("bid", None)
-        ask = info.get("ask", None)
-        if bid is None or ask is None or bid == 0 or ask == 0:
-            return None, None
-        return float(bid), float(ask)
-    except Exception:
-        return None, None
+# --- PATCH v16.8: TRWAŁE USTAWIENIA + AUTO‑REFRESH ---
 
-# --- Obliczenia metryk technicznych ---
-def compute_metrics(symbol):
-    df = get_price_data(symbol, "5d", "1h")
-    if df.empty or len(df) < 3:
+defaults = {
+    "account_size_v2": 10000.0,
+    "risk_pct_v2": 1.0,
+    "auto_refresh_minutes": 5,
+    "last_refresh": time.time(),
+}
+
+for key, val in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
+
+st.sidebar.markdown("### 🔄 Auto‑refresh (1–15 min)")
+st.session_state["auto_refresh_minutes"] = st.sidebar.slider(
+    "Częstotliwość odświeżania (minuty)",
+    1,
+    15,
+    st.session_state["auto_refresh_minutes"],
+    key=auto_key("refresh_slider_minutes"),
+)
+
+# --- INIT SESSION STATE FOR MODULES 21+22 ---
+for key, default in {
+    "auto_v2_levels": {},
+    "auto_v2_comment": {},
+    "auto_v2_mode": {},
+    "trades_log": [],
+    "alerts": [],
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+APP_TITLE = "AI ALPHA TERMINAL v16.9 PRO PL"
+DB_FILE = "tickers_db.txt"
+
+# --- 2. STYL / LAYOUT ---
+
+st.markdown(
+    """
+    <style>
+    .stApp { background-color: #050812; color: #c9d1d9; }
+    .ticker-card { 
+        background: radial-gradient(circle at top left, #111827, #020617); 
+        padding: 20px; 
+        border-radius: 16px; 
+        border: 1px solid #1f2937; 
+        margin-bottom: 24px; 
+        box-shadow: 0 0 18px rgba(0,255,180,0.12);
+    }
+    .top-rank-card { 
+        background: linear-gradient(135deg, #020617, #111827); 
+        padding: 12px; 
+        border-radius: 12px; 
+        border: 1px solid #1f2937; 
+        text-align: center;
+        box-shadow: 0 0 12px rgba(56,189,248,0.25);
+        min-height: 120px;
+    }
+    .stat-label { font-size: 0.7rem; color: #8b949e; text-transform: uppercase; }
+    .neon-pill {
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 0.7rem;
+        border: 1px solid rgba(56,189,248,0.6);
+        color: #e5e7eb;
+        background: rgba(15,23,42,0.9);
+    }
+    .fibo-box {
+        font-size: 0.75rem;
+        color: #e5e7eb;
+        background: rgba(15,23,42,0.9);
+        border-radius: 10px;
+        padding: 8px 10px;
+        border: 1px solid rgba(94,234,212,0.5);
+        margin-top: 6px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# --- 3. FUNKCJE POMOCNICZE (UTILS) ---
+
+def load_tickers(default: str = "PKO.WA, BTC-USD, NVDA, TSLA, BTCUSDT") -> str:
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, "r") as f:
+                content = f.read().strip()
+                return content if content else default
+        except Exception:
+            return default
+    return default
+
+# --- 4. MARKET DATA / WSKAŹNIKI ---
+
+class MarketData:
+    @staticmethod
+    def get_yf(symbol: str, period: str = "250d", interval: str = "1d") -> pd.DataFrame | None:
+        df = yf.download(symbol, period=period, interval=interval, progress=False)
+        if df.empty:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df
+
+    @staticmethod
+    def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        close = df["Close"]
+
+        df["EMA20"] = close.ewm(span=20).mean()
+        df["EMA50"] = close.ewm(span=50).mean()
+        df["EMA200"] = close.ewm(span=200).mean()
+
+        ema12 = close.ewm(span=12).mean()
+        ema26 = close.ewm(span=26).mean()
+        df["MACD"] = ema12 - ema26
+        df["MACD_signal"] = df["MACD"].ewm(span=9).mean()
+        df["MACD_hist"] = df["MACD"] - df["MACD_signal"]
+
+        delta = close.diff()
+        gain = delta.where(delta > 0, 0).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / (loss + 1e-9)
+        df["RSI"] = 100 - (100 / (1 + rs))
+
+        return df
+
+    @staticmethod
+    def fibo_levels(df: pd.DataFrame):
+        recent = df.tail(120)
+        high = recent["High"].max()
+        low = recent["Low"].min()
+        diff = high - low
+        levels = {
+            "0.0%": high,
+            "23.6%": high - 0.236 * diff,
+            "38.2%": high - 0.382 * diff,
+            "50.0%": high - 0.5 * diff,
+            "61.8%": high - 0.618 * diff,
+            "78.6%": high - 0.786 * diff,
+            "100%": low,
+        }
+        return levels, high, low
+
+    @staticmethod
+    def simple_backtest(df: pd.DataFrame, strategy: str = "EMA_CROSS") -> dict:
+        df = df.copy()
+        df["ret"] = df["Close"].pct_change().fillna(0)
+
+        if strategy == "EMA_CROSS":
+            df["EMA20"] = df["Close"].ewm(span=20).mean()
+            df["EMA50"] = df["Close"].ewm(span=50).mean()
+            df["signal"] = 0
+            df.loc[df["EMA20"] > df["EMA50"], "signal"] = 1
+            df.loc[df["EMA20"] < df["EMA50"], "signal"] = -1
+        elif strategy == "RSI":
+            df["RSI"] = MarketData.compute_indicators(df)["RSI"]
+            df["signal"] = 0
+            df.loc[df["RSI"] < 30, "signal"] = 1
+            df.loc[df["RSI"] > 70, "signal"] = -1
+        elif strategy == "MACD":
+            tmp = MarketData.compute_indicators(df)
+            df["MACD"] = tmp["MACD"]
+            df["MACD_signal"] = tmp["MACD_signal"]
+            df["signal"] = 0
+            df.loc[df["MACD"] > df["MACD_signal"], "signal"] = 1
+            df.loc[df["MACD"] < df["MACD_signal"], "signal"] = -1
+        else:
+            df["signal"] = 0
+
+        df["position"] = df["signal"].shift(1).fillna(0)
+        df["strategy"] = df["position"] * df["ret"]
+        equity = (1 + df["strategy"]).cumprod()
+        total_ret = equity.iloc[-1] - 1
+        max_dd = (equity.cummax() - equity).max()
+        trades = (df["position"].diff().abs() > 0).sum()
+
         return {
-            "Symbol": symbol,
-            "Change": 0.0,
-            "Volume": 0.0,
-            "ATR": 0.0,
-            "Trend": "NONE",
-            "Signal": "NEUTRAL",
-            "MomentumScore": 0.0,
-            "VolatilityScore": 0.0,
-            "TrendStrength": 0.0,
-            "RiskScore": 50.0,
-            "SetupScore": 0.0,
+            "total_return": float(total_ret * 100),
+            "max_drawdown": float(max_dd * 100),
+            "trades": int(trades),
         }
 
-    close = df["Close"].astype(float)
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
-    volume = df["Volume"].astype(float)
+# --- 5. RISK ENGINE ---
 
-    last = float(close.iloc[-1])
-    prev = float(close.iloc[-2])
-    change = ((last - prev) / prev * 100) if prev != 0 else 0.0
+class RiskEngine:
+    def __init__(self, account_size: float):
+        self.account_size = account_size
 
-    # ATR
-    tr = pd.concat(
-        [
-            (high - low),
-            (high - close.shift()).abs(),
-            (low - close.shift()).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    atr_series = tr.rolling(14).mean()
-    atr = float(atr_series.iloc[-1]) if not atr_series.dropna().empty else 0.0
+    def position_size_atr(
+        self,
+        price: float,
+        atr: float,
+        risk_pct: float,
+        atr_mult: float = 1.5,
+    ) -> dict:
+        stop_distance = atr * atr_mult
+        risk_amount = self.account_size * (risk_pct / 100)
+        size = risk_amount / stop_distance if stop_distance > 0 else 0
+        return {
+            "stop_distance": float(stop_distance),
+            "risk_amount": float(risk_amount),
+            "size": float(size),
+        }
 
-    # Trend (EMA)
-    ema20 = close.ewm(span=20, adjust=False).mean()
-    ema50 = close.ewm(span=50, adjust=False).mean()
-    ema20_last = float(ema20.iloc[-1])
-    ema50_last = float(ema50.iloc[-1])
-
-    if last > ema20_last > ema50_last:
-        trend = "UP"
-    elif last < ema20_last < ema50_last:
-        trend = "DOWN"
-    else:
-        trend = "SIDE"
-
-    # Sygnał techniczny
-    if trend == "UP" and change > 0:
-        signal = "BUY"
-    elif trend == "DOWN" and change < 0:
-        signal = "SELL"
-    else:
-        signal = "NEUTRAL"
-
-    # MomentumScore
-    vol_last = float(volume.iloc[-1])
-    vol_prev = float(volume.iloc[-2]) if len(volume) > 1 else vol_last
-    vol_change = ((vol_last - vol_prev) / vol_prev * 100) if vol_prev != 0 else 0.0
-
-    raw_momentum = change * 0.7 + vol_change * 0.3
-    momentum_score = max(0.0, min(100.0, 50.0 + raw_momentum))
-
-    # VolatilityScore (ATR / cena)
-    vol_ratio = (atr / last * 100) if last != 0 else 0.0
-    volatility_score = max(0.0, min(100.0, vol_ratio * 2))
-
-    # TrendStrength
-    trend_diff = abs(ema20_last - ema50_last) / last * 100 if last != 0 else 0.0
-    trend_strength = max(0.0, min(100.0, trend_diff * 5))
-
-    # RiskScore
-    risk_raw = volatility_score
-    risk_score = max(0.0, min(100.0, risk_raw))
-
-    # SetupScore v1 (zostaje, NewsScore będzie osobno)
-    setup = 0.0
-    if signal == "BUY":
-        setup += 30
-    elif signal == "SELL":
-        setup += 20
-
-    setup += momentum_score * 0.3
-    setup += trend_strength * 0.3
-    setup -= risk_score * 0.2
-
-    setup_score = max(0.0, min(100.0, setup))
-
-    return {
-        "Symbol": symbol,
-        "Change": change,
-        "Volume": vol_last,
-        "ATR": atr,
-        "Trend": trend,
-        "Signal": signal,
-        "MomentumScore": momentum_score,
-        "VolatilityScore": volatility_score,
-        "TrendStrength": trend_strength,
-        "RiskScore": risk_score,
-        "SetupScore": setup_score,
-    }
-
-# --- Formatowanie paska NewsScore (tekst + pasek) ---
-def format_news_score(value):
-    try:
-        score = float(value)
-    except Exception:
-        score = 0.0
-
-    score = max(0.0, min(100.0, score))
-    length = 40  # średni pasek
-    filled = int(round(score / 100 * length))
-    bar = "█" * filled + "░" * (length - filled)
-
-    if score < 30:
-        icon = "🟢"
-    elif score < 60:
-        icon = "🟠"
-    else:
-        icon = "🔴"
-
-    return f"{icon} {score:.0f} |{bar}|"
-
-# --- Stylowanie tabeli (Heatmap + NewsScore) ---
-def style_heatmap(df):
-    styles = pd.DataFrame("", index=df.index, columns=df.columns)
-
-    for i, row in df.iterrows():
-        ss = row["SetupScore"]
-        intensity = min(max(ss / 100.0, 0.0), 1.0)
-        base_color = "0,255,0" if ss >= 50 else "255,0,0"
-        row_bg = f"background-color: rgba({base_color},{0.15 + 0.35*intensity})"
-
-        for col in df.columns:
-            styles.loc[i, col] = row_bg
-
-        c = row["Change"]
-        if c > 0:
-            styles.loc[i, "Change"] = f"background-color: rgba(0,255,0,{min(abs(c)/10,1)})"
-        elif c < 0:
-            styles.loc[i, "Change"] = f"background-color: rgba(255,0,0,{min(abs(c)/10,1)})"
+    def compute_r_multiple(
+        self,
+        entry: float,
+        stop: float,
+        target: float,
+        direction: str = "long",
+    ) -> float | None:
+        if direction == "long":
+            risk = entry - stop
+            reward = target - entry
         else:
-            styles.loc[i, "Change"] = "background-color: rgba(128,128,128,0.3)"
+            risk = stop - entry
+            reward = entry - target
+        if risk <= 0:
+            return None
+        return reward / risk
 
-        if row["Trend"] == "UP":
-            styles.loc[i, "Trend"] = "background-color: rgba(0,255,0,0.4)"
-        elif row["Trend"] == "DOWN":
-            styles.loc[i, "Trend"] = "background-color: rgba(255,0,0,0.4)"
-        else:
-            styles.loc[i, "Trend"] = "background-color: rgba(128,128,128,0.3)"
+# --- 6. ALERT ENGINE ---
 
-        if row["Signal"] == "BUY":
-            styles.loc[i, "Signal"] = "background-color: rgba(0,255,0,0.6)"
-        elif row["Signal"] == "SELL":
-            styles.loc[i, "Signal"] = "background-color: rgba(255,0,0,0.6)"
-        else:
-            styles.loc[i, "Signal"] = "background-color: rgba(128,128,128,0.3)"
-
-        # NewsScore gradient (zielony -> pomarańczowy -> czerwony)
-        if "NewsScore" in df.columns:
-            ns = row.get("NewsScore", 0.0)
-            try:
-                ns = float(ns)
-            except Exception:
-                ns = 0.0
-            ns = max(0.0, min(100.0, ns))
-
-            if ns <= 50:
-                # zielony -> pomarańczowy
-                t = ns / 50.0
-                r = int(0 + t * (255 - 0))
-                g = int(255 - t * (255 - 165))
-                b = 0
-            else:
-                # pomarańczowy -> czerwony
-                t = (ns - 50) / 50.0
-                r = 255
-                g = int(165 - t * 165)
-                b = 0
-
-            styles.loc[i, "NewsScore"] = f"background-color: rgba({r},{g},{b},0.35)"
-
-    fmt_dict = {
-        "Change": "{:+.2f}%",
-        "Volume": "{:,.0f}",
-        "ATR": "{:.4f}",
-        "MomentumScore": "{:.1f}",
-        "VolatilityScore": "{:.1f}",
-        "TrendStrength": "{:.1f}",
-        "RiskScore": "{:.1f}",
-        "SetupScore": "{:.1f}",
-    }
-
-    if "NewsScore" in df.columns:
-        fmt_dict["NewsScore"] = format_news_score
-
-    return df.style.apply(lambda _: styles, axis=None).format(fmt_dict)
-
-# --- AI Verdict dla TOP 5 (techniczny) ---
-def ai_verdict_for_top5(top_df: pd.DataFrame) -> str:
-    if top_df.empty:
-        return "Brak spółek do analizy."
-
-    lines = []
-    for _, row in top_df.iterrows():
-        lines.append(
-            f"{row['Symbol']}: "
-            f"SetupScore={row['SetupScore']:.1f}, "
-            f"Change={row['Change']:+.2f}%, "
-            f"Trend={row['Trend']}, "
-            f"Signal={row['Signal']}, "
-            f"Momentum={row['MomentumScore']:.1f}, "
-            f"Volatility={row['VolatilityScore']:.1f}, "
-            f"Risk={row['RiskScore']:.1f}"
-        )
-    context = "\n".join(lines)
-
-    system_prompt = """
-Jesteś zawodowym prop-traderem i risk managerem.
-Dostajesz listę maksymalnie 5 spółek z metrykami:
-- SetupScore (0-100)
-- Change %
-- Trend (UP/DOWN/SIDE)
-- Signal (BUY/SELL/NEUTRAL)
-- MomentumScore
-- VolatilityScore
-- RiskScore
-
-Twoje zadanie:
-1) Dla każdej spółki daj krótki werdykt (1-3 zdania): co jest mocne, co słabe, co trzeba obserwować.
-2) Na końcu daj zbiorczy komentarz:
-   - która spółka wygląda NAJCIEKAWEJ jako setup,
-   - gdzie ryzyko jest najwyższe,
-   - co musi się stać, żeby setup był „A+”.
-
-Pisz krótko, konkretnie, bez lania wody.
-"""
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Oto dane spółek:\n{context}"},
-    ]
-
-    res = client.chat.completions.create(
-        model=AI_MODEL,
-        messages=messages,
-    )
-    return res.choices[0].message.content
-
-# --- Wykres PRO (cena + EMA + RSI + MACD + ATR) ---
-def plot_pro_chart(symbol: str):
-    df = get_price_data(symbol, "3mo", "1d")
-    if df.empty:
-        st.warning("Brak danych do wykresu.")
-        return
-
-    close = df["Close"].astype(float)
-    ema20 = close.ewm(span=20, adjust=False).mean()
-    ema50 = close.ewm(span=50, adjust=False).mean()
-
-    fig = go.Figure()
-    fig.add_candlestick(
-        x=df.index,
-        open=df["Open"],
-        high=df["High"],
-        low=df["Low"],
-        close=df["Close"],
-        name="Cena",
-    )
-    fig.add_trace(go.Scatter(x=df.index, y=ema20, mode="lines", name="EMA20", line=dict(color="cyan")))
-    fig.add_trace(go.Scatter(x=df.index, y=ema50, mode="lines", name="EMA50", line=dict(color="magenta")))
-    fig.update_layout(template="plotly_dark", height=500)
-    st.plotly_chart(fig, use_container_width=True)
-
-    # RSI
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean().abs()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.dropna()
-
-    st.subheader("RSI(14)")
-    st.line_chart(rsi)
-
-    # MACD
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
-    macd_line = ema12 - ema26
-    signal_line = macd_line.ewm(span=9, adjust=False).mean()
-    macd_df = pd.DataFrame({"MACD": macd_line, "Signal": signal_line}).dropna()
-
-    st.subheader("MACD")
-    st.line_chart(macd_df)
-
-    # ATR
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
-    tr = pd.concat(
-        [
-            (high - low),
-            (high - close.shift()).abs(),
-            (low - close.shift()).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    atr_series = tr.rolling(14).mean().dropna()
-
-    st.subheader("ATR(14)")
-    st.line_chart(atr_series)
-# --- ALERTY ---
-def generate_alerts(df: pd.DataFrame):
-    alerts = []
-
-    for _, row in df.iterrows():
-        sym = row["Symbol"]
-        ss = row["SetupScore"]
-        mom = row["MomentumScore"]
-        trend = row["Trend"]
-        ch = row["Change"]
-        vol = row["VolatilityScore"]
-
-        if ss >= 70 and trend == "UP":
-            alerts.append(f"🔥 {sym}: mocny setup (SetupScore {ss:.1f}, trend UP).")
-        if mom >= 60:
-            alerts.append(f"⚡ {sym}: wysokie momentum ({mom:.1f}).")
-        if abs(ch) >= 3:
-            alerts.append(f"📈 {sym}: duża zmiana intraday ({ch:+.2f}%).")
-        if vol >= 70:
-            alerts.append(f"⚠️ {sym}: bardzo wysoka zmienność (VolatilityScore {vol:.1f}).")
-
-    return alerts
-
-# --- PATTERNY ---
-def detect_patterns_for_symbol(symbol: str):
-    df = get_price_data(symbol, "3mo", "1d")
-    if df.empty or len(df) < 30:
-        return []
-
-    close = df["Close"].astype(float)
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
-
-    patterns = []
-
-    # Breakout górą / dołem (20 dni)
-    rolling_max = close.rolling(20).max()
-    rolling_min = close.rolling(20).min()
-    last = close.iloc[-1]
-    prev_max = rolling_max.iloc[-2]
-    prev_min = rolling_min.iloc[-2]
-
-    if last > prev_max:
-        patterns.append("Breakout UP (wybicie powyżej 20-dniowego maksimum).")
-    if last < prev_min:
-        patterns.append("Breakout DOWN (wybicie poniżej 20-dniowego minimum).")
-
-    # Bollinger squeeze (niska zmienność)
-    ma20 = close.rolling(20).mean()
-    std20 = close.rolling(20).std()
-    bb_width = (std20 * 2).iloc[-1] / last * 100 if last != 0 else 0
-    if bb_width < 3:
-        patterns.append("Bollinger Squeeze (bardzo niska zmienność, możliwe wybicie).")
-
-    # RSI overbought/oversold
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean().abs()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_last = rsi.iloc[-1]
-
-    if rsi_last > 70:
-        patterns.append(f"RSI overbought ({rsi_last:.1f}).")
-    elif rsi_last < 30:
-        patterns.append(f"RSI oversold ({rsi_last:.1f}).")
-
-    # EMA cross
-    ema20 = close.ewm(span=20, adjust=False).mean()
-    ema50 = close.ewm(span=50, adjust=False).mean()
-    if ema20.iloc[-2] < ema50.iloc[-2] and ema20.iloc[-1] > ema50.iloc[-1]:
-        patterns.append("Golden Cross (EMA20 przebiła EMA50 w górę).")
-    if ema20.iloc[-2] > ema50.iloc[-2] and ema20.iloc[-1] < ema50.iloc[-1]:
-        patterns.append("Death Cross (EMA20 przebiła EMA50 w dół).")
-
-    return patterns
-
-def detect_patterns_all(symbols):
-    out = {}
-    for s in symbols:
-        pats = detect_patterns_for_symbol(s)
-        if pats:
-            out[s] = pats
-    return out
-
-# --- AI DEEP DIVE (TECHNICZNY) ---
-def ai_deep_dive(symbol: str, metrics: dict):
-    text = (
-        f"Symbol: {symbol}\n"
-        f"SetupScore: {metrics['SetupScore']:.1f}\n"
-        f"Change: {metrics['Change']:+.2f}%\n"
-        f"Trend: {metrics['Trend']}\n"
-        f"Signal: {metrics['Signal']}\n"
-        f"MomentumScore: {metrics['MomentumScore']:.1f}\n"
-        f"VolatilityScore: {metrics['VolatilityScore']:.1f}\n"
-        f"RiskScore: {metrics['RiskScore']:.1f}\n"
-        f"ATR: {metrics['ATR']:.4f}\n"
-        f"Volume: {metrics['Volume']:.0f}\n"
-    )
-
-    system_prompt = """
-Jesteś doświadczonym prop-traderem.
-Masz dane jednej spółki: setup, momentum, trend, ryzyko, zmienność.
-Zrób krótki DEEP DIVE:
-1) Jak wygląda obecny setup (kontekst, siła, słabości)?
-2) Jakie są 2–3 główne scenariusze (byczy, niedźwiedzi, neutralny)?
-3) Jakie poziomy / warunki obserwować, żeby setup stał się A+ lub się posypał?
-Nie dawaj porad typu 'kup/sprzedaj', tylko opis scenariuszy i ryzyka.
-Pisz konkretnie, bez lania wody, po polsku.
-"""
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": text},
-    ]
-
-    res = client.chat.completions.create(
-        model=AI_MODEL,
-        messages=messages,
-    )
-    return res.choices[0].message.content
-
-# --- MULTI-AI (4 style tradingu) ---
-def multi_ai_verdict(top_df: pd.DataFrame) -> str:
-    if top_df.empty:
-        return "Brak spółek do analizy."
-
-    context_lines = []
-    for _, row in top_df.iterrows():
-        context_lines.append(
-            f"{row['Symbol']}: SetupScore={row['SetupScore']:.1f}, "
-            f"Change={row['Change']:+.2f}%, Trend={row['Trend']}, "
-            f"Signal={row['Signal']}, Momentum={row['MomentumScore']:.1f}, "
-            f"Volatility={row['VolatilityScore']:.1f}, Risk={row['RiskScore']:.1f}"
-        )
-    context = "\n".join(context_lines)
-
-    system_prompt = """
-Jesteś panelem 4 różnych 'AI-traderów':
-1) Konserwatywny risk manager
-2) Agresywny momentum trader
-3) Swing trader
-4) Mean-reversion trader
-
-Dostajesz listę spółek z metrykami (SetupScore, Trend, Signal, Momentum, Volatility, Risk).
-Dla każdej spółki:
-- każdy z 4 traderów daje 1–2 zdania swojego spojrzenia.
-Na końcu:
-- krótki konsensus: które tickery są najciekawsze dla którego stylu.
-
-Pisz krótko, w formie:
-[TYP TRADERA] komentarz...
-Po polsku.
-"""
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Dane spółek:\n{context}"},
-    ]
-
-    res = client.chat.completions.create(
-        model=AI_MODEL,
-        messages=messages,
-    )
-    return res.choices[0].message.content
-
-# --- AI NEWS: NewsScore dla wszystkich spółek ---
-def ai_news_score_for_df(df: pd.DataFrame) -> dict:
-    if df.empty:
-        return {}
-
-    lines = []
-    for _, row in df.iterrows():
-        lines.append(
-            f"{row['Symbol']}: "
-            f"SetupScore={row['SetupScore']:.1f}, "
-            f"Change={row['Change']:+.2f}%, "
-            f"Trend={row['Trend']}, "
-            f"Signal={row['Signal']}, "
-            f"Momentum={row['MomentumScore']:.1f}, "
-            f"Volatility={row['VolatilityScore']:.1f}, "
-            f"Risk={row['RiskScore']:.1f}, "
-            f"Volume={row['Volume']:.0f}"
-        )
-    context = "\n".join(lines)
-
-    system_prompt = """
-Jesteś analitykiem w stylu Bloomberg Terminal.
-Masz listę spółek z danymi technicznymi (setup, momentum, zmienność, ryzyko, wolumen).
-Masz wygenerować dla każdej spółki jeden wskaźnik:
-NewsScore (0–100) = MIX:
-- ryzyko newsowe (earnings, sektorowe eventy, makro, gapy),
-- potencjał wybicia pod newsy (wolumen, momentum, sektor, sentyment).
-
-Interpretacja:
-- 0–30 → spokojnie,
-- 30–60 → obserwować,
-- 60–100 → coś się „gotuje”.
-
-Zwróć TYLKO linie w formacie:
-TICKER: SCORE
-np.
-AAPL: 42
-TSLA: 78
-
-Bez dodatkowego tekstu.
-Po polsku, ale format linii dokładnie jak powyżej.
-"""
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Dane spółek:\n{context}"},
-    ]
-
-    res = client.chat.completions.create(
-        model=AI_MODEL,
-        messages=messages,
-    )
-    content = res.choices[0].message.content
-
-    scores = {}
-    for line in content.splitlines():
-        line = line.strip()
-        if not line or ":" not in line:
-            continue
+class AlertEngine:
+    @staticmethod
+    def send_webhook(url: str, payload: dict) -> int | None:
         try:
-            sym, val = line.split(":", 1)
-            sym = sym.strip().upper()
-            val = val.strip().replace("%", "").replace(",", ".")
-            score = float(val)
-            score = max(0.0, min(100.0, score))
-            scores[sym] = score
+            r = requests.post(url, json=payload, timeout=3)
+            return r.status_code
         except Exception:
-            continue
+            return None
 
-    return scores
+    @staticmethod
+    def send_telegram(bot_token: str, chat_id: str, text: str) -> int | None:
+        try:
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            r = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=3)
+            return r.status_code
+        except Exception:
+            return None
 
-# --- AI NEWS: Deep Dive News dla jednej spółki ---
-def ai_news_deep_dive(symbol: str, metrics: dict, bid: float | None, ask: float | None):
-    text = (
-        f"Symbol: {symbol}\n"
-        f"SetupScore: {metrics['SetupScore']:.1f}\n"
-        f"Change: {metrics['Change']:+.2f}%\n"
-        f"Trend: {metrics['Trend']}\n"
-        f"Signal: {metrics['Signal']}\n"
-        f"MomentumScore: {metrics['MomentumScore']:.1f}\n"
-        f"VolatilityScore: {metrics['VolatilityScore']:.1f}\n"
-        f"RiskScore: {metrics['RiskScore']:.1f}\n"
-        f"ATR: {metrics['ATR']:.4f}\n"
-        f"Volume: {metrics['Volume']:.0f}\n"
-        f"Bid: {bid if bid is not None else 'brak danych'}\n"
-        f"Ask: {ask if ask is not None else 'brak danych'}\n"
-    )
+# --- 7. AI KLIENT ---
 
-    system_prompt = """
-Jesteś analitykiem w stylu Bloomberg Terminal, mówisz po polsku.
-Masz dane jednej spółki (setup, momentum, zmienność, ryzyko, wolumen, bid/ask).
-Zrób DEEP DIVE NEWS + RYZYKO:
+class AIClient:
+    def __init__(self, api_key: str, model: str):
+        self.client = OpenAI(api_key=api_key)
+        self.model = model
 
-1) Kontekst rynkowy:
-   - czy wygląda, jakby coś się „gotowało” pod newsy (earnings, sektor, makro)?
-2) Earnings / wydarzenia:
-   - czy można podejrzewać zbliżające się wyniki / raport / ważne wydarzenie?
-3) Ryzyko newsowe:
-   - ryzyko gapów, nagłych ruchów, zaskoczeń.
-4) Płynność i spread:
-   - co mówi bid/ask (jeśli brak danych, powiedz to wprost),
-   - ryzyko poślizgu, problemów z wejściem/wyjściem.
-5) Scenariusze:
-   - byczy, niedźwiedzi, neutralny (krótko, konkretnie).
-6) Strefy:
-   - strefa ryzyka (coś w stylu SL, ale opisowo),
-   - strefa potencjału (coś w stylu TP, ale opisowo).
-
-Nie dawaj porad typu „kup/sprzedaj”.
-Pisz konkretnie, bez lania wody, w punktach lub krótkich akapitach.
-"""
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": text},
-    ]
-
-    res = client.chat.completions.create(
-        model=AI_MODEL,
-        messages=messages,
-    )
-    return res.choices[0].message.content
-
-# --- AI NEWS: News Radar (lista spółek / ryzyk) ---
-def ai_news_radar(df: pd.DataFrame) -> str:
-    if df.empty:
-        return "Brak spółek do analizy."
-
-    lines = []
-    for _, row in df.iterrows():
-        ns = row.get("NewsScore", 0.0)
-        lines.append(
-            f"{row['Symbol']}: "
-            f"NewsScore={ns:.1f}, "
-            f"SetupScore={row['SetupScore']:.1f}, "
-            f"Trend={row['Trend']}, "
-            f"Signal={row['Signal']}, "
-            f"Momentum={row['MomentumScore']:.1f}, "
-            f"Volatility={row['VolatilityScore']:.1f}, "
-            f"Risk={row['RiskScore']:.1f}, "
-            f"Change={row['Change']:+.2f}%, "
-            f"Volume={row['Volume']:.0f}"
+    def chat(self, prompt: str) -> str:
+        resp = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
         )
-    context = "\n".join(lines)
+        return resp.choices[0].message.content
 
-    system_prompt = """
-Jesteś analitykiem newsowym w stylu Bloomberg, mówisz po polsku.
-Masz listę spółek z:
-- NewsScore (0–100, mix ryzyka newsowego i potencjału wybicia),
-- SetupScore, Trend, Signal, Momentum, Volatility, Risk, Change, Volume.
+    def chat_json(self, prompt: str):
+        raw = self.chat(prompt)
+        try:
+            return json.loads(raw)
+        except Exception:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start != -1 and end != -1:
+                try:
+                    return json.loads(raw[start : end + 1])
+                except Exception:
+                    return {"raw": raw}
+            return {"raw": raw}
 
-Zrób „News Radar”:
-1) Wypisz spółki z najwyższym NewsScore (top 5) z krótkim komentarzem, dlaczego mogą być wrażliwe na newsy.
-2) Wskaż spółki, które wyglądają jak „earnings soon / event soon”.
-3) Wskaż spółki z ryzykiem gapów (wysoka zmienność + wysoki NewsScore).
-4) Krótki komentarz sektorowy / makro, jeśli da się coś wywnioskować.
-5) Na końcu daj 2–3 zdania podsumowania: gdzie jest największe ryzyko, a gdzie największy potencjał wybicia.
+# --- 8. SIDEBAR / USTAWIENIA ---
 
-Pisz konkretnie, bez lania wody.
-"""
+with st.sidebar:
+    st.title("⚙️ TERMINAL v16.9 PRO PL")
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Dane spółek:\n{context}"},
-    ]
+    api_key = st.secrets.get("OPENAI_API_KEY")
+    if api_key:
+        st.success("✅ OpenAI (Secrets)")
+    else:
+        api_key = st.text_input("OpenAI Key", type="password", key=auto_key("openai_key_input"))
+        if not api_key:
+            st.warning("Dodaj klucz w Secrets lub wpisz go tutaj.")
 
-    res = client.chat.completions.create(
-        model=AI_MODEL,
-        messages=messages,
+    ai_model = st.selectbox(
+        "Model AI",
+        [
+            "gpt-4o-mini",
+            "gpt-4o",
+            "gpt-4.1",
+            "gpt-4.1-large",
+        ],
+        index=2,
+        key=auto_key("ai_model_select"),
     )
-    return res.choices[0].message.content
-# --- Aplikacja główna ---
-def main():
-    st.title("🔥 HEATMAPA PRO — Kombajn: AI + Wykres + Skaner + Alerty + Patterny + Multi-AI + News")
 
-    # --- Session state ---
-    if "symbols" not in st.session_state:
-        st.session_state.symbols = []
-    if "ai_top5_comment" not in st.session_state:
-        st.session_state.ai_top5_comment = ""
-    if "ai_deep_dive_cache" not in st.session_state:
-        st.session_state.ai_deep_dive_cache = {}
-    if "ai_multi_comment" not in st.session_state:
-        st.session_state.ai_multi_comment = ""
-    if "news_scores" not in st.session_state:
-        st.session_state.news_scores = {}
-    if "ai_news_deep_cache" not in st.session_state:
-        st.session_state.ai_news_deep_cache = {}
-    if "ai_news_radar_comment" not in st.session_state:
-        st.session_state.ai_news_radar_comment = ""
+    tickers_input = st.text_area("Symbole (przecinek)", value=load_tickers(), key=auto_key("tickers_input"))
+    if st.button("Zapisz listę", key=auto_key("save_tickers_btn")):
+        with open(DB_FILE, "w") as f:
+            f.write(tickers_input)
+        st.rerun()
 
-    # --- Sidebar: zarządzanie listą spółek ---
-    symbols_input = st.sidebar.text_input("Dodaj spółki (oddzielone przecinkami):", "")
+    refresh = st.select_slider(
+        "Odśwież (s)",
+        options=[30, 60, 300],
+        value=60,
+        key=auto_key("refresh_seconds_slider"),
+    )
 
-    if st.sidebar.button("Dodaj"):
-        for raw in symbols_input.split(","):
-            sym = raw.strip().upper()
-            if sym and sym not in st.session_state.symbols:
-                st.session_state.symbols.append(sym)
+    st.markdown("### 🔔 Alerty (log)")
+    if "alerts" not in st.session_state:
+        st.session_state["alerts"] = []
+    for a in st.session_state["alerts"][-10:][::-1]:
+        st.markdown(f"- <span class='neon-pill'>{a}</span>", unsafe_allow_html=True)
 
-    if st.sidebar.button("Wyczyść"):
-        st.session_state.symbols = []
-        st.session_state.ai_top5_comment = ""
-        st.session_state.ai_deep_dive_cache = {}
-        st.session_state.ai_multi_comment = ""
-        st.session_state.news_scores = {}
-        st.session_state.ai_news_deep_cache = {}
-        st.session_state.ai_news_radar_comment = ""
+    st.markdown("### 🌐 Push config")
+    webhook_url = st.text_input("Webhook URL (opcjonalnie)", key=auto_key("webhook_url"))
+    tg_token = st.text_input("Telegram Bot Token (opcjonalnie)", type="password", key=auto_key("tg_token"))
+    tg_chat_id = st.text_input("Telegram Chat ID (opcjonalnie)", key=auto_key("tg_chat_id"))
 
-    if not st.session_state.symbols:
-        st.warning("Dodaj spółki, aby kontynuować.")
-        return
+st_autorefresh(interval=refresh * 1000, key=auto_key("auto_refresh_v16"))
 
-    # --- Tabs ---
-    tab_heatmap, tab_chart, tab_scanner, tab_alerts, tab_patterns, tab_deep, tab_multi, tab_news = st.tabs([
-        "📊 Heatmap PRO + AI + NewsScore",
-        "📈 Wykres PRO",
-        "📡 Skaner Sygnałów",
-        "🚨 Alerty",
-        "📐 Patterny",
-        "🧠 AI Deep Dive",
-        "🤝 Multi-AI Panel",
-        "📰 News Radar",
-    ])
+if not api_key:
+    st.info("Wprowadź OpenAI API Key w pasku bocznym lub dodaj do Secrets.")
+    st.stop()
 
-    # --- HEATMAP + AI + NewsScore ---
-    with tab_heatmap:
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        df = pd.DataFrame(rows)
-        df = df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
+ai = AIClient(api_key=api_key, model=ai_model)
 
-        st.subheader("🏆 TOP 5 setupów (kafelki)")
+# --- 9. INICJALIZACJA SESSION_STATE ---
 
-        top_n = min(5, len(df))
-        if top_n > 0:
-            top_df = df.head(top_n)
-            cols = st.columns(top_n)
-            for idx, (_, row) in enumerate(top_df.iterrows()):
-                with cols[idx]:
-                    ss = row["SetupScore"]
-                    color = "🟢" if ss >= 60 else ("🟡" if ss >= 40 else "🔴")
-                    st.markdown(f"### {color} {row['Symbol']}")
-                    st.write(f"**SetupScore:** {ss:.1f} / 100")
-                    st.write(f"**Change:** {row['Change']:+.2f}%")
-                    st.write(f"**Trend:** {row['Trend']}")
-                    st.write(f"**Signal:** {row['Signal']}")
-                    st.write(f"**Momentum:** {row['MomentumScore']:.1f}")
-                    st.write(f"**Volatility:** {row['VolatilityScore']:.1f}")
-                    st.write(f"**Risk:** {row['RiskScore']:.1f}")
+for key, default in [
+    ("portfolio", []),
+    ("trades_log", []),
+    ("lab_strategy", None),
+    ("lab_desc", None),
+    ("last_ai_signal", None),
+    ("auto_analysis", None),
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
 
-            st.markdown("---")
-            col_ai1, col_ai2 = st.columns(2)
-            with col_ai1:
-                if st.button("🧠 Generuj komentarz AI dla TOP 5"):
-                    with st.spinner("AI analizuje TOP 5 setupów..."):
-                        st.session_state.ai_top5_comment = ai_verdict_for_top5(top_df)
-            with col_ai2:
-                if st.button("📰 Generuj NewsScore dla wszystkich spółek"):
-                    with st.spinner("AI analizuje news-ryzyko i potencjał wybicia..."):
-                        st.session_state.news_scores = ai_news_score_for_df(df)
+tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
-            if st.session_state.ai_top5_comment:
-                st.subheader("🧠 Komentarz AI (prop-trader view)")
-                st.markdown(st.session_state.ai_top5_comment)
+# --- 10. POBRANIE DANYCH RYNKOWYCH (BLOK BAZOWY) ---
 
-        # Dodanie NewsScore do df, jeśli jest w session_state
-        if st.session_state.news_scores:
-            df["NewsScore"] = df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
+data_map: dict[str, dict] = {}
+for sym in tickers:
+    d1d = MarketData.get_yf(sym, "250d", "1d")
+    d15 = MarketData.get_yf(sym, "5d", "15m")
+    if d1d is None or d15 is None:
+        continue
 
-        st.markdown("---")
-        st.subheader("📊 Pełna tabela — Heatmapa PRO + NewsScore")
-        st.dataframe(style_heatmap(df), use_container_width=True)
+    d1d = MarketData.compute_indicators(d1d)
+    d15 = MarketData.compute_indicators(d15)
 
-    # --- WYKRES PRO ---
-    with tab_chart:
-        st.subheader("📈 Wykres PRO dla wybranej spółki")
-        symbol_for_chart = st.selectbox(
-            "Wybierz spółkę do wykresu:", st.session_state.symbols
+    price = float(d15["Close"].iloc[-1])
+    prev_close = float(d1d["Close"].iloc[-2])
+    change_pct = (price - prev_close) / prev_close * 100
+    sma200 = d1d["Close"].rolling(200).mean().iloc[-1]
+    trend_label = "HOSSA 🚀" if price > sma200 else "BESSA 📉"
+    trend_color = "#22c55e" if price > sma200 else "#ef4444"
+    atr = (d1d["High"] - d1d["Low"]).rolling(14).mean().iloc[-1]
+    pivot = (d1d["High"].iloc[-2] + d1d["Low"].iloc[-2] + d1d["Close"].iloc[-2]) / 3
+    rsi = float(d15["RSI"].iloc[-1])
+
+    # --- POPRAWNA LOGIKA RSI ---
+    if rsi < 32:
+        rec, rec_col = "KUPUJ", "#22c55e"
+    elif rsi > 68:
+        rec, rec_col = "SPRZEDAJ", "#ef4444"
+    else:
+        rec, rec_col = "CZEKAJ", "#8b949e"
+
+    # --- FIBO + BACKTEST ---
+    fibo, fib_high, fib_low = MarketData.fibo_levels(d1d)
+    bt_ema = MarketData.simple_backtest(d1d, "EMA_CROSS")
+
+    data_map[sym] = {
+        "symbol": sym,
+        "price": price,
+        "change": change_pct,
+        "rsi": rsi,
+        "rec": rec,
+        "rec_col": rec_col,
+        "trend": trend_label,
+        "trend_col": trend_color,
+        "pivot": pivot,
+        "tp": price + atr * 1.5,
+        "sl": price - atr * 1.2,
+        "atr": float(atr),
+        "df_1d": d1d,
+        "df_15": d15,
+        "fibo": fibo,
+        "backtest_ema": bt_ema,
+    }
+
+if not data_map:
+    st.error("Brak danych dla podanych symboli.")
+    st.stop()
+
+symbols_available = list(data_map.keys())
+
+
+
+# --- 11. TABS / GŁÓWNY DASHBOARD ---
+
+tab_main, tab_strategy, tab_lab, tab_auto, tab_multi, tab_orderbook, tab_patterns, tab_portfolio, tab_risk_ai = st.tabs(
+    [
+        "📊 Główny",
+        "🧮 Strategie & Backtest",
+        "🧪 AI Strategy Lab",
+        "🤖 AI Auto‑Trader",
+        "⏱️ Multi‑Timeframe",
+        "📚 Orderbook (Binance)",
+        "🕯️ Formacje świecowe + AI",
+        "📦 Portfolio & Risk",
+        "🛡️ AI Risk & Hedging",
+    ]
+)
+
+# --- 12. TAB: GŁÓWNY ---
+
+with tab_main:
+    st.subheader("🧊 HEATMAPA RYNKU")
+    heat_df = pd.DataFrame(
+        {
+            "Symbol": [d["symbol"] for d in data_map.values()],
+            "Change": [d["change"] for d in data_map.values()],
+        }
+    )
+    fig_heat = go.Figure(
+        data=go.Treemap(
+            labels=heat_df["Symbol"],
+            parents=[""] * len(heat_df),
+            values=heat_df["Change"].abs() + 0.01,
+            marker=dict(
+                colors=heat_df["Change"],
+                colorscale="RdYlGn",
+                reversescale=True,
+                line=dict(color="#020617", width=1),
+            ),
+            textinfo="label+value",
+            hovertemplate="<b>%{label}</b><br>Zmiana: %{value:.2f}%<extra></extra>",
         )
-        plot_pro_chart(symbol_for_chart)
+    )
+    fig_heat.update_layout(
+        margin=dict(l=0, r=0, t=0, b=0),
+        height=260,
+        paper_bgcolor="#020617",
+        plot_bgcolor="#020617",
+    )
+    st.plotly_chart(fig_heat, use_container_width=True, key=auto_key("heatmap_main"))
 
-    # --- SKANER SYGNAŁÓW ---
-    with tab_scanner:
-        st.subheader("📡 BUY / SELL Radar — Skaner Sygnałów")
-
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        scan_df = pd.DataFrame(rows)
-        scan_df = scan_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
-
-        buy_df = scan_df[
-            (scan_df["Signal"] == "BUY") &
-            (scan_df["Trend"] == "UP") &
-            (scan_df["SetupScore"] >= 60) &
-            (scan_df["MomentumScore"] >= 55)
-        ]
-
-        sell_df = scan_df[
-            (scan_df["Signal"] == "SELL") &
-            (scan_df["Trend"] == "DOWN") &
-            (scan_df["SetupScore"] >= 50)
-        ]
-
-        neutral_df = scan_df[
-            ~scan_df.index.isin(buy_df.index) &
-            ~scan_df.index.isin(sell_df.index)
-        ]
-
-        st.markdown("## 🟢 BUY Radar")
-        if buy_df.empty:
-            st.info("Brak mocnych sygnałów BUY.")
-        else:
-            cols = st.columns(min(5, len(buy_df)))
-            for idx, (_, row) in enumerate(buy_df.iterrows()):
-                with cols[idx % len(cols)]:
-                    st.markdown(f"### 🟢 {row['Symbol']}")
-                    st.write(f"**SetupScore:** {row['SetupScore']:.1f}")
-                    st.write(f"**Momentum:** {row['MomentumScore']:.1f}")
-                    st.write(f"**Trend:** {row['Trend']}")
-                    st.write(f"**Change:** {row['Change']:+.2f}%")
-
-        st.markdown("---")
-
-        st.markdown("## 🔴 SELL Radar")
-        if sell_df.empty:
-            st.info("Brak mocnych sygnałów SELL.")
-        else:
-            cols = st.columns(min(5, len(sell_df)))
-            for idx, (_, row) in enumerate(sell_df.iterrows()):
-                with cols[idx % len(cols)]:
-                    st.markdown(f"### 🔴 {row['Symbol']}")
-                    st.write(f"**SetupScore:** {row['SetupScore']:.1f}")
-                    st.write(f"**Volatility:** {row['VolatilityScore']:.1f}")
-                    st.write(f"**Trend:** {row['Trend']}")
-                    st.write(f"**Change:** {row['Change']:+.2f}%")
-
-        st.markdown("---")
-
-        st.markdown("## 🟡 Neutral Radar")
-        if neutral_df.empty:
-            st.info("Brak neutralnych setupów.")
-        else:
-            st.dataframe(
-                neutral_df[[
-                    "Symbol", "SetupScore", "Trend", "Signal",
-                    "MomentumScore", "VolatilityScore", "RiskScore"
-                ]],
-                use_container_width=True
+    st.subheader("📊 MONITORING RYNKU")
+    data_list = list(data_map.values())
+    top_cols = st.columns(min(len(data_list), 5))
+    for i, d in enumerate(sorted(data_list, key=lambda x: abs(x["change"]), reverse=True)[:10]):
+        with top_cols[i % 5]:
+            c_col = "#22c55e" if d["change"] >= 0 else "#ef4444"
+            st.markdown(
+                f"""
+                <div class="top-rank-card" style="border-top: 3px solid {d['trend_col']};">
+                    <b>{d['symbol']}</b><br>
+                    <span style="color:{c_col}; font-weight:bold; font-size:1.1rem;">{d['price']:.2f}</span><br>
+                    <span style="font-size:0.8rem; color:{d['trend_col']};">{d['trend']}</span><br>
+                    <div style="background:{d['rec_col']}; font-size:0.7rem; border-radius:999px; margin:6px 0; color:white; display:inline-block; padding:2px 10px;">
+                        {d['rec']}
+                    </div><br>
+                    <span class="stat-label">Δ {d['change']:.2f}% | RSI: {d['rsi']:.1f}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
 
-    # --- ALERTY ---
-    with tab_alerts:
-        st.subheader("🚨 Alerty z rynku (na bazie Heatmap PRO)")
+    st.subheader("📈 Szczegóły")
+    for d in data_list:
+        st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
+        c1, c2 = st.columns([1.1, 2.2])
 
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        alert_df = pd.DataFrame(rows)
-        alert_df = alert_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
+        with c1:
+            st.markdown(f"### {d['symbol']} ({d['trend']})")
+            st.metric("Cena", f"{d['price']:.2f}", f"{d['change']:.2f}%")
+            st.write(f"**Pivot:** {d['pivot']:.2f} | **RSI:** {d['rsi']:.1f}")
+            st.write(f"**TP:** {d['tp']:.2f} | **SL:** {d['sl']:.2f}")
 
-        alerts = generate_alerts(alert_df)
-
-        if not alerts:
-            st.info("Brak alertów spełniających kryteria.")
-        else:
-            for a in alerts:
-                st.write("• " + a)
-
-        st.markdown("---")
-        st.write("Możesz później zaostrzyć / złagodzić kryteria w funkcji generate_alerts().")
-
-    # --- PATTERNY ---
-    with tab_patterns:
-        st.subheader("📐 Patterny techniczne (breakout, squeeze, RSI, EMA cross)")
-
-        patterns_all = detect_patterns_all(st.session_state.symbols)
-        if not patterns_all:
-            st.info("Brak wykrytych patternów dla obecnych spółek (lub za mało danych).")
-        else:
-            for sym, pats in patterns_all.items():
-                st.markdown(f"### {sym}")
-                for p in pats:
-                    st.write("• " + p)
-                st.markdown("---")
-
-    # --- AI DEEP DIVE (TECH + NEWS osobno) ---
-    with tab_deep:
-        st.subheader("🧠 AI Deep Dive — pełny komentarz dla jednej spółki")
-
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        deep_df = pd.DataFrame(rows)
-        deep_df = deep_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
-
-        symbol_for_deep = st.selectbox(
-            "Wybierz spółkę do analizy AI:", deep_df["Symbol"].tolist()
-        )
-
-        metrics = deep_df[deep_df["Symbol"] == symbol_for_deep].iloc[0].to_dict()
-
-        col_d1, col_d2 = st.columns(2)
-        with col_d1:
-            if st.button("🔍 Generuj AI Deep Dive (techniczny)"):
-                with st.spinner("AI analizuje wybraną spółkę (technicznie)..."):
-                    comment = ai_deep_dive(symbol_for_deep, metrics)
-                    st.session_state.ai_deep_dive_cache[symbol_for_deep] = comment
-        with col_d2:
-            if st.button("📰 Generuj AI Deep Dive News"):
-                with st.spinner("AI analizuje news-ryzyko i potencjał wybicia..."):
-                    bid, ask = get_bid_ask(symbol_for_deep)
-                    comment_news = ai_news_deep_dive(symbol_for_deep, metrics, bid, ask)
-                    st.session_state.ai_news_deep_cache[symbol_for_deep] = comment_news
-
-        if symbol_for_deep in st.session_state.ai_deep_dive_cache:
-            st.subheader(f"AI Deep Dive (techniczny) — {symbol_for_deep}")
-            st.markdown(st.session_state.ai_deep_dive_cache[symbol_for_deep])
-
-        if symbol_for_deep in st.session_state.ai_news_deep_cache:
-            st.subheader(f"AI Deep Dive News — {symbol_for_deep}")
-            st.markdown(st.session_state.ai_news_deep_cache[symbol_for_deep])
-
-    # --- MULTI-AI PANEL ---
-    with tab_multi:
-        st.subheader("🤝 Multi-AI Panel — 4 style tradingu na TOP setupach")
-
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        multi_df = pd.DataFrame(rows)
-        multi_df = multi_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
-        top_n = min(5, len(multi_df))
-        top_df = multi_df.head(top_n)
-
-        if st.button("🤝 Generuj Multi-AI werdykt dla TOP setupów"):
-            with st.spinner("AI generuje panel 4 stylów tradingu..."):
-                st.session_state.ai_multi_comment = multi_ai_verdict(top_df)
-
-        if st.session_state.ai_multi_comment:
-            st.subheader("🤝 Multi-AI Panel — komentarze")
-            st.markdown(st.session_state.ai_multi_comment)
-
-    # --- NEWS RADAR ---
-    with tab_news:
-        st.subheader("📰 News Radar — NewsScore + ryzyko newsowe / potencjał wybicia")
-
-        rows = [compute_metrics(s) for s in st.session_state.symbols]
-        news_df = pd.DataFrame(rows)
-        news_df = news_df.sort_values("SetupScore", ascending=False).reset_index(drop=True)
-
-        # jeśli mamy już NewsScore z Heatmapy, użyj; jeśli nie, można wygenerować tutaj
-        if st.session_state.news_scores:
-            news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
-
-        col_n1, col_n2 = st.columns(2)
-        with col_n1:
-            if st.button("📰 Generuj / odśwież NewsScore (wszystkie spółki)"):
-                with st.spinner("AI liczy NewsScore (mix ryzyka i potencjału)..."):
-                    st.session_state.news_scores = ai_news_score_for_df(news_df)
-                    news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
-        with col_n2:
-            if st.button("📡 Generuj News Radar (AI raport)"):
-                with st.spinner("AI generuje News Radar..."):
-                    if "NewsScore" not in news_df.columns and st.session_state.news_scores:
-                        news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
-                    st.session_state.ai_news_radar_comment = ai_news_radar(news_df)
-
-        st.markdown("---")
-        st.subheader("📊 Tabela z NewsScore")
-        if st.session_state.news_scores:
-            news_df["NewsScore"] = news_df["Symbol"].map(st.session_state.news_scores).fillna(0.0)
-            st.dataframe(
-                style_heatmap(news_df),
-                use_container_width=True
+            bt = d["backtest_ema"]
+            st.markdown(
+                f"<span class='neon-pill'>Backtest EMA20/50: {bt['total_return']:.1f}% | DD: {bt['max_drawdown']:.1f}% | Trades: {bt['trades']}</span>",
+                unsafe_allow_html=True,
             )
-        else:
-            st.info("Brak NewsScore — kliknij przycisk, aby wygenerować.")
 
-        if st.session_state.ai_news_radar_comment:
-            st.markdown("---")
-            st.subheader("📰 AI News Radar — komentarz")
-            st.markdown(st.session_state.ai_news_radar_comment)
+            fibo = d["fibo"]
+            st.markdown("<div class='fibo-box'><b>Fibonacci (ostatnie 120 sesji)</b><br>", unsafe_allow_html=True)
+            st.markdown("<br>".join([f"{lvl}: {val:.2f}" for lvl, val in fibo.items()]), unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        with c2:
+            df15 = d["df_15"].tail(120)
+            fig = make_subplots(
+                rows=3,
+                cols=1,
+                shared_xaxes=True,
+                row_heights=[0.55, 0.2, 0.25],
+                vertical_spacing=0.03,
+            )
+
+            fig.add_trace(
+                go.Candlestick(
+                    x=df15.index,
+                    open=df15["Open"],
+                    high=df15["High"],
+                    low=df15["Low"],
+                    close=df15["Close"],
+                    name="Cena",
+                    increasing_line_color="#22c55e",
+                    decreasing_line_color="#ef4444",
+                    showlegend=False,
+                ),
+                row=1,
+                col=1,
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=df15.index,
+                    y=df15["EMA20"],
+                    line=dict(color="#38bdf8", width=1.2),
+                    name="EMA20",
+                ),
+                row=1,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=df15.index,
+                    y=df15["EMA50"],
+                    line=dict(color="#a855f7", width=1.1),
+                    name="EMA50",
+                ),
+                row=1,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=df15.index,
+                    y=df15["EMA200"],
+                    line=dict(color="#f97316", width=1.1),
+                    name="EMA200",
+                ),
+                row=1,
+                col=1,
+            )
+
+            fig.add_trace(
+                go.Bar(x=df15.index, y=df15["Volume"], marker_color="#4b5563", name="Volume"),
+                row=2,
+                col=1,
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=df15.index,
+                    y=df15["MACD"],
+                    line=dict(color="#22c55e", width=1),
+                    name="MACD",
+                ),
+                row=3,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=df15.index,
+                    y=df15["MACD_signal"],
+                    line=dict(color="#ef4444", width=1),
+                    name="Signal",
+                ),
+                row=3,
+                col=1,
+            )
+            fig.add_trace(
+                go.Bar(
+                    x=df15.index,
+                    y=df15["MACD_hist"],
+                    marker_color=np.where(df15["MACD_hist"] >= 0, "#22c55e", "#ef4444"),
+                    name="Hist",
+                ),
+                row=3,
+                col=1,
+            )
+
+            fig.update_layout(
+                template="plotly_dark",
+                height=420,
+                margin=dict(l=0, r=0, t=10, b=0),
+                xaxis_rangeslider_visible=False,
+                paper_bgcolor="#020617",
+                plot_bgcolor="#020617",
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1,
+                ),
+            )
+            fig.update_xaxes(showgrid=False)
+            fig.update_yaxes(showgrid=False)
+            st.plotly_chart(fig, use_container_width=True, key=auto_key(f"detail_{d['symbol']}"))
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+# --- 13. TAB: STRATEGIE & BACKTEST ---
+
+with tab_strategy:
+    st.subheader("🧮 Panel strategii & Backtest")
+    col_s1, col_s2 = st.columns(2)
+
+    with col_s1:
+        sym = st.selectbox("Symbol", symbols_available, key=auto_key("strat_sym"))
+        strat = st.selectbox("Strategia", ["EMA_CROSS", "RSI", "MACD"], key=auto_key("strat_type"))
+        df = data_map[sym]["df_1d"]
+        bt_res = MarketData.simple_backtest(df, strat)
+        st.write(f"**Wynik backtestu ({strat}):**")
+        st.write(f"- Zwrot: {bt_res['total_return']:.2f}%")
+        st.write(f"- Max DD: {bt_res['max_drawdown']:.2f}%")
+        st.write(f"- Liczba transakcji: {bt_res['trades']}")
+
+    with col_s2:
+        if st.button("🧠 AI: wygeneruj strategię (JSON, PL)", key=auto_key("ai_strategy_json")):
+            prompt = """
+            Wygeneruj agresywną strategię tradingową w formacie JSON po polsku.
+            Wszystkie pola muszą być po polsku.
+
+            Pola:
+            - name
+            - description
+            - entry_rules
+            - exit_rules
+            - indicators
+            - timeframe
+
+            Zwróć TYLKO JSON.
+            """
+            js = ai.chat_json(prompt)
+            st.json(js)
+
+# --- 14. TAB: AI STRATEGY LAB ---
+
+with tab_lab:
+    st.subheader("🧪 AI Strategy Lab — generator, tester, Pine Script, Auto‑Optimizer (PL)")
+
+    st.markdown("### 🧠 Generuj strategię AI (JSON, PL)")
+    if st.button("Generuj strategię AI", key=auto_key("lab_gen")):
+        prompt = """
+        Wygeneruj agresywną strategię tradingową w formacie JSON po polsku.
+        Wszystkie pola muszą być po polsku.
+        """
+        st.session_state["lab_strategy"] = ai.chat_json(prompt)
+
+    if st.session_state.get("lab_strategy"):
+        st.json(st.session_state["lab_strategy"])
+
+        st.markdown("### ✏️ Edytuj strategię AI (JSON)")
+        edited = st.text_area(
+            "Edytuj JSON strategii",
+            json.dumps(st.session_state["lab_strategy"], indent=4, ensure_ascii=False),
+            height=260,
+            key=auto_key("lab_editor"),
+        )
+        if st.button("Zapisz zmiany", key=auto_key("lab_save")):
+            try:
+                st.session_state["lab_strategy"] = json.loads(edited)
+                st.success("Zapisano strategię.")
+            except Exception:
+                st.error("Błąd w JSON.")
+
+        st.markdown("### 🧪 Przetestuj strategię AI na danych")
+        sym_lab = st.selectbox("Symbol", symbols_available, key=auto_key("lab_sym_test"))
+        df_lab = data_map[sym_lab]["df_1d"]
+
+        if st.button("Uruchom backtest AI", key=auto_key("lab_bt")):
+            strat = st.session_state["lab_strategy"]
+            df_bt = df_lab.copy()
+            df_bt["signal"] = 0
+
+            if "EMA" in " ".join(strat.get("indicators", [])):
+                df_bt["EMA20"] = df_bt["Close"].ewm(span=20).mean()
+                df_bt["EMA50"] = df_bt["Close"].ewm(span=50).mean()
+                df_bt.loc[df_bt["EMA20"] > df_bt["EMA50"], "signal"] = 1
+                df_bt.loc[df_bt["EMA20"] < df_bt["EMA50"], "signal"] = -1
+
+            if "RSI" in " ".join(strat.get("indicators", [])):
+                df_bt["RSI"] = MarketData.compute_indicators(df_bt)["RSI"]
+                df_bt.loc[df_bt["RSI"] < 30, "signal"] = 1
+                df_bt.loc[df_bt["RSI"] > 70, "signal"] = -1
+
+            df_bt["position"] = df_bt["signal"].shift(1).fillna(0)
+            df_bt["ret"] = df_bt["Close"].pct_change().fillna(0)
+            df_bt["strategy"] = df_bt["position"] * df_bt["ret"]
+            equity = (1 + df_bt["strategy"]).cumprod()
+
+            st.line_chart(equity)
+            st.write(f"Zwrot: {(equity.iloc[-1] - 1) * 100:.2f}%")
+            st.write(f"Max DD: {(equity.cummax() - equity).max() * 100:.2f}%")
+
+        st.markdown("### 🧬 AI Auto‑Optimizer (PL)")
+        if st.button("Optymalizuj strategię AI", key=auto_key("lab_opt")):
+            prompt = f"""
+            Popraw strategię JSON pod kątem:
+            - lepszego R/R
+            - mniejszego DD
+            - agresywniejszych wejść
+
+            Strategia:
+            {json.dumps(st.session_state["lab_strategy"], indent=4, ensure_ascii=False)}
+
+            Zwróć TYLKO JSON.
+            """
+            st.session_state["lab_strategy"] = ai.chat_json(prompt)
+            st.success("Strategia zoptymalizowana.")
+            st.json(st.session_state["lab_strategy"])
+
+        st.markdown("### 📜 Generuj Pine Script")
+        if st.button("Generuj Pine Script", key=auto_key("lab_pine")):
+            prompt = """
+            Zamień tę strategię JSON na kod Pine Script v5.
+            Zwróć TYLKO kod.
+            """
+            code = ai.chat(prompt)
+            st.code(code, language="pine")
 
 
-if __name__ == "__main__":
-    main()
+
