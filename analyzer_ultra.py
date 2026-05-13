@@ -1,4 +1,3 @@
-
 # --- 1. KONFIGURACJA / IMPORTY ---
 import os
 import json
@@ -12,29 +11,19 @@ from plotly.subplots import make_subplots
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 from openai import OpenAI
-# --- AUTO‑KEY ENGINE v16.7 ---
 import uuid
-
-def auto_key(base: str) -> str:
-    """
-    Generuje stabilny, unikalny key dla elementów Streamlit.
-    - Każdy 'base' ma własny unikalny identyfikator.
-    - Nie zmienia się przy refreshu.
-    - Nie powoduje duplikatów.
-    """
-    if "auto_keys" not in st.session_state:
-        st.session_state["auto_keys"] = {}
-
-    if base not in st.session_state["auto_keys"]:
-        st.session_state["auto_keys"][base] = f"{base}_{uuid.uuid4().hex[:8]}"
-
-    return st.session_state["auto_keys"][base]
-
-# --- PATCH v16.5: TRWAŁE USTAWIENIA + AUTO‑REFRESH ---
-
 import time
 
-# --- trwałe ustawienia (inicjalizacja tylko raz) ---
+# --- AUTO‑KEY ENGINE v16.8 ---
+def auto_key(base: str) -> str:
+    if "auto_keys" not in st.session_state:
+        st.session_state["auto_keys"] = {}
+    if base not in st.session_state["auto_keys"]:
+        st.session_state["auto_keys"][base] = f"{base}_{uuid.uuid4().hex[:8]}"
+    return st.session_state["auto_keys"][base]
+
+# --- PATCH v16.8: TRWAŁE USTAWIENIA + AUTO‑REFRESH ---
+
 defaults = {
     "account_size_v2": 10000.0,
     "risk_pct_v2": 1.0,
@@ -46,16 +35,15 @@ for key, val in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = val
 
-# --- slider auto‑refresh (1–15 min) ---
-st.sidebar.markdown("### 🔄 Auto‑refresh")
+st.sidebar.markdown("### 🔄 Auto‑refresh (1–15 min)")
 st.session_state["auto_refresh_minutes"] = st.sidebar.slider(
     "Częstotliwość odświeżania (minuty)",
-    1, 15,
+    1,
+    15,
     st.session_state["auto_refresh_minutes"],
-    key="refresh_slider"
+    key=auto_key("refresh_slider_minutes"),
 )
 
-# --- mechanizm auto‑refresh ---
 elapsed = time.time() - st.session_state["last_refresh"]
 if elapsed > st.session_state["auto_refresh_minutes"] * 60:
     st.session_state["last_refresh"] = time.time()
@@ -72,9 +60,8 @@ for key, default in {
     if key not in st.session_state:
         st.session_state[key] = default
 
-APP_TITLE = "AI ALPHA TERMINAL v16 PRO PL"
+APP_TITLE = "AI ALPHA TERMINAL v16.8 PRO PL"
 DB_FILE = "tickers_db.txt"
-
 
 # --- 2. STYL / LAYOUT ---
 
@@ -124,7 +111,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
 # --- 3. FUNKCJE POMOCNICZE (UTILS) ---
 
 def load_tickers(default: str = "PKO.WA, BTC-USD, NVDA, TSLA, BTCUSDT") -> str:
@@ -136,7 +122,6 @@ def load_tickers(default: str = "PKO.WA, BTC-USD, NVDA, TSLA, BTCUSDT") -> str:
         except Exception:
             return default
     return default
-
 
 # --- 4. MARKET DATA / WSKAŹNIKI ---
 
@@ -229,7 +214,6 @@ class MarketData:
             "trades": int(trades),
         }
 
-
 # --- 5. RISK ENGINE ---
 
 class RiskEngine:
@@ -269,7 +253,6 @@ class RiskEngine:
             return None
         return reward / risk
 
-
 # --- 6. ALERT ENGINE ---
 
 class AlertEngine:
@@ -289,7 +272,6 @@ class AlertEngine:
             return r.status_code
         except Exception:
             return None
-
 
 # --- 7. AI KLIENT ---
 
@@ -319,22 +301,19 @@ class AIClient:
                     return {"raw": raw}
             return {"raw": raw}
 
-
 # --- 8. SIDEBAR / USTAWIENIA ---
 
 with st.sidebar:
-    st.title("⚙️ TERMINAL v16 PRO PL")
+    st.title("⚙️ TERMINAL v16.8 PRO PL")
 
-    # --- API KEY ---
     api_key = st.secrets.get("OPENAI_API_KEY")
     if api_key:
         st.success("✅ OpenAI (Secrets)")
     else:
-        api_key = st.text_input("OpenAI Key", type="password")
+        api_key = st.text_input("OpenAI Key", type="password", key=auto_key("openai_key_input"))
         if not api_key:
             st.warning("Dodaj klucz w Secrets lub wpisz go tutaj.")
 
-    # --- WYBÓR MODELU AI ---
     ai_model = st.selectbox(
         "Model AI",
         [
@@ -343,43 +322,41 @@ with st.sidebar:
             "gpt-4.1",
             "gpt-4.1-large",
         ],
-        index=1,
+        index=2,
+        key=auto_key("ai_model_select"),
     )
 
-    # --- LISTA TICKERÓW ---
-    tickers_input = st.text_area("Symbole (przecinek)", value=load_tickers())
-    if st.button("Zapisz listę"):
+    tickers_input = st.text_area("Symbole (przecinek)", value=load_tickers(), key=auto_key("tickers_input"))
+    if st.button("Zapisz listę", key=auto_key("save_tickers_btn")):
         with open(DB_FILE, "w") as f:
             f.write(tickers_input)
         st.rerun()
 
-    # --- AUTOREFRESH ---
-    refresh = st.select_slider("Odśwież (s)", options=[30, 60, 300], value=60)
+    refresh = st.select_slider(
+        "Odśwież (s)",
+        options=[30, 60, 300],
+        value=60,
+        key=auto_key("refresh_seconds_slider"),
+    )
 
-    # --- ALERTY ---
     st.markdown("### 🔔 Alerty (log)")
     if "alerts" not in st.session_state:
         st.session_state["alerts"] = []
     for a in st.session_state["alerts"][-10:][::-1]:
         st.markdown(f"- <span class='neon-pill'>{a}</span>", unsafe_allow_html=True)
 
-    # --- PUSH CONFIG ---
     st.markdown("### 🌐 Push config")
-    webhook_url = st.text_input("Webhook URL (opcjonalnie)")
-    tg_token = st.text_input("Telegram Bot Token (opcjonalnie)", type="password")
-    tg_chat_id = st.text_input("Telegram Chat ID (opcjonalnie)")
+    webhook_url = st.text_input("Webhook URL (opcjonalnie)", key=auto_key("webhook_url"))
+    tg_token = st.text_input("Telegram Bot Token (opcjonalnie)", type="password", key=auto_key("tg_token"))
+    tg_chat_id = st.text_input("Telegram Chat ID (opcjonalnie)", key=auto_key("tg_chat_id"))
 
-# --- AUTOREFRESH ---
-st_autorefresh(interval=refresh * 1000, key="auto_refresh_v16")
+st_autorefresh(interval=refresh * 1000, key=auto_key("auto_refresh_v16"))
 
-# --- API KEY CHECK ---
 if not api_key:
     st.info("Wprowadź OpenAI API Key w pasku bocznym lub dodaj do Secrets.")
     st.stop()
 
-# --- AI CLIENT ---
 ai = AIClient(api_key=api_key, model=ai_model)
-
 
 # --- 9. INICJALIZACJA SESSION_STATE ---
 
@@ -395,7 +372,6 @@ for key, default in [
         st.session_state[key] = default
 
 tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
-
 
 # --- 10. POBRANIE DANYCH RYNKOWYCH (BLOK BAZOWY) ---
 
@@ -454,52 +430,6 @@ if not data_map:
 
 symbols_available = list(data_map.keys())
 
-# --- SZKIELET TABS (WYPEŁNIMY W CZĘŚCI 2/3/4) ---
-
-tab_main, tab_strategy, tab_lab, tab_auto, tab_multi, tab_orderbook, tab_patterns, tab_portfolio = st.tabs(
-    [
-        "📊 Główny",
-        "🧮 Strategie & Backtest",
-        "🧪 AI Strategy Lab",
-        "🤖 AI Auto‑Trader",
-        "⏱️ Multi‑Timeframe",
-        "📚 Orderbook (Binance)",
-        "🕯️ Formacje świecowe + AI",
-        "📦 Portfolio & Risk",
-    ]
-)
-
-with tab_main:
-    st.subheader("📊 Główny — szkielet v16 (wypełnimy w części 2)")
-    st.write("Dane zostały pobrane poprawnie. Moduły wizualizacji i AI dojdą w kolejnych częściach.")
-
-with tab_strategy:
-    st.subheader("🧮 Strategie & Backtest — szkielet v16")
-    st.write("Panel strategii zostanie rozbudowany w części 2/3.")
-
-with tab_lab:
-    st.subheader("🧪 AI Strategy Lab — szkielet v16")
-    st.write("Pełny AI Strategy Lab (PL) dojdzie w części 2.")
-
-with tab_auto:
-    st.subheader("🤖 AI Auto‑Trader — szkielet v16")
-    st.write("Auto‑Trader v2 + poziomy SL/TP 1‑2‑3 dojdą w części 2/4.")
-
-with tab_multi:
-    st.subheader("⏱️ Multi‑Timeframe — szkielet v16")
-    st.write("Dashboard multi‑TF przeniesiemy i ulepszymy w części 2.")
-
-with tab_orderbook:
-    st.subheader("📚 Orderbook (Binance) — szkielet v16")
-    st.write("Orderbook zostanie przeniesiony i dopracowany w części 2.")
-
-with tab_patterns:
-    st.subheader("🕯️ Formacje świecowe + AI — szkielet v16")
-    st.write("Zaawansowane AI Pattern Recognition PRO dojdzie w części 2/3.")
-
-with tab_portfolio:
-    st.subheader("📦 Portfolio & Risk — szkielet v16")
-    st.write("Portfolio, RiskEngine i przyszły AI Portfolio Optimizer dojdą w części 3.")
 # --- 11. TABS / GŁÓWNY DASHBOARD ---
 
 tab_main, tab_strategy, tab_lab, tab_auto, tab_multi, tab_orderbook, tab_patterns, tab_portfolio, tab_risk_ai = st.tabs(
@@ -515,7 +445,6 @@ tab_main, tab_strategy, tab_lab, tab_auto, tab_multi, tab_orderbook, tab_pattern
         "🛡️ AI Risk & Hedging",
     ]
 )
-
 
 # --- 12. TAB: GŁÓWNY ---
 
@@ -548,7 +477,7 @@ with tab_main:
         paper_bgcolor="#020617",
         plot_bgcolor="#020617",
     )
-    st.plotly_chart(fig_heat, use_container_width=True, key="heatmap_main")
+    st.plotly_chart(fig_heat, use_container_width=True, key=auto_key("heatmap_main"))
 
     st.subheader("📊 MONITORING RYNKU")
     data_list = list(data_map.values())
@@ -704,10 +633,9 @@ with tab_main:
             )
             fig.update_xaxes(showgrid=False)
             fig.update_yaxes(showgrid=False)
-            st.plotly_chart(fig, use_container_width=True, key=f"detail_{d['symbol']}")
+            st.plotly_chart(fig, use_container_width=True, key=auto_key(f"detail_{d['symbol']}"))
 
         st.markdown("</div>", unsafe_allow_html=True)
-
 # --- 13. TAB: STRATEGIE & BACKTEST ---
 
 with tab_strategy:
@@ -715,8 +643,8 @@ with tab_strategy:
     col_s1, col_s2 = st.columns(2)
 
     with col_s1:
-        sym = st.selectbox("Symbol", symbols_available, key="strat_sym")
-        strat = st.selectbox("Strategia", ["EMA_CROSS", "RSI", "MACD"], key="strat_type")
+        sym = st.selectbox("Symbol", symbols_available, key=auto_key("strat_sym"))
+        strat = st.selectbox("Strategia", ["EMA_CROSS", "RSI", "MACD"], key=auto_key("strat_type"))
         df = data_map[sym]["df_1d"]
         bt_res = MarketData.simple_backtest(df, strat)
         st.write(f"**Wynik backtestu ({strat}):**")
@@ -725,18 +653,18 @@ with tab_strategy:
         st.write(f"- Liczba transakcji: {bt_res['trades']}")
 
     with col_s2:
-        if st.button("🧠 AI: wygeneruj strategię (JSON, PL)", key="ai_strategy_json"):
+        if st.button("🧠 AI: wygeneruj strategię (JSON, PL)", key=auto_key("ai_strategy_json")):
             prompt = """
             Wygeneruj agresywną strategię tradingową w formacie JSON po polsku.
             Wszystkie pola muszą być po polsku.
 
             Pola:
-            - name (string, po polsku)
-            - description (string, po polsku)
-            - entry_rules (lista krótkich zasad po polsku)
-            - exit_rules (lista krótkich zasad po polsku)
-            - indicators (lista nazw wskaźników po polsku lub standardowych nazw angielskich)
-            - timeframe (np. 1m, 5m, 15m, 1h, 1d)
+            - name
+            - description
+            - entry_rules
+            - exit_rules
+            - indicators
+            - timeframe
 
             Zwróć TYLKO JSON.
             """
@@ -749,20 +677,10 @@ with tab_lab:
     st.subheader("🧪 AI Strategy Lab — generator, tester, Pine Script, Auto‑Optimizer (PL)")
 
     st.markdown("### 🧠 Generuj strategię AI (JSON, PL)")
-    if st.button("Generuj strategię AI", key="lab_gen"):
+    if st.button("Generuj strategię AI", key=auto_key("lab_gen")):
         prompt = """
         Wygeneruj agresywną strategię tradingową w formacie JSON po polsku.
         Wszystkie pola muszą być po polsku.
-
-        Pola:
-        - name (string, po polsku)
-        - description (string, po polsku)
-        - entry_rules (lista krótkich zasad po polsku)
-        - exit_rules (lista krótkich zasad po polsku)
-        - indicators (lista nazw wskaźników po polsku lub standardowych nazw angielskich)
-        - timeframe (np. 1m, 5m, 15m, 1h, 1d)
-
-        Zwróć TYLKO JSON.
         """
         st.session_state["lab_strategy"] = ai.chat_json(prompt)
 
@@ -774,9 +692,9 @@ with tab_lab:
             "Edytuj JSON strategii",
             json.dumps(st.session_state["lab_strategy"], indent=4, ensure_ascii=False),
             height=260,
-            key="lab_editor",
+            key=auto_key("lab_editor"),
         )
-        if st.button("Zapisz zmiany", key="lab_save"):
+        if st.button("Zapisz zmiany", key=auto_key("lab_save")):
             try:
                 st.session_state["lab_strategy"] = json.loads(edited)
                 st.success("Zapisano strategię.")
@@ -784,10 +702,10 @@ with tab_lab:
                 st.error("Błąd w JSON.")
 
         st.markdown("### 🧪 Przetestuj strategię AI na danych")
-        sym_lab = st.selectbox("Symbol", symbols_available, key="lab_sym_test")
+        sym_lab = st.selectbox("Symbol", symbols_available, key=auto_key("lab_sym_test"))
         df_lab = data_map[sym_lab]["df_1d"]
 
-        if st.button("Uruchom backtest AI", key="lab_bt"):
+        if st.button("Uruchom backtest AI", key=auto_key("lab_bt")):
             strat = st.session_state["lab_strategy"]
             df_bt = df_lab.copy()
             df_bt["signal"] = 0
@@ -808,37 +726,32 @@ with tab_lab:
             df_bt["strategy"] = df_bt["position"] * df_bt["ret"]
             equity = (1 + df_bt["strategy"]).cumprod()
 
-            st.line_chart(equity, key=f"lab_bt_{sym_lab}")
+            st.line_chart(equity, key=auto_key(f"lab_bt_{sym_lab}"))
             st.write(f"Zwrot: {(equity.iloc[-1]-1)*100:.2f}%")
             st.write(f"Max DD: {(equity.cummax()-equity).max()*100:.2f}%")
 
-        st.markdown("### 🧬 AI Auto‑Optimizer (popraw strategię, PL)")
-        if st.button("Optymalizuj strategię AI", key="lab_opt"):
+        st.markdown("### 🧬 AI Auto‑Optimizer (PL)")
+        if st.button("Optymalizuj strategię AI", key=auto_key("lab_opt")):
             prompt = f"""
-            Masz strategię w JSON (po polsku) i chcesz ją poprawić pod kątem:
-            - lepszego stosunku zysku do ryzyka
+            Popraw strategię JSON pod kątem:
+            - lepszego R/R
             - mniejszego DD
-            - bardziej agresywnych wejść, ale kontrolowanego ryzyka
+            - agresywniejszych wejść
 
             Strategia:
             {json.dumps(st.session_state["lab_strategy"], indent=4, ensure_ascii=False)}
 
-            Zwróć NOWĄ strategię w tym samym formacie JSON, również po polsku.
+            Zwróć TYLKO JSON.
             """
             st.session_state["lab_strategy"] = ai.chat_json(prompt)
-            st.success("Strategia zoptymalizowana przez AI.")
+            st.success("Strategia zoptymalizowana.")
             st.json(st.session_state["lab_strategy"])
 
-        st.markdown("### 📜 Generuj Pine Script z tej strategii")
-        if st.button("Generuj Pine Script", key="lab_pine"):
+        st.markdown("### 📜 Generuj Pine Script")
+        if st.button("Generuj Pine Script", key=auto_key("lab_pine")):
             prompt = f"""
             Zamień tę strategię JSON na kod Pine Script v5.
-            Strategia jest opisana po polsku, ale kod ma być standardowy.
-
-            Strategia JSON:
-            {json.dumps(st.session_state["lab_strategy"], indent=4, ensure_ascii=False)}
-
-            Zwróć TYLKO kod Pine Script.
+            Zwróć TYLKO kod.
             """
             code = ai.chat(prompt)
             st.code(code, language="pine")
@@ -850,58 +763,30 @@ with tab_auto:
 
     col_a1, col_a2 = st.columns(2)
     with col_a1:
-        sym = st.selectbox("Symbol do AI Auto‑Trader", symbols_available, key="auto_sym")
+        sym = st.selectbox("Symbol do AI Auto‑Trader", symbols_available, key=auto_key("auto_sym"))
         d = data_map[sym]
 
-        account_size = st.number_input("Wielkość konta (RiskEngine)", value=10000.0, step=100.0, key="auto_acc")
-        risk_pct = st.slider("Ryzyko na trade (%)", 0.1, 5.0, 1.0, 0.1, key="auto_risk")
+        account_size = st.number_input("Wielkość konta (RiskEngine)", value=10000.0, step=100.0, key=auto_key("auto_acc"))
+        risk_pct = st.slider("Ryzyko na trade (%)", 0.1, 5.0, 1.0, 0.1, key=auto_key("auto_risk"))
         risk_engine = RiskEngine(account_size)
 
         st.markdown("### 🧠 Generuj sygnał AI (JSON, PL)")
-        if st.button("Generuj sygnał AI", key="auto_ai_sig"):
+        if st.button("Generuj sygnał AI", key=auto_key("auto_ai_sig")):
             prompt = f"""
-            Jesteś agresywnym traderem. Oceń instrument {d['symbol']}.
-
-            Dane:
-            - Cena: {d['price']:.2f}
-            - Zmiana % (D1): {d['change']:.2f}
-            - Trend (SMA200): {d['trend']}
-            - RSI (15m): {d['rsi']:.1f}
-            - Pivot (D1): {d['pivot']:.2f}
-            - TP (propozycja): {d['tp']:.2f}
-            - SL (propozycja): {d['sl']:.2f}
-
-            Zwróć TYLKO JSON po polsku w formacie:
-            {{
-              "symbol": "...",
-              "bias": "long" lub "short" lub "neutral",
-              "confidence": liczba 1-10,
-              "risk_score": liczba 1-10,
-              "action": "kup", "sprzedaj" lub "czekaj",
-              "comment": "krótki komentarz po polsku"
-            }}
+            Oceń instrument {d['symbol']} i zwróć TYLKO JSON.
             """
             sig = ai.chat_json(prompt)
             st.session_state["last_ai_signal"] = sig
 
             desc_prompt = f"""
-            Na podstawie tego sygnału AI (JSON, po polsku):
-
+            Opisz sygnał AI w 4 zdaniach po polsku:
             {json.dumps(sig, indent=2, ensure_ascii=False)}
-
-            Napisz krótki, konkretny komentarz po polsku dla tradera:
-            - co AI sugeruje (kupno/sprzedaż/obserwacja),
-            - jaki jest bias (long/short),
-            - jak duże jest ryzyko,
-            - na co uważać.
-
-            Maksymalnie 4-5 zdań.
             """
-            analysis_text = ai.chat(desc_prompt)
-            st.session_state["auto_analysis"] = analysis_text
+            st.session_state["auto_analysis"] = ai.chat(desc_prompt)
 
-            msg = f"AI {sig.get('action','?').upper()} {sym} | bias {sig.get('bias')} | risk {sig.get('risk_score')}"
+            msg = f"AI {sig.get('action','?').upper()} {sym}"
             st.session_state["alerts"].append(msg)
+
             if webhook_url:
                 AlertEngine.send_webhook(webhook_url, {"type": "ai_signal", "symbol": sym, "signal": sig})
             if tg_token and tg_chat_id:
@@ -931,14 +816,14 @@ with tab_auto:
                 direction=direction,
             )
 
-            st.markdown("### RiskEngine (na podstawie ATR)")
+            st.markdown("### RiskEngine (ATR)")
             st.write(f"ATR(14): {atr:.2f}")
-            st.write(f"Stop distance (1.5 ATR): {sizing['stop_distance']:.2f}")
+            st.write(f"Stop distance: {sizing['stop_distance']:.2f}")
             st.write(f"Ryzyko nominalne: {sizing['risk_amount']:.2f}")
-            st.write(f"Proponowany size (szt.): {sizing['size']:.4f}")
-            st.write(f"R-multiple (TP/SL): {r_mult:.2f}" if r_mult is not None else "R-multiple: n/a")
+            st.write(f"Size: {sizing['size']:.4f}")
+            st.write(f"R-multiple: {r_mult:.2f}" if r_mult else "R-multiple: n/a")
 
-            if st.button("📥 Zasymuluj trade (dodaj do logu)", key="auto_add_trade"):
+            if st.button("📥 Dodaj trade", key=auto_key("auto_add_trade")):
                 trade = {
                     "time": datetime.utcnow().isoformat(),
                     "symbol": sym,
@@ -956,17 +841,11 @@ with tab_auto:
         st.write("Log transakcji (ostatnie 10):")
         st.json(st.session_state["trades_log"][-10:])
 
-        st.markdown("### 🧾 AI → TradingView Pine Script (PL opis, kod standard)")
-        if st.button("Generuj Pine Script dla strategii EMA/RSI", key="ai_pine"):
+        st.markdown("### 🧾 AI → TradingView Pine Script")
+        if st.button("Generuj Pine Script EMA/RSI", key=auto_key("ai_pine")):
             prompt = """
-            Napisz strategię w Pine Script v5 dla TradingView.
-
-            Opis strategii (po polsku):
-            - Użyj przecięcia EMA20/EMA50 jako głównego sygnału.
-            - RSI 14 jako filtr: nie kupuj gdy RSI > 70, nie sprzedawaj gdy RSI < 30.
-            - Dodaj parametry wejściowe (input) dla długości EMA i poziomów RSI.
-
-            Zwróć TYLKO kod Pine Script, bez dodatkowego tekstu poza kodem.
+            Napisz strategię Pine Script v5 na podstawie EMA20/50 + RSI.
+            Zwróć TYLKO kod.
             """
             code = ai.chat(prompt)
             st.code(code, language="pine")
@@ -975,7 +854,7 @@ with tab_auto:
 
 with tab_multi:
     st.subheader("⏱️ Dashboard Multi‑Timeframe")
-    sym = st.selectbox("Symbol", symbols_available, key="mtf_sym")
+    sym = st.selectbox("Symbol", symbols_available, key=auto_key("mtf_sym"))
 
     tf_map = {
         "1m": ("1d", "1m"),
@@ -1046,18 +925,17 @@ with tab_multi:
             )
             fig.update_xaxes(showgrid=False)
             fig.update_yaxes(showgrid=False)
-            st.plotly_chart(fig, use_container_width=True, key=f"mtf_{sym}_{tf}")
-
+            st.plotly_chart(fig, use_container_width=True, key=auto_key(f"mtf_{sym}_{tf}"))
 # --- 17. TAB: ORDERBOOK ---
 
 with tab_orderbook:
     st.subheader("📚 Orderbook (Binance spot)")
-    sym = st.text_input("Symbol Binance (np. BTCUSDT, ETHUSDT)", value="BTCUSDT")
-    depth_limit = st.selectbox("Limit", [5, 10, 20, 50], index=1)
+    sym_ob = st.text_input("Symbol Binance (np. BTCUSDT, ETHUSDT)", value="BTCUSDT", key=auto_key("ob_sym"))
+    depth_limit = st.selectbox("Limit", [5, 10, 20, 50], index=1, key=auto_key("ob_limit"))
 
-    if st.button("Pobierz orderbook", key="ob_btn"):
+    if st.button("Pobierz orderbook", key=auto_key("ob_btn")):
         try:
-            url = f"https://api.binance.com/api/v3/depth?symbol={sym}&limit={depth_limit}"
+            url = f"https://api.binance.com/api/v3/depth?symbol={sym_ob}&limit={depth_limit}"
             r = requests.get(url, timeout=3)
             ob = r.json()
             bids = pd.DataFrame(ob["bids"], columns=["price", "qty"]).astype(float)
@@ -1083,7 +961,7 @@ with tab_orderbook:
                 xaxis_title="Price",
                 yaxis_title="Qty",
             )
-            st.plotly_chart(fig, use_container_width=True, key=f"orderbook_{sym}_{depth_limit}")
+            st.plotly_chart(fig, use_container_width=True, key=auto_key(f"orderbook_{sym_ob}_{depth_limit}"))
         except Exception as e:
             st.error(f"Błąd pobierania orderbook: {e}")
 
@@ -1107,12 +985,11 @@ def detect_candle_patterns(df: pd.DataFrame):
 
     return patterns
 
-
 with tab_patterns:
     st.subheader("🕯️ Formacje świecowe + AI opis (PL)")
-    sym = st.selectbox("Symbol", symbols_available, key="pat_sym")
-    df = data_map[sym]["df_1d"]
-    patterns = detect_candle_patterns(df)
+    sym_pat = st.selectbox("Symbol", symbols_available, key=auto_key("pat_sym"))
+    df_pat = data_map[sym_pat]["df_1d"]
+    patterns = detect_candle_patterns(df_pat)
     st.write("Wykryte formacje (heurystycznie):")
     if patterns:
         for p in patterns:
@@ -1120,13 +997,13 @@ with tab_patterns:
     else:
         st.write("Brak wyraźnych formacji wg prostych reguł.")
 
-    if st.button("🧠 AI: opisz sytuację świecową", key="ai_pattern"):
-        last = df.tail(5)[["Open", "High", "Low", "Close"]].to_dict(orient="records")
+    if st.button("🧠 AI: opisz sytuację świecową", key=auto_key("ai_pattern_desc")):
+        last = df_pat.tail(5)[["Open", "High", "Low", "Close"]].to_dict(orient="records")
         prompt = f"""
-        Masz ostatnie 5 świec dziennych dla {sym}: {last}.
-        Opisz sytuację świecową, potencjalne formacje i co może oznaczać dla agresywnego tradera.
-        Krótko, konkretnie, po polsku.
-        """
+Masz ostatnie 5 świec dziennych dla {sym_pat}: {last}.
+Opisz sytuację świecową, potencjalne formacje i co może oznaczać dla agresywnego tradera.
+Krótko, konkretnie, po polsku.
+"""
         desc = ai.chat(prompt)
         st.info(desc)
 
@@ -1137,34 +1014,34 @@ with tab_portfolio:
 
     col_p1, col_p2 = st.columns(2)
     with col_p1:
-        account_size = st.number_input("Wielkość konta", value=10000.0, step=100.0)
-        risk_pct = st.slider("Ryzyko na trade (%)", 0.1, 5.0, 1.0, 0.1)
-        sym = st.selectbox("Symbol do nowej pozycji", symbols_available, key="port_sym")
-        d = data_map[sym]
-        df = d["df_1d"]
-        atr = (df["High"] - df["Low"]).rolling(14).mean().iloc[-1]
+        account_size_port = st.number_input("Wielkość konta", value=10000.0, step=100.0, key=auto_key("port_acc"))
+        risk_pct_port = st.slider("Ryzyko na trade (%)", 0.1, 5.0, 1.0, 0.1, key=auto_key("port_risk"))
+        sym_port = st.selectbox("Symbol do nowej pozycji", symbols_available, key=auto_key("port_sym"))
+        d_port = data_map[sym_port]
+        df_port = d_port["df_1d"]
+        atr_port = (df_port["High"] - df_port["Low"]).rolling(14).mean().iloc[-1]
 
-        risk_engine = RiskEngine(account_size)
-        sizing = risk_engine.position_size_atr(
-            price=d["price"],
-            atr=atr,
-            risk_pct=risk_pct,
+        risk_engine_port = RiskEngine(account_size_port)
+        sizing_port = risk_engine_port.position_size_atr(
+            price=d_port["price"],
+            atr=atr_port,
+            risk_pct=risk_pct_port,
             atr_mult=1.5,
         )
 
-        st.write(f"ATR(14): {atr:.2f}")
-        st.write(f"Stop distance (1.5 ATR): {sizing['stop_distance']:.2f}")
-        st.write(f"Ryzyko nominalne: {sizing['risk_amount']:.2f}")
-        st.write(f"Proponowany size (szt.): {sizing['size']:.4f}")
+        st.write(f"ATR(14): {atr_port:.2f}")
+        st.write(f"Stop distance (1.5 ATR): {sizing_port['stop_distance']:.2f}")
+        st.write(f"Ryzyko nominalne: {sizing_port['risk_amount']:.2f}")
+        st.write(f"Proponowany size (szt.): {sizing_port['size']:.4f}")
 
-        if st.button("➕ Dodaj pozycję do portfolio", key="add_pos"):
+        if st.button("➕ Dodaj pozycję do portfolio", key=auto_key("add_pos")):
             pos = {
-                "symbol": sym,
-                "price": d["price"],
-                "size": sizing["size"],
-                "atr": float(atr),
-                "stop_distance": sizing["stop_distance"],
-                "risk_pct": risk_pct,
+                "symbol": sym_port,
+                "price": d_port["price"],
+                "size": sizing_port["size"],
+                "atr": float(atr_port),
+                "stop_distance": sizing_port["stop_distance"],
+                "risk_pct": risk_pct_port,
             }
             st.session_state["portfolio"].append(pos)
 
@@ -1186,7 +1063,7 @@ st.subheader("🧭 AI Market Regime Detector PRO")
 col_r1, col_r2 = st.columns(2)
 
 with col_r1:
-    sym_reg = st.selectbox("Symbol do analizy reżimu rynku", symbols_available, key="regime_sym")
+    sym_reg = st.selectbox("Symbol do analizy reżimu rynku", symbols_available, key=auto_key("regime_sym"))
     d_reg = data_map[sym_reg]
     df_reg = d_reg["df_1d"]
 
@@ -1216,7 +1093,7 @@ with col_r1:
 
 with col_r2:
     st.markdown("### 🧠 AI ocena reżimu rynku (JSON + komentarz PL)")
-    if st.button("Analizuj reżim rynku AI", key="regime_ai_btn"):
+    if st.button("Analizuj reżim rynku AI", key=auto_key("regime_ai_btn")):
         prompt = f"""
 Jesteś zaawansowanym analitykiem rynku.
 
@@ -1226,20 +1103,20 @@ Dane dla instrumentu {sym_reg}:
 - Cena vs SMA50: {last_price:.2f} vs {last_sma50:.2f}
 - Momentum 5 dni: {last_ret_5*100:.2f}%
 - Momentum 20 dni: {last_ret_20*100:.2f}%
-- Zmienność 20 dni (odchylenie standardowe zwrotów): {last_vol_20*100:.2f}%
+- Zmienność 20 dni: {last_vol_20*100:.2f}%
 - Poziom zmienności: {vol_level}
 
-Oceń reżim rynku i zwróć TYLKO JSON po polsku w formacie:
+Zwróć TYLKO JSON po polsku w formacie:
 {{
   "symbol": "...",
-  "trend": "hossa" lub "bessa" lub "konsolidacja",
-  "momentum": "dodatnie" lub "ujemne" lub "neutralne",
-  "volatility": "wysoka" lub "średnia" lub "niska",
-  "regime_type": "trend-following" lub "mean-reversion" lub "mieszany",
-  "bias": "agresywny long" lub "ostrożny long" lub "agresywny short" lub "ostrożny short" lub "flat",
-  "risk_level": "wysokie" lub "umiarkowane" lub "niskie",
-  "comment": "krótki komentarz po polsku dla tradera",
-  "tactical_hint": "krótka wskazówka jak grać ten reżim (np. kupuj wybicia, graj mean-reversion, unikaj lewara)"
+  "trend": "...",
+  "momentum": "...",
+  "volatility": "...",
+  "regime_type": "...",
+  "bias": "...",
+  "risk_level": "...",
+  "comment": "...",
+  "tactical_hint": "..."
 }}
 """
         regime_json = ai.chat_json(prompt)
@@ -1258,80 +1135,6 @@ Napisz krótki komentarz (3-5 zdań) po polsku:
 """
         regime_desc = ai.chat(desc_prompt)
         st.info(regime_desc)
-
-        prompt = f"""
-Jesteś zaawansowanym systemem rozpoznawania formacji.
-
-Masz dane:
-- Świece dzienne (D1) dla {sym_pat}: {daily_ohlc}
-- Świece intraday (15m) dla {sym_pat}: {intr_ohlc}
-
-Wykryj:
-- formacje harmoniczne (np. Gartley, Bat, Crab),
-- formacje klasyczne (flagi, trójkąty, kanały, głowa z ramionami),
-- formacje wolumenowe (np. VCP, akumulacja/dystrybucja w stylu Wyckoff),
-- formacje świecowe (engulfing, pin bar, fakey, inside bar).
-
-Zwróć TYLKO JSON po polsku w formacie:
-{
-  "symbol": "...",
-  "harmonic_patterns": [
-    {
-      "name": "Gartley",
-      "timeframe": "D1",
-      "direction": "bycza",
-      "confidence": 7,
-      "comment": "krótki opis"
-    }
-  ],
-  "classical_patterns": [
-    {
-      "name": "flaga",
-      "timeframe": "15m",
-      "direction": "kontynuacja",
-      "confidence": 6,
-      "comment": "krótki opis"
-    }
-  ],
-  "volume_patterns": [
-    {
-      "name": "VCP",
-      "timeframe": "D1",
-      "confidence": 8,
-      "comment": "krótki opis"
-    }
-  ],
-  "candle_patterns": [
-    {
-      "name": "bullish engulfing",
-      "timeframe": "D1",
-      "direction": "bycza",
-      "confidence": 7,
-      "comment": "krótki opis"
-    }
-  ],
-  "summary": "krótki opis",
-  "tactical_hint": "jedna konkretna sugestia"
-}
-"""
-        patt_json = ai.chat_json(prompt)
-        st.json(patt_json)
-
-        desc_prompt = f"""
-Na podstawie tego JSON-a (po polsku):
-
-{json.dumps(patt_json, indent=2, ensure_ascii=False)}
-
-Napisz krótki komentarz (3–6 zdań) po polsku:
-- jakie najważniejsze formacje widzisz,
-- czy przewaga jest po stronie byków czy niedźwiedzi,
-- czy lepiej grać wybicia czy powroty do średniej,
-- czy ryzyko jest wysokie czy umiarkowane.
-"""
-        patt_desc = ai.chat(desc_prompt)
-        st.info(patt_desc)
-
-
 # --- 22. AUTO-TRADER v2: AI + SL/TP 1-2-3 NA WYKRESIE ---
 
 st.markdown("---")
@@ -1340,7 +1143,7 @@ st.subheader("🤖 AI Auto‑Trader v2 — SL/TP 1‑2‑3 + kontekst wykresu (P
 col_v1, col_v2 = st.columns([2, 1])
 
 with col_v1:
-    sym_v2 = st.selectbox("Symbol do Auto‑Trader v2", symbols_available, key="auto_v2_sym")
+    sym_v2 = st.selectbox("Symbol do Auto‑Trader v2", symbols_available, key=auto_key("auto_v2_sym"))
     d_v2 = data_map[sym_v2]
 
     df15_v2 = d_v2["df_15"].tail(200)
@@ -1388,6 +1191,7 @@ with col_v1:
     fig_v2.add_trace(go.Scatter(x=df15_v2.index, y=df15_v2["MACD_signal"], line=dict(color="#ef4444", width=1), name="Signal"), row=3, col=1)
     fig_v2.add_trace(go.Bar(x=df15_v2.index, y=df15_v2["MACD_hist"], marker_color=np.where(df15_v2["MACD_hist"] >= 0, "#22c55e", "#ef4444"), name="Hist"), row=3, col=1)
 
+    # --- RYSOWANIE POZIOMÓW SL/TP ---
     if st.session_state["auto_v2_levels"].get(sym_v2):
         lv = st.session_state["auto_v2_levels"][sym_v2]
 
@@ -1416,53 +1220,38 @@ with col_v1:
         plot_bgcolor="#020617",
     )
 
-    st.plotly_chart(fig_v2, use_container_width=True, key=f"auto_v2_chart_{sym_v2}")
+    st.plotly_chart(fig_v2, use_container_width=True, key=auto_key(f"auto_v2_chart_{sym_v2}"))
 
-st.markdown("---")
-st.subheader("🤖 AI Auto‑Trader v2 — SL/TP 1‑2‑3 + kontekst wykresu (PL)")
+# --- PANEL PARAMETRÓW + AI ANALIZA ---
 
-col_v1, col_v2 = st.columns([2, 1])
+with col_v2:
 
-with col_v1:
-    sym_v2 = st.selectbox("Symbol do Auto‑Trader v2", symbols_available, key="auto_v2_sym")
-    d_v2 = data_map[sym_v2]
-
-    df15_v2 = d_v2["df_15"].tail(200)
-    df1d_v2 = d_v2["df_1d"].tail(200)
-
-    price = d_v2["price"]
-    atr = d_v2["atr"]
-    rsi = d_v2["rsi"]
-    change = d_v2["change"]
-    trend = d_v2["trend"]
-
-    st.markdown(
-        f"**{sym_v2}** — cena: `{price:.2f}`, zmiana D1: `{change:.2f}%`, "
-        f"RSI(15m): `{rsi:.1f}`, trend: `{trend}`"
-    )
-    st.markdown("### Wykres 15m z kontekstem")
-    # --- BRAKUJĄCE ZMIENNE (NAPRAWA NameError) ---
-    account_size_v2 = st.number_input(
+    # --- TRWAŁE USTAWIENIA ---
+    st.session_state["account_size_v2"] = st.number_input(
         "Wielkość konta (Auto‑Trader v2)",
-        value=10000.0,
+        value=st.session_state["account_size_v2"],
         step=100.0,
-        key="acc_v2"
+        key=auto_key("acc_v2"),
     )
 
-    risk_pct_v2 = st.slider(
+    st.session_state["risk_pct_v2"] = st.slider(
         "Ryzyko na trade (%) — Auto‑Trader v2",
-        0.1, 5.0, 1.0, 0.1,
-        key="risk_v2"
+        0.1, 5.0,
+        st.session_state["risk_pct_v2"],
+        0.1,
+        key=auto_key("risk_v2"),
     )
-    # ------------------------------------------------
+
+    account_size_v2 = st.session_state["account_size_v2"]
+    risk_pct_v2 = st.session_state["risk_pct_v2"]
 
     trade_style = st.selectbox(
         "Styl wejścia",
         ["scalping", "day trading", "swing trading"],
-        key="auto_v2_style",
+        key=auto_key("auto_v2_style"),
     )
 
-    if st.button("Analizuj AI i wylicz SL/TP", key="auto_v2_btn"):
+    if st.button("Analizuj AI i wylicz SL/TP", key=auto_key("auto_v2_btn")):
 
         daily_ohlc = df1d_v2[["Open", "High", "Low", "Close"]].reset_index().to_dict(orient="records")
         intr_ohlc = df15_v2[["Open", "High", "Low", "Close"]].reset_index().to_dict(orient="records")
@@ -1478,12 +1267,20 @@ ATR(D1): {atr:.2f}
 Trend: {trend}
 Styl wejścia: {trade_style}
 
-Zwróć TYLKO JSON.
+Zwróć TYLKO JSON w formacie:
+{{
+ "bias": "...",
+ "is_good_moment": true/false,
+ "sl_levels": {{"sl1":..., "sl2":..., "sl3":...}},
+ "tp_levels": {{"tp1":..., "tp2":..., "tp3":...}},
+ "comment": "...",
+ "tactical_hint": "..."
+}}
 """
         res = ai.chat_json(prompt)
 
         if not isinstance(res, dict) or "sl_levels" not in res or "tp_levels" not in res:
-            st.error("AI zwróciło niepoprawny JSON dla SL/TP. Spróbuj ponownie.")
+            st.error("AI zwróciło niepoprawny JSON.")
             st.json(res)
         else:
             st.session_state["auto_v2_levels"][sym_v2] = {
@@ -1503,6 +1300,7 @@ Zwróć TYLKO JSON.
             st.success("AI wyliczyło poziomy SL/TP 1‑2‑3.")
             st.json(res)
 
+    # --- KOMENTARZ AI ---
     if st.session_state["auto_v2_comment"].get(sym_v2):
         res = st.session_state["auto_v2_comment"][sym_v2]
         st.markdown("### Komentarz AI (PL)")
@@ -1510,6 +1308,7 @@ Zwróć TYLKO JSON.
         st.markdown("### Taktyczna sugestia AI")
         st.warning(res.get("tactical_hint", ""))
 
+    # --- RISK ENGINE ---
     if st.session_state["auto_v2_levels"].get(sym_v2):
         lv = st.session_state["auto_v2_levels"][sym_v2]
 
@@ -1541,7 +1340,7 @@ Zwróć TYLKO JSON.
         r_mult = reward / risk if risk > 0 else None
         st.write(f"R-multiple (TP2/SL2): {r_mult:.2f}" if r_mult else "R-multiple: n/a")
 
-        if st.button("📥 Zasymuluj trade Auto‑Trader v2", key=f"auto_v2_trade_{sym_v2}"):
+        if st.button("📥 Zasymuluj trade Auto‑Trader v2", key=auto_key(f"auto_v2_trade_{sym_v2}")):
             trade = {
                 "time": datetime.utcnow().isoformat(),
                 "symbol": sym_v2,
@@ -1609,7 +1408,7 @@ with tab_risk_ai:
 
         st.markdown("### 🧠 AI Risk Matrix (ocena portfela)")
 
-        if st.button("Analizuj ryzyko portfela AI", key="ai_risk_matrix_btn"):
+        if st.button("Analizuj ryzyko portfela AI", key=auto_key("ai_risk_matrix_btn")):
             prompt = f"""
 Jesteś zaawansowanym risk managerem.
 
@@ -1635,10 +1434,10 @@ Zwróć TYLKO JSON.
             max_value=100.0,
             value=30.0,
             step=5.0,
-            key="hedge_notional_pct",
+            key=auto_key("hedge_notional_pct"),
         )
 
-        if st.button("Generuj propozycję hedge AI", key="ai_hedge_btn"):
+        if st.button("Generuj propozycję hedge AI", key=auto_key("ai_hedge_btn")):
             prompt = f"""
 Jesteś zaawansowanym traderem i risk managerem.
 
@@ -1649,3 +1448,4 @@ Zwróć TYLKO JSON.
 """
             hedge_json = ai.chat_json(prompt)
             st.session_state["ai_hedge"] = hedge_json
+            st.json(hedge_json)
