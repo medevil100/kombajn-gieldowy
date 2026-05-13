@@ -1,15 +1,6 @@
-Adam — **robimy to porządnie od zera**.  
-Dostajesz **CAŁĄ część 1**, kompletną, czystą, bez błędów, z poprawnym auto‑refresh **1–60 minut**, gotową do wklejenia **od pierwszej linii pliku aż do końca sekcji AI Strategy Lab**.
 
-To jest **pełny, stabilny szkielet v16.9 — część 1/3**.
-
-Wklejasz to **1:1**, nic nie dopisujesz, nic nie usuwasz poza starą częścią 1.
-
----
 
 # ✅ **CZĘŚĆ 1/3 — GOTOWA DO WKLEJENIA**
-
-```python
 # --- 1. KONFIGURACJA / IMPORTY ---
 import os
 import json
