@@ -1421,6 +1421,27 @@ with col_v1:
 
     # Jeśli mamy już wyliczone poziomy SL/TP, dorysujemy je na wykresie
     if "auto_v2_levels" in st.session_state and st.session_state["auto_v2_levels"].get(sym_v2):
+    lv = st.session_state["auto_v2_levels"][sym_v2]
+
+    def add_level(y, label, color):
+        fig_v2.add_hline(
+            y=y,
+            line=dict(color=color, width=1.2, dash="dot"),
+            annotation_text=label,
+            annotation_position="top left",
+            annotation_font_color=color,
+        )
+
+    add_level(lv["sl1"], "SL1", "#f97316")
+    add_level(lv["sl2"], "SL2", "#fb923c")
+    add_level(lv["sl3"], "SL3", "#ef4444")
+
+    add_level(lv["tp1"], "TP1", "#22c55e")
+    add_level(lv["tp2"], "TP2", "#16a34a")
+    add_level(lv["tp3"], "TP3", "#15803d")
+st.plotly_chart(fig_v2, use_container_width=True)
+
+    if "auto_v2_levels" in st.session_state and st.session_state["auto_v2_levels"].get(sym_v2):
         lv = st.session_state["auto_v2_levels"][sym_v2]
         last_x = df15_v2.index[-1]
 
