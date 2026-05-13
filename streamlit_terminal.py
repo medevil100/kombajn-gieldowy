@@ -327,6 +327,16 @@ if not api_key:
 ai = AIClient(api_key, ai_model)
 
 # --- 9. SESSION STATE ---
+# --- INIT: Auto‑Trader v2 ---
+if "auto_v2_levels" not in st.session_state:
+    st.session_state["auto_v2_levels"] = {}
+
+if "auto_v2_comment" not in st.session_state:
+    st.session_state["auto_v2_comment"] = {}
+
+if "auto_v2_mode" not in st.session_state:
+    st.session_state["auto_v2_mode"] = {}
+
 for key, default in [
     ("portfolio", []),
     ("trades_log", []),
