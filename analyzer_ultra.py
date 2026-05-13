@@ -1,4 +1,4 @@
-```python
+
 # --- 1. KONFIGURACJA / IMPORTY ---
 
 import os
