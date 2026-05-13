@@ -276,7 +276,7 @@ with st.sidebar:
         if not api_key:
             st.warning("Dodaj klucz w Secrets lub wpisz go tutaj.")
 
-   ai_model = st.selectbox(
+ai_model = st.selectbox(
     "Model AI",
     [
         "gpt-4o-mini",
