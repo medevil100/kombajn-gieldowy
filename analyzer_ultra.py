@@ -700,8 +700,7 @@ with tab_lab:
         sym_lab = st.selectbox("Symbol", symbols_available, key=auto_key("lab_sym_test"))
         df_lab = data_map[sym_lab]["df_1d"]
 
-        st.line_chart(equity)
-
+        if st.button("Uruchom backtest AI", key=auto_key("lab_bt")):
             strat = st.session_state["lab_strategy"]
             df_bt = df_lab.copy()
             df_bt["signal"] = 0
@@ -722,9 +721,9 @@ with tab_lab:
             df_bt["strategy"] = df_bt["position"] * df_bt["ret"]
             equity = (1 + df_bt["strategy"]).cumprod()
 
-            st.line_chart(equity, key=auto_key(f"lab_bt_{sym_lab}"))
-            st.write(f"Zwrot: {(equity.iloc[-1]-1)*100:.2f}%")
-            st.write(f"Max DD: {(equity.cummax()-equity).max()*100:.2f}%")
+            st.line_chart(equity)
+            st.write(f"Zwrot: {(equity.iloc[-1] - 1) * 100:.2f}%")
+            st.write(f"Max DD: {(equity.cummax() - equity).max() * 100:.2f}%")
 
         st.markdown("### 🧬 AI Auto‑Optimizer (PL)")
         if st.button("Optymalizuj strategię AI", key=auto_key("lab_opt")):
@@ -745,7 +744,7 @@ with tab_lab:
 
         st.markdown("### 📜 Generuj Pine Script")
         if st.button("Generuj Pine Script", key=auto_key("lab_pine")):
-            prompt = f"""
+            prompt = """
             Zamień tę strategię JSON na kod Pine Script v5.
             Zwróć TYLKO kod.
             """
@@ -753,6 +752,7 @@ with tab_lab:
             st.code(code, language="pine")
 
 # --- 15. TAB: AI AUTO-TRADER (wersja v1, PL) ---
+
 
 with tab_auto:
     st.subheader("🤖 AI Auto‑Trader (wirtualny, z RiskEngine, PL)")
