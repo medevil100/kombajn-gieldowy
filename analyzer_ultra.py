@@ -1332,66 +1332,12 @@ with col_v1:
         col=1,
     )
 
-    fig_v2.add_trace(
-        go.Scatter(
-            x=df15_v2.index,
-            y=df15_v2["EMA20"],
-            line=dict(color="#38bdf8", width=1.1),
-            name="EMA20",
-        ),
-        row=1,
-        col=1,
-    )
-    fig_v2.add_trace(
-        go.Scatter(
-            x=df15_v2.index,
-            y=df15_v2["EMA50"],
-            line=dict(color="#a855f7", width=1.0),
-            name="EMA50",
-        ),
-        row=1,
-        col=1,
-    )
-    fig_v2.add_trace(
-        go.Bar(
-            x=df15_v2.index,
-            y=df15_v2["Volume"],
-            marker_color="#4b5563",
-            name="Volume",
-        ),
-        row=2,
-        col=1,
-    )
-    fig_v2.add_trace(
-        go.Scatter(
-            x=df15_v2.index,
-            y=df15_v2["MACD"],
-            line=dict(color="#22c55e", width=1),
-            name="MACD",
-        ),
-        row=3,
-        col=1,
-    )
-    fig_v2.add_trace(
-        go.Scatter(
-            x=df15_v2.index,
-            y=df15_v2["MACD_signal"],
-            line=dict(color="#ef4444", width=1),
-            name="Signal",
-        ),
-        row=3,
-        col=1,
-    )
-    fig_v2.add_trace(
-        go.Bar(
-            x=df15_v2.index,
-            y=df15_v2["MACD_hist"],
-            marker_color=np.where(df15_v2["MACD_hist"] >= 0, "#22c55e", "#ef4444"),
-            name="Hist",
-        ),
-        row=3,
-        col=1,
-    )
+    fig_v2.add_trace(go.Scatter(x=df15_v2.index, y=df15_v2["EMA20"], line=dict(color="#38bdf8", width=1.1), name="EMA20"), row=1, col=1)
+    fig_v2.add_trace(go.Scatter(x=df15_v2.index, y=df15_v2["EMA50"], line=dict(color="#a855f7", width=1.0), name="EMA50"), row=1, col=1)
+    fig_v2.add_trace(go.Bar(x=df15_v2.index, y=df15_v2["Volume"], marker_color="#4b5563", name="Volume"), row=2, col=1)
+    fig_v2.add_trace(go.Scatter(x=df15_v2.index, y=df15_v2["MACD"], line=dict(color="#22c55e", width=1), name="MACD"), row=3, col=1)
+    fig_v2.add_trace(go.Scatter(x=df15_v2.index, y=df15_v2["MACD_signal"], line=dict(color="#ef4444", width=1), name="Signal"), row=3, col=1)
+    fig_v2.add_trace(go.Bar(x=df15_v2.index, y=df15_v2["MACD_hist"], marker_color=np.where(df15_v2["MACD_hist"] >= 0, "#22c55e", "#ef4444"), name="Hist"), row=3, col=1)
 
     if st.session_state["auto_v2_levels"].get(sym_v2):
         lv = st.session_state["auto_v2_levels"][sym_v2]
@@ -1426,6 +1372,21 @@ with col_v1:
 with col_v2:
     st.markdown("### Parametry / AI decyzja")
 
+    # --- BRAKUJĄCE ZMIENNE (NAPRAWA NameError) ---
+    account_size_v2 = st.number_input(
+        "Wielkość konta (Auto‑Trader v2)",
+        value=10000.0,
+        step=100.0,
+        key="acc_v2"
+    )
+
+    risk_pct_v2 = st.slider(
+        "Ryzyko na trade (%) — Auto‑Trader v2",
+        0.1, 5.0, 1.0, 0.1,
+        key="risk_v2"
+    )
+    # ------------------------------------------------
+
     trade_style = st.selectbox(
         "Styl wejścia",
         ["scalping", "day trading", "swing trading"],
@@ -1440,34 +1401,18 @@ with col_v2:
         prompt = f"""
 Jesteś zaawansowanym traderem i risk managerem.
 
-Masz dane dla instrumentu {sym_v2}:
-- Cena: {price:.2f}
-- Zmiana D1: {change:.2f}%
-- RSI(15m): {rsi:.1f}
-- ATR(D1): {atr:.2f}
-- Trend: {trend}
-- Styl wejścia: {trade_style}
+Masz dane:
+Cena: {price:.2f}
+Zmiana D1: {change:.2f}%
+RSI(15m): {rsi:.1f}
+ATR(D1): {atr:.2f}
+Trend: {trend}
+Styl wejścia: {trade_style}
 
-Dane świec:
-- D1: {daily_ohlc}
-- 15m: {intr_ohlc}
-
-Zwróć TYLKO JSON w formacie:
-{{
-  "symbol": "{sym_v2}",
-  "is_good_moment": true lub false,
-  "reason": "krótko po polsku",
-  "recommended_style": "scalping" lub "day trading" lub "swing trading",
-  "bias": "long" lub "short" lub "neutral",
-  "sl_levels": {{"sl1": liczba, "sl2": liczba, "sl3": liczba}},
-  "tp_levels": {{"tp1": liczba, "tp2": liczba, "tp3": liczba}},
-  "comment": "krótki komentarz po polsku",
-  "tactical_hint": "krótka taktyczna sugestia po polsku"
-}}
+Zwróć TYLKO JSON.
 """
         res = ai.chat_json(prompt)
 
-        # prosta walidacja, żeby nie wywalić się na złym JSON
         if not isinstance(res, dict) or "sl_levels" not in res or "tp_levels" not in res:
             st.error("AI zwróciło niepoprawny JSON dla SL/TP. Spróbuj ponownie.")
             st.json(res)
