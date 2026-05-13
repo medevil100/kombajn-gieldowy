@@ -1310,17 +1310,21 @@ col_v1, col_v2 = st.columns([2, 1])
 with col_v1:
     sym_v2 = st.selectbox("Symbol do Auto‑Trader v2", symbols_available, key="auto_v2_sym")
     d_v2 = data_map[sym_v2]
+
+    # dane 15m / 1d
     df15_v2 = d_v2["df_15"].tail(200)
     df1d_v2 = d_v2["df_1d"].tail(200)
 
-    # Podstawowe dane
     price = d_v2["price"]
     atr = d_v2["atr"]
     rsi = d_v2["rsi"]
     change = d_v2["change"]
     trend = d_v2["trend"]
 
-    st.markdown(f"**{sym_v2}** — cena: `{price:.2f}`, zmiana D1: `{change:.2f}%`, RSI(15m): `{rsi:.1f}`, trend: `{trend}`")
+    st.markdown(
+        f"**{sym_v2}** — cena: `{price:.2f}`, zmiana D1: `{change:.2f}%`, "
+        f"RSI(15m): `{rsi:.1f}`, trend: `{trend}`"
+    )
     st.markdown("### Wykres 15m z kontekstem")
 
     fig_v2 = make_subplots(
@@ -1366,7 +1370,12 @@ with col_v1:
         col=1,
     )
     fig_v2.add_trace(
-        go.Bar(x=df15_v2.index, y=df15_v2["Volume"], marker_color="#4b5563", name="Volume"),
+        go.Bar(
+            x=df15_v2.index,
+            y=df15_v2["Volume"],
+            marker_color="#4b5563",
+            name="Volume",
+        ),
         row=2,
         col=1,
     )
@@ -1401,6 +1410,27 @@ with col_v1:
         col=1,
     )
 
+    # SL/TP 1‑2‑3 na wykresie (jeśli są w session_state)
+    if "auto_v2_levels" in st.session_state and st.session_state["auto_v2_levels"].get(sym_v2):
+        lv = st.session_state["auto_v2_levels"][sym_v2]
+
+        def add_level(y, label, color):
+            fig_v2.add_hline(
+                y=y,
+                line=dict(color=color, width=1.2, dash="dot"),
+                annotation_text=label,
+                annotation_position="top left",
+                annotation_font_color=color,
+            )
+
+        add_level(lv["sl1"], "SL1", "#f97316")
+        add_level(lv["sl2"], "SL2", "#fb923c")
+        add_level(lv["sl3"], "SL3", "#ef4444")
+
+        add_level(lv["tp1"], "TP1", "#22c55e")
+        add_level(lv["tp2"], "TP2", "#16a34a")
+        add_level(lv["tp3"], "TP3", "#15803d")
+
     fig_v2.update_layout(
         template="plotly_dark",
         height=420,
@@ -1419,71 +1449,12 @@ with col_v1:
     fig_v2.update_xaxes(showgrid=False)
     fig_v2.update_yaxes(showgrid=False)
 
-# Jeśli mamy już wyliczone poziomy SL/TP, dorysujemy je na wykresie
-if "auto_v2_levels" in st.session_state and st.session_state["auto_v2_levels"].get(sym_v2):
-    lv = st.session_state["auto_v2_levels"][sym_v2]
-
-    def add_level(y, label, color):
-        fig_v2.add_hline(
-            y=y,
-            line=dict(color=color, width=1.2, dash="dot"),
-            annotation_text=label,
-            annotation_position="top left",
-            annotation_font_color=color,
-        )
-
-    add_level(lv["sl1"], "SL1", "#f97316")
-    add_level(lv["sl2"], "SL2", "#fb923c")
-    add_level(lv["sl3"], "SL3", "#ef4444")
-
-    add_level(lv["tp1"], "TP1", "#22c55e")
-    add_level(lv["tp2"], "TP2", "#16a34a")
-    add_level(lv["tp3"], "TP3", "#15803d")
-
-st.plotly_chart(fig_v2, use_container_width=True)
-
-    if "auto_v2_levels" in st.session_state and st.session_state["auto_v2_levels"].get(sym_v2):
-        lv = st.session_state["auto_v2_levels"][sym_v2]
-        last_x = df15_v2.index[-1]
-
-        def add_hline(y, name, color):
-            fig_v2.add_hline(
-                y=y,
-                line=dict(color=color, width=1, dash="dot"),
-                annotation_text=name,
-                annotation_position="top left",
-                annotation_font_color=color,
-            )
-
-        add_hline(lv["sl1"], "SL1", "#f97316")
-        add_hline(lv["sl2"], "SL2", "#fb923c")
-        add_hline(lv["sl3"], "SL3", "#ef4444")
-        add_hline(lv["tp1"], "TP1", "#22c55e")
-        add_hline(lv["tp2"], "TP2", "#16a34a")
-        add_hline(lv["tp3"], "TP3", "#15803d")
-
     st.plotly_chart(fig_v2, use_container_width=True, key=f"auto_v2_chart_{sym_v2}")
 
 with col_v2:
-    if "auto_v2_levels" not in st.session_state:
-        st.session_state["auto_v2_levels"] = {}
-    if "auto_v2_comment" not in st.session_state:
-        st.session_state["auto_v2_comment"] = {}
-    if "auto_v2_mode" not in st.session_state:
-        st.session_state["auto_v2_mode"] = {}
+    st.markdown("### Parametry / AI decyzja")
+    st.write("… (tu zostaje Twój istniejący panel AI / przyciski / logika)")
 
-    st.markdown("### 🧠 AI: czy to dobry moment na wejście?")
-    trade_style = st.selectbox(
-        "Styl wejścia",
-        ["scalping", "day trading", "swing trading"],
-        key="auto_v2_style",
-    )
-
-    account_size_v2 = st.number_input("Wielkość konta (Auto‑Trader v2)", value=10000.0, step=100.0, key="auto_v2_acc")
-    risk_pct_v2 = st.slider("Ryzyko na trade (%)", 0.1, 5.0, 1.0, 0.1, key="auto_v2_risk")
-    risk_engine_v2 = RiskEngine(account_size_v2)
-
-    if st.button("Analiza AI + SL/TP 1‑2‑3", key="auto_v2_btn"):
         # Dane wejściowe dla AI
         daily_ohlc = df1d_v2[["Open", "High", "Low", "Close"]].reset_index().to_dict(orient="records")
         intr_ohlc = df15_v2[["Open", "High", "Low", "Close", "Volume"]].reset_index().to_dict(orient="records")
