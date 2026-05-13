@@ -1211,7 +1211,7 @@ with col_r2:
         """
         regime_desc = ai.chat(desc_prompt)
         st.info(regime_desc)
-   --- 21. MODUŁ AI: PATTERN RECOGNITION PRO ---
+
 st.markdown("---")
 st.subheader("📈 AI Pattern Recognition PRO")
 
