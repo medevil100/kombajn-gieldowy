@@ -1210,32 +1210,6 @@ Napisz krótki komentarz (3-5 zdań) po polsku:
         regime_desc = ai.chat(desc_prompt)
         st.info(regime_desc)
 
-# --- 21. MODUŁ AI: PATTERN RECOGNITION PRO ---
-
-st.markdown("---")
-st.subheader("📈 AI Pattern Recognition PRO")
-
-col_patt1, col_patt2 = st.columns(2)
-
-with col_patt1:
-    sym_pat = st.selectbox("Symbol do AI Pattern Recognition", symbols_available, key="pat_ai_sym")
-    d_pat = data_map[sym_pat]
-    df_daily = d_pat["df_1d"].tail(200)
-    df_intraday = d_pat["df_15"].tail(200)
-
-    st.markdown("### Dane wejściowe (skrót)")
-    st.write(f"Ostatnie świece D1: {len(df_daily)}")
-    st.write(f"Ostatnie świece 15m: {len(df_intraday)}")
-
-    st.dataframe(df_daily[["Open", "High", "Low", "Close"]].tail(5))
-
-with col_patt2:
-    st.markdown("### 🧠 AI: wykryj formacje (harmoniczne, klasyczne, świecowe, wolumenowe)")
-
-    if st.button("Analizuj formacje AI", key="pat_ai_btn"):
-        daily_ohlc = df_daily[["Open", "High", "Low", "Close"]].reset_index().to_dict(orient="records")
-        intr_ohlc = df_intraday[["Open", "High", "Low", "Close", "Volume"]].reset_index().to_dict(orient="records")
-
         prompt = f"""
 Jesteś zaawansowanym systemem rozpoznawania formacji.
 
@@ -1250,46 +1224,46 @@ Wykryj:
 - formacje świecowe (engulfing, pin bar, fakey, inside bar).
 
 Zwróć TYLKO JSON po polsku w formacie:
-{{
+{
   "symbol": "...",
   "harmonic_patterns": [
-    {{
-      "name": "Gartley" lub inna,
-      "timeframe": "D1" lub "15m",
-      "direction": "bycza" lub "niedźwiedzia",
-      "confidence": 1-10,
-      "comment": "krótki opis po polsku"
-    }}
+    {
+      "name": "Gartley",
+      "timeframe": "D1",
+      "direction": "bycza",
+      "confidence": 7,
+      "comment": "krótki opis"
+    }
   ],
   "classical_patterns": [
-    {{
-      "name": "flaga", "trójkąt", "kanał", "RGR", "odwrócony RGR" itd.,
-      "timeframe": "D1" lub "15m",
-      "direction": "kontynuacja" lub "odwrócenie",
-      "confidence": 1-10,
-      "comment": "krótki opis po polsku"
-    }}
+    {
+      "name": "flaga",
+      "timeframe": "15m",
+      "direction": "kontynuacja",
+      "confidence": 6,
+      "comment": "krótki opis"
+    }
   ],
   "volume_patterns": [
-    {{
-      "name": "VCP", "akumulacja", "dystrybucja" itd.,
-      "timeframe": "D1" lub "15m",
-      "confidence": 1-10,
-      "comment": "krótki opis po polsku"
-    }}
+    {
+      "name": "VCP",
+      "timeframe": "D1",
+      "confidence": 8,
+      "comment": "krótki opis"
+    }
   ],
   "candle_patterns": [
-    {{
-      "name": "bullish engulfing", "pin bar", "inside bar" itd.,
-      "timeframe": "D1" lub "15m",
-      "direction": "bycza" lub "niedźwiedzia",
-      "confidence": 1-10,
-      "comment": "krótki opis po polsku"
-    }}
+    {
+      "name": "bullish engulfing",
+      "timeframe": "D1",
+      "direction": "bycza",
+      "confidence": 7,
+      "comment": "krótki opis"
+    }
   ],
-  "summary": "krótkie podsumowanie po polsku: co to oznacza dla agresywnego tradera",
-  "tactical_hint": "konkretna sugestia: graj wybicia, graj mean-reversion, poczekaj na potwierdzenie itd."
-}}
+  "summary": "krótki opis",
+  "tactical_hint": "jedna konkretna sugestia"
+}
 """
         patt_json = ai.chat_json(prompt)
         st.json(patt_json)
@@ -1299,7 +1273,7 @@ Na podstawie tego JSON-a (po polsku):
 
 {json.dumps(patt_json, indent=2, ensure_ascii=False)}
 
-Napisz krótki komentarz (3-6 zdań) po polsku:
+Napisz krótki komentarz (3–6 zdań) po polsku:
 - jakie najważniejsze formacje widzisz,
 - czy przewaga jest po stronie byków czy niedźwiedzi,
 - czy lepiej grać wybicia czy powroty do średniej,
@@ -1307,6 +1281,7 @@ Napisz krótki komentarz (3-6 zdań) po polsku:
 """
         patt_desc = ai.chat(desc_prompt)
         st.info(patt_desc)
+
 
 # --- 22. AUTO-TRADER v2: AI + SL/TP 1-2-3 NA WYKRESIE ---
 
