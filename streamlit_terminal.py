@@ -344,8 +344,8 @@ if mode == "Monitoring rynku":
                 if not zag.empty: st.dataframe(zag.set_index("symbol"))
 
             for d in data_list:
-                st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
-                       for d in data_list:
+            st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
+                for d in data_list:
                 st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
                 c1, c2 = st.columns([1, 2])
                 with c1:
