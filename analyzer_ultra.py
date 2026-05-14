@@ -27,8 +27,10 @@ class XTBClient:
         self.ws = None
         self.session_id = None
 
-    def _get_url(self):
-        return "wss://ws.xtb.com/demo" if self.mode == "demo" else "wss://ws.xtb.com/real"
+   def _get_url(self):
+    if self.mode == "demo":
+        return "wss://ws.xtb.com/demoStream"
+    return "wss://ws.xtb.com/realStream"
 
     def connect(self):
         if self.ws is None:
