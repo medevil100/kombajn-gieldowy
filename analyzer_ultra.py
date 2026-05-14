@@ -18,18 +18,109 @@ st.set_page_config(page_title="AI PENNY KOMBAJN ULTRA v6", page_icon="📈", lay
 
 st.markdown("""
 <style>
-.stApp { background-color: #050810; color: #c9d1d9; }
-.block-container { padding-top: 0.5rem; }
-.sidebar .sidebar-content { background-color: #050810; }
-.ticker-card { background: radial-gradient(circle at top left, #111827, #020617); padding: 12px; border-radius: 12px; border: 1px solid #1f2937; margin-bottom: 12px; }
-.top-rank-card { background: linear-gradient(135deg, #020617, #111827); padding: 8px; border-radius: 10px; border: 1px solid #1f2937; text-align: center; font-size: 0.8rem; box-shadow: 0 0 12px rgba(56,189,248,0.15); }
-.stat-label { font-size: 0.65rem; color: #9ca3af; text-transform: uppercase; }
-.metric-good { color: #22c55e; }
-.metric-bad { color: #ef4444; }
-.metric-neutral { color: #eab308; }
-h1, h2, h3, h4 { color: #e5e7eb; }
+/* TŁO APLIKACJI */
+.stApp { 
+    background-color: #02030a; 
+    color: #e5e7eb; 
+}
+
+/* KONTENER GŁÓWNY */
+.block-container { 
+    padding-top: 0.5rem; 
+}
+
+/* SIDEBAR */
+.sidebar .sidebar-content { 
+    background: radial-gradient(circle at top left, #020617, #000000); 
+    border-right: 1px solid #1f2937;
+}
+
+/* KARTY TICKERÓW */
+.ticker-card { 
+    background: radial-gradient(circle at top left, #020617, #000000); 
+    padding: 12px; 
+    border-radius: 12px; 
+    border: 1px solid #1f2937; 
+    margin-bottom: 12px; 
+    box-shadow: 0 0 18px rgba(56,189,248,0.18);
+}
+
+/* TOP RANK KARTY (TOP 5 OKAZJI/ZAGROŻEŃ) */
+.top-rank-card { 
+    background: linear-gradient(135deg, #020617, #000000); 
+    padding: 8px; 
+    border-radius: 10px; 
+    border: 1px solid #1f2937; 
+    text-align: center; 
+    font-size: 0.8rem; 
+    box-shadow: 0 0 20px rgba(34,197,94,0.25);
+}
+
+/* LABELKI STATYSTYK */
+.stat-label { 
+    font-size: 0.65rem; 
+    color: #9ca3af; 
+    text-transform: uppercase; 
+}
+
+/* METRYKI – NEONOWE KOLORY */
+.metric-good { 
+    color: #22c55e; 
+    text-shadow: 0 0 8px rgba(34,197,94,0.7);
+}
+.metric-bad { 
+    color: #f97373; 
+    text-shadow: 0 0 8px rgba(248,113,113,0.7);
+}
+.metric-neutral { 
+    color: #eab308; 
+    text-shadow: 0 0 8px rgba(234,179,8,0.7);
+}
+
+/* NAGŁÓWKI */
+h1, h2, h3, h4 { 
+    color: #f9fafb; 
+    text-shadow: 0 0 12px rgba(56,189,248,0.35);
+}
+
+/* PRZYCISKI */
+.stButton>button {
+    background: linear-gradient(135deg, #0f172a, #0369a1);
+    color: #e5e7eb;
+    border-radius: 999px;
+    border: 1px solid #38bdf8;
+    padding: 0.35rem 0.9rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    box-shadow: 0 0 14px rgba(56,189,248,0.35);
+}
+.stButton>button:hover {
+    border-color: #22c55e;
+    box-shadow: 0 0 18px rgba(34,197,94,0.55);
+}
+
+/* SELECTBOXY / RADIO / INPUTY */
+.stSelectbox, .stRadio, .stTextArea, .stTextInput {
+    color: #e5e7eb;
+}
+.stSelectbox>div>div, .stRadio>div, .stTextArea textarea, .stTextInput input {
+    background-color: #020617 !important;
+    border-radius: 8px !important;
+    border: 1px solid #1f2937 !important;
+}
+
+/* TABELKI */
+.dataframe {
+    background-color: #020617 !important;
+}
+
+/* WYKRESY – LEKKI GLOW */
+.js-plotly-plot .plotly .main-svg {
+    filter: drop-shadow(0 0 12px rgba(56,189,248,0.25));
+}
 </style>
 """, unsafe_allow_html=True)
+
 
 MOJA20_FILE = "watchlist_moja20.txt"
 
