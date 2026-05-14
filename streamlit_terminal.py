@@ -332,20 +332,39 @@ if mode == "Monitoring rynku":
             else:
                 data_list = sorted(data_list, key=lambda x: x["change"], reverse=True)
 
+if mode == "Monitoring rynku":
+    if not tickers_active:
+        st.info("Brak aktywnych tickerów.")
+    else:
+        sort_key = st.selectbox("Sortowanie", ["RSI ↑", "Zmiana % ↓"])
+        data_list = []
+        for t in tickers_active:
+            a = get_analysis(t)
+            if a:
+                data_list.append(a)
+
+        if not data_list:
+            st.warning("Brak danych.")
+        else:
+            if sort_key.startswith("RSI"):
+                data_list = sorted(data_list, key=lambda x: x["rsi"])
+            else:
+                data_list = sorted(data_list, key=lambda x: x["change"], reverse=True)
+
             st.subheader("Monitoring rynku")
 
             ok, zag = top_okazje_zagrozenia(data_list)
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown("#### 🟢 TOP 5 okazji")
-                if not ok.empty: st.dataframe(ok.set_index("symbol"))
+                if not ok.empty:
+                    st.dataframe(ok.set_index("symbol"))
             with c2:
                 st.markdown("#### 🔴 TOP 5 zagrożeń")
-                if not zag.empty: st.dataframe(zag.set_index("symbol"))
+                if not zag.empty:
+                    st.dataframe(zag.set_index("symbol"))
 
             for d in data_list:
-            st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
-                for d in data_list:
                 st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
                 c1, c2 = st.columns([1, 2])
                 with c1:
@@ -411,6 +430,7 @@ if mode == "Monitoring rynku":
                     st.plotly_chart(fig, use_container_width=True)
 
                 st.markdown("</div>", unsafe_allow_html=True)
+
 elif mode == "Heatmapa trendu":
     st.subheader("🔥 NEON HEATMAPA TRENDÓW (RSI / Zmiana % / Trend)")
 
@@ -451,9 +471,9 @@ elif mode == "Heatmapa trendu":
             fig = px.imshow(
                 df_hm[[metric]].T,
                 color_continuous_scale=[
-                    "#22c55e",  # neon green
-                    "#eab308",  # neon yellow
-                    "#ef4444"   # neon red
+                    "#22c55e",
+                    "#eab308",
+                    "#ef4444"
                 ],
                 aspect="auto"
             )
@@ -471,6 +491,7 @@ elif mode == "Heatmapa trendu":
 
             st.plotly_chart(fig, use_container_width=True)
             st.dataframe(df_hm.sort_values(metric, ascending=(metric == "RSI")))
+
 elif mode == "AUTO‑SCALPER PRO":
     st.subheader("AUTO‑SCALPER PRO – sygnały 15m")
 
