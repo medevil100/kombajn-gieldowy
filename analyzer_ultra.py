@@ -478,6 +478,11 @@ with st.sidebar:
     market_filter = st.radio("Filtr rynku", ["MIX", "GPW", "USA"], horizontal=True)
 
     ai_style = st.radio("Styl AI", ["SCALP", "DAY", "SWING", "LONG"], horizontal=True)
+    model = st.selectbox(
+    "Model GPT",
+    ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini"],
+    index=0
+)
 
     mode = st.selectbox(
         "Tryb",
