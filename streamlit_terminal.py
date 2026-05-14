@@ -13,7 +13,6 @@ from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="AI PENNY KOMBAJN ULTRA v6.1 PRO", page_icon="📈", layout="wide")
 
-# === UI / CSS ===
 st.markdown("""
 <style>
 .stApp { background-color: #02030a; color: #e5e7eb; }
@@ -32,13 +31,12 @@ h1, h2, h3, h4 { color: #f9fafb; text-shadow: 0 0 12px rgba(56,189,248,0.35); }
     border: 1px solid #1f2937 !important;
     color: #e5e7eb !important;
 }
+.js-plotly-plot .plotly .main-svg { filter: drop-shadow(0 0 12px rgba(56,189,248,0.25)); }
 </style>
 """, unsafe_allow_html=True)
 
-# === PLIKI ===
 MOJA20_FILE = "watchlist_moja20.txt"
 
-# === PORTFEL ===
 MOJE_AKCJE = {
     "BCS.WA": [5.610, 200],
     "STX.WA": [2.753, 2050],
@@ -46,7 +44,6 @@ MOJE_AKCJE = {
     "GOSS": [0.45, 2000],
 }
 
-# === FUNKCJE SYSTEMOWE ===
 def pobierz_kurs_usd():
     try:
         usd = yf.download("USDPLN=X", period="1d", interval="1m", progress=False)
@@ -97,18 +94,23 @@ def calculate_rsi(series, window=14):
     rs = gain / (loss + 1e-9)
     return 100 - (100 / (1 + rs))
 
-def is_gpw(symbol): return symbol.upper().endswith(".WA")
-def is_usa(symbol): return not symbol.upper().endswith(".WA")
+def is_gpw(symbol): 
+    return symbol.upper().endswith(".WA")
+
+def is_usa(symbol): 
+    return not symbol.upper().endswith(".WA")
 
 def is_market_open(symbol):
     now = datetime.now().time()
-    if is_gpw(symbol): return dtime(9, 0) <= now <= dtime(17, 5)
+    if is_gpw(symbol):
+        return dtime(9, 0) <= now <= dtime(17, 5)
     return dtime(15, 30) <= now <= dtime(22, 5)
 
 @st.cache_data(show_spinner=False)
 def yf_cached(symbol, period, interval):
     df = yf.download(symbol, period=period, interval=interval, progress=False)
-    if df.empty: return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df
@@ -117,8 +119,8 @@ def get_analysis(symbol):
     try:
         d15 = yf_cached(symbol, "5d", "15m")
         d1d = yf_cached(symbol, "250d", "1d")
-        if d15.empty or d1d.empty: return None
-
+        if d15.empty or d1d.empty:
+            return None
         price = float(d15["Close"].iloc[-1])
         prev = float(d1d["Close"].iloc[-2])
         change = (price - prev) / prev * 100
@@ -127,7 +129,6 @@ def get_analysis(symbol):
         atr = (d1d["High"] - d1d["Low"]).rolling(14).mean().iloc[-1]
         pivot = (d1d["High"].iloc[-2] + d1d["Low"].iloc[-2] + d1d["Close"].iloc[-2]) / 3
         rsi = float(calculate_rsi(d15["Close"]).iloc[-1])
-
         return {
             "symbol": symbol,
             "price": price,
@@ -143,20 +144,32 @@ def get_analysis(symbol):
         return None
 
 def get_openai_client(api_key):
-    if not api_key: return None
-    try: return OpenAI(api_key=api_key)
-    except: return None
+    if not api_key:
+        return None
+    try:
+        return OpenAI(api_key=api_key)
+    except:
+        return None
 
 def build_trading_system_prompt(style):
     return (
         "Jesteś analitykiem technicznym. Masz wydać decyzję KUP/SPRZEDAJ/TRZYMAJ.\n"
         "Podawaj:\n"
         "- RSI\n- Trend\n- Momentum\n- Wolumen\n- Poziomy\n- Świece\n- Kontekst\n\n"
-        "Format A2-FULL:\nDECYZJA:\nUzasadnienie:\nWejście:\nSL:\nTP:\nRyzyko:\nUwaga:\n"
+        "Format A2-FULL, numerowane bloki:\n"
+        "#1 DECYZJA: KUP / SPRZEDAJ / TRZYMAJ\n"
+        "#2 UZASADNIENIE:\n"
+        "- RSI:\n- Trend:\n- Momentum:\n- Wolumen:\n- Poziomy:\n- Świece:\n- Kontekst:\n"
+        "#3 PLAN TRANSAKCJI:\n"
+        "ENTRY:\nSL:\nTP:\n"
+        "#4 RYZYKO:\n"
+        "#5 UWAGI:\n"
+        "Trend HOSSA traktuj jako pozytywny, BESSA jako negatywny.\n"
     )
 
 def call_gpt(client, system_prompt, user_prompt):
-    if client is None: return "(AI OFF)"
+    if client is None:
+        return "(AI OFF)"
     try:
         r = client.chat.completions.create(
             model=model,
@@ -173,7 +186,10 @@ def call_gpt(client, system_prompt, user_prompt):
 def ai_growth_probability(client, symbol, price, rsi, change, trend, pivot):
     system_prompt = (
         "Oszacuj prawdopodobieństwo ruchu w górę i w dół.\n"
-        "Format:\nWZROST: xx%\nSPADEK: xx%\nKomentarz:"
+        "Format:\n"
+        "#1 WZROST: xx%\n"
+        "#2 SPADEK: xx%\n"
+        "#3 KOMENTARZ:\n"
     )
     user_prompt = (
         f"Symbol: {symbol}\nCena: {price}\nRSI: {rsi}\nZmiana: {change}\nTrend: {trend}\nPivot: {pivot}"
@@ -185,7 +201,8 @@ def auto_scalper_scan(tickers):
     for t in tickers:
         try:
             df = yf_cached(t, "2d", "15m")
-            if df.empty or len(df) < 30: continue
+            if df.empty or len(df) < 30:
+                continue
             close = df["Close"]
             rsi = float(calculate_rsi(close).iloc[-1])
             price = float(close.iloc[-1])
@@ -207,7 +224,8 @@ def analiza_portfela():
     for t, (entry, qty) in MOJE_AKCJE.items():
         try:
             df = yf_cached(t, "60d", "1d")
-            if df.empty: continue
+            if df.empty:
+                continue
             price = float(df["Close"].iloc[-1])
             zysk = (price - entry) / entry * 100
             mult = kurs if ".WA" not in t else 1
@@ -238,7 +256,6 @@ def analiza_portfela():
         }
     return rows, summary
 
-# === SIDEBAR ===
 with st.sidebar:
     st.title("⚙️ ULTRA v6.1 PRO")
 
@@ -300,7 +317,6 @@ with st.sidebar:
         refresh = st.slider("Odświeżanie (min)", 15, 60, 30)
         st_autorefresh(interval=refresh * 60 * 1000, key="auto_refresh")
 
-# === FILTR TICKERÓW ===
 tickers_all = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
 if market_filter == "GPW":
@@ -312,8 +328,33 @@ tickers_active = [t for t in tickers_all if is_market_open(t)][:20]
 
 st.title("📈 AI PENNY KOMBAJN ULTRA v6.1 PRO")
 
+def style_top_table(df):
+    def color_trend(val):
+        if isinstance(val, str):
+            if "HOSSA" in val:
+                return "color: #22c55e; font-weight: 600;"
+            if "BESSA" in val:
+                return "color: #ef4444; font-weight: 600;"
+        return ""
+    def color_change(val):
+        try:
+            v = float(val)
+        except:
+            return ""
+        if v > 0:
+            return "color: #22c55e;"
+        if v < 0:
+            return "color: #ef4444;"
+        return "color: #eab308;"
+    styler = df.style.background_gradient(
+        subset=["rsi", "change"],
+        cmap="RdYlGn_r"
+    ).applymap(color_trend, subset=["trend"]).applymap(color_change, subset=["change"])
+    return styler
+
 def top_okazje_zagrozenia(data):
-    if not data: return [], []
+    if not data:
+        return None, None
     df = pd.DataFrame([
         {"symbol": d["symbol"], "change": d["change"], "rsi": d["rsi"], "trend": d["trend"]}
         for d in data
@@ -321,6 +362,7 @@ def top_okazje_zagrozenia(data):
     ok = df.sort_values(["rsi", "change"]).head(5)
     zag = df.sort_values(["rsi", "change"], ascending=[False, False]).head(5)
     return ok, zag
+
 if mode == "Monitoring rynku":
     if not tickers_active:
         st.info("Brak aktywnych tickerów.")
@@ -346,12 +388,12 @@ if mode == "Monitoring rynku":
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown("#### 🟢 TOP 5 okazji")
-                if not ok.empty:
-                    st.dataframe(ok.set_index("symbol"))
+                if ok is not None and not ok.empty:
+                    st.dataframe(style_top_table(ok.set_index("symbol")), use_container_width=True)
             with c2:
                 st.markdown("#### 🔴 TOP 5 zagrożeń")
-                if not zag.empty:
-                    st.dataframe(zag.set_index("symbol"))
+                if zag is not None and not zag.empty:
+                    st.dataframe(style_top_table(zag.set_index("symbol")), use_container_width=True)
 
             for d in data_list:
                 st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
@@ -378,7 +420,7 @@ if mode == "Monitoring rynku":
                             f"TP: {d['tp']:.4f}\n"
                             f"SL: {d['sl']:.4f}\n"
                             f"Zmiana: {d['change']:.2f}%\n"
-                            "Wydaj decyzję A2-FULL."
+                            "Wydaj decyzję w formacie A2-FULL z blokami #1–#5."
                         )
                         ans = call_gpt(client, system_prompt, prompt)
                         st.markdown(ans, unsafe_allow_html=True)
@@ -397,8 +439,7 @@ if mode == "Monitoring rynku":
 
                 with c2:
                     df = d["df"]
-
-                    if df.empty or len(df) < 2:
+                    if df is None or df.empty or len(df) < 2:
                         st.warning("Brak danych do wykresu.")
                         continue
 
@@ -438,7 +479,6 @@ elif mode == "Heatmapa trendu":
                 df = yf_cached(t, "120d", "1d")
                 if df.empty or len(df) < 20:
                     continue
-
                 close = df["Close"]
                 rsi = float(calculate_rsi(close).iloc[-1])
                 price = float(close.iloc[-1])
@@ -446,7 +486,6 @@ elif mode == "Heatmapa trendu":
                 zmiana = (price - prev) / prev * 100
                 sma200 = float(close.rolling(200).mean().iloc[-1])
                 trend = 1 if price > sma200 else -1
-
                 rows.append({
                     "Ticker": t,
                     "RSI": rsi,
@@ -460,9 +499,7 @@ elif mode == "Heatmapa trendu":
             st.warning("Brak danych do heatmapy.")
         else:
             df_hm = pd.DataFrame(rows).set_index("Ticker")
-
             metric = st.selectbox("Metryka", ["RSI", "Zmiana %", "Trend"])
-
             fig = px.imshow(
                 df_hm[[metric]].T,
                 color_continuous_scale=[
@@ -472,7 +509,6 @@ elif mode == "Heatmapa trendu":
                 ],
                 aspect="auto"
             )
-
             fig.update_layout(
                 template="plotly_dark",
                 height=260,
@@ -483,9 +519,14 @@ elif mode == "Heatmapa trendu":
                     titlefont=dict(color="#e5e7eb")
                 )
             )
-
             st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(df_hm.sort_values(metric, ascending=(metric == "RSI")))
+            st.dataframe(
+                df_hm.sort_values(metric, ascending=(metric == "RSI")).style.background_gradient(
+                    subset=[metric],
+                    cmap="RdYlGn_r"
+                ),
+                use_container_width=True
+            )
 
 elif mode == "AUTO‑SCALPER PRO":
     st.subheader("AUTO‑SCALPER PRO – sygnały 15m")
@@ -500,14 +541,20 @@ elif mode == "AUTO‑SCALPER PRO":
         else:
             df_sig = pd.DataFrame(sygnaly)
             st.success(f"Znaleziono {len(sygnaly)} sygnałów.")
-            st.dataframe(df_sig, use_container_width=True)
+            st.dataframe(
+                df_sig.style.background_gradient(
+                    subset=["rsi", "zmiana", "rvol"],
+                    cmap="RdYlGn_r"
+                ),
+                use_container_width=True
+            )
 
             opis = "Sygnały scalp:\n"
             for s in sygnaly:
                 opis += f"- {s['symbol']}: {s['price']:.4f}, RSI {s['rsi']:.1f}, zmiana {s['zmiana']:.2f}%, RVOL {s['rvol']:.1f}x\n"
 
             system_prompt = build_trading_system_prompt("SCALP")
-            ans = call_gpt(client, system_prompt, opis + "\nWybierz najlepsze wejścia scalp.")
+            ans = call_gpt(client, system_prompt, opis + "\nWybierz najlepsze wejścia scalp w formacie A2-FULL.")
             st.markdown(ans, unsafe_allow_html=True)
 
 elif mode == "AI TREND MAPA":
@@ -520,7 +567,8 @@ elif mode == "AI TREND MAPA":
         for t in tickers_active:
             try:
                 df = yf_cached(t, "120d", "1d")
-                if df.empty or len(df) < 20: continue
+                if df.empty or len(df) < 20:
+                    continue
                 close = df["Close"]
                 rsi = float(calculate_rsi(close).iloc[-1])
                 price = float(close.iloc[-1])
@@ -535,12 +583,15 @@ elif mode == "AI TREND MAPA":
         if not rows:
             st.warning("Brak danych.")
         else:
-            text = "Oceń rynek:\n\n"
+            text = "Oceń rynek na podstawie listy spółek.\n\n"
             for r in rows:
                 text += f"- {r['symbol']}: {r['price']:.4f}, RSI {r['rsi']:.1f}, zmiana {r['zmiana']:.2f}%, {r['trend']}\n"
 
             system_prompt = (
-                "Oceń rynek: dominujący trend, ryzyko, najlepsze sektory, agresywne czy selektywne wejścia."
+                "Oceń rynek: dominujący trend, ryzyko, najlepsze sektory, agresywne czy selektywne wejścia.\n"
+                "Użyj numerowanych bloków:\n"
+                "#1 DOMINUJĄCY TREND\n#2 RYZYKO\n#3 NAJLEPSZE SEKTORY\n#4 STYL WEJŚĆ\n#5 PODSUMOWANIE\n"
+                "Trend HOSSA traktuj jako zielony, BESSA jako czerwony (w opisie)."
             )
             ans = call_gpt(client, system_prompt, text)
             st.markdown(ans, unsafe_allow_html=True)
@@ -555,7 +606,8 @@ elif mode == "AI analiza listy":
         for t in tickers_active:
             try:
                 df = yf_cached(t, "120d", "1d")
-                if df.empty or len(df) < 20: continue
+                if df.empty or len(df) < 20:
+                    continue
                 close = df["Close"]
                 rsi = float(calculate_rsi(close).iloc[-1])
                 price = float(close.iloc[-1])
@@ -573,14 +625,21 @@ elif mode == "AI analiza listy":
                 text += f"- {r['symbol']}: {r['price']:.4f}, RSI {r['rsi']:.1f}, zmiana {r['zmiana']:.2f}%\n"
 
             system_prompt = build_trading_system_prompt(ai_style)
-            ans = call_gpt(client, system_prompt, text + "\nWydaj decyzje A2-FULL.")
+            ans = call_gpt(client, system_prompt, text + "\nWydaj decyzje A2-FULL dla każdej spółki, z blokami #1–#5.")
             st.markdown(ans, unsafe_allow_html=True)
+
 elif mode == "STX + Portfel":
     st.subheader("STX + Portfel")
 
     rows, summary = analiza_portfela()
     if rows:
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        st.dataframe(
+            pd.DataFrame(rows).style.background_gradient(
+                subset=["Zysk %", "Wartość PLN"],
+                cmap="RdYlGn"
+            ),
+            use_container_width=True
+        )
 
         if summary:
             c1, c2, c3 = st.columns(3)
@@ -607,15 +666,14 @@ elif mode == "STX + Portfel":
                     f"Symbol: STX.WA\nCena: {stx['price']:.4f}\nTrend: {stx['trend']}\n"
                     f"RSI: {stx['rsi']:.1f}\nPivot: {stx['pivot']:.4f}\nTP: {stx['tp']:.4f}\n"
                     f"SL: {stx['sl']:.4f}\nZmiana: {stx['change']:.2f}%\n"
-                    "Wydaj decyzję A2-FULL."
+                    "Wydaj decyzję A2-FULL z blokami #1–#5."
                 )
                 ans = call_gpt(client, system_prompt, prompt)
                 st.markdown(ans, unsafe_allow_html=True)
 
         with c2:
             df = stx["df"]
-
-            if df.empty or len(df) < 2:
+            if df is None or df.empty or len(df) < 2:
                 st.warning("Brak danych do wykresu.")
             else:
                 fig = go.Figure(
@@ -660,12 +718,10 @@ elif mode == "Moje typy":
             for i, d in enumerate(data_list):
                 with cols[i % 2]:
                     st.markdown(f"**{d['symbol']}** – {d['price']:.4f} ({d['change']:.2f}%) | RSI {d['rsi']:.1f}")
-
                     df = d["df"]
-                    if df.empty or len(df) < 2:
+                    if df is None or df.empty or len(df) < 2:
                         st.warning("Brak danych do wykresu.")
                         continue
-
                     fig = go.Figure(
                         data=[
                             go.Candlestick(
@@ -692,7 +748,6 @@ elif mode == "Moje typy":
                         f"- {d['symbol']}: {d['price']:.4f}, RSI {d['rsi']:.1f}, "
                         f"zmiana {d['change']:.2f}%, {d['trend']}\n"
                     )
-
                 system_prompt = build_trading_system_prompt(ai_style)
-                ans = call_gpt(client, system_prompt, text + "\nWydaj decyzje A2-FULL.")
+                ans = call_gpt(client, system_prompt, text + "\nWydaj decyzje A2-FULL z blokami #1–#5.")
                 st.markdown(ans, unsafe_allow_html=True)
