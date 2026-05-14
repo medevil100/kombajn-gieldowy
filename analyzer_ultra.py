@@ -1,3 +1,4 @@
+
 import os
 from datetime import datetime, time as dtime
 
@@ -13,7 +14,7 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 # KONFIG / STYL
 # =========================================================
-st.set_page_config(page_title="AI PENNY KOMBAJN ULTRA v4", page_icon="📈", layout="wide")
+st.set_page_config(page_title="AI PENNY KOMBAJN ULTRA v5", page_icon="📈", layout="wide")
 
 st.markdown("""
 <style>
@@ -81,7 +82,6 @@ def load_moja20():
                     return content
         except:
             pass
-    # domyślnie weź 20 z presetów
     return ", ".join((preset_gpw_penny() + preset_usa_penny())[:20])
 
 def save_moja20(text):
@@ -193,8 +193,7 @@ def build_trading_system_prompt(style: str) -> str:
         "GORA (przewaga kupujacych), DOL (przewaga sprzedajacych), SRODEK (konsolidacja / brak przewagi). "
         "Podawaj: 1) werdykt GORA/DOL/SRODEK, 2) strefe wejscia (konkretne poziomy), "
         "3) gdzie UWAZAC (slaba plynnosc, duze knoty, gapy, newsy), 4) ryzyko 1-10. "
-        "Nie pisz ogolnych ostrzezen typu 'pamietaj ze inwestowanie jest ryzykowne'. "
-        "Krotko, konkretnie, jak do tradera."
+        "Nie pisz ogolnych ostrzezen. Krotko, konkretnie, jak do tradera."
     )
     if style == "SCALP":
         return base + " Styl: SCALP – horyzont minuty-godziny, liczy sie szybki ruch i wyjscie."
@@ -222,8 +221,27 @@ def call_gpt(client: OpenAI | None, system_prompt: str, user_prompt: str) -> str
     except Exception as e:
         return f"(AI ERROR: {e})"
 
+def ai_growth_probability(client, symbol, price, rsi, change, trend, pivot):
+    system_prompt = (
+        "Jestes systemem tradingowym. Twoim zadaniem jest oszacowanie prawdopodobienstwa "
+        "ruchu w gore lub w dol na podstawie RSI, momentum, trendu i pivotow. "
+        "Zwracaj TYLKO liczby procentowe i krotki komentarz. "
+        "Format odpowiedzi:\n"
+        "WZROST: xx%\nSPADEK: xx%\nKomentarz: ..."
+    )
+    user_prompt = (
+        f"Symbol: {symbol}\n"
+        f"Cena: {price}\n"
+        f"RSI: {rsi}\n"
+        f"Zmiana dzienna: {change}\n"
+        f"Trend: {trend}\n"
+        f"Pivot: {pivot}\n"
+        "Oszacuj prawdopodobienstwo ruchu w gore i w dol."
+    )
+    return call_gpt(client, system_prompt, user_prompt)
+
 # =========================================================
-# AUTO‑SCALPER – OSOBNY TRYB
+# AUTO‑SCALPER – PRO
 # =========================================================
 def auto_scalper_scan(tickers):
     sygnaly = []
@@ -312,7 +330,7 @@ def analiza_portfela():
 # SIDEBAR
 # =========================================================
 with st.sidebar:
-    st.title("⚙️ PENNY KOMBAJN ULTRA v4")
+    st.title("⚙️ PENNY KOMBAJN ULTRA v5")
 
     api_key = st.secrets.get("OPENAI_API_KEY")
     if api_key:
@@ -326,7 +344,7 @@ with st.sidebar:
 
     preset_choice = st.selectbox(
         "Preset tickerów",
-        ["MIX (Penny GPW + USA)", "Tylko GPW (penny)", "Tylko USA (penny)", "MOJA 20‑TKA"],
+        ["MIX (Penny GPW + USA)", "Tylko GPW (penny)", "Tylko USA (penny)", "MOJE TYPY (20)"],
     )
 
     if preset_choice == "MIX (Penny GPW + USA)":
@@ -338,17 +356,13 @@ with st.sidebar:
     else:
         base_list = load_moja20()
 
-    tickers_input = st.text_area("Symbole (przecinek)", value=base_list, height=120)
-
-    col_w1, col_w2 = st.columns(2)
-    with col_w1:
-        if st.button("💾 Zapisz jako MOJA 20‑TKA"):
-            save_moja20(tickers_input)
-            st.success("Zapisano MOJA 20‑TKA do pliku.")
-    with col_w2:
-        if st.button("🔁 Wczytaj MOJA 20‑TKA"):
-            tickers_input = load_moja20()
-            st.experimental_rerun()
+    with st.form("tickers_form"):
+        tickers_input = st.text_area("Symbole (przecinek) – ENTER = odśwież", value=base_list, height=120)
+        submitted = st.form_submit_button("Zastosuj / Odśwież")
+        if submitted:
+            if preset_choice == "MOJE TYPY (20)":
+                save_moja20(tickers_input)
+            st.rerun()
 
     market_filter = st.radio("Filtr rynku", ["MIX", "GPW", "USA"], horizontal=True)
 
@@ -358,16 +372,18 @@ with st.sidebar:
         "Tryb",
         [
             "Monitoring rynku",
-            "Heatmapa rynku",
-            "AUTO‑SCALPER (15 min, AI)",
+            "Heatmapa trendu",
+            "AUTO‑SCALPER PRO (15 min, AI + alert)",
+            "AI TREND MAPA (rynek)",
             "AI analiza listy (20 wybranych)",
             "STX + Mój portfel",
+            "Moje typy – osobne okno",
         ],
     )
 
-    if mode == "AUTO‑SCALPER (15 min, AI)":
+    if mode == "AUTO‑SCALPER PRO (15 min, AI + alert)":
         st_autorefresh(interval=15 * 60 * 1000, key="auto_scalper_refresh")
-        st.info("AUTO‑SCALPER odświeża się co 15 minut. Dźwięk ustawiasz w telefonie/PC (powiadomienia przeglądarki).")
+        st.info("AUTO‑SCALPER odświeża się co 15 minut. Dźwięk/powiadomienie – przez przeglądarkę.")
     else:
         refresh_min = st.slider("Odświeżanie (minuty)", 15, 60, 30, step=5)
         st_autorefresh(interval=refresh_min * 60 * 1000, key="auto_refresh")
@@ -385,7 +401,30 @@ elif market_filter == "USA":
 tickers_active = [t for t in tickers_all if is_market_open(t)]
 tickers_active = tickers_active[:20]
 
-st.title("📈 AI PENNY KOMBAJN ULTRA v4")
+st.title("📈 AI PENNY KOMBAJN ULTRA v5")
+
+# =========================================================
+# TOP 5 OKAZJI / ZAGROŻEŃ – pomocnicze
+# =========================================================
+def top_okazje_zagrozenia(data_list):
+    if not data_list:
+        return [], []
+    df = pd.DataFrame(
+        [
+            {
+                "symbol": d["symbol"],
+                "change": d["change"],
+                "rsi": d["rsi"],
+                "trend": d["trend"],
+            }
+            for d in data_list
+        ]
+    )
+    # okazje: mocno w dół, RSI nisko
+    df_ok = df.sort_values(["rsi", "change"]).head(5)
+    # zagrożenia: mocno w górę, RSI wysoko
+    df_zag = df.sort_values(["rsi", "change"], ascending=[False, False]).head(5)
+    return df_ok, df_zag
 
 # =========================================================
 # TRYB: MONITORING – LEKKI, BEZ ML
@@ -414,6 +453,21 @@ if mode == "Monitoring rynku":
                 data_list = sorted(data_list, key=lambda x: x["change"], reverse=True)
 
             st.subheader("📊 Monitoring rynku (max 20, tylko aktywne)")
+
+            df_ok, df_zag = top_okazje_zagrozenia(data_list)
+            c_ok, c_zag = st.columns(2)
+            with c_ok:
+                st.markdown("#### 🟢 TOP 5 okazji dnia")
+                if df_ok.empty:
+                    st.caption("Brak wyraźnych okazji.")
+                else:
+                    st.dataframe(df_ok.set_index("symbol"), use_container_width=True)
+            with c_zag:
+                st.markdown("#### 🔴 TOP 5 zagrożeń dnia")
+                if df_zag.empty:
+                    st.caption("Brak wyraźnych zagrożeń.")
+                else:
+                    st.dataframe(df_zag.set_index("symbol"), use_container_width=True)
 
             top_cols = st.columns(min(len(data_list), 4))
             for i, d in enumerate(data_list[:12]):
@@ -458,8 +512,22 @@ if mode == "Monitoring rynku":
                         ans = call_gpt(client, system_prompt, prompt)
                         st.session_state[f"ai_{d['symbol']}"] = ans
 
+                    if st.button(f"📈 WZROST % {d['symbol']}", key=f"grow_{d['symbol']}"):
+                        ans = ai_growth_probability(
+                            client,
+                            d["symbol"],
+                            d["price"],
+                            d["rsi"],
+                            d["change"],
+                            d["trend"],
+                            d["pivot"],
+                        )
+                        st.session_state[f"grow_{d['symbol']}"] = ans
+
                     if f"ai_{d['symbol']}" in st.session_state:
                         st.info(st.session_state[f"ai_{d['symbol']}"])
+                    if f"grow_{d['symbol']}" in st.session_state:
+                        st.success(st.session_state[f"grow_{d['symbol']}"])
 
                 with c2:
                     df = d["df"]
@@ -487,25 +555,27 @@ if mode == "Monitoring rynku":
                 st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================================================
-# TRYB: HEATMAPA – OSOBNY, LEKKI
+# TRYB: HEATMAPA TRENDÓW
 # =========================================================
-elif mode == "Heatmapa rynku":
-    st.subheader("Heatmapa rynku – RSI / Zmiana % (max 20, aktywne)")
+elif mode == "Heatmapa trendu":
+    st.subheader("Heatmapa trendu – RSI / Zmiana % / Trend (max 20, aktywne)")
     if not tickers_active:
         st.info("Brak aktywnych tickerów.")
     else:
         rows = []
         for t in tickers_active:
             try:
-                df = yf_cached(t, "60d", "1d")
-                if df.empty:
+                df = yf_cached(t, "120d", "1d")
+                if df.empty or len(df) < 20:
                     continue
                 close = df["Close"]
                 rsi = float(calculate_rsi(close).iloc[-1])
                 price = float(close.iloc[-1])
                 prev = float(close.iloc[-2])
                 zmiana = (price - prev) / prev * 100
-                rows.append({"Ticker": t, "RSI": rsi, "Zmiana %": zmiana})
+                sma200 = float(close.rolling(200).mean().iloc[-1])
+                trend = 1 if price > sma200 else -1
+                rows.append({"Ticker": t, "RSI": rsi, "Zmiana %": zmiana, "Trend": trend})
             except:
                 continue
 
@@ -513,7 +583,7 @@ elif mode == "Heatmapa rynku":
             st.warning("Brak danych do heatmapy.")
         else:
             df_hm = pd.DataFrame(rows).set_index("Ticker")
-            metric = st.selectbox("Metryka do heatmapy", ["RSI", "Zmiana %"])
+            metric = st.selectbox("Metryka do heatmapy", ["RSI", "Zmiana %", "Trend"])
             fig = px.imshow(
                 df_hm[[metric]].T,
                 color_continuous_scale="RdYlGn",
@@ -524,10 +594,10 @@ elif mode == "Heatmapa rynku":
             st.dataframe(df_hm.sort_values(metric, ascending=(metric == "RSI")), use_container_width=True)
 
 # =========================================================
-# TRYB: AUTO‑SCALPER – OSOBNY WORKER
+# TRYB: AUTO‑SCALPER PRO – AI + ALERT
 # =========================================================
-elif mode == "AUTO‑SCALPER (15 min, AI)":
-    st.subheader("AUTO‑SCALPER – sygnały co 15 minut (RSI + RVOL + AI)")
+elif mode == "AUTO‑SCALPER PRO (15 min, AI + alert)":
+    st.subheader("AUTO‑SCALPER PRO – sygnały co 15 minut (RSI + RVOL + AI + alert)")
     if not tickers_active:
         st.info("Brak aktywnych tickerów.")
     else:
@@ -550,7 +620,48 @@ elif mode == "AUTO‑SCALPER (15 min, AI)":
                 opis + "\nWybierz 2-3 najlepsze wejscia scalp, podaj strefe wejscia, SL i gdzie UWAZAC.",
             )
             st.write(ans)
-            st.caption("Dźwięk systemowy ustawiasz w telefonie/PC (powiadomienia przeglądarki).")
+            st.caption("Dźwięk/powiadomienia – ustawiasz w systemie/przeglądarce (np. powiadomienia strony).")
+
+# =========================================================
+# TRYB: AI TREND MAPA (RYNEK)
+# =========================================================
+elif mode == "AI TREND MAPA (rynek)":
+    st.subheader("AI TREND MAPA – ocena rynku (konkretnie, nie lanie wody)")
+    if not tickers_active:
+        st.info("Brak aktywnych tickerów.")
+    else:
+        rows = []
+        for t in tickers_active:
+            try:
+                df = yf_cached(t, "120d", "1d")
+                if df.empty or len(df) < 20:
+                    continue
+                close = df["Close"]
+                rsi = float(calculate_rsi(close).iloc[-1])
+                price = float(close.iloc[-1])
+                prev = float(close.iloc[-2])
+                zmiana = (price - prev) / prev * 100
+                sma200 = float(close.rolling(200).mean().iloc[-1])
+                trend = "HOSSA" if price > sma200 else "BESSA"
+                rows.append({"symbol": t, "price": price, "rsi": rsi, "zmiana": zmiana, "trend": trend})
+            except:
+                continue
+
+        if not rows:
+            st.warning("Brak danych do AI TREND MAPY.")
+        else:
+            text = "Ocen rynek na podstawie tych spolek. Daj konkret, nie lanie wody.\n\n"
+            for r in rows:
+                text += f"- {r['symbol']}: cena {r['price']:.4f}, RSI {r['rsi']:.1f}, zmiana {r['zmiana']:.2f}%, trend {r['trend']}\n"
+
+            system_prompt = (
+                "Jestes systemem analizujacym rynek. Masz ocenic ogolny stan rynku na podstawie listy spolek. "
+                "Podaj: 1) czy przewaza HOSSA/BESSA/KONSOLIDACJA, 2) ktore sektory/typy spolek wygladaja najlepiej, "
+                "3) gdzie jest najwieksze ryzyko, 4) czy to dobry moment na agresywne wejscia czy raczej selektywne. "
+                "Konkret, bez lania wody, max kilka krotkich akapitow."
+            )
+            ans = call_gpt(client, system_prompt, text)
+            st.write(ans)
 
 # =========================================================
 # TRYB: AI ANALIZA LISTY (20 WYBRANYCH)
@@ -665,3 +776,52 @@ elif mode == "STX + Mój portfel":
                 xaxis_rangeslider_visible=False,
             )
             st.plotly_chart(fig, use_container_width=True)
+
+# =========================================================
+# TRYB: MOJE TYPY – OSOBNE OKNO
+# =========================================================
+elif mode == "Moje typy – osobne okno":
+    st.subheader("Moje typy – osobne okno (MOJE 20, tylko aktywne)")
+    moja20_raw = load_moja20()
+    moja20_list = [t.strip().upper() for t in moja20_raw.split(",") if t.strip()]
+    moja20_active = [t for t in moja20_list if is_market_open(t)][:20]
+
+    if not moja20_active:
+        st.info("Brak aktywnych spółek z MOJE 20.")
+    else:
+        data_list = []
+        for t in moja20_active:
+            res = get_analysis(t)
+            if res:
+                data_list.append(res)
+
+        if not data_list:
+            st.warning("Brak danych dla MOJE 20.")
+        else:
+            st.markdown("#### Mini‑monitor (mobile friendly)")
+            cols = st.columns(2)
+            for i, d in enumerate(data_list):
+                with cols[i % 2]:
+                    st.markdown(f"**{d['symbol']}** – {d['price']:.4f} ({d['change']:.2f}%) | RSI {d['rsi']:.1f}")
+                    df = d["df"]
+                    fig = go.Figure(
+                        data=[
+                            go.Candlestick(
+                                x=df.index[-40:],
+                                open=df["Open"][-40:],
+                                high=df["High"][-40:],
+                                low=df["Low"][-40:],
+                                close=df["Close"][-40:],
+                                increasing_line_color="#22c55e",
+                                decreasing_line_color="#ef4444",
+                            )
+                        ]
+                    )
+                    fig.update_layout(
+                        template="plotly_dark",
+                        height=180,
+                        margin=dict(l=0, r=0, t=0, b=0),
+                        xaxis_rangeslider_visible=False,
+                        showlegend=False,
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
