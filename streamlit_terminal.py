@@ -1,31 +1,4 @@
 
-# 🟩 **CZĘŚĆ 1/4 FINALNEGO SKRYPTU ULTRA v6.1 PRO**
-
-### 🔥 ZASADY TEGO FINALNEGO SKRYPTU:
-- **Zero Styler** (żadnych `.style.applymap()`)  
-- **Zero gradientów**  
-- **Zero matplotlib**  
-- **Zero błędów Streamlit Cloud**  
-- **Kolorowanie całych wierszy HTML-em**  
-- **AI (#1–#5)**  
-- **Wybór modelu GPT**  
-- **Patch na puste wykresy**  
-- **Neon UI**  
-- **Twoja kolejność trybów (uporządkowana logicznie)**  
-- **W 100% działający**  
-
----
-
-# 🟩 CZĘŚĆ 1/4  
-(od importów do funkcji AI — gotowe, czyste, poprawione)
-
-👇 **Wklej to 1:1 do pliku**.  
-👇 **Nic nie zmieniaj**.  
-👇 **Czekaj na CZĘŚĆ 2/4** po wklejeniu.
-
----
-
-```python
 import os
 from datetime import datetime, time as dtime
 
