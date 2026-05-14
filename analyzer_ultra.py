@@ -14,7 +14,7 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 # KONFIG / STYL
 # =========================================================
-st.set_page_config(page_title="AI PENNY KOMBAJN ULTRA v5", page_icon="📈", layout="wide")
+st.set_page_config(page_title="AI PENNY KOMBAJN ULTRA v6", page_icon="📈", layout="wide")
 
 st.markdown("""
 <style>
@@ -31,7 +31,6 @@ h1, h2, h3, h4 { color: #e5e7eb; }
 </style>
 """, unsafe_allow_html=True)
 
-DB_FILE = "tickers_db.txt"
 MOJA20_FILE = "watchlist_moja20.txt"
 
 # =========================================================
@@ -52,7 +51,7 @@ def pobierz_kurs_usd():
         return 4.00
 
 # =========================================================
-# PRESET – TYLKO TANIE GPW + TANIE USA (bez drogich blue chipów)
+# PRESET – TYLKO TANIE GPW + TANIE USA
 # =========================================================
 def preset_gpw_penny():
     return [
@@ -115,7 +114,7 @@ def is_market_open(symbol: str) -> bool:
         return dtime(15, 30) <= now <= dtime(22, 5)
 
 # =========================================================
-# CACHE DANYCH – PRZYSPIESZENIE
+# CACHE DANYCH
 # =========================================================
 @st.cache_data(show_spinner=False)
 def yf_cached(symbol, period, interval):
@@ -127,7 +126,7 @@ def yf_cached(symbol, period, interval):
     return df
 
 # =========================================================
-# ANALIZA 15m + D1 (monitoring) – BEZ ML
+# ANALIZA 15m + D1
 # =========================================================
 def get_analysis(symbol):
     try:
@@ -177,7 +176,7 @@ def get_analysis(symbol):
         return None
 
 # =========================================================
-# AI – 4 STYLE: SCALP / DAY / SWING / LONG
+# AI – 4 STYLE + A2-FULL
 # =========================================================
 def get_openai_client(api_key: str | None):
     if not api_key:
@@ -189,20 +188,39 @@ def get_openai_client(api_key: str | None):
 
 def build_trading_system_prompt(style: str) -> str:
     base = (
-        "Jestes systemem tradingowym. Oceniaj kazda spolke w trzech kategoriach: "
-        "GORA (przewaga kupujacych), DOL (przewaga sprzedajacych), SRODEK (konsolidacja / brak przewagi). "
-        "Podawaj: 1) werdykt GORA/DOL/SRODEK, 2) strefe wejscia (konkretne poziomy), "
-        "3) gdzie UWAZAC (slaba plynnosc, duze knoty, gapy, newsy), 4) ryzyko 1-10. "
-        "Nie pisz ogolnych ostrzezen. Krotko, konkretnie, jak do tradera."
+        "Jestes analitykiem technicznym. Oceniaj kazda spolke profesjonalnie, bez lania wody. "
+        "Masz wydac decyzje: KUP / SPRZEDAJ / TRZYMAJ.\n\n"
+        "Format odpowiedzi:\n\n"
+        "DECYZJA: (KUP / SPRZEDAJ / TRZYMAJ)\n\n"
+        "Uzasadnienie:\n"
+        "- RSI: poziom + kierunek zmiany\n"
+        "- Trend: SMA200 + struktura swiec\n"
+        "- Momentum: czy rosnace / slabnace\n"
+        "- Wolumen: vs srednia\n"
+        "- Kluczowe poziomy: wsparcia / opory / pivoty\n"
+        "- Sygnały swiecowe: engulfing, pin-bar, wybicie, retest\n"
+        "- Kontekst rynku: czy rynek wspiera ruch\n\n"
+        "Wejscie:\n"
+        "- poziom wejscia (dokladny)\n"
+        "- alternatywne wejscie (jesli warunkowe)\n\n"
+        "SL:\n"
+        "- poziom SL z uzasadnieniem\n\n"
+        "TP:\n"
+        "- pierwszy target\n"
+        "- drugi target (jesli logiczny)\n\n"
+        "Ryzyko:\n"
+        "- ocena 1–10\n\n"
+        "Uwaga:\n"
+        "- niska plynnosc / gapy / newsy / falszywe wybicia\n\n"
     )
     if style == "SCALP":
-        return base + " Styl: SCALP – horyzont minuty-godziny, liczy sie szybki ruch i wyjscie."
+        return base + "Styl: SCALP – horyzont minuty-godziny, szybkie ruchy, liczy sie precyzja wejscia i wyjscia."
     if style == "DAY":
-        return base + " Styl: DAY – horyzont 1 dzien, pozycje zamykane przed koncem sesji."
+        return base + "Styl: DAY – horyzont 1 dzien, pozycje zamykane przed koncem sesji."
     if style == "SWING":
-        return base + " Styl: SWING – horyzont kilka dni, grasz fale w trendzie."
+        return base + "Styl: SWING – horyzont kilka dni, grasz fale w trendzie."
     if style == "LONG":
-        return base + " Styl: LONG – horyzont kilka tygodni, wazny trend i poziomy wsparcia/oporu."
+        return base + "Styl: LONG – horyzont kilka tygodni, wazny trend i kluczowe poziomy."
     return base
 
 def call_gpt(client: OpenAI | None, system_prompt: str, user_prompt: str) -> str:
@@ -223,11 +241,13 @@ def call_gpt(client: OpenAI | None, system_prompt: str, user_prompt: str) -> str
 
 def ai_growth_probability(client, symbol, price, rsi, change, trend, pivot):
     system_prompt = (
-        "Jestes systemem tradingowym. Twoim zadaniem jest oszacowanie prawdopodobienstwa "
+        "Jestes analitykiem technicznym. Twoim zadaniem jest oszacowanie prawdopodobienstwa "
         "ruchu w gore lub w dol na podstawie RSI, momentum, trendu i pivotow. "
-        "Zwracaj TYLKO liczby procentowe i krotki komentarz. "
+        "Zwracaj TYLKO liczby procentowe i krotki komentarz.\n\n"
         "Format odpowiedzi:\n"
-        "WZROST: xx%\nSPADEK: xx%\nKomentarz: ..."
+        "WZROST: xx%\n"
+        "SPADEK: xx%\n"
+        "Komentarz: ..."
     )
     user_prompt = (
         f"Symbol: {symbol}\n"
@@ -241,7 +261,7 @@ def ai_growth_probability(client, symbol, price, rsi, change, trend, pivot):
     return call_gpt(client, system_prompt, user_prompt)
 
 # =========================================================
-# AUTO‑SCALPER – PRO
+# AUTO‑SCALPER PRO
 # =========================================================
 def auto_scalper_scan(tickers):
     sygnaly = []
@@ -274,7 +294,7 @@ def auto_scalper_scan(tickers):
     return sygnaly
 
 # =========================================================
-# PANEL PORTFELA – STX + MOJE_AKCJE
+# PORTFEL
 # =========================================================
 def analiza_portfela():
     kurs_usd = pobierz_kurs_usd()
@@ -330,7 +350,7 @@ def analiza_portfela():
 # SIDEBAR
 # =========================================================
 with st.sidebar:
-    st.title("⚙️ PENNY KOMBAJN ULTRA v5")
+    st.title("⚙️ PENNY KOMBAJN ULTRA v6")
 
     api_key = st.secrets.get("OPENAI_API_KEY")
     if api_key:
@@ -383,13 +403,13 @@ with st.sidebar:
 
     if mode == "AUTO‑SCALPER PRO (15 min, AI + alert)":
         st_autorefresh(interval=15 * 60 * 1000, key="auto_scalper_refresh")
-        st.info("AUTO‑SCALPER odświeża się co 15 minut. Dźwięk/powiadomienie – przez przeglądarkę.")
+        st.info("AUTO‑SCALPER odświeża się co 15 minut.")
     else:
         refresh_min = st.slider("Odświeżanie (minuty)", 15, 60, 30, step=5)
         st_autorefresh(interval=refresh_min * 60 * 1000, key="auto_refresh")
 
 # =========================================================
-# LISTA TICKERÓW + FILTR RYNKU + LIMIT 20
+# LISTA TICKERÓW
 # =========================================================
 tickers_all = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
@@ -401,10 +421,10 @@ elif market_filter == "USA":
 tickers_active = [t for t in tickers_all if is_market_open(t)]
 tickers_active = tickers_active[:20]
 
-st.title("📈 AI PENNY KOMBAJN ULTRA v5")
+st.title("📈 AI PENNY KOMBAJN ULTRA v6")
 
 # =========================================================
-# TOP 5 OKAZJI / ZAGROŻEŃ – pomocnicze
+# TOP 5 OKAZJI / ZAGROŻEŃ
 # =========================================================
 def top_okazje_zagrozenia(data_list):
     if not data_list:
@@ -420,18 +440,16 @@ def top_okazje_zagrozenia(data_list):
             for d in data_list
         ]
     )
-    # okazje: mocno w dół, RSI nisko
     df_ok = df.sort_values(["rsi", "change"]).head(5)
-    # zagrożenia: mocno w górę, RSI wysoko
     df_zag = df.sort_values(["rsi", "change"], ascending=[False, False]).head(5)
     return df_ok, df_zag
 
 # =========================================================
-# TRYB: MONITORING – LEKKI, BEZ ML
+# MONITORING RYNKU
 # =========================================================
 if mode == "Monitoring rynku":
     if not tickers_active:
-        st.info("Brak aktywnych tickerów dla bieżącej godziny (GPW 9–17, USA 15:30–22).")
+        st.info("Brak aktywnych tickerów (GPW 9–17, USA 15:30–22).")
     else:
         sort_key = st.selectbox(
             "Sortowanie",
@@ -469,25 +487,6 @@ if mode == "Monitoring rynku":
                 else:
                     st.dataframe(df_zag.set_index("symbol"), use_container_width=True)
 
-            top_cols = st.columns(min(len(data_list), 4))
-            for i, d in enumerate(data_list[:12]):
-                with top_cols[i % 4]:
-                    c_col = "#22c55e" if d["change"] >= 0 else "#ef4444"
-                    st.markdown(
-                        f"""
-                        <div class="top-rank-card" style="border-top: 3px solid {d['trend_col']};">
-                            <b style="color:#e5e7eb;">{d['symbol']}</b><br>
-                            <span style="color:{c_col}; font-weight:bold;">{d['price']:.4f}</span><br>
-                            <span style="font-size:0.75rem; color:{d['trend_col']};">{d['trend']}</span><br>
-                            <div style="background:{d['rec_col']}; font-size:0.65rem; border-radius:4px; margin:4px 0; color:#020617; font-weight:600;">
-                                {d['rec']}
-                            </div>
-                            <span class="stat-label">RSI: {d['rsi']:.1f} | Zm: {d['change']:.2f}%</span>
-                        </div>
-                    """,
-                        unsafe_allow_html=True,
-                    )
-
             for d in data_list:
                 st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
                 c1, c2 = st.columns([1, 2])
@@ -502,15 +501,21 @@ if mode == "Monitoring rynku":
                     st.write(f"**TP:** {d['tp']:.4f} | **SL:** {d['sl']:.4f}")
                     st.caption("RSI < 30 – dół, > 70 – góra, 30–70 – środek (obserwacja).")
 
-                    if st.button(f"🧠 AI {d['symbol']}", key=f"btn_{d['symbol']}"):
+                    if st.button(f"🧠 AI decyzja {d['symbol']}", key=f"ai_{d['symbol']}"):
                         system_prompt = build_trading_system_prompt(ai_style)
                         prompt = (
-                            f"Symbol: {d['symbol']}, Cena: {d['price']:.4f}, Trend: {d['trend']}, "
-                            f"RSI: {d['rsi']:.1f}, Pivot: {d['pivot']:.4f}, TP: {d['tp']:.4f}, SL: {d['sl']:.4f}. "
-                            f"Podaj: 1) GORA/DOL/SRODEK, 2) strefe wejscia, 3) gdzie UWAZAC, 4) ryzyko 1-10."
+                            f"Symbol: {d['symbol']}\n"
+                            f"Cena: {d['price']:.4f}\n"
+                            f"Trend: {d['trend']}\n"
+                            f"RSI: {d['rsi']:.1f}\n"
+                            f"Pivot: {d['pivot']:.4f}\n"
+                            f"TP: {d['tp']:.4f}\n"
+                            f"SL: {d['sl']:.4f}\n"
+                            f"Zmiana dzienna: {d['change']:.2f}%\n"
+                            "Wydaj decyzje KUP / SPRZEDAJ / TRZYMAJ w formacie A2-FULL opisanym w system prompt."
                         )
                         ans = call_gpt(client, system_prompt, prompt)
-                        st.session_state[f"ai_{d['symbol']}"] = ans
+                        st.info(ans)
 
                     if st.button(f"📈 WZROST % {d['symbol']}", key=f"grow_{d['symbol']}"):
                         ans = ai_growth_probability(
@@ -522,12 +527,7 @@ if mode == "Monitoring rynku":
                             d["trend"],
                             d["pivot"],
                         )
-                        st.session_state[f"grow_{d['symbol']}"] = ans
-
-                    if f"ai_{d['symbol']}" in st.session_state:
-                        st.info(st.session_state[f"ai_{d['symbol']}"])
-                    if f"grow_{d['symbol']}" in st.session_state:
-                        st.success(st.session_state[f"grow_{d['symbol']}"])
+                        st.success(ans)
 
                 with c2:
                     df = d["df"]
@@ -555,7 +555,7 @@ if mode == "Monitoring rynku":
                 st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================================================
-# TRYB: HEATMAPA TRENDÓW
+# HEATMAPA TRENDÓW
 # =========================================================
 elif mode == "Heatmapa trendu":
     st.subheader("Heatmapa trendu – RSI / Zmiana % / Trend (max 20, aktywne)")
@@ -594,10 +594,10 @@ elif mode == "Heatmapa trendu":
             st.dataframe(df_hm.sort_values(metric, ascending=(metric == "RSI")), use_container_width=True)
 
 # =========================================================
-# TRYB: AUTO‑SCALPER PRO – AI + ALERT
+# AUTO‑SCALPER PRO
 # =========================================================
 elif mode == "AUTO‑SCALPER PRO (15 min, AI + alert)":
-    st.subheader("AUTO‑SCALPER PRO – sygnały co 15 minut (RSI + RVOL + AI + alert)")
+    st.subheader("AUTO‑SCALPER PRO – sygnały co 15 minut (RSI + RVOL + AI)")
     if not tickers_active:
         st.info("Brak aktywnych tickerów.")
     else:
@@ -620,13 +620,13 @@ elif mode == "AUTO‑SCALPER PRO (15 min, AI + alert)":
                 opis + "\nWybierz 2-3 najlepsze wejscia scalp, podaj strefe wejscia, SL i gdzie UWAZAC.",
             )
             st.write(ans)
-            st.caption("Dźwięk/powiadomienia – ustawiasz w systemie/przeglądarce (np. powiadomienia strony).")
+            st.caption("Alert dźwiękowy / powiadomienie ustawiasz w przeglądarce/systemie (powiadomienia strony).")
 
 # =========================================================
-# TRYB: AI TREND MAPA (RYNEK)
+# AI TREND MAPA
 # =========================================================
 elif mode == "AI TREND MAPA (rynek)":
-    st.subheader("AI TREND MAPA – ocena rynku (konkretnie, nie lanie wody)")
+    st.subheader("AI TREND MAPA – ocena rynku (konkretnie)")
     if not tickers_active:
         st.info("Brak aktywnych tickerów.")
     else:
@@ -650,21 +650,21 @@ elif mode == "AI TREND MAPA (rynek)":
         if not rows:
             st.warning("Brak danych do AI TREND MAPY.")
         else:
-            text = "Ocen rynek na podstawie tych spolek. Daj konkret, nie lanie wody.\n\n"
+            text = "Ocen rynek na podstawie tych spolek. Daj konkret, bez lania wody.\n\n"
             for r in rows:
                 text += f"- {r['symbol']}: cena {r['price']:.4f}, RSI {r['rsi']:.1f}, zmiana {r['zmiana']:.2f}%, trend {r['trend']}\n"
 
             system_prompt = (
-                "Jestes systemem analizujacym rynek. Masz ocenic ogolny stan rynku na podstawie listy spolek. "
-                "Podaj: 1) czy przewaza HOSSA/BESSA/KONSOLIDACJA, 2) ktore sektory/typy spolek wygladaja najlepiej, "
+                "Jestes analitykiem rynku. Masz ocenic ogolny stan rynku na podstawie listy spolek. "
+                "Podaj: 1) czy przewaza HOSSA/BESSA/KONSOLIDACJA, 2) ktore typy spolek wygladaja najlepiej, "
                 "3) gdzie jest najwieksze ryzyko, 4) czy to dobry moment na agresywne wejscia czy raczej selektywne. "
-                "Konkret, bez lania wody, max kilka krotkich akapitow."
+                "Konkret, max kilka krotkich akapitow, bez lania wody."
             )
             ans = call_gpt(client, system_prompt, text)
             st.write(ans)
 
 # =========================================================
-# TRYB: AI ANALIZA LISTY (20 WYBRANYCH)
+# AI ANALIZA LISTY
 # =========================================================
 elif mode == "AI analiza listy (20 wybranych)":
     st.subheader("AI analiza – 20 wybranych, tylko aktywne")
@@ -689,7 +689,7 @@ elif mode == "AI analiza listy (20 wybranych)":
         if not rows:
             st.warning("Brak danych do AI analizy.")
         else:
-            text = "Oceń te spolki w stylu " + ai_style + ":\n\n"
+            text = "Oceń te spolki w stylu " + ai_style + " (A2-FULL):\n\n"
             for r in rows:
                 text += f"- {r['symbol']}: cena {r['price']:.4f}, RSI {r['rsi']:.1f}, zmiana {r['zmiana']:.2f}%\n"
 
@@ -697,12 +697,12 @@ elif mode == "AI analiza listy (20 wybranych)":
             ans = call_gpt(
                 client,
                 system_prompt,
-                text + "\nDla kazdej: GORA/DOL/SRODEK, strefa wejscia, gdzie UWAZAC, ryzyko 1-10.",
+                text + "\nDla kazdej: decyzja KUP/SPRZEDAJ/TRZYMAJ w formacie A2-FULL.",
             )
             st.write(ans)
 
 # =========================================================
-# TRYB: STX + MÓJ PORTFEL
+# STX + PORTFEL
 # =========================================================
 elif mode == "STX + Mój portfel":
     st.subheader("STX + Mój portfel (realne pozycje)")
@@ -740,18 +740,21 @@ elif mode == "STX + Mój portfel":
             st.metric("Cena", f"{stx_data['price']:.4f}", f"{stx_data['change']:.2f}%")
             st.write(f"**Pivot:** {stx_data['pivot']:.4f} | **RSI:** {stx_data['rsi']:.1f}")
             st.write(f"**TP:** {stx_data['tp']:.4f} | **SL:** {stx_data['sl']:.4f}")
-            if st.button("🧠 AI STX.WA", key="ai_stx"):
+            if st.button("🧠 AI STX.WA (A2-FULL)", key="ai_stx"):
                 system_prompt = build_trading_system_prompt(ai_style)
                 prompt = (
-                    f"Symbol: STX.WA, Cena: {stx_data['price']:.4f}, Trend: {stx_data['trend']}, "
-                    f"RSI: {stx_data['rsi']:.1f}, Pivot: {stx_data['pivot']:.4f}, TP: {stx_data['tp']:.4f}, SL: {stx_data['sl']:.4f}. "
-                    f"Podaj: 1) GORA/DOL/SRODEK, 2) strefe wejscia, 3) gdzie UWAZAC, 4) ryzyko 1-10."
+                    f"Symbol: STX.WA\n"
+                    f"Cena: {stx_data['price']:.4f}\n"
+                    f"Trend: {stx_data['trend']}\n"
+                    f"RSI: {stx_data['rsi']:.1f}\n"
+                    f"Pivot: {stx_data['pivot']:.4f}\n"
+                    f"TP: {stx_data['tp']:.4f}\n"
+                    f"SL: {stx_data['sl']:.4f}\n"
+                    f"Zmiana dzienna: {stx_data['change']:.2f}%\n"
+                    "Wydaj decyzje KUP / SPRZEDAJ / TRZYMAJ w formacie A2-FULL."
                 )
                 ans = call_gpt(client, system_prompt, prompt)
-                st.session_state["ai_stx"] = ans
-
-            if "ai_stx" in st.session_state:
-                st.info(st.session_state["ai_stx"])
+                st.info(ans)
 
         with c2:
             df = stx_data["df"]
@@ -778,7 +781,7 @@ elif mode == "STX + Mój portfel":
             st.plotly_chart(fig, use_container_width=True)
 
 # =========================================================
-# TRYB: MOJE TYPY – OSOBNE OKNO
+# MOJE TYPY – OSOBNE OKNO
 # =========================================================
 elif mode == "Moje typy – osobne okno":
     st.subheader("Moje typy – osobne okno (MOJE 20, tylko aktywne)")
@@ -825,3 +828,23 @@ elif mode == "Moje typy – osobne okno":
                         showlegend=False,
                     )
                     st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("---")
+            st.markdown("### AI analiza MOJE 20 (A2‑FULL)")
+
+            if st.button("🧠 AI analiza MOJE 20 (A2‑FULL)", key="ai_moje20"):
+                text = "Oceń MOJE 20 w stylu " + ai_style + " (A2-FULL):\n\n"
+                for d in data_list:
+                    text += (
+                        f"- {d['symbol']}: cena {d['price']:.4f}, "
+                        f"RSI {d['rsi']:.1f}, zmiana {d['change']:.2f}%, "
+                        f"trend {d['trend']}\n"
+                    )
+
+                system_prompt = build_trading_system_prompt(ai_style)
+                ans = call_gpt(
+                    client,
+                    system_prompt,
+                    text + "\nDla każdej spółki wydaj decyzję KUP/SPRZEDAJ/TRZYMAJ w formacie A2-FULL."
+                )
+                st.info(ans)
