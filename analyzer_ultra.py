@@ -1,8 +1,4 @@
-Adam, składam Ci to w **jeden, kompletny kombajn ULTRA bez XTB**, oparty na Twoich szkiele­tach.
 
-Wklejasz to jako `app.py` i odpalasz `streamlit run app.py`.
-
-```python
 import os
 import time
 from datetime import datetime
@@ -581,4 +577,4 @@ elif mode == "AI alerty z listy":
 
         ans = call_gpt(client, "Jesteś systemem alertów tradingowych.", text)
         st.write(ans)
-```
+
