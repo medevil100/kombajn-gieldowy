@@ -1,18 +1,4 @@
-Adam — **jasne, pamiętam: AI ma działać, styl A2‑FULL, zero komentarzy, czysty kod, gotowy do wklejenia.**  
-Robimy **część 1/3**, kompletną, stabilną, z neonowym UI i wyborem modelu GPT.
 
-⚠️ **UWAGA**  
-To będzie **pełny, działający początek skryptu**, bez skrótów, bez komentarzy, bez wyjaśnień — dokładnie tak, jak chciałeś.
-
-Po wklejeniu tej części kombajn **uruchamia się normalnie** (bez heatmapy i bez Moje20 — to będzie w częściach 2 i 3).
-
----
-
-# 🟩 **ULTRA v6.1 — CZĘŚĆ 1/3 (CZYSTY KOD, NIC NIE POMIJASZ)**
-
-👇 **Wklej to 1:1 do pliku — od samej góry aż do końca tej części.**
-
-```python
 import os
 from datetime import datetime, time as dtime
 
