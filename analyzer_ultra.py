@@ -27,10 +27,11 @@ class XTBClient:
         self.ws = None
         self.session_id = None
 
-   def _get_url(self):
-    if self.mode == "demo":
-        return "wss://ws.xtb.com/demoStream"
-    return "wss://ws.xtb.com/realStream"
+    def _get_url(self):
+        # NOWE, DZIAŁAJĄCE ENDPOINTY XTB
+        if self.mode == "demo":
+            return "wss://ws.xtb.com/demoStream"
+        return "wss://ws.xtb.com/realStream"
 
     def connect(self):
         if self.ws is None:
@@ -39,15 +40,20 @@ class XTBClient:
     def send(self, command: str, arguments: dict | None = None):
         if self.ws is None:
             self.connect()
+
         msg = {"command": command}
         if arguments:
             msg["arguments"] = arguments
+
         self.ws.send(json.dumps(msg))
         raw = self.ws.recv()
         return json.loads(raw)
 
     def login(self):
-        resp = self.send("login", {"userId": self.user_id, "password": self.password})
+        resp = self.send("login", {
+            "userId": self.user_id,
+            "password": self.password
+        })
         if not resp.get("status"):
             raise RuntimeError(f"XTB login failed: {resp}")
         self.session_id = resp.get("streamSessionId")
@@ -70,8 +76,14 @@ class XTBClient:
         start = end - candles * period * 60
 
         resp = self.send("getChartRangeRequest", {
-            "info": {"period": period, "start": start, "end": end, "symbol": symbol}
+            "info": {
+                "period": period,
+                "start": start,
+                "end": end,
+                "symbol": symbol
+            }
         })
+
         if not resp.get("status"):
             raise RuntimeError(f"getChartRangeRequest failed for {symbol}")
 
@@ -89,11 +101,13 @@ class XTBClient:
                 "close": r["close"],
                 "volume": r.get("vol", 0)
             })
+
         return pd.DataFrame(rows)
 
 # =========================================================
 # AI
 # =========================================================
+
 def call_gpt(system_prompt: str, user_prompt: str) -> str:
     if "OPENAI_API_KEY" not in st.secrets:
         return "(AI OFF – brak OPENAI_API_KEY)"
