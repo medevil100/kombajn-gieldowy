@@ -3,36 +3,32 @@ import pandas as pd
 import numpy as np
 import pandas_ta as ta
 import plotly.express as px
-from datetime import datetime, timedelta
+import plotly.graph_objects as go
+from datetime import datetime
 import json
 import time
 import requests
 from websocket import create_connection
 
 # =========================================================
-# KONFIGURACJA APLIKACJI
+# KONFIGURACJA
 # =========================================================
-st.set_page_config(page_title="Kombajn Giełdowy XTB REAL", layout="wide")
-st.set_option("client.showErrorDetails", False)
-
-st.title("📈 Kombajn Giełdowy – XTB REAL + GPT‑4.1 AI alerty")
+st.set_page_config(page_title="Kombajn Giełdowy XTB ULTRA", layout="wide")
+st.title("📈 Kombajn Giełdowy – XTB REAL + GPT‑4.1 (ULTRA)")
 
 # =========================================================
-# KLIENT XTB (xAPI WebSocket – REAL/DEMO)
+# KLIENT XTB
 # =========================================================
 class XTBClient:
     def __init__(self, user_id: str, password: str, mode: str = "real"):
         self.user_id = user_id
         self.password = password
-        self.mode = mode  # "real" lub "demo"
+        self.mode = mode
         self.ws = None
-        self.stream_ws = None
         self.session_id = None
 
     def _get_url(self):
-        if self.mode == "demo":
-            return "wss://ws.xtb.com/demo"
-        return "wss://ws.xtb.com/real"
+        return "wss://ws.xtb.com/demo" if self.mode == "demo" else "wss://ws.xtb.com/real"
 
     def connect(self):
         if self.ws is None:
@@ -42,17 +38,14 @@ class XTBClient:
         if self.ws is None:
             self.connect()
         msg = {"command": command}
-        if arguments is not None:
+        if arguments:
             msg["arguments"] = arguments
         self.ws.send(json.dumps(msg))
         raw = self.ws.recv()
         return json.loads(raw)
 
     def login(self):
-        resp = self.send("login", {
-            "userId": self.user_id,
-            "password": self.password
-        })
+        resp = self.send("login", {"userId": self.user_id, "password": self.password})
         if not resp.get("status"):
             raise RuntimeError(f"XTB login failed: {resp}")
         self.session_id = resp.get("streamSessionId")
@@ -63,41 +56,26 @@ class XTBClient:
             raise RuntimeError("getAllSymbols failed")
         return resp["returnData"]
 
-    def get_gpw_stocks(self, limit: int | None = None):
+    def get_gpw_stocks(self):
         data = self.get_all_symbols()
-        stocks = [
+        return [
             s for s in data
-            if s.get("categoryName") == "STOCK"
+            if s.get("categoryName") == "STOCK" and s.get("currency") == "PLN"
         ]
-        if limit:
-            stocks = stocks[:limit]
-        return stocks
 
-    def get_ohlc(self, symbol: str, period: int = 1440, candles: int = 200) -> pd.DataFrame:
-        """
-        period (minuty): 1, 5, 15, 30, 60, 240, 1440 (D1)
-        """
+    def get_ohlc(self, symbol: str, period: int = 1440, candles: int = 200):
         end = int(time.time())
-        # przybliżony start – candles * period * 60
         start = end - candles * period * 60
 
         resp = self.send("getChartRangeRequest", {
-            "info": {
-                "period": period,
-                "start": start,
-                "end": end,
-                "symbol": symbol
-            }
+            "info": {"period": period, "start": start, "end": end, "symbol": symbol}
         })
         if not resp.get("status"):
             raise RuntimeError(f"getChartRangeRequest failed for {symbol}")
 
         data = resp["returnData"]["rateInfos"]
-        if not data:
-            raise RuntimeError(f"No OHLC data for {symbol}")
-
-        # XTB zwraca czas jako offset od startTime
         start_time = resp["returnData"]["info"]["start"]
+
         rows = []
         for r in data:
             t = (start_time + r["ctm"]) / 1000.0
@@ -109,28 +87,23 @@ class XTBClient:
                 "close": r["close"],
                 "volume": r.get("vol", 0)
             })
-        df = pd.DataFrame(rows)
-        return df.tail(candles)
+        return pd.DataFrame(rows)
 
 # =========================================================
-# AI – GPT‑4.1: KOMENTARZE I ALERTY
+# AI
 # =========================================================
 def call_gpt(system_prompt: str, user_prompt: str) -> str:
     if "OPENAI_API_KEY" not in st.secrets:
-        return "(AI OFF – brak OPENAI_API_KEY w secrets.toml)"
-
-    api_key = st.secrets["OPENAI_API_KEY"]
-    model = st.secrets.get("OPENAI_MODEL", "gpt-4.1")
-
+        return "(AI OFF – brak OPENAI_API_KEY)"
     try:
         r = requests.post(
             "https://api.openai.com/v1/chat/completions",
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Bearer {st.secrets['OPENAI_API_KEY']}",
                 "Content-Type": "application/json"
             },
             data=json.dumps({
-                "model": model,
+                "model": st.secrets.get("OPENAI_MODEL", "gpt-4.1"),
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -139,279 +112,158 @@ def call_gpt(system_prompt: str, user_prompt: str) -> str:
             }),
             timeout=20
         )
-        data = r.json()
-        return data["choices"][0]["message"]["content"].strip()
+        return r.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
         return f"(AI ERROR: {e})"
 
-def generate_ai_comment(row: pd.Series, profile: str) -> str:
-    user_prompt = f"""
-Spółka: {row['symbol']}
-Profil: {profile}
-
-Dane:
-Cena: {row['price']:.2f}
-RSI(14): {row['rsi']:.1f}
-Momentum 5d: {row['mom5']:.2%}
-Momentum 20d: {row['mom20']:.2%}
-Momentum 60d: {row['mom60']:.2%}
-SMA20: {row['sma20']:.2f}
-SMA50: {row['sma50']:.2f}
-Score: {row['score']:.4f}
-
-Napisz 1–2 zdania po polsku:
-- konkretnie,
-- bez lania wody,
-- uwzględnij momentum, RSI i pozycję względem SMA.
-"""
-    return call_gpt(
-        "Jesteś analitykiem giełdowym, piszesz krótko, konkretnie, bez marketingu.",
-        user_prompt
-    )
-
-def generate_ai_alerts(rows: list[dict]) -> str:
-    """
-    rows: lista słowników z danymi spółek (top N)
-    """
-    text = "Masz wygenerować krótkie alerty tradingowe dla poniższych spółek.\n\n"
-    for r in rows:
-        text += (
-            f"- {r['symbol']}: cena {r['price']:.2f}, RSI {r['rsi']:.1f}, "
-            f"mom20 {r['mom20']:.2%}, score {r['score']:.4f}\n"
-        )
-    text += "\nZwróć 3–6 najciekawszych alertów (po polsku, krótko)."
-
-    return call_gpt(
-        "Jesteś systemem alertów tradingowych. Wybierasz tylko najciekawsze setupy.",
-        text
-    )
-
 # =========================================================
-# WSKAŹNIKI I SCORING
+# WSKAŹNIKI
 # =========================================================
-def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+def compute_indicators(df):
     df = df.copy()
     df["rsi"] = ta.rsi(df["close"], length=14)
     df["sma20"] = ta.sma(df["close"], length=20)
     df["sma50"] = ta.sma(df["close"], length=50)
-    df["mom5"] = df["close"].pct_change(5)
     df["mom20"] = df["close"].pct_change(20)
-    df["mom60"] = df["close"].pct_change(60)
     return df
 
-def score_swing(row: pd.Series) -> float:
-    score = 0.0
-    if pd.notna(row["mom20"]):
-        score += float(row["mom20"]) * 0.6
-    if pd.notna(row["mom60"]):
-        score += float(row["mom60"]) * 0.4
-    if pd.notna(row["rsi"]):
-        score += (1 - abs(float(row["rsi"]) - 50) / 50) * 0.5
-    if row["price"] > row["sma20"]:
-        score += 0.3
-    if row["price"] > row["sma50"]:
-        score += 0.2
-    return score
-
-def score_day(row: pd.Series) -> float:
-    score = 0.0
-    if pd.notna(row["mom5"]):
-        score += float(row["mom5"]) * 0.5
-    if pd.notna(row["mom20"]):
-        score += float(row["mom20"]) * 0.3
-    if pd.notna(row["rsi"]):
-        score += (1 - abs(float(row["rsi"]) - 50) / 50) * 0.7
-    if row["price"] > row["sma20"]:
-        score += 0.2
-    return score
-
 # =========================================================
-# CACHE – POD CLOUD
+# CACHE
 # =========================================================
 @st.cache_data(ttl=300)
-def cached_symbols(user_id: str, mode: str) -> pd.DataFrame:
+def cached_symbols(user_id, mode):
     client = get_client(user_id, mode)
-    data = client.get_gpw_stocks()
-    return pd.DataFrame(data)
+    return pd.DataFrame(client.get_gpw_stocks())
 
 @st.cache_data(ttl=300)
-def cached_ohlc(user_id: str, mode: str, symbol: str, period: int, candles: int) -> pd.DataFrame:
+def cached_ohlc(user_id, mode, symbol, period, candles):
     client = get_client(user_id, mode)
-    df = client.get_ohlc(symbol, period=period, candles=candles)
+    df = client.get_ohlc(symbol, period, candles)
     return compute_indicators(df)
 
 # =========================================================
-# KLIENT XTB W SESSION_STATE
+# SESSION CLIENT
 # =========================================================
-def get_client(user_id: str, mode: str) -> XTBClient:
+def get_client(user_id, mode):
     key = f"xtb_{mode}_{user_id}"
     if key not in st.session_state:
-        # hasło nie jest trzymane w session_state – logowanie niżej
-        raise RuntimeError("Brak zalogowanego klienta XTB w session_state")
+        raise RuntimeError("Brak zalogowanego klienta XTB")
     return st.session_state[key]
 
-def set_client(user_id: str, password: str, mode: str):
-    key = f"xtb_{mode}_{user_id}"
-    client = XTBClient(user_id=user_id, password=password, mode=mode)
+def set_client(user_id, password, mode):
+    client = XTBClient(user_id, password, mode)
     client.login()
-    st.session_state[key] = client
+    st.session_state[f"xtb_{mode}_{user_id}"] = client
 
 # =========================================================
-# SIDEBAR – LOGOWANIE + USTAWIENIA
+# SIDEBAR
 # =========================================================
 st.sidebar.header("🔐 XTB REAL / DEMO")
+xtb_login = st.sidebar.text_input("Login XTB")
+xtb_password = st.sidebar.text_input("Hasło XTB", type="password")
+xtb_mode = st.sidebar.selectbox("Tryb XTB", ["real", "demo"])
 
-xtb_login = st.sidebar.text_input("Login XTB", value="", type="default")
-xtb_password = st.sidebar.text_input("Hasło XTB", value="", type="password")
-xtb_mode = st.sidebar.selectbox("Tryb XTB", ["real", "demo"], index=0)
-
-login_btn = st.sidebar.button("Połącz z XTB")
-
-if login_btn:
+if st.sidebar.button("Połącz z XTB"):
     try:
         set_client(xtb_login, xtb_password, xtb_mode)
-        st.sidebar.success("Zalogowano do XTB.")
+        st.sidebar.success("Zalogowano.")
     except Exception as e:
         st.sidebar.error(f"Błąd logowania: {e}")
 
 menu = st.sidebar.radio("Menu", ["Ranking", "Szczegóły", "AI alerty"])
-profile = st.sidebar.selectbox("Profil tradingowy", ["Swing", "Day"], index=0)
 
 # =========================================================
-# GUARD – WYMAGANE LOGOWANIE
+# GUARD
 # =========================================================
 if xtb_login == "" or f"xtb_{xtb_mode}_{xtb_login}" not in st.session_state:
-    st.warning("Zaloguj się do XTB (login + hasło) po lewej, potem wybierz menu.")
+    st.warning("Zaloguj się do XTB.")
     st.stop()
 
 # =========================================================
 # RANKING
 # =========================================================
 if menu == "Ranking":
-    st.subheader(f"Ranking spółek – XTB {xtb_mode.upper()} – profil {profile}")
-
-    limit = st.slider("Ilość spółek w rankingu", 10, 150, 50, step=10)
-    period = 1440  # D1
-    candles = 200
-
-    if st.button("🔄 Odśwież ranking"):
-        st.cache_data.clear()
+    st.subheader("Ranking spółek GPW")
 
     symbols_df = cached_symbols(xtb_login, xtb_mode)
-    # bierzemy tylko pierwsze N, żeby nie zabić Cloud
-    symbols_df = symbols_df.head(limit)
+
+    # 🔥 FILTROWANIE SEKTORÓW
+    sectors = sorted(symbols_df["groupName"].dropna().unique())
+    selected_sector = st.selectbox("Filtr sektorów", ["Wszystkie"] + sectors)
+
+    if selected_sector != "Wszystkie":
+        symbols_df = symbols_df[symbols_df["groupName"] == selected_sector]
+
+    limit = st.slider("Ilość spółek", 10, 150, 50)
 
     rows = []
-    for _, s in symbols_df.iterrows():
-        symbol = s["symbol"]
+    for _, s in symbols_df.head(limit).iterrows():
         try:
-            df = cached_ohlc(xtb_login, xtb_mode, symbol, period, candles)
+            df = cached_ohlc(xtb_login, xtb_mode, s["symbol"], 1440, 200)
             last = df.iloc[-1]
-            row = {
-                "symbol": symbol,
-                "price": float(last["close"]),
-                "rsi": float(last["rsi"]),
-                "mom5": float(last["mom5"]),
-                "mom20": float(last["mom20"]),
-                "mom60": float(last["mom60"]),
-                "sma20": float(last["sma20"]),
-                "sma50": float(last["sma50"]),
-            }
-            if profile == "Swing":
-                row["score"] = score_swing(pd.Series(row))
-            else:
-                row["score"] = score_day(pd.Series(row))
-            rows.append(row)
-        except Exception:
+            rows.append({
+                "symbol": s["symbol"],
+                "price": last["close"],
+                "rsi": last["rsi"],
+                "mom20": last["mom20"],
+                "sma20": last["sma20"],
+                "sma50": last["sma50"],
+            })
+        except:
             continue
 
-    if not rows:
-        st.error("Brak danych OHLC z XTB dla wybranych spółek.")
-        st.stop()
-
-    rank_df = pd.DataFrame(rows).sort_values("score", ascending=False)
+    rank_df = pd.DataFrame(rows).sort_values("mom20", ascending=False)
     st.dataframe(rank_df, use_container_width=True)
 
-    st.markdown("### AI‑komentarze (GPT‑4.1) – top 10")
-    top10 = rank_df.head(10)
-    for _, r in top10.iterrows():
-        comment = generate_ai_comment(r, profile)
-        st.markdown(f"**{r['symbol']}** — {comment}")
-
 # =========================================================
-# SZCZEGÓŁY SPÓŁKI
+# SZCZEGÓŁY — WYKRES ŚWIECOWY
 # =========================================================
 if menu == "Szczegóły":
-    st.subheader("Szczegóły spółki – XTB")
+    st.subheader("Szczegóły spółki – wykres świecowy")
 
     symbols_df = cached_symbols(xtb_login, xtb_mode)
     symbol = st.selectbox("Wybierz spółkę", symbols_df["symbol"].tolist())
 
-    period = st.selectbox("Interwał", ["D1", "H4", "H1"], index=0)
-    period_map = {"D1": 1440, "H4": 240, "H1": 60}
-    candles = st.slider("Liczba świec", 50, 400, 200, step=50)
+    df = cached_ohlc(xtb_login, xtb_mode, symbol, 1440, 200)
 
-    if st.button("🔄 Odśwież dane spółki"):
-        st.cache_data.clear()
+    fig = go.Figure(data=[
+        go.Candlestick(
+            x=df["time"],
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"]
+        )
+    ])
+    fig.update_layout(title=f"Wykres świecowy – {symbol}", height=600)
 
-    df = cached_ohlc(xtb_login, xtb_mode, symbol, period_map[period], candles)
-    df_plot = df.copy()
-    df_plot["time"] = df_plot["time"].astype(str)
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        fig_price = px.line(df_plot, x="time", y="close", title=f"Cena – {symbol}")
-        st.plotly_chart(fig_price, use_container_width=True)
-
-    with col2:
-        fig_rsi = px.line(df_plot, x="time", y="rsi", title="RSI(14)")
-        st.plotly_chart(fig_rsi, use_container_width=True)
-
-    st.markdown("### Ostatnie świece")
+    st.plotly_chart(fig, use_container_width=True)
     st.dataframe(df.tail(20), use_container_width=True)
 
 # =========================================================
 # AI ALERTY
 # =========================================================
 if menu == "AI alerty":
-    st.subheader("AI alerty – GPT‑4.1 na podstawie rankingu")
+    st.subheader("AI alerty – GPT‑4.1")
 
-    limit = st.slider("Ilość spółek do analizy alertów", 10, 150, 50, step=10)
-    period = 1440
-    candles = 200
-
-    if st.button("🔄 Odśwież dane do alertów"):
-        st.cache_data.clear()
-
-    symbols_df = cached_symbols(xtb_login, xtb_mode)
-    symbols_df = symbols_df.head(limit)
+    symbols_df = cached_symbols(xtb_login, xtb_mode).head(50)
 
     rows = []
     for _, s in symbols_df.iterrows():
-        symbol = s["symbol"]
         try:
-            df = cached_ohlc(xtb_login, xtb_mode, symbol, period, candles)
+            df = cached_ohlc(xtb_login, xtb_mode, s["symbol"], 1440, 200)
             last = df.iloc[-1]
-            row = {
-                "symbol": symbol,
-                "price": float(last["close"]),
-                "rsi": float(last["rsi"]),
-                "mom5": float(last["mom5"]),
-                "mom20": float(last["mom20"]),
-                "mom60": float(last["mom60"]),
-                "sma20": float(last["sma20"]),
-                "sma50": float(last["sma50"]),
-            }
-            row["score"] = score_swing(pd.Series(row))
-            rows.append(row)
-        except Exception:
+            rows.append({
+                "symbol": s["symbol"],
+                "price": last["close"],
+                "rsi": last["rsi"],
+                "mom20": last["mom20"],
+            })
+        except:
             continue
 
-    if not rows:
-        st.error("Brak danych do alertów.")
-        st.stop()
+    text = "Wygeneruj alerty tradingowe dla spółek:\n\n"
+    for r in rows:
+        text += f"- {r['symbol']}: cena {r['price']:.2f}, RSI {r['rsi']:.1f}, mom20 {r['mom20']:.2%}\n"
 
-    alerts_text = generate_ai_alerts(rows)
-    st.markdown("### 🔔 AI‑alerty (GPT‑4.1)")
-    st.write(alerts_text)
+    st.write(call_gpt("Jesteś systemem alertów tradingowych.", text))
