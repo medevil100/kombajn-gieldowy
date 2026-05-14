@@ -1,4 +1,3 @@
-
 import os
 from datetime import datetime, time as dtime
 
@@ -313,24 +312,6 @@ def top_okazje_zagrozenia(data):
     ok = df.sort_values(["rsi", "change"]).head(5)
     zag = df.sort_values(["rsi", "change"], ascending=[False, False]).head(5)
     return ok, zag
-
-if mode == "Monitoring rynku":
-    if not tickers_active:
-        st.info("Brak aktywnych tickerów.")
-    else:
-        sort_key = st.selectbox("Sortowanie", ["RSI ↑", "Zmiana % ↓"])
-        data_list = []
-        for t in tickers_active:
-            a = get_analysis(t)
-            if a: data_list.append(a)
-
-        if not data_list:
-            st.warning("Brak danych.")
-        else:
-            if sort_key.startswith("RSI"):
-                data_list = sorted(data_list, key=lambda x: x["rsi"])
-            else:
-                data_list = sorted(data_list, key=lambda x: x["change"], reverse=True)
 
 if mode == "Monitoring rynku":
     if not tickers_active:
@@ -692,4 +673,364 @@ elif mode == "Moje typy":
                 system_prompt = build_trading_system_prompt(ai_style)
                 ans = call_gpt(client, system_prompt, text + "\nWydaj decyzje A2-FULL.")
                 st.markdown(f"<pre>{ans}</pre>", unsafe_allow_html=True)
- 
+if mode == "Monitoring rynku":
+    if not tickers_active:
+        st.info("Brak aktywnych tickerów.")
+    else:
+        sort_key = st.selectbox("Sortowanie", ["RSI ↑", "Zmiana % ↓"])
+        data_list = []
+        for t in tickers_active:
+            a = get_analysis(t)
+            if a:
+                data_list.append(a)
+
+        if not data_list:
+            st.warning("Brak danych.")
+        else:
+            if sort_key.startswith("RSI"):
+                data_list = sorted(data_list, key=lambda x: x["rsi"])
+            else:
+                data_list = sorted(data_list, key=lambda x: x["change"], reverse=True)
+
+            st.subheader("Monitoring rynku")
+
+            ok, zag = top_okazje_zagrozenia(data_list)
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("#### 🟢 TOP 5 okazji")
+                if not ok.empty:
+                    st.dataframe(ok.set_index("symbol"))
+            with c2:
+                st.markdown("#### 🔴 TOP 5 zagrożeń")
+                if not zag.empty:
+                    st.dataframe(zag.set_index("symbol"))
+
+            for d in data_list:
+                st.markdown('<div class="ticker-card">', unsafe_allow_html=True)
+                c1, c2 = st.columns([1, 2])
+
+                with c1:
+                    st.markdown(f"#### {d['symbol']} ({d['trend']})")
+                    delta_class = "metric-good" if d["change"] >= 0 else "metric-bad"
+                    st.markdown(
+                        f"<span class='{delta_class}'>Cena: {d['price']:.4f} ({d['change']:.2f}%)</span>",
+                        unsafe_allow_html=True,
+                    )
+                    st.write(f"Pivot: {d['pivot']:.4f} | RSI: {d['rsi']:.1f}")
+                    st.write(f"TP: {d['tp']:.4f} | SL: {d['sl']:.4f}")
+
+                    if st.button(f"AI decyzja {d['symbol']}", key=f"ai_{d['symbol']}"):
+                        system_prompt = build_trading_system_prompt(ai_style)
+                        prompt = (
+                            f"Symbol: {d['symbol']}\n"
+                            f"Cena: {d['price']:.4f}\n"
+                            f"Trend: {d['trend']}\n"
+                            f"RSI: {d['rsi']:.1f}\n"
+                            f"Pivot: {d['pivot']:.4f}\n"
+                            f"TP: {d['tp']:.4f}\n"
+                            f"SL: {d['sl']:.4f}\n"
+                            f"Zmiana: {d['change']:.2f}%\n"
+                            "Wydaj decyzję KUP/SPRZEDAJ/TRZYMAJ w formacie A2-FULL."
+                        )
+                        ans = call_gpt(client, system_prompt, prompt)
+                        st.markdown(f"<pre>{ans}</pre>", unsafe_allow_html=True)
+
+                    if st.button(f"Wzrost % {d['symbol']}", key=f"grow_{d['symbol']}"):
+                        ans = ai_growth_probability(
+                            client,
+                            d["symbol"],
+                            d["price"],
+                            d["rsi"],
+                            d["change"],
+                            d["trend"],
+                            d["pivot"],
+                        )
+                        st.markdown(f"<pre>{ans}</pre>", unsafe_allow_html=True)
+
+                with c2:
+                    df = d["df"]
+                    fig = go.Figure(
+                        data=[
+                            go.Candlestick(
+                                x=df.index[-80:],
+                                open=df["Open"][-80:],
+                                high=df["High"][-80:],
+                                low=df["Low"][-80:],
+                                close=df["Close"][-80:],
+                                increasing_line_color="#22c55e",
+                                decreasing_line_color="#ef4444",
+                            )
+                        ]
+                    )
+                    fig.add_hline(y=d["pivot"], line_dash="dot", line_color="#e5e7eb")
+                    fig.update_layout(
+                        template="plotly_dark",
+                        height=360,
+                        margin=dict(l=0, r=0, t=0, b=0),
+                        xaxis_rangeslider_visible=False,
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                st.markdown("</div>", unsafe_allow_html=True)
+
+elif mode == "Heatmapa trendu":
+    st.subheader("🔥 NEON HEATMAPA TRENDÓW (RSI / Zmiana % / Trend)")
+
+    if not tickers_active:
+        st.info("Brak aktywnych tickerów.")
+    else:
+        rows = []
+        for t in tickers_active:
+            try:
+                df = yf_cached(t, "120d", "1d")
+                if df.empty or len(df) < 20:
+                    continue
+
+                close = df["Close"]
+                rsi = float(calculate_rsi(close).iloc[-1])
+                price = float(close.iloc[-1])
+                prev = float(close.iloc[-2])
+                zmiana = (price - prev) / prev * 100
+                sma200 = float(close.rolling(200).mean().iloc[-1])
+                trend = 1 if price > sma200 else -1
+
+                rows.append({
+                    "Ticker": t,
+                    "RSI": rsi,
+                    "Zmiana %": zmiana,
+                    "Trend": trend
+                })
+            except:
+                continue
+
+        if not rows:
+            st.warning("Brak danych do heatmapy.")
+        else:
+            df_hm = pd.DataFrame(rows).set_index("Ticker")
+
+            metric = st.selectbox("Metryka", ["RSI", "Zmiana %", "Trend"])
+
+            fig = px.imshow(
+                df_hm[[metric]].T,
+                color_continuous_scale=[
+                    "#22c55e",
+                    "#eab308",
+                    "#ef4444"
+                ],
+                aspect="auto"
+            )
+
+            fig.update_layout(
+                template="plotly_dark",
+                height=260,
+                margin=dict(l=0, r=0, t=0, b=0),
+                coloraxis_colorbar=dict(
+                    title=metric,
+                    tickfont=dict(color="#e5e7eb"),
+                    titlefont=dict(color="#e5e7eb")
+                )
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(df_hm.sort_values(metric, ascending=(metric == "RSI")))
+
+elif mode == "AUTO‑SCALPER PRO":
+    st.subheader("AUTO‑SCALPER PRO – sygnały 15m")
+
+    if not tickers_active:
+        st.info("Brak aktywnych tickerów.")
+    else:
+        sygnaly = auto_scalper_scan(tickers_active)
+
+        if not sygnaly:
+            st.warning("Brak sygnałów scalp.")
+        else:
+            df_sig = pd.DataFrame(sygnaly)
+            st.success(f"Znaleziono {len(sygnaly)} sygnałów.")
+            st.dataframe(df_sig, use_container_width=True)
+
+            opis = "Sygnały scalp:\n"
+            for s in sygnaly:
+                opis += f"- {s['symbol']}: {s['price']:.4f}, RSI {s['rsi']:.1f}, zmiana {s['zmiana']:.2f}%, RVOL {s['rvol']:.1f}x\n"
+
+            system_prompt = build_trading_system_prompt("SCALP")
+            ans = call_gpt(client, system_prompt, opis + "\nWybierz najlepsze wejścia scalp.")
+            st.markdown(f"<pre>{ans}</pre>", unsafe_allow_html=True)
+
+elif mode == "AI TREND MAPA":
+    st.subheader("AI TREND MAPA – ocena rynku")
+
+    if not tickers_active:
+        st.info("Brak aktywnych tickerów.")
+    else:
+        rows = []
+        for t in tickers_active:
+            try:
+                df = yf_cached(t, "120d", "1d")
+                if df.empty or len(df) < 20: continue
+                close = df["Close"]
+                rsi = float(calculate_rsi(close).iloc[-1])
+                price = float(close.iloc[-1])
+                prev = float(close.iloc[-2])
+                zmiana = (price - prev) / prev * 100
+                sma200 = float(close.rolling(200).mean().iloc[-1])
+                trend = "HOSSA" if price > sma200 else "BESSA"
+                rows.append({"symbol": t, "price": price, "rsi": rsi, "zmiana": zmiana, "trend": trend})
+            except:
+                continue
+
+        if not rows:
+            st.warning("Brak danych.")
+        else:
+            text = "Oceń rynek:\n\n"
+            for r in rows:
+                text += f"- {r['symbol']}: {r['price']:.4f}, RSI {r['rsi']:.1f}, zmiana {r['zmiana']:.2f}%, {r['trend']}\n"
+
+            system_prompt = (
+                "Oceń rynek: dominujący trend, ryzyko, najlepsze sektory, agresywne czy selektywne wejścia."
+            )
+            ans = call_gpt(client, system_prompt, text)
+            st.markdown(f"<pre>{ans}</pre>", unsafe_allow_html=True)
+
+elif mode == "AI analiza listy":
+    st.subheader("AI analiza – 20 aktywnych")
+
+    if not tickers_active:
+        st.info("Brak aktywnych tickerów.")
+    else:
+        rows = []
+        for t in tickers_active:
+            try:
+                df = yf_cached(t, "120d", "1d")
+                if df.empty or len(df) < 20: continue
+                close = df["Close"]
+                rsi = float(calculate_rsi(close).iloc[-1])
+                price = float(close.iloc[-1])
+                prev = float(close.iloc[-2])
+                zmiana = (price - prev) / prev * 100
+                rows.append({"symbol": t, "price": price, "rsi": rsi, "zmiana": zmiana})
+            except:
+                continue
+
+        if not rows:
+            st.warning("Brak danych.")
+        else:
+            text = "Analiza listy w stylu " + ai_style + ":\n\n"
+            for r in rows:
+                text += f"- {r['symbol']}: {r['price']:.4f}, RSI {r['rsi']:.1f}, zmiana {r['zmiana']:.2f}%\n"
+
+            system_prompt = build_trading_system_prompt(ai_style)
+            ans = call_gpt(client, system_prompt, text + "\nWydaj decyzje A2-FULL.")
+            st.markdown(f"<pre>{ans}</pre>", unsafe_allow_html=True)
+elif mode == "STX + Portfel":
+    st.subheader("STX + Portfel")
+
+    rows, summary = analiza_portfela()
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+        if summary:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Wartość portfela", f"{summary['total']:.2f} PLN")
+            c2.metric("Zysk/Strata", f"{summary['profit']:.2f} PLN")
+            c3.metric("USD/PLN", f"{summary['kurs']:.2f}")
+
+    st.markdown("---")
+    st.markdown("### STX.WA – wykres + AI")
+
+    stx = get_analysis("STX.WA")
+    if stx:
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            st.metric("Cena", f"{stx['price']:.4f}", f"{stx['change']:.2f}%")
+            st.write(f"Pivot: {stx['pivot']:.4f}")
+            st.write(f"RSI: {stx['rsi']:.1f}")
+            st.write(f"TP: {stx['tp']:.4f}")
+            st.write(f"SL: {stx['sl']:.4f}")
+
+            if st.button("AI STX.WA", key="ai_stx"):
+                system_prompt = build_trading_system_prompt(ai_style)
+                prompt = (
+                    f"Symbol: STX.WA\nCena: {stx['price']:.4f}\nTrend: {stx['trend']}\n"
+                    f"RSI: {stx['rsi']:.1f}\nPivot: {stx['pivot']:.4f}\nTP: {stx['tp']:.4f}\n"
+                    f"SL: {stx['sl']:.4f}\nZmiana: {stx['change']:.2f}%\n"
+                    "Wydaj decyzję A2-FULL."
+                )
+                ans = call_gpt(client, system_prompt, prompt)
+                st.markdown(f"<pre>{ans}</pre>", unsafe_allow_html=True)
+
+        with c2:
+            df = stx["df"]
+            fig = go.Figure(
+                data=[
+                    go.Candlestick(
+                        x=df.index[-80:],
+                        open=df["Open"][-80:],
+                        high=df["High"][-80:],
+                        low=df["Low"][-80:],
+                        close=df["Close"][-80:],
+                        increasing_line_color="#22c55e",
+                        decreasing_line_color="#ef4444",
+                    )
+                ]
+            )
+            fig.add_hline(y=stx["pivot"], line_dash="dot", line_color="#e5e7eb")
+            fig.update_layout(template="plotly_dark", height=360, margin=dict(l=0, r=0, t=0, b=0))
+            st.plotly_chart(fig, use_container_width=True)
+
+elif mode == "Moje typy":
+    st.subheader("MOJE 20 – aktywne")
+
+    moja20_raw = load_moja20()
+    moja20_list = [t.strip().upper() for t in moja20_raw.split(",") if t.strip()]
+    moja20_active = [t for t in moja20_list if is_market_open(t)][:20]
+
+    if not moja20_active:
+        st.info("Brak aktywnych spółek.")
+    else:
+        data_list = []
+        for t in moja20_active:
+            a = get_analysis(t)
+            if a:
+                data_list.append(a)
+
+        if not data_list:
+            st.warning("Brak danych.")
+        else:
+            st.markdown("#### Mini‑monitor")
+            cols = st.columns(2)
+
+            for i, d in enumerate(data_list):
+                with cols[i % 2]:
+                    st.markdown(f"**{d['symbol']}** – {d['price']:.4f} ({d['change']:.2f}%) | RSI {d['rsi']:.1f}")
+                    df = d["df"]
+                    fig = go.Figure(
+                        data=[
+                            go.Candlestick(
+                                x=df.index[-40:],
+                                open=df["Open"][-40:],
+                                high=df["High"][-40:],
+                                low=df["Low"][-40:],
+                                close=df["Close"][-40:],
+                                increasing_line_color="#22c55e",
+                                decreasing_line_color="#ef4444",
+                            )
+                        ]
+                    )
+                    fig.update_layout(template="plotly_dark", height=180, margin=dict(l=0, r=0, t=0, b=0))
+                    st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("---")
+            st.markdown("### AI analiza MOJE 20")
+
+            if st.button("AI analiza MOJE 20", key="ai_moje20"):
+                text = "Analiza MOJE 20:\n\n"
+                for d in data_list:
+                    text += (
+                        f"- {d['symbol']}: {d['price']:.4f}, RSI {d['rsi']:.1f}, "
+                        f"zmiana {d['change']:.2f}%, {d['trend']}\n"
+                    )
+
+                system_prompt = build_trading_system_prompt(ai_style)
+                ans = call_gpt(client, system_prompt, text + "\nWydaj decyzje A2-FULL.")
+                st.markdown(f"<pre>{ans}</pre>", unsafe_allow_html=True)
