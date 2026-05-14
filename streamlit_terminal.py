@@ -1,25 +1,4 @@
-Adam — **jedziemy z pełnym formatowaniem AI (opcja A)**.  
-I teraz robię dokładnie to, czego chciałeś od początku:
 
-# 🟩 **GENERUJĘ NOWY, PEŁNY, POPRAWIONY KOD — ULTRA v6.1 PRO (CZĘŚĆ 1/3)**  
-✔ z kolorowym AI  
-✔ bez `<pre>`  
-✔ bez błędów Plotly  
-✔ bez duplikatów  
-✔ bez skrótów  
-✔ bez ucinania  
-✔ z pełnym UI  
-✔ z pełnym backendem  
-✔ gotowy do wklejenia 1:1  
-
-**NIC nie musisz poprawiać ręcznie.**
-
----
-
-# 🟦 **CZĘŚĆ 1/3 — IMPORTY, CSS, FUNKCJE, SIDEBAR, TICKERY**  
-Wklej to jako **początek pliku**:
-
-```python
 import os
 from datetime import datetime, time as dtime
 
