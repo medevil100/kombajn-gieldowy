@@ -3,39 +3,64 @@ from openai import OpenAI
 
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-st.title("3× AI — Swing / Day / Long (czytelne dane + różne modele GPT)")
+st.set_page_config(page_title="3× AI — Swing / Day / Long", layout="centered")
 
-# ================== 3 MODELE AI ==================
+# ================== STYLE ==================
+st.markdown("""
+<style>
+.box {
+    padding: 15px;
+    border-radius: 10px;
+    font-size: 18px;
+    margin-top: 15px;
+    color: white;
+}
+.swing  { background-color: #0f5132; }
+.day    { background-color: #0d6efd; }
+.long   { background-color: #6f42c1; }
+</style>
+""", unsafe_allow_html=True)
 
+st.title("📈 3× AI — Swing / Day / Long (3 różne modele, 3 różne style)")
+
+
+# ================== AI #1 — SWING (gpt‑4o‑mini) ==================
 def ai_swing(ticker, text):
     prompt = f"""
-Analiza SWING dla {ticker}.
-Dane techniczne:
+Jesteś agresywnym traderem swingowym.
+Myślisz szybko, patrzysz na momentum, RSI, wolumen i wybicia.
+
+Analiza SWING dla {ticker}:
 {text}
 
 Zadanie:
-- Zrób analizę swing (kilka dni–tygodni)
 - 2–3 zdania
-- Bez kopiowania danych
+- dynamiczny styl
+- zero kopiowania danych
+- skup się na krótkoterminowych ruchach
 """
     r = client.chat.completions.create(
         model="gpt-4o-mini",
-        temperature=0.2,
+        temperature=0.4,
         messages=[{"role": "user", "content": prompt}],
     )
     return r.choices[0].message.content.strip()
 
 
+# ================== AI #2 — DAY (gpt‑4o) ==================
 def ai_day(ticker, text):
     prompt = f"""
-Analiza DAYTRADING dla {ticker}.
-Dane techniczne:
+Jesteś precyzyjnym daytraderem.
+Analizujesz mikro‑ruchy, momentum 3, RSI7, wolumen intraday.
+
+Analiza DAYTRADING dla {ticker}:
 {text}
 
 Zadanie:
-- Zrób analizę daytrading (krótkie ruchy)
 - 2–3 zdania
-- Bez kopiowania danych
+- styl szybki, konkretny
+- zero kopiowania danych
+- skup się na ruchach intraday
 """
     r = client.chat.completions.create(
         model="gpt-4o",
@@ -45,16 +70,20 @@ Zadanie:
     return r.choices[0].message.content.strip()
 
 
+# ================== AI #3 — LONG (o3‑mini) ==================
 def ai_long(ticker, text):
     prompt = f"""
-Analiza LONG-TERM dla {ticker}.
-Dane techniczne:
+Jesteś spokojnym analitykiem długoterminowym.
+Patrzysz na trend EMA50/100/200, stabilność, wolumen i strukturę rynku.
+
+Analiza LONG-TERM dla {ticker}:
 {text}
 
 Zadanie:
-- Zrób analizę długoterminową
 - 2–3 zdania
-- Bez kopiowania danych
+- styl spokojny, analityczny
+- zero kopiowania danych
+- skup się na kierunku miesięcznym
 """
     r = client.chat.completions.create(
         model="o3-mini",
@@ -84,19 +113,25 @@ Sygnały:
 ai_choice = st.selectbox(
     "Wybierz AI:",
     [
-        "Swing (gpt‑4o‑mini)",
-        "Day (gpt‑4o)",
-        "Long (o3‑mini)"
+        "AI Swing — gpt‑4o‑mini",
+        "AI Day — gpt‑4o",
+        "AI Long — o3‑mini"
     ]
 )
 
 if st.button("Analizuj"):
     if "Swing" in ai_choice:
         wynik = ai_swing(ticker, dane)
+        css = "swing"
     elif "Day" in ai_choice:
         wynik = ai_day(ticker, dane)
+        css = "day"
     else:
         wynik = ai_long(ticker, dane)
+        css = "long"
 
-    st.subheader("Wynik AI:")
-    st.write(wynik)
+    st.markdown(f"""
+    <div class="box {css}">
+        <b>Wynik AI:</b><br>{wynik}
+    </div>
+    """, unsafe_allow_html=True)
