@@ -1,288 +1,151 @@
-import streamlit as st
+import time
 import pandas as pd
-import numpy as np
+import streamlit as str
 import yfinance as yf
-from datetime import datetime
 from openai import OpenAI
-import io, wave, math, struct, base64
 
-# ============================================================
-#  OPENAI
-# ============================================================
+# Ustawienia strony zoptymalizowane pod urządzenia mobilne
+str.set_page_config(
+    page_title="Groszówki AI", page_icon="📈", layout="centered"
+)
 
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+# Ładowanie kluczy z Streamlit Secrets
+try:
+    OPENAI_API_KEY = str.secrets["OPENAI_API_KEY"]
+    APP_PASSWORD = str.secrets["APP_PASSWORD"]
+except Exception:
+    str.error(
+        "Błąd: Brak kluczy w Streamlit Secrets (OPENAI_API_KEY lub APP_PASSWORD)."
+    )
+    str.stop()
 
-# ============================================================
-#  DŹWIĘK ALERTU
-# ============================================================
+# Prosty ekran logowania na telefonie
+if "logged_in" not in str.session_state:
+    str.session_state.logged_in = False
 
-@st.cache_resource
-def generate_beep_b64():
-    framerate = 44100
-    duration = 0.35
-    freq = 880
-    n_samples = int(duration * framerate)
-    buf = io.BytesIO()
-    w = wave.open(buf, "wb")
-    w.setnchannels(1)
-    w.setsampwidth(2)
-    w.setframerate(framerate)
-    for i in range(n_samples):
-        val = int(32767 * math.sin(2 * math.pi * freq * i / framerate))
-        w.writeframes(struct.pack("<h", val))
-    w.close()
-    return base64.b64encode(buf.getvalue()).decode("ascii")
+if not str.session_state.logged_in:
+    str.title("🔒 Dostęp zablokowany")
+    haslo = str.text_input("Podaj hasło dostępowe:", type="password")
+    if str.button("Zaloguj się"):
+        if haslo == APP_PASSWORD:
+            str.session_state.logged_in = True
+            str.rerun()
+        else:
+            str.error("Niepoprawne hasło.")
+    str.stop()
 
-BEEP = generate_beep_b64()
 
-def play_beep():
-    st.markdown(
-        f"""
-        <audio autoplay>
-            <source src="data:audio/wav;base64,{BEEP}" type="audio/wav">
-        </audio>
-        """,
-        unsafe_allow_html=True
+# --- FUNKCJE ANALITYCZNE ---
+def pobierz_aktywne_groszowki(rynek):
+    """Pobiera i dynamicznie filtruje groszówki ze stałej bazy płynnych tickerów."""
+    # Lista bazowa dla zachowania szybkości na telefonie (można rozszerzyć do 100+)
+    baza = (
+        ["ATT.WA", "COG.WA", "PCO.WA", "SNS.WA", "RFK.WA", "MSW.WA", "BOW.WA"]
+        if rynek == "PL (GPW)"
+        else ["SNDL", "NIO", "AAL", "F", "LCID", "RIG", "SOFI", "BITF", "HUT"]
     )
 
-# ============================================================
-#  POBIERANIE DANYCH
-# ============================================================
+    dane_spolek = []
+    for ticker in baza:
+        try:
+            t = yf.Ticker(ticker)
+            df = t.history(period="30d")
+            if len(df) < 15:
+                continue
 
-def download(tickers):
-    if not tickers:
-        return {}
-    data = yf.download(
-        tickers,
-        period="180d",
-        interval="1d",
-        group_by="ticker",
-        auto_adjust=True,
-        threads=True,
-        progress=False
+            cena = df["Close"].iloc[-1]
+            wolumen_teraz = df["Volume"].iloc[-1]
+            wolumen_srednia = df["Volume"].rolling(10).mean().iloc[-1]
+
+            # Kryterium groszówki (< 5 PLN/USD) oraz minimalna płynność
+            if 0.10 <= cena <= 5.00 and wolumen_teraz > 0:
+                # Wyliczanie wskaźników pędu i trendu
+                sma_15 = df["Close"].rolling(15).mean().iloc[-1]
+                skok_wolumenu = (
+                    wolumen_teraz / wolumen_srednia if wolumen_srednia > 0 else 1.0
+                )
+                trend = "Wzrostowy" if cena > sma_15 else "Spadkowy"
+
+                dane_spolek.append(
+                    {
+                        "Spółka": ticker,
+                        "Cena": round(cena, 2),
+                        "Skok Vol": round(skok_wolumenu, 2),
+                        "Trend": trend,
+                    }
+                )
+        except Exception:
+            continue
+
+    return pd.DataFrame(dane_spolek)
+
+
+def analizuj_przez_gpt(model, dane_tabeli):
+    """Przesyła przefiltrowane dane giełdowe do wybranego modelu GPT."""
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    tekst_danych = dane_tabeli.to_string(index=False)
+
+    Prompt = (
+        f"Przeanalizuj poniższe spółki groszowe. Wskaż 1-2 najlepsze okazje "
+        f"(wysoki Skok Vol + Trend Wzrostowy) oraz ostrzeż przed spółkami tracącymi siłę. "
+        f"Napisz krótki, konkretny raport zwięźle, idealny do przeczytania na ekranie telefonu:\n\n{tekst_danych}"
     )
-    result = {}
-    if isinstance(data.columns, pd.MultiIndex):
-        for t in tickers:
-            if t in data.columns.get_level_values(0):
-                df = data[t].copy().dropna()
-                result[t] = df
-    else:
-        df = data.copy().dropna()
-        result[tickers[0]] = df
-    return result
 
-# ============================================================
-#  WSKAŹNIKI – TRYBY
-# ============================================================
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": "Jesteś ekspertem giełdowym od penny stocks. Odpowiadasz krótko, używając wypunktowań i emoji.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.3,
+    )
+    return response.choices[0].message.content
 
-def indicators(df, mode):
-    df = df.copy()
 
-    if mode == "Swing":
-        df["EMA_fast"] = df["Close"].ewm(span=20).mean()
-        df["EMA_mid"] = df["Close"].ewm(span=50).mean()
-        df["EMA_slow"] = df["Close"].ewm(span=200).mean()
-        delta = df["Close"].diff()
-        gain = delta.clip(lower=0).rolling(14).mean()
-        loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rs = gain / loss
-        df["RSI"] = 100 - (100 / (1 + rs))
-        df["Fibo_high"] = df["Close"].rolling(60).max()
-        df["Fibo_low"] = df["Close"].rolling(60).min()
-        df["Momentum"] = df["Close"].diff(10)
-        df["Vol_avg"] = df["Volume"].rolling(20).mean()
+# --- INTERFEJS MOBILNY (STREAMLIT) ---
+str.title("📱 Skaner Groszówek AI")
 
-    elif mode == "Day":
-        df["EMA_fast"] = df["Close"].ewm(span=9).mean()
-        df["EMA_mid"] = df["Close"].ewm(span=20).mean()
-        df["EMA_slow"] = df["Close"].ewm(span=50).mean()
-        delta = df["Close"].diff()
-        gain = delta.clip(lower=0).rolling(7).mean()
-        loss = (-delta.clip(upper=0)).rolling(7).mean()
-        rs = gain / loss
-        df["RSI"] = 100 - (100 / (1 + rs))
-        df["Fibo_high"] = df["Close"].rolling(20).max()
-        df["Fibo_low"] = df["Close"].rolling(20).min()
-        df["Momentum"] = df["Close"].diff(3)
-        df["Vol_avg"] = df["Volume"].rolling(10).mean()
+# Menu boczne zoptymalizowane pod smartfony (z możliwością zwinięcia)
+with str.sidebar:
+    str.header("⚙️ Ustawienia")
+    rynek_wybor = str.radio("Wybierz rynek:", ["PL (GPW)", "USA"])
 
-    else:  # Long
-        df["EMA_fast"] = df["Close"].ewm(span=50).mean()
-        df["EMA_mid"] = df["Close"].ewm(span=100).mean()
-        df["EMA_slow"] = df["Close"].ewm(span=200).mean()
-        delta = df["Close"].diff()
-        gain = delta.clip(lower=0).rolling(14).mean()
-        loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rs = gain / loss
-        df["RSI"] = 100 - (100 / (1 + rs))
-        df["Fibo_high"] = df["Close"].rolling(120).max()
-        df["Fibo_low"] = df["Close"].rolling(120).min()
-        df["Momentum"] = df["Close"].diff(20)
-        df["Vol_avg"] = df["Volume"].rolling(50).mean()
+    # 3 Modele GPT do wyboru
+    gpt_wybor = str.selectbox(
+        "Model AI (OpenAI):", ["gpt-4o-mini", "gpt-4o", "o1-mini"]
+    )
 
-    df["Trend"] = df["EMA_fast"] - df["EMA_mid"]
-    df["Vol_ratio"] = df["Volume"] / df["Vol_avg"]
-    return df
+    # Regulacja odświeżania w czasie rzeczywistym
+    interwal = str.slider(
+        "Czas odświeżania (minuty):",
+        min_value=1,
+        max_value=60,
+        value=5,
+        step=1,
+    )
+    str.caption(f"Aplikacja przeładuje dane automatycznie co {interwal} min.")
 
-# ============================================================
-#  NEWS – FLAGI
-# ============================================================
+# Główny kontener danych rynkowych
+str.subheader(f"📊 Dane Real-Time: {rynek_wybor}")
+tabela_danych = pobierz_aktywne_groszowki(rynek_wybor)
 
-def news_flags(ticker):
-    try:
-        tk = yf.Ticker(ticker)
-        news = tk.news or []
-    except Exception:
-        return ""
+if not tabela_danych.empty:
+    # Wyświetlanie danych w tabeli dopasowanej do smartfona
+    str.dataframe(tabela_danych, use_container_width=True, hide_index=True)
 
-    text = ""
-    for n in news[:5]:
-        text += " " + str(n.get("title", "")) + " " + str(n.get("summary", ""))
+    # Sekcja uruchamiania dedykowanej analizy LLM
+    if str.button(f"🤖 Generuj analizę przez {gpt_wybor}", type="primary"):
+        with str.spinner("Sztuczna inteligencja przetwarza macierz danych..."):
+            raport = analizuj_przez_gpt(gpt_wybor, tabela_danych)
+            str.markdown("### 📝 Raport i Alerty AI:")
+            str.info(raport)
+else:
+    str.warning("Brak spółek spełniających kryteria groszówki w tej minucie.")
 
-    text_low = text.lower()
-    flags = []
-
-    if "fda" in text_low:
-        flags.append("FDA")
-    if "approval" in text_low:
-        flags.append("approval")
-    if "debt" in text_low or "zadłużenie" in text_low:
-        flags.append("debt")
-    if "downgrade" in text_low:
-        flags.append("downgrade")
-    if "profit warning" in text_low:
-        flags.append("profit warning")
-    if "bankruptcy" in text_low:
-        flags.append("bankruptcy")
-    if "offering" in text_low:
-        flags.append("share offering")
-    if "buyback" in text_low:
-        flags.append("buyback")
-    if "acquisition" in text_low:
-        flags.append("M&A")
-
-    return " | ".join(flags)
-
-# ============================================================
-#  SYGNAŁY 1–7
-# ============================================================
-
-def compute_signals(df):
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    signals = []
-
-    if last["EMA_fast"] > last["EMA_mid"] > last["EMA_slow"] and last["RSI"] > 55:
-        trend_state = "trend rośnie"
-    elif last["EMA_fast"] < last["EMA_mid"] < last["EMA_slow"] and last["RSI"] < 45:
-        trend_state = "trend spada"
-    else:
-        trend_state = "trend stoi"
-
-    signals.append(trend_state)
-
-    if last["Close"] > last["EMA_mid"] and prev["Close"] <= prev["EMA_mid"]:
-        signals.append("przebicie EMA_mid")
-    if last["Close"] > last["Fibo_high"] * 0.999:
-        signals.append("wybicie Fibo HIGH")
-    if last["Close"] < last["Fibo_low"] * 1.001:
-        signals.append("wybicie Fibo LOW")
-
-    if last["Close"] > prev["Close"] and last["Vol_ratio"] > 1.5 and last["RSI"] > prev["RSI"]:
-        signals.append("wzrost kupujących")
-
-    if last["Close"] < prev["Close"] and last["Vol_ratio"] > 1.5 and last["RSI"] < prev["RSI"]:
-        signals.append("wzrost sprzedających")
-
-    return trend_state, signals
-
-# ============================================================
-#  AI #2 — KOMENTARZ LLM
-# ============================================================
-
-def ai2_comment(ticker, last, trend_state, signals, news_text):
-    sig_str = ", ".join(signals)
-    news_str = news_text if news_text else "brak newsów"
-
-    prompt = f"""
-Opisz sytuację spółki w 1–2 zdaniach.
-
-Ticker: {ticker}
-Cena: {last['Close']:.2f}
-Trend: {trend_state}
-Sygnały: {sig_str}
-News: {news_str}
-
-Zasady:
-- krótko i konkretnie,
-- bez rekomendacji,
-- opisz trend, momentum, wolumen, newsy.
-"""
-
-    try:
-        r = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2
-        )
-        return r.choices[0].message["content"].strip()
-    except:
-        return "Błąd AI #2"
-
-# ============================================================
-#  AI #3 — SENTIMENT NEWSÓW
-# ============================================================
-
-def ai3_sentiment(news_text):
-    if not news_text:
-        return "brak newsów — brak analizy"
-
-    text = news_text.lower()
-
-    positive = ["fda", "approval", "buyback", "acquisition"]
-    negative = ["debt", "downgrade", "bankruptcy", "offering", "profit warning"]
-
-    pos = any(p in text for p in positive)
-    neg = any(n in text for n in negative)
-
-    if pos and not neg:
-        return "sentiment pozytywny"
-    if neg and not pos:
-        return "sentiment negatywny"
-    return "sentiment neutralny"
-
-# ============================================================
-#  AI #4 — FUNDAMENTALNE RYZYKA
-# ============================================================
-
-def ai4_fundamental(news_text):
-    if not news_text:
-        return "brak newsów — brak ryzyk"
-
-    text = news_text.lower()
-
-    risks = []
-    if "debt" in text:
-        risks.append("zadłużenie")
-    if "offering" in text:
-        risks.append("emisja akcji")
-    if "bankruptcy" in text:
-        risks.append("ryzyko bankructwa")
-    if "downgrade" in text:
-        risks.append("obniżenie ratingu")
-
-    if risks:
-        return "ryzyka: " + ", ".join(risks)
-    return "brak istotnych ryzyk"
-
-# ============================================================
-#  UI — GPW / USA
-# ============================================================
-
-st.set_page_config(page_title="Dual Market Scanner", layout="wide")
-
-st.title("📈 Dual Market Scanner — GPW & USA (4 AI)")
-
-tab_gpw, tab_usa = st.tabs(["🇵🇱 GPW", "🇺🇸 USA"])
+# Licznik czasu i pętla automatycznego odświeżania ekranu mobilnego
+str.caption(f"Ostatnia aktualizacja: {time.strftime('%H:%M:%S')}")
+time.sleep(interwal * 60)
+str.rerun()
