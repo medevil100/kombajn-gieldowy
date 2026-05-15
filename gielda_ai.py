@@ -1,40 +1,43 @@
 import os
-import time
 import io
-import wave
+import time
 import math
+import wave
 import struct
 import base64
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
+import plotly.graph_objects as go
 from openai import OpenAI
 
+# ================== USTAWIENIA APLIKACJI ==================
+
 st.set_page_config(
-    page_title="Dual Market + Skaner AI Pro Master",
+    page_title="📈 Dual Market Scanner — GPW & USA (4 AI)",
     page_icon="📈",
     layout="wide",
 )
 
-# --- CSS ---
 st.markdown(
     """
     <style>
-    .stApp { background-color: #0E1117; }
+    .stApp { background-color: #0E1117; color: #E6EDF3; }
     div[data-testid="stDataFrame"] { background-color: #161B22; border: 1px solid #30363D; border-radius: 8px; }
     div.stButton > button:first-child {
         background-color: #00ff66 !important; color: #000000 !important; font-weight: bold !important;
         border-radius: 6px !important; border: none !important; box-shadow: 0 0 12px rgba(0, 255, 102, 0.5);
     }
+    .block-container { padding-top: 1rem; padding-bottom: 2rem; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# --- SECRETS / API ---
+# ================== SECRETS / API ==================
+
 try:
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
     APP_PASSWORD = st.secrets["APP_PASSWORD"]
@@ -44,7 +47,8 @@ except Exception:
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# --- AUTORYZACJA ---
+# ================== AUTORYZACJA ==================
+
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
@@ -59,9 +63,7 @@ if not st.session_state.logged_in:
             st.error("Błędne hasło!")
     st.stop()
 
-# ============================================================
-#  BEEP
-# ============================================================
+# ================== BEEP ==================
 
 @st.cache_resource
 def generate_beep_b64():
@@ -92,9 +94,7 @@ def play_beep():
         unsafe_allow_html=True
     )
 
-# ============================================================
-#  DUAL SCANNER – DOWNLOAD
-# ============================================================
+# ================== DOWNLOAD DANYCH ==================
 
 @st.cache_data(show_spinner=False)
 def ds_download(tickers, period="240d", interval="1d"):
@@ -120,9 +120,7 @@ def ds_download(tickers, period="240d", interval="1d"):
         result[tickers[0]] = df
     return result
 
-# ============================================================
-#  DUAL SCANNER – HYBRYDOWE WSKAŹNIKI (Swing + Day + Long)
-# ============================================================
+# ================== HYBRYDOWE WSKAŹNIKI ==================
 
 def ds_indicators_hybrid(df):
     df = df.copy()
@@ -168,9 +166,7 @@ def ds_indicators_hybrid(df):
 
     return df
 
-# ============================================================
-#  DUAL SCANNER – NEWS
-# ============================================================
+# ================== NEWS ==================
 
 def ds_news_raw(ticker):
     try:
@@ -208,9 +204,7 @@ def ds_news_flags(text):
         flags.append("M&A")
     return " | ".join(flags)
 
-# ============================================================
-#  DUAL SCANNER – SYGNAŁY HYBRYDOWE
-# ============================================================
+# ================== SYGNAŁY HYBRYDOWE ==================
 
 def ds_compute_signals_hybrid(df):
     last = df.iloc[-1]
@@ -218,7 +212,6 @@ def ds_compute_signals_hybrid(df):
 
     signals = []
 
-    # Multi‑frame trend
     swing_up = last["EMA20"] > last["EMA50"] > last["EMA200"]
     swing_down = last["EMA20"] < last["EMA50"] < last["EMA200"]
     day_up = last["EMA9"] > last["EMA20_d"] > last["EMA50_d"]
@@ -239,7 +232,6 @@ def ds_compute_signals_hybrid(df):
 
     signals.append(trend_state)
 
-    # Fibo
     if last["Close"] >= last["Fibo20_high"] * 0.999:
         signals.append("wybicie Fibo20 HIGH")
     if last["Close"] <= last["Fibo20_low"] * 1.001:
@@ -249,31 +241,26 @@ def ds_compute_signals_hybrid(df):
     if last["Close"] <= last["Fibo60_low"] * 1.001:
         signals.append("wybicie Fibo60 LOW")
 
-    # Momentum
     if last["Mom3"] > 0 and last["Mom10"] > 0:
         signals.append("mocne momentum wzrostowe (3/10)")
     if last["Mom3"] < 0 and last["Mom10"] < 0:
         signals.append("mocne momentum spadkowe (3/10)")
 
-    # Vol
     if last["Vol_ratio"] > 2:
         signals.append("bardzo wysoki wolumen")
     elif last["Vol_ratio"] > 1.3:
         signals.append("podwyższony wolumen")
 
-    # RSI
     if last["RSI14"] > 70:
         signals.append("RSI14 wykupienie")
     elif last["RSI14"] < 30:
         signals.append("RSI14 wyprzedanie")
 
-    # Kupujący / sprzedający
     if last["Close"] > prev["Close"] and last["Vol_ratio"] > 1.3 and last["RSI7"] > prev["RSI7"]:
         signals.append("wzrost kupujących (RSI7 + wolumen)")
     if last["Close"] < prev["Close"] and last["Vol_ratio"] > 1.3 and last["RSI7"] < prev["RSI7"]:
         signals.append("wzrost sprzedających (RSI7 + wolumen)")
 
-    # Score
     score = 0
     if "wzrostowy" in trend_state:
         score += 3
@@ -294,42 +281,36 @@ def ds_compute_signals_hybrid(df):
     if any("sprzedających" in s for s in signals):
         score -= 1
 
-    return trend_state, signals, score
+    return trend_state, signals, score, last
 
-# ============================================================
-#  DUAL SCANNER – AI #2 / #3 / #4 (o3‑mini)
-# ============================================================
+# ================== AI #2 / #3 / #4 ==================
 
-def ds_ai2_comment(ticker, last, trend_state, signals, news_flags, mode_desc):
-    sig_str = "; ".join(signals)
+def ds_ai2_comment(ticker, tech, news_flags, mode_desc):
     prompt = f"""
-Jesteś zawodowym traderem. Zrób krótką, konkretną analizę techniczną spółki.
+Jesteś zawodowym traderem. Otrzymujesz dane techniczne w formacie JSON:
 
-Ticker: {ticker}
-Cena zamknięcia: {last['Close']:.2f}
-Zmiana dzienna: {((last['Close'] / last['Open']) - 1) * 100:.2f}%
-RSI14: {last['RSI14']:.1f}
-RSI7: {last['RSI7']:.1f}
-Momentum 3: {last['Mom3']:.2f}
-Momentum 10: {last['Mom10']:.2f}
-Vol ratio (20): {last['Vol_ratio']:.2f}
-Trend hybrydowy: {trend_state}
-Sygnały: {sig_str}
-Tryb: {mode_desc}
-Flagi newsów: {news_flags or "brak"}
+DANE_TECHNICZNE:
+{tech}
 
-Zasady:
-- 2–3 zdania,
-- bez słów KUP/SPRZEDAJ,
-- opisz trend (krótko/średnio/długoterminowy), momentum, wolumen i wpływ newsów,
-- język: polski, styl: konkretny, pod telefon.
+ZADANIE:
+- Zrób profesjonalną analizę techniczną spółki {ticker}.
+- Uwzględnij: trend (krótki/średni/długi), momentum, wolumen, RSI, Fibo, sygnały.
+- Uwzględnij flagi newsów: {news_flags or "brak"}.
+- Uwzględnij tryb: {mode_desc}.
+- Napisz 2–3 zdania, konkretnie, pod telefon.
+- Zero rekomendacji typu KUP/SPRZEDAJ.
+- Zero kopiowania JSON.
+- Tylko interpretacja.
+
+FORMAT:
+- 2–3 zdania analizy.
 """
     try:
         r = client.chat.completions.create(
             model="o3-mini",
-            reasoning_effort="medium",
+            reasoning_effort="high",
+            temperature=0.1,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
         )
         return r.choices[0].message.content.strip()
     except Exception as e:
@@ -339,25 +320,26 @@ def ds_ai3_sentiment(news_text):
     if not news_text:
         return "Brak newsów — brak analizy sentymentu."
     prompt = f"""
-Masz newsy o spółce (tytuły + skróty):
+Masz newsy o spółce:
 
 \"\"\"{news_text[:4000]}\"\"\"
 
-Oceń:
-- czy sentyment jest pozytywny, neutralny czy negatywny,
-- wskaż 1–2 kluczowe powody.
+ZADANIE:
+- Oceń sentyment: pozytywny / neutralny / negatywny.
+- Podaj 1–2 powody.
+- Zero kopiowania newsów.
+- Krótko, pod telefon.
 
-Forma:
-- 1 zdanie werdyktu (Pozytywny/Neutralny/Negatywny),
-- 1 zdanie uzasadnienia,
-- język: polski, krótko, pod telefon.
+FORMAT:
+- Werdykt (Pozytywny/Neutralny/Negatywny)
+- 1 zdanie uzasadnienia
 """
     try:
         r = client.chat.completions.create(
             model="o3-mini",
-            reasoning_effort="medium",
+            reasoning_effort="high",
+            temperature=0.1,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
         )
         return r.choices[0].message.content.strip()
     except Exception as e:
@@ -365,33 +347,33 @@ Forma:
 
 def ds_ai4_fundamental(news_text):
     if not news_text:
-        return "Brak newsów — brak wykrytych ryzyk fundamentalnych."
+        return "Brak newsów — brak wykrytych ryzyk."
     prompt = f"""
-Masz newsy o spółce (tytuły + skróty):
+Masz newsy o spółce:
 
 \"\"\"{news_text[:4000]}\"\"\"
 
-Wypisz krótko:
-- jakie ryzyka fundamentalne są widoczne (np. zadłużenie, emisja akcji, bankructwo, obniżka ratingu, problemy regulacyjne),
-- jeśli brak istotnych ryzyk — napisz to wprost.
+ZADANIE:
+- Wypisz ryzyka fundamentalne (jeśli są).
+- Jeśli brak — napisz to.
+- Zero kopiowania newsów.
+- Krótko, pod telefon.
 
-Forma:
-- lista punktów z emoji,
-- język: polski, krótko, pod telefon.
+FORMAT:
+- Lista punktów z emoji
 """
     try:
         r = client.chat.completions.create(
             model="o3-mini",
-            reasoning_effort="medium",
+            reasoning_effort="high",
+            temperature=0.1,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
         )
         return r.choices[0].message.content.strip()
     except Exception as e:
         return f"Błąd AI #4: {e}"
-# ============================================================
-#  DUAL SCANNER – FUNKCJA RYNKU
-# ============================================================
+
+# ================== RYNEK – RENDER ==================
 
 def render_market(tab, market_name):
     with tab:
@@ -426,7 +408,7 @@ def render_market(tab, market_name):
         tickers = st.session_state[f"{key}_tickers"]
 
         mode = st.selectbox(
-            "Tryb analizy (opis tylko dla AI #2):",
+            "Tryb (opis tylko dla AI #2):",
             ["Swing", "Day", "Long", "Hybrid"],
             index=3,
             key=f"{key}_mode"
@@ -460,8 +442,7 @@ def render_market(tab, market_name):
                     if df is None or df.empty or len(df) < 10:
                         continue
 
-                    last = df.iloc[-1]
-                    trend_state, sigs, score = ds_compute_signals_hybrid(df)
+                    trend_state, sigs, score, last = ds_compute_signals_hybrid(df)
                     news_raw = ds_news_raw(t)
                     news_flags = ds_news_flags(news_raw)
 
@@ -502,7 +483,7 @@ def render_market(tab, market_name):
 
         if df_out is not None:
 
-            col_left, col_right = st.columns([1.2, 1])
+            col_left, col_right = st.columns([1.3, 1])
 
             with col_left:
                 st.subheader("📊 Wyniki AI #1 — Hybrydowa analiza techniczna")
@@ -535,60 +516,56 @@ def render_market(tab, market_name):
                             st.line_chart(spark[t], height=120)
 
             with col_right:
-                st.subheader("🧠 AI #2 / #3 / #4")
+                st.subheader("🧠 Moduły Sztucznej Inteligencji")
 
-                ai_choice = st.radio(
-                    "Wybierz AI:",
+                ai_choice = st.selectbox(
+                    "Wybierz moduł analityczny:",
                     [
-                        "AI #2 — Komentarz LLM (pełna analiza)",
+                        "AI #2 — Komentarz techniczny LLM",
                         "AI #3 — Sentiment newsów",
-                        "AI #4 — Fundamentalne ryzyka",
+                        "AI #4 — Ryzyka fundamentalne",
                     ],
                     key=f"{key}_ai_choice",
                 )
 
-                st.subheader("📌 Wybierz spółki do analizy AI")
+                st.markdown("### 📌 Wybierz spółki do analizy:")
 
                 selected = []
                 for t in df_out["Ticker"]:
-                    if st.checkbox(t, key=f"{key}_{t}_chk"):
+                    if st.checkbox(f"{t}", key=f"{key}_{t}_chk"):
                         selected.append(t)
 
-                if st.button("💬 Uruchom wybraną AI", key=f"{key}_ai_run"):
+                if st.button("🚀 Uruchom wybraną AI", key=f"{key}_ai_run"):
                     if not selected:
                         st.warning("Nie wybrano żadnych spółek.")
                     else:
-                        with st.spinner("AI pracuje..."):
+                        with st.spinner("AI analizuje wybrane spółki..."):
                             new_rows = []
+
                             for _, row in df_out.iterrows():
                                 if row["Ticker"] in selected:
+
                                     if ai_choice.startswith("AI #2"):
-                                        # pełna analiza techniczna + newsy
-                                        comment = ds_ai2_comment(
+                                        tech = {
+                                            "close": row["Kurs"],
+                                            "rsi14": row["RSI14"],
+                                            "rsi7": row["RSI7"],
+                                            "vol_ratio": row["Vol x"],
+                                            "trend": row["Trend"],
+                                            "signals": row["Sygnały"].split(" | "),
+                                        }
+                                        row["Komentarz AI"] = ds_ai2_comment(
                                             row["Ticker"],
-                                            last=pd.Series({
-                                                "Close": row["Kurs"],
-                                                "RSI14": row["RSI14"],
-                                                "RSI7": row["RSI7"],
-                                                "Mom3": 0.0,
-                                                "Mom10": 0.0,
-                                                "Vol_ratio": row["Vol x"],
-                                                "Open": row["Kurs"],  # przybliżenie
-                                            }),
-                                            trend_state=row["Trend"],
-                                            signals=row["Sygnały"].split(" | ") if row["Sygnały"] else [],
-                                            news_flags=row["News_flags"],
-                                            mode_desc=mode_desc,
+                                            tech,
+                                            row["News_flags"],
+                                            mode_desc,
                                         )
-                                        row["Komentarz AI"] = comment
 
                                     elif ai_choice.startswith("AI #3"):
-                                        comment = ds_ai3_sentiment(row["News_raw"])
-                                        row["Sentiment AI"] = comment
+                                        row["Sentiment AI"] = ds_ai3_sentiment(row["News_raw"])
 
-                                    else:  # AI #4
-                                        comment = ds_ai4_fundamental(row["News_raw"])
-                                        row["Fundamental AI"] = comment
+                                    else:
+                                        row["Fundamental AI"] = ds_ai4_fundamental(row["News_raw"])
 
                                 new_rows.append(row)
 
@@ -603,11 +580,9 @@ def render_market(tab, market_name):
                         )
 
         else:
-            st.info("Wpisz tickery, wybierz tryb i uruchom 🔍 AI #1 — Hybrydowa analiza techniczna.")
+            st.info("Wpisz tickery, a potem uruchom 🔍 AI #1 — Hybrydowa analiza techniczna.")
 
-# ============================================================
-#  DUAL SCANNER – UI GŁÓWNE
-# ============================================================
+# ================== UI GŁÓWNE ==================
 
 st.title("📈 Dual Market Scanner — GPW & USA (4 AI, HYBRID + o3‑mini)")
 
@@ -615,10 +590,3 @@ tab_gpw, tab_usa = st.tabs(["🇵🇱 GPW", "🇺🇸 USA"])
 
 render_market(tab_gpw, "GPW")
 render_market(tab_usa, "USA")
-
-st.markdown("---")
-# --- TRWAŁY ZAPIS DO PLIKÓW ---
-def wczytaj_liste_z_pliku(rynek):
-    ...
-
-    
