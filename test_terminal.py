@@ -172,6 +172,7 @@ def skanuj_wybrane_spolki(lista_tickerow):
                 odleglosc_od_dna = ((cena - low_52w) / low_52w) * 100
                 formacja = wykryj_formacje_swiecowe(df)
 
+                # NAPRAWIONO: usunięto błędne przypisanie oily_bb
                 dane_spolek.append(
                     {
                         "Ticker": ticker.strip().upper(),
@@ -193,7 +194,7 @@ def skanuj_wybrane_spolki(lista_tickerow):
                             if not pd.isna(ostatni["ATR"])
                             else 0.0
                         ),
-                        "Wstęgi BB": oily_bb = pozycja_bb,
+                        "Wstęgi BB": pozycja_bb,
                         "52W Low": round(low_52w, 2),
                         "52W High": round(high_52w, 2),
                         "Od Dna (%)": round(odleglosc_od_dna, 1),
@@ -279,20 +280,16 @@ df_aktywne, pełne_dfs = skanuj_wybrane_spolki(aktualna_lista)
 if not df_aktywne.empty:
     df_aktywne = df_aktywne.sort_values(by="Skok Vol", ascending=False)
 
-    # --- NOWOŚĆ: WYSZUKIWANIE SPÓŁEK PO SŁOWACH KLUCZOWYCH ---
+    # --- WYSZUKIWANIE SPÓŁEK PO SŁOWACH KLUCZOWYCH ---
     szukaj_frazy = st.text_input(
         "🔍 Szukaj (wpisz Ticker, Formację lub Trend, np. 'Młot', '🟢', 'SNDL'):"
     )
     if szukaj_frazy:
-        # Filtrowanie elastyczne po tekście w kolumnach Ticker, Trend lub Formacja
         maska = (
-            df_aktywne["Ticker"]
-            .str.contains(szukaj_frazy, case=False, na=False)
+            df_aktywne["Ticker"].str.contains(szukaj_frazy, case=False, na=False)
 
             | df_aktywne["Trend"].str.contains(szukaj_frazy, case=False, na=False)
-            | df_aktywne["Formacja"].str.contains(
-                szukaj_frazy, case=False, na=False
-            )
+            | df_aktywne["Formacja"].str.contains(szukaj_frazy, case=False, na=False)
         )
         df_wyswietlane = df_aktywne[maska]
     else:
@@ -382,7 +379,7 @@ if not df_aktywne.empty:
         poziom_sl = round(cena_wejscia * 0.5, 2)
         odleglosc_sl = round(cena_wejscia - poziom_sl, 2)
 
-    # --- NOWOŚĆ: STRATEGIA WIELOPOZIOMOWEGO TAKE PROFIT (R:R) ---
+    # STRATEGIA WIELOPOZIOMOWEGO TAKE PROFIT (R:R)
     poziom_tp1 = round(cena_wejscia + odleglosc_sl, 2)  # R:R = 1:1
     poziom_tp2 = round(cena_wejscia + (2 * odleglosc_sl), 2)  # R:R = 1:2
     poziom_tp3 = round(cena_wejscia + (3 * odleglosc_sl), 2)  # R:R = 1:3
@@ -405,14 +402,12 @@ if not df_aktywne.empty:
         st.metric(label="Koszt pozycji", value=f"{calkowity_kapital} {waluta}")
         st.metric(label="Od Dna 52W", value=f"{wiersz_spolki['Od Dna (%)']}%")
 
-    # Wizualizacja dynamicznych poziomów profitu
     st.markdown("**🎯 Wielopoziomowe Targety Cenowe (Take Profit):**")
     c1, c2, c3 = st.columns(3)
     c1.metric(label="TP1 (Zabezpieczenie 1:1)", value=f"{poziom_tp1} {waluta}")
     c2.metric(label="TP2 (Cel Główny 1:2)", value=f"{poziom_tp2} {waluta}")
     c3.metric(label="TP3 (Rakieta 1:3)", value=f"{poziom_tp3} {waluta}")
 
-    # Przekazanie kompletnej struktury targetów do analizy AI
     slownik_tp = {
         "sl": poziom_sl,
         "tp1": poziom_tp1,
