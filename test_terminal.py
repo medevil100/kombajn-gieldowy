@@ -50,7 +50,7 @@ if not st.session_state.logged_in:
     st.stop()
 
 
-# --- TRWAŁY ZAPIS DO PLIKÓW (TRWAŁA BAZA) ---
+# --- TRWAŁY ZAPIS DO PLIKÓW ---
 def wczytaj_liste_z_pliku(rynek):
     nazwa_pliku = (
         "spolki_pl.txt" if rynek == "PL (GPW)" else "spolki_usa.txt"
@@ -76,7 +76,6 @@ def zapisz_liste_do_pliku(rynek, lista_tickerow):
 
 # --- DETEKCJA FORMACJI ŚWIECOWYCH ---
 def wykryj_formacje_swiecowe(df):
-    """Analizuje geometrię ostatniej i przedostatniej świecy."""
     if len(df) < 2:
         return "Brak danych"
 
@@ -93,11 +92,8 @@ def wykryj_formacje_swiecowe(df):
     cien_gorny = h - max(o, c)
     zakres = h - l if (h - l) > 0 else 0.001
 
-    # 1. Formacja Młota (Długi dolny cień, mały korpus na dole zakresu)
     if cien_dolny > (2 * korpus) and cien_gorny < (0.2 * zakres):
-        return "🔨 Młot (Sygnał Odwrócenia)"
-
-    # 2. Objęcie Hossy (Zielona świeca całkowicie połyka poprzednią czerwoną)
+        return "🔨 Młot"
     if c_prev < o_prev and c > o and o <= c_prev and c >= o_prev:
         return "🔥 Objęcie Hossy"
 
@@ -120,7 +116,7 @@ def oblicz_wskazniki(df):
     df["MA20"] = df["Close"].rolling(window=20).mean()
     df["STD20"] = df["Close"].rolling(window=20).std()
     df["Upper_Band"] = df["MA20"] + (df["STD20"] * 2)
-    df["Lower_Band"] = df["MA20"] - (df['STD20'] * 2)
+    df["Lower_Band"] = df["MA20"] - (df["STD20"] * 2)
 
     high_low = df["High"] - df["Low"]
     high_cp = np.abs(df["High"] - df["Close"].shift())
@@ -137,7 +133,7 @@ def oblicz_wskazniki(df):
 
 def skanuj_wybrane_spolki(lista_tickerow):
     dane_spolek = []
-    slownik_df = {}  # Zapamiętujemy pełne df do rysowania wykresów
+    slownik_df = {}
     if not lista_tickerow:
         return pd.DataFrame(), {}
 
@@ -197,7 +193,7 @@ def skanuj_wybrane_spolki(lista_tickerow):
                             if not pd.isna(ostatni["ATR"])
                             else 0.0
                         ),
-                        "Wstęgi BB": pozycja_bb,
+                        "Wstęgi BB": oily_bb = pozycja_bb,
                         "52W Low": round(low_52w, 2),
                         "52W High": round(high_52w, 2),
                         "Od Dna (%)": round(odleglosc_od_dna, 1),
@@ -211,20 +207,27 @@ def skanuj_wybrane_spolki(lista_tickerow):
     return pd.DataFrame(dane_spolek), slownik_df
 
 
-def generuj_raport_pojedynczej_spolki(model, ticker, wiersz_danych):
+def generuj_raport_pojedynczej_spolki(model, ticker, wiersz_danych, dane_tp):
     client = OpenAI(api_key=OPENAI_API_KEY)
     dane_tekst = wiersz_danych.to_string(index=False)
+    tp_tekst = (
+        f"Planowane cele Take Profit: TP1={dane_tp['tp1']}, "
+        f"TP2={dane_tp['tp2']}, TP3={dane_tp['tp3']}. Stop Loss={dane_tp['sl']}."
+    )
 
     prompt = f"""
     Jesteś zawodowym traderem. Wykonaj analizę dla spółki {ticker}:
     {dane_tekst}
     
-    Zinterpretuj:
-    1. Czy wykryta formacja świecowa ('Formacja') i odległość od dna potwierdzają akumulację kapitału?
-    2. Co o pędzie mówi RSI i MACD w połączeniu ze Skokiem Vol?
-    3. Werdykt: KUP / SPRZEDAJ / CZEKAJ.
+    Zaimplementowany plan rynkowy tradera:
+    {tp_tekst}
     
-    Krótko, zwięźle, pod telefon. Używaj emoji.
+    Zinterpretuj i oceń:
+    1. Czy odległość od dna i formacja świecowa dają przewagę rynkową?
+    2. Czy w oparciu o RSI, MACD i Skok Vol wyznaczone poziomy Take Profit (TP1, TP2, TP3) są matematycznie i technicznie realne do osiągnięcia w najbliższych dniach?
+    3. Werdykt końcowy (KUP / SPRZEDAJ / CZEKAJ).
+    
+    Krótko, konkretnie, pod telefon. Używaj punktów i emoji.
     """
 
     params = {"model": model, "messages": [{"role": "user", "content": prompt}]}
@@ -234,7 +237,7 @@ def generuj_raport_pojedynczej_spolki(model, ticker, wiersz_danych):
     try:
         response = client.chat.completions.create(**params)
         if hasattr(response, "choices") and len(response.choices) > 0:
-            choice = response.choices[0]
+            choice = response.choices
             if hasattr(choice, "message") and hasattr(choice.message, "content"):
                 return choice.message.content
         return str(response)
@@ -253,7 +256,7 @@ with st.sidebar:
         "Interwał odświeżania (min):", min_value=1, max_value=60, value=5
     )
 
-# Zarządzanie listą (wczytanie z dysku serwera)
+# Zarządzanie listą
 st.subheader("📝 Trwała Lista Spółek")
 aktualna_lista = wczytaj_liste_z_pliku(rynek_wybor)
 lista_tekst = ", ".join(aktualna_lista)
@@ -276,8 +279,27 @@ df_aktywne, pełne_dfs = skanuj_wybrane_spolki(aktualna_lista)
 if not df_aktywne.empty:
     df_aktywne = df_aktywne.sort_values(by="Skok Vol", ascending=False)
 
+    # --- NOWOŚĆ: WYSZUKIWANIE SPÓŁEK PO SŁOWACH KLUCZOWYCH ---
+    szukaj_frazy = st.text_input(
+        "🔍 Szukaj (wpisz Ticker, Formację lub Trend, np. 'Młot', '🟢', 'SNDL'):"
+    )
+    if szukaj_frazy:
+        # Filtrowanie elastyczne po tekście w kolumnach Ticker, Trend lub Formacja
+        maska = (
+            df_aktywne["Ticker"]
+            .str.contains(szukaj_frazy, case=False, na=False)
+
+            | df_aktywne["Trend"].str.contains(szukaj_frazy, case=False, na=False)
+            | df_aktywne["Formacja"].str.contains(
+                szukaj_frazy, case=False, na=False
+            )
+        )
+        df_wyswietlane = df_aktywne[maska]
+    else:
+        df_wyswietlane = df_aktywne
+
     # Widok tabeli na telefon
-    widok_tabeli = df_aktywne[
+    widok_tabeli = df_wyswietlane[
         [
             "Ticker",
             "Cena",
@@ -290,21 +312,21 @@ if not df_aktywne.empty:
     ]
     st.dataframe(widok_tabeli, use_container_width=True, hide_index=True)
 
+    if df_wyswietlane.empty:
+        st.info("Brak wyników dla wpisanej frazy kluczowej.")
+
     # --- INDYWIDUALNA ANALIZA I WYKRES ---
     st.markdown("---")
     st.subheader("🔍 Detale i Wykres Spółki")
 
-    lista_tickerow_do_wyboru = df_aktywne["Ticker"].tolist()
+    lista_tickerow_do_wyboru = df_wyswietlane["Ticker"].tolist() if not df_wyswietlane.empty else df_aktywne["Ticker"].tolist()
     wybrany_ticker = st.selectbox(
-        "Wybierz ticker:", lista_tickerow_do_wyboru
+        "Wybierz ticker do analizy:", lista_tickerow_do_wyboru
     )
 
-    # RYSOWANIE WYKRESU ŚWIECOWEGO (PLOTLY)
     if wybrany_ticker in pełne_dfs:
-        df_wykres = pełne_dfs[wybrany_ticker].tail(30)  # Ostatnie 30 świec
-
+        df_wykres = pełne_dfs[wybrany_ticker].tail(30)
         fig = go.Figure()
-        # Świece
         fig.add_trace(
             go.Candlestick(
                 x=df_wykres.index,
@@ -315,7 +337,6 @@ if not df_aktywne.empty:
                 name="Cena",
             )
         )
-        # Wstęgi Bollingera
         fig.add_trace(
             go.Scatter(
                 x=df_wykres.index,
@@ -332,21 +353,20 @@ if not df_aktywne.empty:
                 name="BB Dolna",
             )
         )
-
         fig.update_layout(
             template="plotly_dark",
             xaxis_rangeslider_visible=False,
-            height=280,
+            height=240,
             margin=dict(l=10, r=10, t=10, b=10),
             showlegend=False,
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # --- KALKULATOR RYZYKA ---
+    # --- KALKULATOR RYZYKA I WIELOPOZIOMOWYCH TP ---
     wiersz_spolki = df_aktywne[df_aktywne["Ticker"] == wybrany_ticker].iloc[0]
     waluta = "PLN" if rynek_wybor == "PL (GPW)" else "USD"
 
-    st.markdown("##### 🧮 Kalkulator wielkości pozycji")
+    st.markdown("##### 🧮 Kalkulator Wielkości i Targetów (TP)")
     akceptowalne_ryzyko = st.number_input(
         f"Ryzyko kwotowe ({waluta}):", min_value=10, value=200, step=50
     )
@@ -362,11 +382,17 @@ if not df_aktywne.empty:
         poziom_sl = round(cena_wejscia * 0.5, 2)
         odleglosc_sl = round(cena_wejscia - poziom_sl, 2)
 
+    # --- NOWOŚĆ: STRATEGIA WIELOPOZIOMOWEGO TAKE PROFIT (R:R) ---
+    poziom_tp1 = round(cena_wejscia + odleglosc_sl, 2)  # R:R = 1:1
+    poziom_tp2 = round(cena_wejscia + (2 * odleglosc_sl), 2)  # R:R = 1:2
+    poziom_tp3 = round(cena_wejscia + (3 * odleglosc_sl), 2)  # R:R = 1:3
+
     liczba_akcji = (
         int(akceptowalne_ryzyko / odleglosc_sl) if odleglosc_sl > 0 else 0
     )
     calkowity_kapital = round(liczba_akcji * cena_wejscia, 2)
 
+    # Prezentacja Money Management
     col1, col2 = st.columns(2)
     with col1:
         st.metric(
@@ -377,21 +403,34 @@ if not df_aktywne.empty:
         st.metric(label="Kup akcji", value=f"{liczba_akcji} szt.")
     with col2:
         st.metric(label="Koszt pozycji", value=f"{calkowity_kapital} {waluta}")
-        st.metric(
-            label="Od Dna 52W", value=f"{wiersz_spolki['Od Dna (%)']}%"
-        )
+        st.metric(label="Od Dna 52W", value=f"{wiersz_spolki['Od Dna (%)']}%")
+
+    # Wizualizacja dynamicznych poziomów profitu
+    st.markdown("**🎯 Wielopoziomowe Targety Cenowe (Take Profit):**")
+    c1, c2, c3 = st.columns(3)
+    c1.metric(label="TP1 (Zabezpieczenie 1:1)", value=f"{poziom_tp1} {waluta}")
+    c2.metric(label="TP2 (Cel Główny 1:2)", value=f"{poziom_tp2} {waluta}")
+    c3.metric(label="TP3 (Rakieta 1:3)", value=f"{poziom_tp3} {waluta}")
+
+    # Przekazanie kompletnej struktury targetów do analizy AI
+    slownik_tp = {
+        "sl": poziom_sl,
+        "tp1": poziom_tp1,
+        "tp2": poziom_tp2,
+        "tp3": poziom_tp3,
+    }
 
     if st.button(
-        f"🧠 Analiza Formacji i Wskaźników",
+        f"🧠 Analiza i Ocena Celów przez AI",
         type="primary",
         use_container_width=True,
     ):
         dane_spolki_pelne = df_aktywne[df_aktywne["Ticker"] == wybrany_ticker]
-        with st.spinner("Model AI bada geometrię świec i strukturę pędu..."):
+        with st.spinner("Najsilniejsze AI weryfikuje poziomy TP i geometrię świec..."):
             wynik_indywidualny = generuj_raport_pojedynczej_spolki(
-                gpt_wybor, wybrany_ticker, dane_spolki_pelne
+                gpt_wybor, wybrany_ticker, dane_spolki_pelne, slownik_tp
             )
-            st.markdown(f"### 📝 Raport AI dla {wybrany_ticker}:")
+            st.markdown(f"### 📝 Strategiczny Raport AI dla {wybrany_ticker}:")
             st.info(wynik_indywidualny)
 else:
     st.warning("Lista pusta lub brak aktywności na spółkach.")
