@@ -21,14 +21,14 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 3× AI — Swing / Day / Long (3 różne modele, 3 różne style)")
+st.title("📈 3× AI — Swing / Day / Long (3 modele GPT)")
 
 
 # ================== AI #1 — SWING (gpt‑4o‑mini) ==================
 def ai_swing(ticker, text):
     prompt = f"""
 Jesteś agresywnym traderem swingowym.
-Myślisz szybko, patrzysz na momentum, RSI, wolumen i wybicia.
+Patrzysz na momentum, RSI, wolumen i wybicia.
 
 Analiza SWING dla {ticker}:
 {text}
@@ -37,7 +37,6 @@ Zadanie:
 - 2–3 zdania
 - dynamiczny styl
 - zero kopiowania danych
-- skup się na krótkoterminowych ruchach
 """
     r = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -60,7 +59,6 @@ Zadanie:
 - 2–3 zdania
 - styl szybki, konkretny
 - zero kopiowania danych
-- skup się na ruchach intraday
 """
     r = client.chat.completions.create(
         model="gpt-4o",
@@ -74,7 +72,7 @@ Zadanie:
 def ai_long(ticker, text):
     prompt = f"""
 Jesteś spokojnym analitykiem długoterminowym.
-Patrzysz na trend EMA50/100/200, stabilność, wolumen i strukturę rynku.
+Patrzysz na trend EMA50/100/200, stabilność i wolumen.
 
 Analiza LONG-TERM dla {ticker}:
 {text}
@@ -83,11 +81,9 @@ Zadanie:
 - 2–3 zdania
 - styl spokojny, analityczny
 - zero kopiowania danych
-- skup się na kierunku miesięcznym
 """
     r = client.chat.completions.create(
         model="o3-mini",
-        reasoning_effort="high",
         temperature=0.1,
         messages=[{"role": "user", "content": prompt}],
     )
