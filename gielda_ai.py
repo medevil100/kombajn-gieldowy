@@ -619,4 +619,6 @@ render_market(tab_usa, "USA")
 st.markdown("---")
 # --- TRWAŁY ZAPIS DO PLIKÓW ---
 def wczytaj_liste_z_pliku(rynek):
+    ...
+
     
