@@ -1,4 +1,4 @@
-```python
+
 import os
 import io
 import math
@@ -649,4 +649,4 @@ tab_gpw, tab_usa = st.tabs(["🇵🇱 GPW", "🇺🇸 USA"])
 
 render_market(tab_gpw, "GPW")
 render_market(tab_usa, "USA")
-```
+
