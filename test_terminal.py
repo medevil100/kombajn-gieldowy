@@ -1,18 +1,19 @@
+import os
 import time
-import pandas as pd
 import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 from openai import OpenAI
 
 st.set_page_config(
-    page_title="Skaner Groszówek AI Ultra", 
-    page_icon="📱", 
-    layout="centered"
+    page_title="Skaner Groszówek AI Master", page_icon="📱", layout="centered"
 )
 
 # --- MATRYCA WIZUALNA (CSS) ---
-st.markdown("""
+st.markdown(
+    """
     <style>
     .stApp { background-color: #0E1117; }
     div[data-testid="stDataFrame"] { background-color: #161B22; border: 1px solid #30363D; border-radius: 8px; }
@@ -21,13 +22,17 @@ st.markdown("""
         border-radius: 6px !important; border: none !important; box-shadow: 0 0 12px rgba(0, 255, 102, 0.5);
     }
     </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 try:
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
     APP_PASSWORD = st.secrets["APP_PASSWORD"]
 except Exception:
-    st.error("Błąd: Skonfiguruj 'OPENAI_API_KEY' oraz 'APP_PASSWORD' w Streamlit Secrets.")
+    st.error(
+        "Błąd: Skonfiguruj 'OPENAI_API_KEY' oraz 'APP_PASSWORD' w Streamlit Secrets."
+    )
     st.stop()
 
 if "logged_in" not in st.session_state:
@@ -44,212 +49,355 @@ if not st.session_state.logged_in:
             st.error("Błędne hasło!")
     st.stop()
 
-if "spolki_pl" not in st.session_state:
-    st.session_state.spolki_pl = ["ATT.WA", "COG.WA", "PCO.WA", "SNS.WA", "RFK.WA"]
-if "spolki_usa" not in st.session_state:
-    st.session_state.spolki_usa = ["SNDL", "NIO", "AAL", "F", "LCID", "RIG"]
 
-# --- MATEMATYKA I SZACOWANIE WSKAŹNIKÓW ---
+# --- TRWAŁY ZAPIS DO PLIKÓW (TRWAŁA BAZA) ---
+def wczytaj_liste_z_pliku(rynek):
+    nazwa_pliku = (
+        "spolki_pl.txt" if rynek == "PL (GPW)" else "spolki_usa.txt"
+    )
+    if os.path.exists(nazwa_pliku):
+        with open(nazwa_pliku, "r") as f:
+            zawartosc = f.read()
+            return [t.strip().upper() for t in zawartosc.split(",") if t.strip()]
+    return (
+        ["ATT.WA", "COG.WA", "PCO.WA", "SNS.WA"]
+        if rynek == "PL (GPW)"
+        else ["SNDL", "NIO", "AAL", "F"]
+    )
+
+
+def zapisz_liste_do_pliku(rynek, lista_tickerow):
+    nazwa_pliku = (
+        "spolki_pl.txt" if rynek == "PL (GPW)" else "spolki_usa.txt"
+    )
+    with open(nazwa_pliku, "w") as f:
+        f.write(", ".join(lista_tickerow))
+
+
+# --- DETEKCJA FORMACJI ŚWIECOWYCH ---
+def wykryj_formacje_swiecowe(df):
+    """Analizuje geometrię ostatniej i przedostatniej świecy."""
+    if len(df) < 2:
+        return "Brak danych"
+
+    o = df["Open"].iloc[-1]
+    h = df["High"].iloc[-1]
+    l = df["Low"].iloc[-1]
+    c = df["Close"].iloc[-1]
+
+    o_prev = df["Open"].iloc[-2]
+    c_prev = df["Close"].iloc[-2]
+
+    korpus = abs(c - o)
+    cien_dolny = min(o, c) - l
+    cien_gorny = h - max(o, c)
+    zakres = h - l if (h - l) > 0 else 0.001
+
+    # 1. Formacja Młota (Długi dolny cień, mały korpus na dole zakresu)
+    if cien_dolny > (2 * korpus) and cien_gorny < (0.2 * zakres):
+        return "🔨 Młot (Sygnał Odwrócenia)"
+
+    # 2. Objęcie Hossy (Zielona świeca całkowicie połyka poprzednią czerwoną)
+    if c_prev < o_prev and c > o and o <= c_prev and c >= o_prev:
+        return "🔥 Objęcie Hossy"
+
+    return "Neutralna"
+
+
+# --- MATEMATYKA GIEŁDOWA ---
 def oblicz_wskazniki(df):
-    delta = df['Close'].diff()
+    delta = df["Close"].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    
-    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = exp1 - exp2
-    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    
-    df['MA20'] = df['Close'].rolling(window=20).mean()
-    df['STD20'] = df['Close'].rolling(window=20).std()
-    df['Upper_Band'] = df['MA20'] + (df['STD20'] * 2)
-    df['Lower_Band'] = df['MA20'] - (df['STD20'] * 2)
-    
-    high_low = df['High'] - df['Low']
-    high_cp = np.abs(df['High'] - df['Close'].shift())
-    low_cp = np.abs(df['Low'] - df['Close'].shift())
-    df['ATR'] = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1).rolling(14).mean()
-    
+    df["RSI"] = 100 - (100 / (1 + rs))
+
+    exp1 = df["Close"].ewm(span=12, adjust=False).mean()
+    exp2 = df["Close"].ewm(span=26, adjust=False).mean()
+    df["MACD"] = exp1 - exp2
+    df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
+
+    df["MA20"] = df["Close"].rolling(window=20).mean()
+    df["STD20"] = df["Close"].rolling(window=20).std()
+    df["Upper_Band"] = df["MA20"] + (df["STD20"] * 2)
+    df["Lower_Band"] = df["MA20"] - (df['STD20'] * 2)
+
+    high_low = df["High"] - df["Low"]
+    high_cp = np.abs(df["High"] - df["Close"].shift())
+    low_cp = np.abs(df["Low"] - df["Close"].shift())
+    df["ATR"] = (
+        pd.concat([high_low, high_cp, low_cp], axis=1)
+        .max(axis=1)
+        .rolling(14)
+        .mean()
+    )
+
     return df
+
 
 def skanuj_wybrane_spolki(lista_tickerow):
     dane_spolek = []
+    slownik_df = {}  # Zapamiętujemy pełne df do rysowania wykresów
     if not lista_tickerow:
-        return pd.DataFrame()
-        
+        return pd.DataFrame(), {}
+
     for ticker in lista_tickerow:
         try:
             t = yf.Ticker(ticker.strip().upper())
-            # Pobieramy dane z ostatniego roku (252 dni robocze) dla 52W High/Low
             df = t.history(period="260d")
             if df.empty or len(df) < 50:
                 continue
-                
-            # Wyliczanie ekstremów 52-tygodniowych
+
             okres_52w = df.iloc[-252:] if len(df) >= 252 else df
             high_52w = okres_52w["High"].max()
             low_52w = okres_52w["Low"].min()
-            
+
             df = oblicz_wskazniki(df)
             ostatni = df.iloc[-1]
             cena = ostatni["Close"]
             wolumen_teraz = ostatni["Volume"]
             wolumen_srednia = df["Volume"].rolling(10).mean().iloc[-1]
-            
+
             if wolumen_teraz > 0:
                 sma_10 = df["Close"].rolling(10).mean().iloc[-1]
-                skok_vol = wolumen_teraz / wolumen_srednia if wolumen_srednia > 0 else 1.0
+                skok_vol = (
+                    wolumen_teraz / wolumen_srednia
+                    if wolumen_srednia > 0
+                    else 1.0
+                )
                 trend = "🟢 Wzrostowy" if cena > sma_10 else "🔴 Spadkowy"
-                
+
                 pozycja_bb = "Środek"
-                if cena >= ostatni['Upper_Band']: pozycja_bb = "🔥 Wybicie Góra"
-                elif cena <= ostatni['Lower_Band']: pozycja_bb = "⚠️ Wybicie Dół"
+                if cena >= ostatni["Upper_Band"]:
+                    pozycja_bb = "🔥 Wybicie Góra"
+                elif cena <= ostatni["Lower_Band"]:
+                    pozycja_bb = "⚠️ Wybicie Dół"
 
-                # Odległość ceny od historycznego dna (w procentach)
                 odleglosc_od_dna = ((cena - low_52w) / low_52w) * 100
+                formacja = wykryj_formacje_swiecowe(df)
 
-                dane_spolek.append({
-                    "Ticker": ticker.strip().upper(),
-                    "Cena": round(cena, 2),
-                    "Skok Vol": round(skok_vol, 2),
-                    "Trend": trend,
-                    "RSI (14)": round(ostatni['RSI'], 1) if not pd.isna(ostatni['RSI']) else 50.0,
-                    "MACD Hist": round(ostatni['MACD'] - ostatni['Signal'], 4) if not pd.isna(ostatni['Signal']) else 0.0,
-                    "Zmienność (ATR)": round(ostatni['ATR'], 3) if not pd.isna(ostatni['ATR']) else 0.0,
-                    "Wstęgi BB": pozycja_bb,
-                    "52W Low": round(low_52w, 2),
-                    "52W High": round(high_52w, 2),
-                    "Od Dna (%)": round(odleglosc_od_dna, 1)
-                })
+                dane_spolek.append(
+                    {
+                        "Ticker": ticker.strip().upper(),
+                        "Cena": round(cena, 2),
+                        "Skok Vol": round(skok_vol, 2),
+                        "Trend": trend,
+                        "RSI (14)": (
+                            round(ostatni["RSI"], 1)
+                            if not pd.isna(ostatni["RSI"])
+                            else 50.0
+                        ),
+                        "MACD Hist": (
+                            round(ostatni["MACD"] - ostatni["Signal"], 4)
+                            if not pd.isna(ostatni["Signal"])
+                            else 0.0
+                        ),
+                        "Zmienność (ATR)": (
+                            round(ostatni["ATR"], 3)
+                            if not pd.isna(ostatni["ATR"])
+                            else 0.0
+                        ),
+                        "Wstęgi BB": pozycja_bb,
+                        "52W Low": round(low_52w, 2),
+                        "52W High": round(high_52w, 2),
+                        "Od Dna (%)": round(odleglosc_od_dna, 1),
+                        "Formacja": formacja,
+                    }
+                )
+                slownik_df[ticker.strip().upper()] = df
         except Exception:
             continue
-            
-    return pd.DataFrame(dane_spolek)
+
+    return pd.DataFrame(dane_spolek), slownik_df
+
 
 def generuj_raport_pojedynczej_spolki(model, ticker, wiersz_danych):
     client = OpenAI(api_key=OPENAI_API_KEY)
     dane_tekst = wiersz_danych.to_string(index=False)
-    
+
     prompt = f"""
-    Jesteś zawodowym traderem giełdowym. Wykonaj indywidualną, maksymalnie szczegółową analizę dla spółki {ticker}.
-    
-    Oto jej pełne parametry rynkowe wraz z poziomami 52-tygodniowymi:
+    Jesteś zawodowym traderem. Wykonaj analizę dla spółki {ticker}:
     {dane_tekst}
     
-    Zinterpretuj precyzyjnie:
-    1. Czy odległość od historycznego dna ('Od Dna (%)') stanowi bezpieczną strefę akumulacji, czy ryzyko bankructwa?
-    2. Co sugeruje poziom RSI, MACD i pozycja ceny względem Wstęg Bollingera (BB)?
-    3. Jaki jest dokładny werdykt i krótka strategia rynkowa?
+    Zinterpretuj:
+    1. Czy wykryta formacja świecowa ('Formacja') i odległość od dna potwierdzają akumulację kapitału?
+    2. Co o pędzie mówi RSI i MACD w połączeniu ze Skokiem Vol?
+    3. Werdykt: KUP / SPRZEDAJ / CZEKAJ.
     
-    Napisz konkretny, strukturyzowany raport przy użyciu punktów i emoji pod ekran telefonu.
+    Krótko, zwięźle, pod telefon. Używaj emoji.
     """
-    
+
     params = {"model": model, "messages": [{"role": "user", "content": prompt}]}
     if model == "o3-mini":
         params["reasoning_effort"] = "high"
-        
+
     try:
         response = client.chat.completions.create(**params)
-        if hasattr(response, 'choices') and len(response.choices) > 0:
+        if hasattr(response, "choices") and len(response.choices) > 0:
             choice = response.choices[0]
-            if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+            if hasattr(choice, "message") and hasattr(choice.message, "content"):
                 return choice.message.content
         return str(response)
     except Exception as e:
-        return f"❌ Błąd API OpenAI: {str(e)}"
+        return f"❌ Błąd OpenAI: {str(e)}"
 
 
 # --- INTERFEJS MOBILNY ---
-st.title("📱 Skaner AI Ultra")
+st.title("📱 Skaner AI Pro Master")
 
 with st.sidebar:
     st.header("⚙️ Parametry")
     rynek_wybor = st.radio("Wybierz okno rynkowe:", ["PL (GPW)", "USA"])
     gpt_wybor = st.selectbox("Mocny Silnik AI:", ["o3-mini", "gpt-4o", "o1"])
-    interwal = st.slider("Interwał odświeżania (min):", min_value=1, max_value=60, value=5)
+    interwal = st.slider(
+        "Interwał odświeżania (min):", min_value=1, max_value=60, value=5
+    )
 
-st.subheader("📝 Edytuj swoją listę")
-aktualna_lista = st.session_state.spolki_pl if rynek_wybor == "PL (GPW)" else st.session_state.spolki_usa
+# Zarządzanie listą (wczytanie z dysku serwera)
+st.subheader("📝 Trwała Lista Spółek")
+aktualna_lista = wczytaj_liste_z_pliku(rynek_wybor)
 lista_tekst = ", ".join(aktualna_lista)
 
-nowa_lista_tekst = st.text_area(f"Tickery dla {rynek_wybor} (rozdziel przecinkami):", value=lista_tekst)
+nowa_lista_tekst = st.text_area(
+    f"Modyfikuj listę dla {rynek_wybor}:", value=lista_tekst
+)
 
-if st.button("💾 Zapisz i Odśwież", use_container_width=True):
-    czysta_lista = [t.strip().upper() for t in nowa_lista_tekst.split(",") if t.strip()]
-    if rynek_wybor == "PL (GPW)": st.session_state.spolki_pl = czysta_lista
-    else: st.session_state.spolki_usa = czysta_lista
-    st.success("Lista zapisana!")
+if st.button("💾 Zapisz na Stałe", use_container_width=True):
+    czysta_lista = [
+        t.strip().upper() for t in nowa_lista_tekst.split(",") if t.strip()
+    ]
+    zapisz_liste_do_pliku(rynek_wybor, czysta_lista)
+    st.success("Zapisano trwale w pamięci aplikacji!")
     st.rerun()
 
 st.subheader(f"📊 Monitorowane Groszówki: {rynek_wybor}")
-df_aktywne = skanuj_wybrane_spolki(aktualna_lista)
+df_aktywne, pełne_dfs = skanuj_wybrane_spolki(aktualna_lista)
 
 if not df_aktywne.empty:
     df_aktywne = df_aktywne.sort_values(by="Skok Vol", ascending=False)
-    
-    # Wyświetlamy najważniejsze kolumny w tabeli głównej dla przejrzystości na telefonie
-    widok_tabeli = df_aktywne[["Ticker", "Cena", "Skok Vol", "Trend", "RSI (14)", "Wstęgi BB", "Od Dna (%)"]]
+
+    # Widok tabeli na telefon
+    widok_tabeli = df_aktywne[
+        [
+            "Ticker",
+            "Cena",
+            "Skok Vol",
+            "Trend",
+            "RSI (14)",
+            "Od Dna (%)",
+            "Formacja",
+        ]
+    ]
     st.dataframe(widok_tabeli, use_container_width=True, hide_index=True)
-    
-    # --- SEKCJA ROZDZIELONEJ ANALIZY + KALKULATOR RYZYKA ---
+
+    # --- INDYWIDUALNA ANALIZA I WYKRES ---
     st.markdown("---")
-    st.subheader("🔍 Indywidualna Analiza i MM")
-    
+    st.subheader("🔍 Detale i Wykres Spółki")
+
     lista_tickerow_do_wyboru = df_aktywne["Ticker"].tolist()
-    wybrany_ticker = st.selectbox("Wybierz spółkę:", lista_tickerow_do_wyboru)
-    
-    # Pobranie wiersza danych wybranej spółki
-    wiersz_spolki = df_aktywne[df_aktywne["Ticker"] == wybrany_ticker].iloc[0]
-    
-    # --- INTEGRACJA KALKULATORA ATR (MONEY MANAGEMENT) ---
-    st.markdown("##### 🧮 Kalkulator wielkości pozycji (ATR)")
-    waluta = "PLN" if rynek_wybor == "PL (GPW)" else "USD"
-    
-    akceptowalne_ryzyko = st.number_input(
-        f"Maksymalna kwota straty na pozycję ({waluta}):", 
-        min_value=10, max_value=50000, value=200, step=50
+    wybrany_ticker = st.selectbox(
+        "Wybierz ticker:", lista_tickerow_do_wyboru
     )
-    
-    # Logika kalkulatora: Stop Loss ustawiany jako odległość 2 * ATR od ceny wejściowej
+
+    # RYSOWANIE WYKRESU ŚWIECOWEGO (PLOTLY)
+    if wybrany_ticker in pełne_dfs:
+        df_wykres = pełne_dfs[wybrany_ticker].tail(30)  # Ostatnie 30 świec
+
+        fig = go.Figure()
+        # Świece
+        fig.add_trace(
+            go.Candlestick(
+                x=df_wykres.index,
+                open=df_wykres["Open"],
+                high=df_wykres["High"],
+                low=df_wykres["Low"],
+                close=df_wykres["Close"],
+                name="Cena",
+            )
+        )
+        # Wstęgi Bollingera
+        fig.add_trace(
+            go.Scatter(
+                x=df_wykres.index,
+                y=df_wykres["Upper_Band"],
+                line=dict(color="rgba(0, 255, 102, 0.3)", width=1),
+                name="BB Górna",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=df_wykres.index,
+                y=df_wykres["Lower_Band"],
+                line=dict(color="rgba(255, 51, 51, 0.3)", width=1),
+                name="BB Dolna",
+            )
+        )
+
+        fig.update_layout(
+            template="plotly_dark",
+            xaxis_rangeslider_visible=False,
+            height=280,
+            margin=dict(l=10, r=10, t=10, b=10),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # --- KALKULATOR RYZYKA ---
+    wiersz_spolki = df_aktywne[df_aktywne["Ticker"] == wybrany_ticker].iloc[0]
+    waluta = "PLN" if rynek_wybor == "PL (GPW)" else "USD"
+
+    st.markdown("##### 🧮 Kalkulator wielkości pozycji")
+    akceptowalne_ryzyko = st.number_input(
+        f"Ryzyko kwotowe ({waluta}):", min_value=10, value=200, step=50
+    )
+
     cena_wejscia = wiersz_spolki["Cena"]
     atr = wiersz_spolki["Zmienność (ATR)"]
-    
-    # Ochrona przed ATR równym 0
     if atr <= 0:
         atr = cena_wejscia * 0.05
-        
+
     odleglosc_sl = round(2 * atr, 2)
     poziom_sl = round(cena_wejscia - odleglosc_sl, 2)
-    
     if poziom_sl <= 0:
         poziom_sl = round(cena_wejscia * 0.5, 2)
         odleglosc_sl = round(cena_wejscia - poziom_sl, 2)
 
-    # Obliczenie wielkości pozycji na podstawie zadeklarowanego ryzyka kwotowego
-    liczba_akcji = int(akceptowalne_ryzyko / odleglosc_sl) if odleglosc_sl > 0 else 0
+    liczba_akcji = (
+        int(akceptowalne_ryzyko / odleglosc_sl) if odleglosc_sl > 0 else 0
+    )
     calkowity_kapital = round(liczba_akcji * cena_wejscia, 2)
 
-    # Prezentacja wyników kalkulatora w widoku mobilnym
     col1, col2 = st.columns(2)
     with col1:
-        st.metric(label="Sugerowana obrona (SL)", value=f"{poziom_sl} {waluta}", delta=f"-{odleglosc_sl}")
-        st.metric(label="Liczba akcji do kupna", value=f"{liczba_akcji} szt.")
+        st.metric(
+            label="Stop Loss (Obrona)",
+            value=f"{poziom_sl} {waluta}",
+            delta=f"-{odleglosc_sl}",
+        )
+        st.metric(label="Kup akcji", value=f"{liczba_akcji} szt.")
     with col2:
-        st.metric(label="Całkowity koszt pozycji", value=f"{calkowity_kapital} {waluta}")
-        st.metric(label="Dołek 52W", value=f"{wiersz_spolki['52W Low']} {waluta}", delta=f"{wiersz_spolki['Od Dna (%)']}% od dna", delta_color="inverse")
+        st.metric(label="Koszt pozycji", value=f"{calkowity_kapital} {waluta}")
+        st.metric(
+            label="Od Dna 52W", value=f"{wiersz_spolki['Od Dna (%)']}%"
+        )
 
-    # Przycisk uruchomienia analizy dedykowanej dla tej spółki z uwzględnieniem danych rocznych
-    if st.button(f"🧠 Generuj Raport AI dla {wybrany_ticker}", type="primary", use_container_width=True):
+    if st.button(
+        f"🧠 Analiza Formacji i Wskaźników",
+        type="primary",
+        use_container_width=True,
+    ):
         dane_spolki_pelne = df_aktywne[df_aktywne["Ticker"] == wybrany_ticker]
-        with st.spinner(f"Potężny model {gpt_wybor} analizuje profil {wybrany_ticker}..."):
-            wynik_indywidualny = generuj_raport_pojedynczej_spolki(gpt_wybor, wybrany_ticker, dane_spolki_pelne)
-            st.markdown(f"### 📝 Raport Głęboki dla {wybrany_ticker}:")
+        with st.spinner("Model AI bada geometrię świec i strukturę pędu..."):
+            wynik_indywidualny = generuj_raport_pojedynczej_spolki(
+                gpt_wybor, wybrany_ticker, dane_spolki_pelne
+            )
+            st.markdown(f"### 📝 Raport AI dla {wybrany_ticker}:")
             st.info(wynik_indywidualny)
 else:
     st.warning("Lista pusta lub brak aktywności na spółkach.")
 
-st.caption(f"Aktualizacja: {time.strftime('%H:%M:%S')} | Odświeżenie za {interwal} min.")
+st.caption(
+    f"Aktualizacja: {time.strftime('%H:%M:%S')} | Odświeżenie za {interwal} min."
+)
 time.sleep(interwal * 60)
 st.rerun()
