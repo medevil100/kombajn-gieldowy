@@ -27,7 +27,7 @@ try:
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
     APP_PASSWORD = st.secrets["APP_PASSWORD"]
 except Exception:
-    st.error("Błąd: Skonfiguruj 'OPENAI_API_KEY' oraz 'APP_PASSWORD' in Streamlit Secrets.")
+    st.error("Błąd: Skonfiguruj 'OPENAI_API_KEY' oraz 'APP_PASSWORD' w Streamlit Secrets.")
     st.stop()
 
 if "logged_in" not in st.session_state:
@@ -116,7 +116,7 @@ def skanuj_wybrane_spolki(lista_tickerow):
             
     return pd.DataFrame(dane_spolek)
 
-# --- NOWA FUNKCJA: GŁĘBOKA ANALIZA JEDNEJ SPÓŁKI ---
+# --- BEZPIECZNE WYCIĄGANIE ODPOWIEDZI AI ---
 def generuj_raport_pojedynczej_spolki(model, ticker, wiersz_danych):
     client = OpenAI(api_key=OPENAI_API_KEY)
     dane_tekst = wiersz_danych.to_string(index=False)
@@ -139,8 +139,19 @@ def generuj_raport_pojedynczej_spolki(model, ticker, wiersz_danych):
     if model == "o3-mini":
         params["reasoning_effort"] = "high"
         
-    response = client.chat.completions.create(**params)
-    return response.choices.message.content
+    try:
+        response = client.chat.completions.create(**params)
+        
+        # ODPORNY PARSER (Obsługuje zarówno obiekty słownikowe, atrybuty Pydantic, jak i surowe struktury o1/o3)
+        if hasattr(response, 'choices') and len(response.choices) > 0:
+            choice = response.choices[0]
+            if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+                return choice.message.content
+            elif isinstance(choice, dict) and 'message' in choice:
+                return choice['message'].get('content', 'Błąd: Brak zawartości w wiadomości.')
+        return str(response)
+    except Exception as e:
+        return f"❌ Wystąpił błąd podczas komunikacji z API OpenAI: {str(e)}"
 
 
 # --- INTERFEJS MOBILNY ---
@@ -172,16 +183,14 @@ if not df_aktywne.empty:
     df_aktywne = df_aktywne.sort_values(by="Skok Vol", ascending=False)
     st.dataframe(df_aktywne, use_container_width=True, hide_index=True)
     
-    # --- SEKCJA ROZDZIELONEJ ANALIZY DLA JEDNEJ SPÓŁKI ---
+    # --- SEKCJA ROZDZIELONEJ ANALIZY ---
     st.markdown("---")
     st.subheader("🔍 Indywidualna Analiza AI")
     
-    # Lista rozwijana z tickerami dostępnymi w tabeli
     lista_tickerow_do_wyboru = df_aktywne["Ticker"].tolist()
     wybrany_ticker = st.selectbox("Wybierz spółkę do analizy szczegółowej:", lista_tickerow_do_wyboru)
     
     if st.button(f"🧠 Analizuj tylko {wybrany_ticker}", type="primary", use_container_width=True):
-        # Wyciągamy z tabeli tylko jeden wiersz powiązany z wybraną spółką
         dane_spolki = df_aktywne[df_aktywne["Ticker"] == wybrany_ticker]
         
         with st.spinner(f"Potężny model {gpt_wybor} rozpracowuje ticker {wybrany_ticker}..."):
