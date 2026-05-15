@@ -30,9 +30,7 @@ try:
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
     APP_PASSWORD = st.secrets["APP_PASSWORD"]
 except Exception:
-    st.error(
-        "Błąd: Skonfiguruj 'OPENAI_API_KEY' oraz 'APP_PASSWORD' w Streamlit Secrets."
-    )
+    st.error("Błąd: Skonfiguruj 'OPENAI_API_KEY' oraz 'APP_PASSWORD' w Streamlit Secrets.")
     st.stop()
 
 if "logged_in" not in st.session_state:
@@ -52,9 +50,7 @@ if not st.session_state.logged_in:
 
 # --- TRWAŁY ZAPIS DO PLIKÓW ---
 def wczytaj_liste_z_pliku(rynek):
-    nazwa_pliku = (
-        "spolki_pl.txt" if rynek == "PL (GPW)" else "spolki_usa.txt"
-    )
+    nazwa_pliku = "spolki_pl.txt" if rynek == "PL (GPW)" else "spolki_usa.txt"
     if os.path.exists(nazwa_pliku):
         with open(nazwa_pliku, "r") as f:
             zawartosc = f.read()
@@ -67,9 +63,7 @@ def wczytaj_liste_z_pliku(rynek):
 
 
 def zapisz_liste_do_pliku(rynek, lista_tickerow):
-    nazwa_pliku = (
-        "spolki_pl.txt" if rynek == "PL (GPW)" else "spolki_usa.txt"
-    )
+    nazwa_pliku = "spolki_pl.txt" if rynek == "PL (GPW)" else "spolki_usa.txt"
     with open(nazwa_pliku, "w") as f:
         f.write(", ".join(lista_tickerow))
 
@@ -172,7 +166,6 @@ def skanuj_wybrane_spolki(lista_tickerow):
                 odleglosc_od_dna = ((cena - low_52w) / low_52w) * 100
                 formacja = wykryj_formacje_swiecowe(df)
 
-                # NAPRAWIONO: usunięto błędne przypisanie oily_bb
                 dane_spolek.append(
                     {
                         "Ticker": ticker.strip().upper(),
@@ -237,11 +230,10 @@ def generuj_raport_pojedynczej_spolki(model, ticker, wiersz_danych, dane_tp):
 
     try:
         response = client.chat.completions.create(**params)
-        if hasattr(response, "choices") and len(response.choices) > 0:
-            choice = response.choices
-            if hasattr(choice, "message") and hasattr(choice.message, "content"):
-                return choice.message.content
-        return str(response)
+        # --- FIX: POPRAWNE INDEKSOWANIE WYNIKU DLA LISTY CHOICES ---
+        if response.choices and len(response.choices) > 0:
+            return response.choices[0].message.content
+        return "❌ Błąd: Odpowiedź modeli OpenAI jest pusta."
     except Exception as e:
         return f"❌ Błąd OpenAI: {str(e)}"
 
@@ -316,7 +308,11 @@ if not df_aktywne.empty:
     st.markdown("---")
     st.subheader("🔍 Detale i Wykres Spółki")
 
-    lista_tickerow_do_wyboru = df_wyswietlane["Ticker"].tolist() if not df_wyswietlane.empty else df_aktywne["Ticker"].tolist()
+    lista_tickerow_do_wyboru = (
+        df_wyswietlane["Ticker"].tolist()
+        if not df_wyswietlane.empty
+        else df_aktywne["Ticker"].tolist()
+    )
     wybrany_ticker = st.selectbox(
         "Wybierz ticker do analizy:", lista_tickerow_do_wyboru
     )
@@ -380,16 +376,15 @@ if not df_aktywne.empty:
         odleglosc_sl = round(cena_wejscia - poziom_sl, 2)
 
     # STRATEGIA WIELOPOZIOMOWEGO TAKE PROFIT (R:R)
-    poziom_tp1 = round(cena_wejscia + odleglosc_sl, 2)  # R:R = 1:1
-    poziom_tp2 = round(cena_wejscia + (2 * odleglosc_sl), 2)  # R:R = 1:2
-    poziom_tp3 = round(cena_wejscia + (3 * odleglosc_sl), 2)  # R:R = 1:3
+    poziom_tp1 = round(cena_wejscia + odleglosc_sl, 2)
+    poziom_tp2 = round(cena_wejscia + (2 * odleglosc_sl), 2)
+    poziom_tp3 = round(cena_wejscia + (3 * odleglosc_sl), 2)
 
     liczba_akcji = (
         int(akceptowalne_ryzyko / odleglosc_sl) if odleglosc_sl > 0 else 0
     )
     calkowity_kapital = round(liczba_akcji * cena_wejscia, 2)
 
-    # Prezentacja Money Management
     col1, col2 = st.columns(2)
     with col1:
         st.metric(
@@ -416,7 +411,7 @@ if not df_aktywne.empty:
     }
 
     if st.button(
-        f"🧠 Analiza i Ocena Celów przez AI",
+        "🧠 Analiza i Ocena Celów przez AI",
         type="primary",
         use_container_width=True,
     ):
