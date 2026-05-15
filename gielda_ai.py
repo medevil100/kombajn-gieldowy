@@ -1,18 +1,25 @@
 import os
 import time
+import io
+import wave
+import math
+import struct
+import base64
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 from openai import OpenAI
-import io, wave, math, struct, base64
 
 st.set_page_config(
-    page_title="Skaner Groszówek AI Master", page_icon="📱", layout="centered"
+    page_title="Dual Market + Skaner AI Pro Master",
+    page_icon="📈",
+    layout="wide",
 )
 
-# --- MATRYCA WIZUALNA (CSS) ---
+# --- CSS ---
 st.markdown(
     """
     <style>
@@ -23,7 +30,7 @@ st.markdown(
         border-radius: 6px !important; border: none !important; box-shadow: 0 0 12px rgba(0, 255, 102, 0.5);
     }
     </style>
-""",
+    """,
     unsafe_allow_html=True,
 )
 
@@ -53,7 +60,7 @@ if not st.session_state.logged_in:
     st.stop()
 
 # ============================================================
-#  DŹWIĘK ALERTU – DUAL SCANNER
+#  BEEP
 # ============================================================
 
 @st.cache_resource
@@ -86,11 +93,11 @@ def play_beep():
     )
 
 # ============================================================
-#  DUAL SCANNER – POBIERANIE DANYCH
+#  DUAL SCANNER – DOWNLOAD
 # ============================================================
 
 @st.cache_data(show_spinner=False)
-def ds_download(tickers, period="180d", interval="1d"):
+def ds_download(tickers, period="240d", interval="1d"):
     if not tickers:
         return {}
     data = yf.download(
@@ -100,7 +107,7 @@ def ds_download(tickers, period="180d", interval="1d"):
         group_by="ticker",
         auto_adjust=True,
         threads=True,
-        progress=False
+        progress=False,
     )
     result = {}
     if isinstance(data.columns, pd.MultiIndex):
@@ -114,76 +121,73 @@ def ds_download(tickers, period="180d", interval="1d"):
     return result
 
 # ============================================================
-#  DUAL SCANNER – WSKAŹNIKI
+#  DUAL SCANNER – HYBRYDOWE WSKAŹNIKI (Swing + Day + Long)
 # ============================================================
 
-def ds_indicators(df, mode):
+def ds_indicators_hybrid(df):
     df = df.copy()
 
-    if mode == "Swing":
-        df["EMA_fast"] = df["Close"].ewm(span=20).mean()
-        df["EMA_mid"] = df["Close"].ewm(span=50).mean()
-        df["EMA_slow"] = df["Close"].ewm(span=200).mean()
-        delta = df["Close"].diff()
-        gain = delta.clip(lower=0).rolling(14).mean()
-        loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rs = gain / loss
-        df["RSI"] = 100 - (100 / (1 + rs))
-        df["Fibo_high"] = df["Close"].rolling(60).max()
-        df["Fibo_low"] = df["Close"].rolling(60).min()
-        df["Momentum"] = df["Close"].diff(10)
-        df["Vol_avg"] = df["Volume"].rolling(20).mean()
+    # Swing
+    df["EMA20"] = df["Close"].ewm(span=20).mean()
+    df["EMA50"] = df["Close"].ewm(span=50).mean()
+    df["EMA200"] = df["Close"].ewm(span=200).mean()
+    delta = df["Close"].diff()
+    gain14 = delta.clip(lower=0).rolling(14).mean()
+    loss14 = (-delta.clip(upper=0)).rolling(14).mean()
+    rs14 = gain14 / loss14
+    df["RSI14"] = 100 - (100 / (1 + rs14))
+    df["Fibo60_high"] = df["Close"].rolling(60).max()
+    df["Fibo60_low"] = df["Close"].rolling(60).min()
+    df["Mom10"] = df["Close"].diff(10)
 
-    elif mode == "Day":
-        df["EMA_fast"] = df["Close"].ewm(span=9).mean()
-        df["EMA_mid"] = df["Close"].ewm(span=20).mean()
-        df["EMA_slow"] = df["Close"].ewm(span=50).mean()
-        delta = df["Close"].diff()
-        gain = delta.clip(lower=0).rolling(7).mean()
-        loss = (-delta.clip(upper=0)).rolling(7).mean()
-        rs = gain / loss
-        df["RSI"] = 100 - (100 / (1 + rs))
-        df["Fibo_high"] = df["Close"].rolling(20).max()
-        df["Fibo_low"] = df["Close"].rolling(20).min()
-        df["Momentum"] = df["Close"].diff(3)
-        df["Vol_avg"] = df["Volume"].rolling(10).mean()
+    # Day
+    df["EMA9"] = df["Close"].ewm(span=9).mean()
+    df["EMA20_d"] = df["Close"].ewm(span=20).mean()
+    df["EMA50_d"] = df["Close"].ewm(span=50).mean()
+    gain7 = delta.clip(lower=0).rolling(7).mean()
+    loss7 = (-delta.clip(upper=0)).rolling(7).mean()
+    rs7 = gain7 / loss7
+    df["RSI7"] = 100 - (100 / (1 + rs7))
+    df["Fibo20_high"] = df["Close"].rolling(20).max()
+    df["Fibo20_low"] = df["Close"].rolling(20).min()
+    df["Mom3"] = df["Close"].diff(3)
 
-    else:  # Long
-        df["EMA_fast"] = df["Close"].ewm(span=50).mean()
-        df["EMA_mid"] = df["Close"].ewm(span=100).mean()
-        df["EMA_slow"] = df["Close"].ewm(span=200).mean()
-        delta = df["Close"].diff()
-        gain = delta.clip(lower=0).rolling(14).mean()
-        loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rs = gain / loss
-        df["RSI"] = 100 - (100 / (1 + rs))
-        df["Fibo_high"] = df["Close"].rolling(120).max()
-        df["Fibo_low"] = df["Close"].rolling(120).min()
-        df["Momentum"] = df["Close"].diff(20)
-        df["Vol_avg"] = df["Volume"].rolling(50).mean()
+    # Long
+    df["EMA50_l"] = df["Close"].ewm(span=50).mean()
+    df["EMA100_l"] = df["Close"].ewm(span=100).mean()
+    df["EMA200_l"] = df["Close"].ewm(span=200).mean()
+    df["Fibo120_high"] = df["Close"].rolling(120).max()
+    df["Fibo120_low"] = df["Close"].rolling(120).min()
 
-    df["Trend"] = df["EMA_fast"] - df["EMA_mid"]
-    df["Vol_ratio"] = df["Volume"] / df["Vol_avg"]
+    df["Vol_avg20"] = df["Volume"].rolling(20).mean()
+    df["Vol_ratio"] = df["Volume"] / df["Vol_avg20"]
+
+    df["Trend_swing"] = df["EMA20"] - df["EMA50"]
+    df["Trend_day"] = df["EMA9"] - df["EMA20_d"]
+    df["Trend_long"] = df["EMA50_l"] - df["EMA100_l"]
+
     return df
 
 # ============================================================
-#  DUAL SCANNER – NEWS FLAGI
+#  DUAL SCANNER – NEWS
 # ============================================================
 
-def ds_news_flags(ticker):
+def ds_news_raw(ticker):
     try:
         tk = yf.Ticker(ticker)
         news = tk.news or []
     except Exception:
         return ""
-
     text = ""
-    for n in news[:5]:
-        text += " " + str(n.get("title", "")) + " " + str(n.get("summary", ""))
+    for n in news[:8]:
+        text += f" {n.get('title','')} {n.get('summary','')}"
+    return text.strip()
 
+def ds_news_flags(text):
+    if not text:
+        return ""
     text_low = text.lower()
     flags = []
-
     if "fda" in text_low:
         flags.append("FDA")
     if "approval" in text_low:
@@ -202,114 +206,189 @@ def ds_news_flags(ticker):
         flags.append("buyback")
     if "acquisition" in text_low:
         flags.append("M&A")
-
     return " | ".join(flags)
 
 # ============================================================
-#  DUAL SCANNER – SYGNAŁY
+#  DUAL SCANNER – SYGNAŁY HYBRYDOWE
 # ============================================================
 
-def ds_compute_signals(df):
+def ds_compute_signals_hybrid(df):
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
     signals = []
 
-    if last["EMA_fast"] > last["EMA_mid"] > last["EMA_slow"] and last["RSI"] > 55:
-        trend_state = "trend rośnie"
-    elif last["EMA_fast"] < last["EMA_mid"] < last["EMA_slow"] and last["RSI"] < 45:
-        trend_state = "trend spada"
+    # Multi‑frame trend
+    swing_up = last["EMA20"] > last["EMA50"] > last["EMA200"]
+    swing_down = last["EMA20"] < last["EMA50"] < last["EMA200"]
+    day_up = last["EMA9"] > last["EMA20_d"] > last["EMA50_d"]
+    day_down = last["EMA9"] < last["EMA20_d"] < last["EMA50_d"]
+    long_up = last["EMA50_l"] > last["EMA100_l"] > last["EMA200_l"]
+    long_down = last["EMA50_l"] < last["EMA100_l"] < last["EMA200_l"]
+
+    if swing_up and day_up and long_up and last["RSI14"] > 55:
+        trend_state = "mocny trend wzrostowy (Swing+Day+Long)"
+    elif swing_down and day_down and long_down and last["RSI14"] < 45:
+        trend_state = "mocny trend spadkowy (Swing+Day+Long)"
+    elif (swing_up or day_up or long_up) and last["RSI14"] > 50:
+        trend_state = "trend wzrostowy mieszany"
+    elif (swing_down or day_down or long_down) and last["RSI14"] < 50:
+        trend_state = "trend spadkowy mieszany"
     else:
-        trend_state = "trend stoi"
+        trend_state = "trend boczny / niejednoznaczny"
 
     signals.append(trend_state)
 
-    if last["Close"] > last["EMA_mid"] and prev["Close"] <= prev["EMA_mid"]:
-        signals.append("przebicie EMA_mid")
-    if last["Close"] > last["Fibo_high"] * 0.999:
-        signals.append("wybicie Fibo HIGH")
-    if last["Close"] < last["Fibo_low"] * 1.001:
-        signals.append("wybicie Fibo LOW")
+    # Fibo
+    if last["Close"] >= last["Fibo20_high"] * 0.999:
+        signals.append("wybicie Fibo20 HIGH")
+    if last["Close"] <= last["Fibo20_low"] * 1.001:
+        signals.append("wybicie Fibo20 LOW")
+    if last["Close"] >= last["Fibo60_high"] * 0.999:
+        signals.append("wybicie Fibo60 HIGH")
+    if last["Close"] <= last["Fibo60_low"] * 1.001:
+        signals.append("wybicie Fibo60 LOW")
 
-    if last["Close"] > prev["Close"] and last["Vol_ratio"] > 1.5 and last["RSI"] > prev["RSI"]:
-        signals.append("wzrost kupujących")
+    # Momentum
+    if last["Mom3"] > 0 and last["Mom10"] > 0:
+        signals.append("mocne momentum wzrostowe (3/10)")
+    if last["Mom3"] < 0 and last["Mom10"] < 0:
+        signals.append("mocne momentum spadkowe (3/10)")
 
-    if last["Close"] < prev["Close"] and last["Vol_ratio"] > 1.5 and last["RSI"] < prev["RSI"]:
-        signals.append("wzrost sprzedających")
+    # Vol
+    if last["Vol_ratio"] > 2:
+        signals.append("bardzo wysoki wolumen")
+    elif last["Vol_ratio"] > 1.3:
+        signals.append("podwyższony wolumen")
 
-    return trend_state, signals
+    # RSI
+    if last["RSI14"] > 70:
+        signals.append("RSI14 wykupienie")
+    elif last["RSI14"] < 30:
+        signals.append("RSI14 wyprzedanie")
+
+    # Kupujący / sprzedający
+    if last["Close"] > prev["Close"] and last["Vol_ratio"] > 1.3 and last["RSI7"] > prev["RSI7"]:
+        signals.append("wzrost kupujących (RSI7 + wolumen)")
+    if last["Close"] < prev["Close"] and last["Vol_ratio"] > 1.3 and last["RSI7"] < prev["RSI7"]:
+        signals.append("wzrost sprzedających (RSI7 + wolumen)")
+
+    # Score
+    score = 0
+    if "wzrostowy" in trend_state:
+        score += 3
+    if "spadkowy" in trend_state:
+        score -= 3
+    if "mocne momentum wzrostowe" in signals:
+        score += 2
+    if "mocne momentum spadkowe" in signals:
+        score -= 2
+    if "bardzo wysoki wolumen" in signals:
+        score += 1
+    if "RSI14 wykupienie" in signals:
+        score -= 1
+    if "RSI14 wyprzedanie" in signals:
+        score += 1
+    if any("kupujących" in s for s in signals):
+        score += 1
+    if any("sprzedających" in s for s in signals):
+        score -= 1
+
+    return trend_state, signals, score
 
 # ============================================================
-#  DUAL SCANNER – AI #2 / #3 / #4
+#  DUAL SCANNER – AI #2 / #3 / #4 (o3‑mini)
 # ============================================================
 
-def ds_ai2_comment(ticker, last, trend_state, signals, news_text):
-    sig_str = ", ".join(signals)
-    news_str = news_text if news_text else "brak newsów"
-
+def ds_ai2_comment(ticker, last, trend_state, signals, news_flags, mode_desc):
+    sig_str = "; ".join(signals)
     prompt = f"""
-Opisz sytuację spółki w 1–2 zdaniach.
+Jesteś zawodowym traderem. Zrób krótką, konkretną analizę techniczną spółki.
 
 Ticker: {ticker}
-Cena: {last['Close']:.2f}
-Trend: {trend_state}
+Cena zamknięcia: {last['Close']:.2f}
+Zmiana dzienna: {((last['Close'] / last['Open']) - 1) * 100:.2f}%
+RSI14: {last['RSI14']:.1f}
+RSI7: {last['RSI7']:.1f}
+Momentum 3: {last['Mom3']:.2f}
+Momentum 10: {last['Mom10']:.2f}
+Vol ratio (20): {last['Vol_ratio']:.2f}
+Trend hybrydowy: {trend_state}
 Sygnały: {sig_str}
-News: {news_str}
+Tryb: {mode_desc}
+Flagi newsów: {news_flags or "brak"}
 
 Zasady:
-- krótko i konkretnie,
-- bez rekomendacji,
-- opisz trend, momentum, wolumen, newsy.
+- 2–3 zdania,
+- bez słów KUP/SPRZEDAJ,
+- opisz trend (krótko/średnio/długoterminowy), momentum, wolumen i wpływ newsów,
+- język: polski, styl: konkretny, pod telefon.
 """
-
     try:
         r = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="o3-mini",
+            reasoning_effort="medium",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2
+            temperature=0.2,
         )
-        return r.choices[0].message["content"].strip()
-    except Exception:
-        return "Błąd AI #2"
+        return r.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Błąd AI #2: {e}"
 
 def ds_ai3_sentiment(news_text):
     if not news_text:
-        return "brak newsów — brak analizy"
+        return "Brak newsów — brak analizy sentymentu."
+    prompt = f"""
+Masz newsy o spółce (tytuły + skróty):
 
-    text = news_text.lower()
+\"\"\"{news_text[:4000]}\"\"\"
 
-    positive = ["fda", "approval", "buyback", "acquisition"]
-    negative = ["debt", "downgrade", "bankruptcy", "offering", "profit warning"]
+Oceń:
+- czy sentyment jest pozytywny, neutralny czy negatywny,
+- wskaż 1–2 kluczowe powody.
 
-    pos = any(p in text for p in positive)
-    neg = any(n in text for n in negative)
-
-    if pos and not neg:
-        return "sentiment pozytywny"
-    if neg and not pos:
-        return "sentiment negatywny"
-    return "sentiment neutralny"
+Forma:
+- 1 zdanie werdyktu (Pozytywny/Neutralny/Negatywny),
+- 1 zdanie uzasadnienia,
+- język: polski, krótko, pod telefon.
+"""
+    try:
+        r = client.chat.completions.create(
+            model="o3-mini",
+            reasoning_effort="medium",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+        )
+        return r.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Błąd AI #3: {e}"
 
 def ds_ai4_fundamental(news_text):
     if not news_text:
-        return "brak newsów — brak ryzyk"
+        return "Brak newsów — brak wykrytych ryzyk fundamentalnych."
+    prompt = f"""
+Masz newsy o spółce (tytuły + skróty):
 
-    text = news_text.lower()
+\"\"\"{news_text[:4000]}\"\"\"
 
-    risks = []
-    if "debt" in text:
-        risks.append("zadłużenie")
-    if "offering" in text:
-        risks.append("emisja akcji")
-    if "bankruptcy" in text:
-        risks.append("ryzyko bankructwa")
-    if "downgrade" in text:
-        risks.append("obniżenie ratingu")
+Wypisz krótko:
+- jakie ryzyka fundamentalne są widoczne (np. zadłużenie, emisja akcji, bankructwo, obniżka ratingu, problemy regulacyjne),
+- jeśli brak istotnych ryzyk — napisz to wprost.
 
-    if risks:
-        return "ryzyka: " + ", ".join(risks)
-    return "brak istotnych ryzyk"
-
+Forma:
+- lista punktów z emoji,
+- język: polski, krótko, pod telefon.
+"""
+    try:
+        r = client.chat.completions.create(
+            model="o3-mini",
+            reasoning_effort="medium",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+        )
+        return r.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Błąd AI #4: {e}"
 # ============================================================
 #  DUAL SCANNER – FUNKCJA RYNKU
 # ============================================================
@@ -347,17 +426,25 @@ def render_market(tab, market_name):
         tickers = st.session_state[f"{key}_tickers"]
 
         mode = st.selectbox(
-            "Tryb analizy:",
-            ["Swing", "Day", "Long"],
+            "Tryb analizy (opis tylko dla AI #2):",
+            ["Swing", "Day", "Long", "Hybrid"],
+            index=3,
             key=f"{key}_mode"
         )
 
-        if st.button("🔍 Analiza techniczna (AI #1)", key=f"{key}_scan"):
+        mode_desc = {
+            "Swing": "swing trading (kilka dni–tygodni)",
+            "Day": "day trading (krótkie ruchy)",
+            "Long": "dłuższy horyzont",
+            "Hybrid": "hybrydowa analiza multi‑frame (Swing+Day+Long)",
+        }[mode]
+
+        if st.button("🔍 AI #1 — Hybrydowa analiza techniczna", key=f"{key}_scan"):
             if not tickers:
                 st.error("Najpierw dodaj spółki.")
                 return
 
-            with st.spinner("Analizuję..."):
+            with st.spinner("AI #1 analizuje technicznie..."):
                 data = ds_download(tickers)
 
                 rows = []
@@ -366,48 +453,38 @@ def render_market(tab, market_name):
                 for t, df in data.items():
                     if df is None or df.empty:
                         continue
-                    if len(df) < 80:
+                    if len(df) < 120:
                         continue
 
-                    df = ds_indicators(df, mode).dropna()
-                    if df is None or df.empty:
-                        continue
-                    if len(df) < 5:
+                    df = ds_indicators_hybrid(df).dropna()
+                    if df is None or df.empty or len(df) < 10:
                         continue
 
                     last = df.iloc[-1]
+                    trend_state, sigs, score = ds_compute_signals_hybrid(df)
+                    news_raw = ds_news_raw(t)
+                    news_flags = ds_news_flags(news_raw)
 
-                    trend_state, sigs = ds_compute_signals(df)
-                    news_text = ds_news_flags(t)
-
-                    score = 0
-                    if "rośnie" in trend_state:
-                        score += 2
-                    if "spada" in trend_state:
-                        score -= 2
-                    if any("kupujących" in s for s in sigs):
-                        score += 1
-                    if any("sprzedających" in s for s in sigs):
-                        score -= 1
-
-                    color = "green" if "rośnie" in trend_state else "red" if "spada" in trend_state else "orange"
+                    color = "green" if "wzrostowy" in trend_state else "red" if "spadkowy" in trend_state else "orange"
 
                     rows.append({
                         "Ticker": t,
                         "Kurs": round(last["Close"], 2),
-                        "RSI": round(last["RSI"], 1),
+                        "RSI14": round(last["RSI14"], 1),
+                        "RSI7": round(last["RSI7"], 1),
                         "Vol x": round(last["Vol_ratio"], 2),
                         "Trend": trend_state,
                         "Sygnały": " | ".join(sigs),
-                        "News": news_text,
+                        "News_flags": news_flags,
+                        "News_raw": news_raw,
                         "AI_score": score,
                         "Kolor": color,
                         "Komentarz AI": "",
                         "Sentiment AI": "",
-                        "Fundamental AI": ""
+                        "Fundamental AI": "",
                     })
 
-                    spark[t] = df["Close"].tail(20).reset_index(drop=True)
+                    spark[t] = df["Close"].tail(30).reset_index(drop=True)
 
                 if not rows:
                     st.warning("Brak spółek z wystarczającą ilością danych.")
@@ -425,10 +502,10 @@ def render_market(tab, market_name):
 
         if df_out is not None:
 
-            col_left, col_right = st.columns([1, 1])
+            col_left, col_right = st.columns([1.2, 1])
 
             with col_left:
-                st.subheader("📊 Wyniki analizy technicznej")
+                st.subheader("📊 Wyniki AI #1 — Hybrydowa analiza techniczna")
 
                 def highlight(row):
                     if row["Kolor"] == "green":
@@ -438,33 +515,36 @@ def render_market(tab, market_name):
                     return ["background-color:#ff8c00;color:black"] * len(row)
 
                 cols_order = [
-                    "Ticker", "Kurs", "RSI", "Vol x", "Trend", "Sygnały", "News",
+                    "Ticker", "Kurs", "RSI14", "RSI7", "Vol x",
+                    "Trend", "Sygnały", "News_flags",
                     "AI_score", "Kolor",
-                    "Komentarz AI", "Sentiment AI", "Fundamental AI"
+                    "Komentarz AI", "Sentiment AI", "Fundamental AI",
                 ]
 
                 st.dataframe(
                     df_out[cols_order].style.apply(highlight, axis=1),
-                    use_container_width=True
+                    use_container_width=True,
                 )
 
-                st.subheader("📉 Sparklines")
+                st.subheader("📉 Sparklines (30 sesji)")
                 cols = st.columns(4)
                 for i, t in enumerate(df_out["Ticker"]):
                     with cols[i % 4]:
                         st.caption(t)
                         if t in spark:
-                            st.line_chart(spark[t])
+                            st.line_chart(spark[t], height=120)
 
             with col_right:
-                st.subheader("🧠 Wybierz AI")
+                st.subheader("🧠 AI #2 / #3 / #4")
 
                 ai_choice = st.radio(
                     "Wybierz AI:",
-                    ["AI #2 — Komentarz LLM",
-                     "AI #3 — Sentiment newsów",
-                     "AI #4 — Fundamentalne ryzyka"],
-                    key=f"{key}_ai_choice"
+                    [
+                        "AI #2 — Komentarz LLM (pełna analiza)",
+                        "AI #3 — Sentiment newsów",
+                        "AI #4 — Fundamentalne ryzyka",
+                    ],
+                    key=f"{key}_ai_choice",
                 )
 
                 st.subheader("📌 Wybierz spółki do analizy AI")
@@ -483,31 +563,31 @@ def render_market(tab, market_name):
                             for _, row in df_out.iterrows():
                                 if row["Ticker"] in selected:
                                     if ai_choice.startswith("AI #2"):
-                                        data_single = ds_download([row["Ticker"]])
-                                        df_single = list(data_single.values())[0]
-
-                                        if df_single is None or df_single.empty:
-                                            row["Komentarz AI"] = "Brak danych"
-                                            new_rows.append(row)
-                                            continue
-
-                                        df_single = ds_indicators(df_single, mode).dropna()
-                                        if df_single is None or df_single.empty or len(df_single) < 5:
-                                            row["Komentarz AI"] = "Za mało danych"
-                                            new_rows.append(row)
-                                            continue
-
-                                        last = df_single.iloc[-1]
-                                        trend_state, sigs = ds_compute_signals(df_single)
-                                        comment = ds_ai2_comment(row["Ticker"], last, trend_state, sigs, row["News"])
+                                        # pełna analiza techniczna + newsy
+                                        comment = ds_ai2_comment(
+                                            row["Ticker"],
+                                            last=pd.Series({
+                                                "Close": row["Kurs"],
+                                                "RSI14": row["RSI14"],
+                                                "RSI7": row["RSI7"],
+                                                "Mom3": 0.0,
+                                                "Mom10": 0.0,
+                                                "Vol_ratio": row["Vol x"],
+                                                "Open": row["Kurs"],  # przybliżenie
+                                            }),
+                                            trend_state=row["Trend"],
+                                            signals=row["Sygnały"].split(" | ") if row["Sygnały"] else [],
+                                            news_flags=row["News_flags"],
+                                            mode_desc=mode_desc,
+                                        )
                                         row["Komentarz AI"] = comment
 
                                     elif ai_choice.startswith("AI #3"):
-                                        comment = ds_ai3_sentiment(row["News"])
+                                        comment = ds_ai3_sentiment(row["News_raw"])
                                         row["Sentiment AI"] = comment
 
                                     else:  # AI #4
-                                        comment = ds_ai4_fundamental(row["News"])
+                                        comment = ds_ai4_fundamental(row["News_raw"])
                                         row["Fundamental AI"] = comment
 
                                 new_rows.append(row)
@@ -519,17 +599,17 @@ def render_market(tab, market_name):
 
                         st.dataframe(
                             df_out[cols_order].style.apply(highlight, axis=1),
-                            use_container_width=True
+                            use_container_width=True,
                         )
 
         else:
-            st.info("Wpisz tickery, wybierz tryb i uruchom 🔍 Analiza techniczna (AI #1).")
+            st.info("Wpisz tickery, wybierz tryb i uruchom 🔍 AI #1 — Hybrydowa analiza techniczna.")
 
 # ============================================================
-#  DUAL SCANNER – UI
+#  DUAL SCANNER – UI GŁÓWNE
 # ============================================================
 
-st.title("📈 Dual Market Scanner — GPW & USA (4 AI)")
+st.title("📈 Dual Market Scanner — GPW & USA (4 AI, HYBRID + o3‑mini)")
 
 tab_gpw, tab_usa = st.tabs(["🇵🇱 GPW", "🇺🇸 USA"])
 
@@ -537,383 +617,6 @@ render_market(tab_gpw, "GPW")
 render_market(tab_usa, "USA")
 
 st.markdown("---")
-
-# ============================================================
-#  PONIŻEJ – TWÓJ ORYGINALNY SKANER AI PRO MASTER
-# ============================================================
-
 # --- TRWAŁY ZAPIS DO PLIKÓW ---
 def wczytaj_liste_z_pliku(rynek):
-    nazwa_pliku = "spolki_pl.txt" if rynek == "PL (GPW)" else "spolki_usa.txt"
-    if os.path.exists(nazwa_pliku):
-        with open(nazwa_pliku, "r") as f:
-            zawartosc = f.read()
-            return [t.strip().upper() for t in zawartosc.split(",") if t.strip()]
-    return (
-        ["ATT.WA", "COG.WA", "PCO.WA", "SNS.WA"]
-        if rynek == "PL (GPW)"
-        else ["SNDL", "NIO", "AAL", "F"]
-    )
-
-
-def zapisz_liste_do_pliku(rynek, lista_tickerow):
-    nazwa_pliku = "spolki_pl.txt" if rynek == "PL (GPW)" else "spolki_usa.txt"
-    with open(nazwa_pliku, "w") as f:
-        f.write(", ".join(lista_tickerow))
-
-
-# --- DETEKCJA FORMACJI ŚWIECOWYCH ---
-def wykryj_formacje_swiecowe(df):
-    if len(df) < 2:
-        return "Brak danych"
-
-    o = df["Open"].iloc[-1]
-    h = df["High"].iloc[-1]
-    l = df["Low"].iloc[-1]
-    c = df["Close"].iloc[-1]
-
-    o_prev = df["Open"].iloc[-2]
-    c_prev = df["Close"].iloc[-2]
-
-    korpus = abs(c - o)
-    cien_dolny = min(o, c) - l
-    cien_gorny = h - max(o, c)
-    zakres = h - l if (h - l) > 0 else 0.001
-
-    if cien_dolny > (2 * korpus) and cien_gorny < (0.2 * zakres):
-        return "🔨 Młot"
-    if c_prev < o_prev and c > o and o <= c_prev and c >= o_prev:
-        return "🔥 Objęcie Hossy"
-
-    return "Neutralna"
-
-
-# --- MATEMATYKA GIEŁDOWA ---
-def oblicz_wskazniki(df):
-    delta = df["Close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df["RSI"] = 100 - (100 / (1 + rs))
-
-    exp1 = df["Close"].ewm(span=12, adjust=False).mean()
-    exp2 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["MACD"] = exp1 - exp2
-    df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
-
-    df["MA20"] = df["Close"].rolling(window=20).mean()
-    df["STD20"] = df["Close"].rolling(window=20).std()
-    df["Upper_Band"] = df["MA20"] + (df["STD20"] * 2)
-    df["Lower_Band"] = df["MA20"] - (df["STD20"] * 2)
-
-    high_low = df["High"] - df["Low"]
-    high_cp = np.abs(df["High"] - df["Close"].shift())
-    low_cp = np.abs(df["Low"] - df["Close"].shift())
-    df["ATR"] = (
-        pd.concat([high_low, high_cp, low_cp], axis=1)
-        .max(axis=1)
-        .rolling(14)
-        .mean()
-    )
-
-    return df
-
-
-def skanuj_wybrane_spolki(lista_tickerow):
-    dane_spolek = []
-    slownik_df = {}
-    if not lista_tickerow:
-        return pd.DataFrame(), {}
-
-    for ticker in lista_tickerow:
-        try:
-            t = yf.Ticker(ticker.strip().upper())
-            df = t.history(period="260d")
-            if df.empty or len(df) < 50:
-                continue
-
-            okres_52w = df.iloc[-252:] if len(df) >= 252 else df
-            high_52w = okres_52w["High"].max()
-            low_52w = okres_52w["Low"].min()
-
-            df = oblicz_wskazniki(df)
-            ostatni = df.iloc[-1]
-            cena = ostatni["Close"]
-            wolumen_teraz = ostatni["Volume"]
-            wolumen_srednia = df["Volume"].rolling(10).mean().iloc[-1]
-
-            if wolumen_teraz > 0:
-                sma_10 = df["Close"].rolling(10).mean().iloc[-1]
-                skok_vol = (
-                    wolumen_teraz / wolumen_srednia
-                    if wolumen_srednia > 0
-                    else 1.0
-                )
-                trend = "🟢 Wzrostowy" if cena > sma_10 else "🔴 Spadkowy"
-
-                pozycja_bb = "Środek"
-                if cena >= ostatni["Upper_Band"]:
-                    pozycja_bb = "🔥 Wybicie Góra"
-                elif cena <= ostatni["Lower_Band"]:
-                    pozycja_bb = "⚠️ Wybicie Dół"
-
-                odleglosc_od_dna = ((cena - low_52w) / low_52w) * 100
-                formacja = wykryj_formacje_swiecowe(df)
-
-                dane_spolek.append(
-                    {
-                        "Ticker": ticker.strip().upper(),
-                        "Cena": round(cena, 2),
-                        "Skok Vol": round(skok_vol, 2),
-                        "Trend": trend,
-                        "RSI (14)": (
-                            round(ostatni["RSI"], 1)
-                            if not pd.isna(ostatni["RSI"])
-                            else 50.0
-                        ),
-                        "MACD Hist": (
-                            round(ostatni["MACD"] - ostatni["Signal"], 4)
-                            if not pd.isna(ostatni["Signal"])
-                            else 0.0
-                        ),
-                        "Zmienność (ATR)": (
-                            round(ostatni["ATR"], 3)
-                            if not pd.isna(ostatni["ATR"])
-                            else 0.0
-                        ),
-                        "Wstęgi BB": pozycja_bb,
-                        "52W Low": round(low_52w, 2),
-                        "52W High": round(high_52w, 2),
-                        "Od Dna (%)": round(odleglosc_od_dna, 1),
-                        "Formacja": formacja,
-                    }
-                )
-                slownik_df[ticker.strip().upper()] = df
-        except Exception:
-            continue
-
-    return pd.DataFrame(dane_spolek), slownik_df
-
-
-def generuj_raport_pojedynczej_spolki(model, ticker, wiersz_danych, dane_tp):
-    dane_tekst = wiersz_danych.to_string(index=False)
-    dane_tp = dane_tp if isinstance(dane_tp, dict) else {}
-    tp_tekst = (
-        f"Planowane cele Take Profit: TP1={dane_tp.get('tp1')}, "
-        f"TP2={dane_tp.get('tp2')}, TP3={dane_tp.get('tp3')}. Stop Loss={dane_tp.get('sl')}."
-    )
-
-    prompt = f"""
-    Jesteś zawodowym traderem. Wykonaj analizę dla spółki {ticker}:
-    {dane_tekst}
     
-    Zaimplementowany plan rynkowy tradera:
-    {tp_tekst}
-    
-    Zinterpretuj i oceń:
-    1. Czy odległość od dna i formacja świecowa dają przewagę rynkową?
-    2. Czy w oparciu o RSI, MACD i Skok Vol wyznaczone poziomy Take Profit (TP1, TP2, TP3) są matematycznie i technicznie realne do osiągnięcia w najbliższych dniach?
-    3. Werdykt końcowy (KUP / SPRZEDAJ / CZEKAJ).
-    
-    Krótko, konkretnie, pod telefon. Używaj punktów i emoji.
-    """
-
-    params = {"model": model, "messages": [{"role": "user", "content": prompt}]}
-    if model == "o3-mini":
-        params["reasoning_effort"] = "high"
-
-    try:
-        response = client.chat.completions.create(**params)
-        if response.choices and len(response.choices) > 0:
-            return response.choices[0].message.content
-        return "❌ Błąd: Odpowiedź modeli OpenAI jest pusta."
-    except Exception as e:
-        return f"❌ Błąd OpenAI: {str(e)}"
-
-
-# --- INTERFEJS MOBILNY ---
-st.title("📱 Skaner AI Pro Master")
-
-with st.sidebar:
-    st.header("⚙️ Parametry")
-    rynek_wybor = st.radio("Wybierz okno rynkowe:", ["PL (GPW)", "USA"])
-    gpt_wybor = st.selectbox("Mocny Silnik AI:", ["o3-mini", "gpt-4o", "o1"])
-    interwal = st.slider(
-        "Interwał odświeżania (min):", min_value=1, max_value=60, value=5
-    )
-
-# Zarządzanie listą
-st.subheader("📝 Trwała Lista Spółek")
-aktualna_lista = wczytaj_liste_z_pliku(rynek_wybor)
-lista_tekst = ", ".join(aktualna_lista)
-
-nowa_lista_tekst = st.text_area(
-    f"Modyfikuj listę dla {rynek_wybor}:", value=lista_tekst
-)
-
-if st.button("💾 Zapisz na Stałe", use_container_width=True):
-    czysta_lista = [
-        t.strip().upper() for t in nowa_lista_tekst.split(",") if t.strip()
-    ]
-    zapisz_liste_do_pliku(rynek_wybor, czysta_lista)
-    st.success("Zapisano trwale w pamięci aplikacji!")
-    st.rerun()
-
-st.subheader(f"📊 Monitorowane Groszówki: {rynek_wybor}")
-df_aktywne, pełne_dfs = skanuj_wybrane_spolki(aktualna_lista)
-
-if not df_aktywne.empty:
-    df_aktywne = df_aktywne.sort_values(by="Skok Vol", ascending=False)
-
-    szukaj_frazy = st.text_input(
-        "🔍 Szukaj (wpisz Ticker, Formację lub Trend, np. 'Młot', '🟢', 'SNDL'):"
-    )
-    if szukaj_frazy:
-        maska = (
-            df_aktywne["Ticker"].str.contains(szukaj_frazy, case=False, na=False)
-            | df_aktywne["Trend"].str.contains(szukaj_frazy, case=False, na=False)
-            | df_aktywne["Formacja"].str.contains(szukaj_frazy, case=False, na=False)
-        )
-        df_wyswietlane = df_aktywne[maska]
-    else:
-        df_wyswietlane = df_aktywne
-
-    widok_tabeli = df_wyswietlane[
-        [
-            "Ticker",
-            "Cena",
-            "Skok Vol",
-            "Trend",
-            "RSI (14)",
-            "Od Dna (%)",
-            "Formacja",
-        ]
-    ]
-    st.dataframe(widok_tabeli, use_container_width=True, hide_index=True)
-
-    if df_wyswietlane.empty:
-        st.info("Brak wyników dla wpisanej frazy kluczowej.")
-
-    st.markdown("---")
-    st.subheader("🔍 Detale i Wykres Spółki")
-
-    lista_tickerow_do_wyboru = (
-        df_wyswietlane["Ticker"].tolist()
-        if not df_wyswietlane.empty
-        else df_aktywne["Ticker"].tolist()
-    )
-    wybrany_ticker = st.selectbox(
-        "Wybierz ticker do analizy:", lista_tickerow_do_wyboru
-    )
-
-    if wybrany_ticker in pełne_dfs:
-        df_wykres = pełne_dfs[wybrany_ticker].tail(30)
-        fig = go.Figure()
-        fig.add_trace(
-            go.Candlestick(
-                x=df_wykres.index,
-                open=df_wykres["Open"],
-                high=df_wykres["High"],
-                low=df_wykres["Low"],
-                close=df_wykres["Close"],
-                name="Cena",
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=df_wykres.index,
-                y=df_wykres["Upper_Band"],
-                line=dict(color="rgba(0, 255, 102, 0.3)", width=1),
-                name="BB Górna",
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=df_wykres.index,
-                y=df_wykres["Lower_Band"],
-                line=dict(color="rgba(255, 51, 51, 0.3)", width=1),
-                name="BB Dolna",
-            )
-        )
-        fig.update_layout(
-            template="plotly_dark",
-            xaxis_rangeslider_visible=False,
-            height=240,
-            margin=dict(l=10, r=10, t=10, b=10),
-            showlegend=False,
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    wiersz_spolki = df_aktywne[df_aktywne["Ticker"] == wybrany_ticker].iloc[0]
-    waluta = "PLN" if rynek_wybor == "PL (GPW)" else "USD"
-
-    st.markdown("##### 🧮 Kalkulator Wielkości i Targetów (TP)")
-    akceptowalne_ryzyko = st.number_input(
-        f"Ryzyko kwotowe ({waluta}):", min_value=10, value=200, step=50
-    )
-
-    cena_wejscia = wiersz_spolki["Cena"]
-    atr = wiersz_spolki["Zmienność (ATR)"]
-    if atr <= 0:
-        atr = cena_wejscia * 0.05
-
-    odleglosc_sl = round(2 * atr, 2)
-    poziom_sl = round(cena_wejscia - odleglosc_sl, 2)
-    if poziom_sl <= 0:
-        poziom_sl = round(cena_wejscia * 0.5, 2)
-        odleglosc_sl = round(cena_wejscia - poziom_sl, 2)
-
-    poziom_tp1 = round(cena_wejscia + odleglosc_sl, 2)
-    poziom_tp2 = round(cena_wejscia + (2 * odleglosc_sl), 2)
-    poziom_tp3 = round(cena_wejscia + (3 * odleglosc_sl), 2)
-
-    liczba_akcji = (
-        int(akceptowalne_ryzyko / odleglosc_sl) if odleglosc_sl > 0 else 0
-    )
-    calkowity_kapital = round(liczba_akcji * cena_wejscia, 2)
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric(
-            label="Stop Loss (Obrona)",
-            value=f"{poziom_sl} {waluta}",
-            delta=f"-{odleglosc_sl}",
-        )
-        st.metric(label="Kup akcji", value=f"{liczba_akcji} szt.")
-    with col2:
-        st.metric(label="Koszt pozycji", value=f"{calkowity_kapital} {waluta}")
-        st.metric(label="Od Dna 52W", value=f"{wiersz_spolki['Od Dna (%)']}%")
-
-    st.markdown("**🎯 Wielopoziomowe Targety Cenowe (Take Profit):**")
-    c1, c2, c3 = st.columns(3)
-    c1.metric(label="TP1 (Zabezpieczenie 1:1)", value=f"{poziom_tp1} {waluta}")
-    c2.metric(label="TP2 (Cel Główny 1:2)", value=f"{poziom_tp2} {waluta}")
-    c3.metric(label="TP3 (Rakieta 1:3)", value=f"{poziom_tp3} {waluta}")
-
-    slownik_tp = {
-        "sl": poziom_sl,
-        "tp1": poziom_tp1,
-        "tp2": poziom_tp2,
-        "tp3": poziom_tp3,
-    }
-
-    if st.button(
-        "🧠 Analiza i Ocena Celów przez AI",
-        type="primary",
-        use_container_width=True,
-    ):
-        dane_spolki_pelne = df_aktywne[df_aktywne["Ticker"] == wybrany_ticker]
-        with st.spinner("Najsilniejsze AI weryfikuje poziomy TP i geometrię świec..."):
-            wynik_indywidualny = generuj_raport_pojedynczej_spolki(
-                gpt_wybor, wybrany_ticker, dane_spolki_pelne, slownik_tp
-            )
-            st.markdown(f"### 📝 Strategiczny Raport AI dla {wybrany_ticker}:")
-            st.info(wynik_indywidualny)
-else:
-    st.warning("Lista pusta lub brak aktywności na spółkach.")
-
-st.caption(
-    f"Aktualizacja: {time.strftime('%H:%M:%S')} | Odświeżenie za {interwal} min."
-)
-time.sleep(interwal * 60)
-st.rerun()
