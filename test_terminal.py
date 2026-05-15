@@ -6,15 +6,15 @@ import io, wave, math, struct, base64
 from datetime import datetime
 from openai import OpenAI
 
-# ============================================================
-#  🔑 OPENAI – klucz z secrets
-# ============================================================
+# ==========================
+# OpenAI client (klucz w st.secrets)
+# ==========================
 
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-# ============================================================
-#  🔊 DŹWIĘK ALERTU
-# ============================================================
+# ==========================
+# Dźwięk alertu
+# ==========================
 
 @st.cache_resource
 def generate_beep_b64():
@@ -45,17 +45,17 @@ def play_beep():
         unsafe_allow_html=True
     )
 
-# ============================================================
-#  📊 FUNKCJE ANALITYCZNE
-# ============================================================
+# ==========================
+# Pobieranie danych
+# ==========================
 
-def download(tickers):
+def download(tickers, period="180d", interval="1d"):
     if not tickers:
         return {}
     data = yf.download(
         tickers,
-        period="90d",
-        interval="1d",
+        period=period,
+        interval=interval,
         group_by="ticker",
         auto_adjust=True,
         threads=True,
@@ -72,84 +72,201 @@ def download(tickers):
         result[tickers[0]] = df
     return result
 
-def indicators(df):
+# ==========================
+# Wskaźniki – zależne od trybu
+# ==========================
+
+def indicators(df, mode):
     df = df.copy()
-    df["EMA20"] = df["Close"].ewm(span=20).mean()
-    df["EMA50"] = df["Close"].ewm(span=50).mean()
-    df["EMA200"] = df["Close"].ewm(span=200).mean()
 
-    # RSI
-    delta = df["Close"].diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / loss
-    df["RSI"] = 100 - (100 / (1 + rs))
+    if mode == "Swing":
+        df["EMA_fast"] = df["Close"].ewm(span=20).mean()
+        df["EMA_mid"] = df["Close"].ewm(span=50).mean()
+        df["EMA_slow"] = df["Close"].ewm(span=200).mean()
+        delta = df["Close"].diff()
+        gain = delta.clip(lower=0).rolling(14).mean()
+        loss = (-delta.clip(upper=0)).rolling(14).mean()
+        rs = gain / loss
+        df["RSI"] = 100 - (100 / (1 + rs))
+        df["Fibo_high"] = df["Close"].rolling(60).max()
+        df["Fibo_low"] = df["Close"].rolling(60).min()
+        df["Momentum"] = df["Close"].diff(10)
+        df["Vol_avg"] = df["Volume"].rolling(20).mean()
 
-    # Fibo high/low
-    df["Fibo_high"] = df["Close"].rolling(60).max()
-    df["Fibo_low"] = df["Close"].rolling(60).min()
+    elif mode == "Day":
+        df["EMA_fast"] = df["Close"].ewm(span=9).mean()
+        df["EMA_mid"] = df["Close"].ewm(span=20).mean()
+        df["EMA_slow"] = df["Close"].ewm(span=50).mean()
+        delta = df["Close"].diff()
+        gain = delta.clip(lower=0).rolling(7).mean()
+        loss = (-delta.clip(upper=0)).rolling(7).mean()
+        rs = gain / loss
+        df["RSI"] = 100 - (100 / (1 + rs))
+        df["Fibo_high"] = df["Close"].rolling(20).max()
+        df["Fibo_low"] = df["Close"].rolling(20).min()
+        df["Momentum"] = df["Close"].diff(3)
+        df["Vol_avg"] = df["Volume"].rolling(10).mean()
 
-    # Trend
-    df["Trend"] = df["EMA20"] - df["EMA50"]
+    else:  # Long
+        df["EMA_fast"] = df["Close"].ewm(span=50).mean()
+        df["EMA_mid"] = df["Close"].ewm(span=100).mean()
+        df["EMA_slow"] = df["Close"].ewm(span=200).mean()
+        delta = df["Close"].diff()
+        gain = delta.clip(lower=0).rolling(14).mean()
+        loss = (-delta.clip(upper=0)).rolling(14).mean()
+        rs = gain / loss
+        df["RSI"] = 100 - (100 / (1 + rs))
+        df["Fibo_high"] = df["Close"].rolling(120).max()
+        df["Fibo_low"] = df["Close"].rolling(120).min()
+        df["Momentum"] = df["Close"].diff(20)
+        df["Vol_avg"] = df["Volume"].rolling(50).mean()
 
-    # Volume
-    df["Vol_avg"] = df["Volume"].rolling(20).mean()
+    df["Trend"] = df["EMA_fast"] - df["EMA_mid"]
     df["Vol_ratio"] = df["Volume"] / df["Vol_avg"]
-
     return df
 
-def classify_signal(df):
+# ==========================
+# News – proste flagi z yfinance
+# ==========================
+
+def news_flags(ticker):
+    try:
+        tk = yf.Ticker(ticker)
+        news = tk.news or []
+    except Exception:
+        return ""
+
+    text = ""
+    for n in news[:5]:
+        text += " " + str(n.get("title", "")) + " " + str(n.get("summary", ""))
+
+    text_low = text.lower()
+    flags = []
+
+    if "fda" in text_low:
+        flags.append("news: FDA")
+    if "approval" in text_low or "approved" in text_low:
+        flags.append("news: approval")
+    if "debt" in text_low or "zadłużenie" in text_low:
+        flags.append("news: debt")
+    if "downgrade" in text_low:
+        flags.append("news: downgrade")
+    if "no coverage" in text_low:
+        flags.append("news: no coverage")
+    if "profit warning" in text_low:
+        flags.append("news: profit warning")
+    if "bankruptcy" in text_low or "bankrupt" in text_low:
+        flags.append("news: bankruptcy")
+    if "offering" in text_low or "share offering" in text_low:
+        flags.append("news: share offering")
+    if "buyback" in text_low:
+        flags.append("news: buyback")
+    if "acquisition" in text_low or "merger" in text_low:
+        flags.append("news: m&a")
+
+    return " | ".join(flags)
+
+# ==========================
+# Sygnały 1–7
+# ==========================
+
+def compute_signals(df, mode):
     last = df.iloc[-1]
+    prev = df.iloc[-2]
 
-    if last["EMA20"] > last["EMA50"] > last["EMA200"] and last["RSI"] > 55:
-        return "green"
+    signals = []
 
-    if 45 <= last["RSI"] <= 55:
-        return "orange"
+    # 1/2/3 – trend rośnie / spada / stoi
+    if last["EMA_fast"] > last["EMA_mid"] > last["EMA_slow"] and last["RSI"] > 55 and last["Momentum"] > 0:
+        trend_state = "trend rośnie"
+        signals.append("trend rośnie")
+    elif last["EMA_fast"] < last["EMA_mid"] < last["EMA_slow"] and last["RSI"] < 45 and last["Momentum"] < 0:
+        trend_state = "trend spada"
+        signals.append("trend spada")
+    else:
+        trend_state = "trend stoi / konsolidacja"
+        signals.append("trend stoi / konsolidacja")
 
-    return "red"
+    # 4 – wybicie / przebicie poziomu
+    if last["Close"] > last["EMA_mid"] and prev["Close"] <= prev["EMA_mid"]:
+        signals.append("przebicie powyżej EMA_mid")
+    if last["Close"] > last["Fibo_high"] * 0.999:
+        signals.append("wybicie powyżej Fibo HIGH")
+    if last["Close"] < last["Fibo_low"] * 1.001:
+        signals.append("wybicie poniżej Fibo LOW")
 
-def ai_score(df):
+    # 5 – wzrost kupujących
+    if last["Close"] > prev["Close"] and last["Vol_ratio"] > 1.5 and last["RSI"] > prev["RSI"]:
+        signals.append("wzrost kupujących (mocny popyt)")
+
+    # 6 – wzrost sprzedających
+    if last["Close"] < prev["Close"] and last["Vol_ratio"] > 1.5 and last["RSI"] < prev["RSI"]:
+        signals.append("wzrost sprzedających (mocna podaż)")
+
+    # 7 – placeholder, newsy dokładamy osobno
+    return trend_state, signals
+
+# ==========================
+# AI score (siła sytuacji)
+# ==========================
+
+def ai_score(df, mode):
     last = df.iloc[-1]
     score = 0
-    if last["EMA20"] > last["EMA50"]:
+
+    if last["EMA_fast"] > last["EMA_mid"]:
         score += 1
-    if last["EMA50"] > last["EMA200"]:
+    if last["EMA_mid"] > last["EMA_slow"]:
         score += 1
     if last["RSI"] > 55:
         score += 1
+    if last["Momentum"] > 0:
+        score += 1
     if last["Vol_ratio"] > 1.5:
         score += 1
-    if last["Trend"] > 0:
-        score += 1
+
     return score
 
-# ============================================================
-#  🤖 KOMENTARZ LLM (GPT‑4o‑mini)
-# ============================================================
+# ==========================
+# Komentarz LLM
+# ==========================
 
-def llm_comment(ticker, last):
+def llm_comment(ticker, last, mode, trend_state, signals, news_text):
+    mode_desc = {
+        "Swing": "średni horyzont (swing)",
+        "Day": "krótki horyzont (day)",
+        "Long": "długi horyzont (long-term)"
+    }[mode]
+
+    sig_str = ", ".join(signals) if signals else "brak wyraźnych sygnałów"
+    news_part = news_text if news_text else "brak istotnych newsów w ostatnich wiadomościach"
+
     prompt = f"""
-Jesteś profesjonalnym analitykiem giełdowym. Na podstawie poniższych danych wygeneruj
-krótki komentarz (1–2 zdania) po polsku, opisujący sytuację techniczną spółki.
+Jesteś analitykiem technicznym. Na podstawie danych wygeneruj krótki komentarz (1–2 zdania) po polsku.
+
+Tryb analizy: {mode_desc}
 
 Dane:
 Ticker: {ticker}
 Cena zamknięcia: {last['Close']:.2f}
 RSI: {last['RSI']:.2f}
-EMA20: {last['EMA20']:.2f}
-EMA50: {last['EMA50']:.2f}
-EMA200: {last['EMA200']:.2f}
-Wolumen ratio: {last['Vol_ratio']:.2f}
-Trend (EMA20-EMA50): {last['Trend']:.2f}
-Fibo HIGH (60 dni): {last['Fibo_high']:.2f}
-Fibo LOW (60 dni): {last['Fibo_low']:.2f}
+EMA_fast: {last['EMA_fast']:.2f}
+EMA_mid: {last['EMA_mid']:.2f}
+EMA_slow: {last['EMA_slow']:.2f}
+Momentum: {last['Momentum']:.2f}
+Vol_ratio: {last['Vol_ratio']:.2f}
+Fibo_high: {last['Fibo_high']:.2f}
+Fibo_low: {last['Fibo_low']:.2f}
+
+Trend: {trend_state}
+Sygnały: {sig_str}
+News: {news_part}
 
 Zasady:
 - pisz krótko i konkretnie,
-- nie używaj ogólników,
-- skup się na sygnałach technicznych,
-- nie dodawaj żadnych ostrzeżeń ani disclaimers.
+- nie dawaj rekomendacji kupna/sprzedaży,
+- skup się na opisie sytuacji (trend, popyt/podaż, wybicia, ryzyko),
+- nie dodawaj disclaimers.
 """
 
     try:
@@ -163,129 +280,152 @@ Zasady:
     except Exception as e:
         return f"Błąd LLM: {e}"
 
-# ============================================================
-#  🧠 UI + LOGIKA
-# ============================================================
+# ==========================
+# UI – całość
+# ==========================
 
-st.set_page_config(page_title="Custom AI Scanner", layout="wide")
+st.set_page_config(page_title="Dual Market Scanner FINAL", layout="wide")
 
-st.title("📈🤖 Custom AI Stock Scanner")
-st.caption("Twoje własne spółki + AI ranking + mini‑sparklines + auto‑skan + komentarze LLM.")
+st.title("📈🤖 Dual Market Scanner – GPW & USA (Swing / Day / Long)")
+st.caption("Trend rośnie / spada / stoi • wybicia • kupujący / sprzedający • newsy • AI komentarz • ranking siły")
 
-# -----------------------------------------
-#  ZAPIS / ODCZYT LISTY SPOŁEK
-# -----------------------------------------
+tab_gpw, tab_usa = st.tabs(["🇵🇱 GPW", "🇺🇸 USA"])
 
-if "saved_tickers" not in st.session_state:
-    st.session_state.saved_tickers = []
+def render_market(tab, market_name):
+    with tab:
+        st.header(f"Rynek: {market_name}")
 
-st.sidebar.header("⚙️ Lista spółek")
+        key_prefix = market_name.replace(" ", "_")
 
-tickers_input = st.sidebar.text_area(
-    "Wpisz swoje tickery (oddzielone przecinkami):",
-    value=",".join(st.session_state.saved_tickers)
-)
+        if f"{key_prefix}_tickers" not in st.session_state:
+            st.session_state[f"{key_prefix}_tickers"] = []
 
-if st.sidebar.button("💾 Zapisz listę spółek"):
-    st.session_state.saved_tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
-    st.sidebar.success("Zapisano!")
+        tickers_input = st.text_area(
+            "Wpisz swoje tickery (oddzielone przecinkami):",
+            value=",".join(st.session_state[f"{key_prefix}_tickers"]),
+            key=f"{key_prefix}_input"
+        )
 
-tickers = st.session_state.saved_tickers
+        if st.button("💾 Zapisz listę", key=f"{key_prefix}_save"):
+            st.session_state[f"{key_prefix}_tickers"] = [
+                t.strip().upper() for t in tickers_input.split(",") if t.strip()
+            ]
+            st.success("Zapisano!")
 
-# -----------------------------------------
-#  AUTO‑SKAN CO X MINUT
-# -----------------------------------------
+        tickers = st.session_state[f"{key_prefix}_tickers"]
 
-auto_minutes = st.sidebar.slider(
-    "Auto‑skan co (minuty, 0 = wyłącz)",
-    min_value=0,
-    max_value=60,
-    value=0,
-    step=5
-)
+        mode = st.selectbox(
+            "Tryb analizy:",
+            ["Swing", "Day", "Long"],
+            key=f"{key_prefix}_mode"
+        )
 
-auto_trigger = False
-if auto_minutes > 0:
-    st.experimental_set_query_params(ts=datetime.utcnow().isoformat())
-    auto_trigger = True
+        auto_minutes = st.slider(
+            "Auto‑skan co (minuty, 0 = wyłącz)",
+            0, 60, 0, 5,
+            key=f"{key_prefix}_auto"
+        )
 
-run_button = st.button("🔍 Skanuj teraz")
-run_scan = run_button or auto_trigger
+        run_button = st.button("🔍 Skanuj teraz", key=f"{key_prefix}_scan")
 
-# -----------------------------------------
-#  SKAN + AI RANKING + SPARKLINES + LLM
-# -----------------------------------------
+        run_scan = run_button
+        if auto_minutes > 0:
+            now = datetime.utcnow().minute
+            if now % auto_minutes == 0:
+                run_scan = True
 
-if run_scan:
-    if not tickers:
-        st.error("Najpierw dodaj spółki.")
-        st.stop()
+        if run_scan:
+            if not tickers:
+                st.error("Najpierw dodaj spółki.")
+                return
 
-    with st.spinner("Pobieram dane i analizuję..."):
-        data = download(tickers)
+            with st.spinner("Pobieram dane, liczę wskaźniki i analizuję..."):
+                data = download(tickers)
 
-        results = []
-        spark_data = {}
+                results = []
+                spark_data = {}
 
-        for t, df in data.items():
-            if len(df) < 60:
-                continue
-            df = indicators(df)
-            color = classify_signal(df)
-            score = ai_score(df)
-            last = df.iloc[-1]
+                for t, df in data.items():
+                    if len(df) < 80:
+                        continue
 
-            # 🔥 komentarz LLM
-            comment = llm_comment(t, last)
+                    df = indicators(df, mode)
+                    df = df.dropna()
+                    if len(df) < 5:
+                        continue
 
-            results.append({
-                "Ticker": t,
-                "Kurs": round(last["Close"], 2),
-                "RSI": round(last["RSI"], 1),
-                "Vol x": round(last["Vol_ratio"], 2),
-                "Sygnał": color,
-                "AI_score": score,
-                "Komentarz LLM": comment
-            })
+                    last = df.iloc[-1]
 
-            spark_data[t] = df["Close"].tail(20).reset_index(drop=True)
+                    trend_state, sigs = compute_signals(df, mode)
+                    news_text = news_flags(t)
+                    comment = llm_comment(t, last, mode, trend_state, sigs, news_text)
+                    score = ai_score(df, mode)
 
-        if not results:
-            st.info("Brak danych / zbyt krótka historia dla podanych spółek.")
-            st.stop()
+                    # kolor
+                    if "trend rośnie" in trend_state:
+                        color = "green"
+                    elif "trend spada" in trend_state:
+                        color = "red"
+                    else:
+                        color = "orange"
 
-        df_out = pd.DataFrame(results)
-        df_out = df_out.sort_values("AI_score", ascending=False).reset_index(drop=True)
+                    results.append({
+                        "Ticker": t,
+                        "Kurs": round(last["Close"], 2),
+                        "RSI": round(last["RSI"], 1),
+                        "Vol x": round(last["Vol_ratio"], 2),
+                        "Trend": trend_state,
+                        "Sygnały": " | ".join(sigs),
+                        "News": news_text,
+                        "AI_score": score,
+                        "Kolor": color,
+                        "Komentarz LLM": comment
+                    })
 
-    play_beep()
+                    spark_data[t] = df["Close"].tail(20).reset_index(drop=True)
 
-    st.subheader("📊 Tabela sygnałów (posortowana wg AI_score)")
+                if not results:
+                    st.info("Brak danych / zbyt krótka historia.")
+                    return
 
-    def highlight(row):
-        if row["Sygnał"] == "green":
-            return ["background-color: #0f5132; color: white"] * len(row)
-        if row["Sygnał"] == "orange":
-            return ["background-color: #ff8c00; color: black"] * len(row)
-        if row["Sygnał"] == "red":
-            return ["background-color: #8b0000; color: white"] * len(row)
-        return [""] * len(row)
+                df_out = pd.DataFrame(results)
+                df_out = df_out.sort_values("AI_score", ascending=False).reset_index(drop=True)
 
-    st.dataframe(df_out.style.apply(highlight, axis=1), use_container_width=True)
+            play_beep()
 
-    st.subheader("📉 Mini‑sparklines (ostatnie 20 sesji)")
+            st.subheader("📊 Tabela sygnałów (posortowana wg AI_score)")
 
-    cols_per_row = 4
-    tickers_order = df_out["Ticker"].tolist()
+            def highlight(row):
+                if row["Kolor"] == "green":
+                    return ["background-color: #0f5132; color: white"] * len(row)
+                if row["Kolor"] == "orange":
+                    return ["background-color: #ff8c00; color: black"] * len(row)
+                if row["Kolor"] == "red":
+                    return ["background-color: #8b0000; color: white"] * len(row)
+                return [""] * len(row)
 
-    for i in range(0, len(tickers_order), cols_per_row):
-        row_tickers = tickers_order[i:i+cols_per_row]
-        cols = st.columns(len(row_tickers))
-        for col, t in zip(cols, row_tickers):
-            with col:
-                st.caption(t)
-                s = spark_data.get(t)
-                if s is not None:
-                    st.line_chart(s)
+            show_cols = ["Ticker", "Kurs", "RSI", "Vol x", "Trend", "Sygnały", "News", "AI_score", "Komentarz LLM"]
+            st.dataframe(
+                df_out[show_cols].style.apply(highlight, axis=1),
+                use_container_width=True
+            )
 
-else:
-    st.info("Dodaj swoje spółki, zapisz listę i kliknij **Skanuj teraz**.")
+            st.subheader("📉 Mini‑sparklines (ostatnie 20 sesji)")
+
+            cols_per_row = 4
+            tickers_order = df_out["Ticker"].tolist()
+
+            for i in range(0, len(tickers_order), cols_per_row):
+                row_tickers = tickers_order[i:i+cols_per_row]
+                cols = st.columns(len(row_tickers))
+                for col, t in zip(cols, row_tickers):
+                    with col:
+                        st.caption(t)
+                        s = spark_data.get(t)
+                        if s is not None:
+                            st.line_chart(s)
+        else:
+            st.info("Ustaw tickery, wybierz tryb i kliknij **Skanuj teraz** (lub włącz auto‑skan).")
+
+render_market(tab_gpw, "GPW")
+render_market(tab_usa, "USA")
