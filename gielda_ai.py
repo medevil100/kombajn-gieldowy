@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime
 from openai import OpenAI
 import io, wave, math, struct, base64
 
@@ -46,17 +45,17 @@ def play_beep():
     )
 
 # ============================================================
-#  POBIERANIE DANYCH (CACHE)
+#  POBIERANIE DANYCH
 # ============================================================
 
 @st.cache_data(show_spinner=False)
-def download(tickers, period="180d", interval="1d"):
+def download(tickers):
     if not tickers:
         return {}
     data = yf.download(
         tickers,
-        period=period,
-        interval=interval,
+        period="180d",
+        interval="1d",
         group_by="ticker",
         auto_adjust=True,
         threads=True,
@@ -74,7 +73,7 @@ def download(tickers, period="180d", interval="1d"):
     return result
 
 # ============================================================
-#  WSKAŹNIKI – TRYBY
+#  WSKAŹNIKI
 # ============================================================
 
 def indicators(df, mode):
@@ -108,7 +107,7 @@ def indicators(df, mode):
         df["Momentum"] = df["Close"].diff(3)
         df["Vol_avg"] = df["Volume"].rolling(10).mean()
 
-    else:  # Long
+    else:
         df["EMA_fast"] = df["Close"].ewm(span=50).mean()
         df["EMA_mid"] = df["Close"].ewm(span=100).mean()
         df["EMA_slow"] = df["Close"].ewm(span=200).mean()
@@ -148,7 +147,7 @@ def news_flags(ticker):
         flags.append("FDA")
     if "approval" in text_low:
         flags.append("approval")
-    if "debt" in text_low or "zadłużenie" in text_low:
+    if "debt" in text_low:
         flags.append("debt")
     if "downgrade" in text_low:
         flags.append("downgrade")
@@ -166,7 +165,7 @@ def news_flags(ticker):
     return " | ".join(flags)
 
 # ============================================================
-#  SYGNAŁY 1–7
+#  SYGNAŁY
 # ============================================================
 
 def compute_signals(df):
@@ -200,7 +199,7 @@ def compute_signals(df):
     return trend_state, signals
 
 # ============================================================
-#  AI #2 — KOMENTARZ LLM
+#  AI #2
 # ============================================================
 
 def ai2_comment(ticker, last, trend_state, signals, news_text):
@@ -215,11 +214,6 @@ Cena: {last['Close']:.2f}
 Trend: {trend_state}
 Sygnały: {sig_str}
 News: {news_str}
-
-Zasady:
-- krótko i konkretnie,
-- bez rekomendacji,
-- opisz trend, momentum, wolumen, newsy.
 """
 
     try:
@@ -229,11 +223,11 @@ Zasady:
             temperature=0.2
         )
         return r.choices[0].message["content"].strip()
-    except Exception:
+    except:
         return "Błąd AI #2"
 
 # ============================================================
-#  AI #3 — SENTIMENT NEWSÓW
+#  AI #3
 # ============================================================
 
 def ai3_sentiment(news_text):
@@ -255,7 +249,7 @@ def ai3_sentiment(news_text):
     return "sentiment neutralny"
 
 # ============================================================
-#  AI #4 — FUNDAMENTALNE RYZYKA
+#  AI #4
 # ============================================================
 
 def ai4_fundamental(news_text):
@@ -287,3 +281,172 @@ st.set_page_config(page_title="Dual Market Scanner", layout="wide")
 st.title("📈 Dual Market Scanner — GPW & USA (4 AI)")
 
 tab_gpw, tab_usa = st.tabs(["🇵🇱 GPW", "🇺🇸 USA"])
+# ============================================================
+#  FUNKCJA RYNKU
+# ============================================================
+
+def render_market(tab, market_name):
+    with tab:
+        st.header(f"Rynek: {market_name}")
+
+        key = market_name.replace(" ", "_")
+
+        if f"{key}_tickers" not in st.session_state:
+            st.session_state[f"{key}_tickers"] = []
+
+        if f"{key}_df" not in st.session_state:
+            st.session_state[f"{key}_df"] = None
+
+        if f"{key}_spark" not in st.session_state:
+            st.session_state[f"{key}_spark"] = {}
+
+        tickers_input = st.text_area(
+            "Wpisz swoje tickery (oddzielone przecinkami):",
+            value=",".join(st.session_state[f"{key}_tickers"]),
+            key=f"{key}_input"
+        )
+
+        if st.button("💾 Zapisz listę", key=f"{key}_save"):
+            st.session_state[f"{key}_tickers"] = [
+                t.strip().upper() for t in tickers_input.split(",") if t.strip()
+            ]
+            st.success("Zapisano listę tickerów.")
+
+        tickers = st.session_state[f"{key}_tickers"]
+
+        mode = st.selectbox(
+            "Tryb analizy:",
+            ["Swing", "Day", "Long"],
+            key=f"{key}_mode"
+        )
+
+        # ============================================================
+        #  ANALIZA TECHNICZNA (AI #1)
+        # ============================================================
+
+        if st.button("🔍 Analiza techniczna (AI #1)", key=f"{key}_scan"):
+            if not tickers:
+                st.error("Najpierw dodaj spółki.")
+                return
+
+            with st.spinner("Analizuję..."):
+                data = download(tickers)
+
+                rows = []
+                spark = {}
+
+                for t, df in data.items():
+                    if df is None or df.empty:
+                        continue
+                    if len(df) < 80:
+                        continue
+
+                    df = indicators(df, mode).dropna()
+                    if df is None or df.empty:
+                        continue
+                    if len(df) < 5:
+                        continue
+
+                    last = df.iloc[-1]
+
+                    trend_state, sigs = compute_signals(df)
+                    news_text = news_flags(t)
+
+                    score = 0
+                    if "rośnie" in trend_state:
+                        score += 2
+                    if "spada" in trend_state:
+                        score -= 2
+                    if any("kupujących" in s for s in sigs):
+                        score += 1
+                    if any("sprzedających" in s for s in sigs):
+                        score -= 1
+
+                    color = "green" if "rośnie" in trend_state else "red" if "spada" in trend_state else "orange"
+
+                    rows.append({
+                        "Ticker": t,
+                        "Kurs": round(last["Close"], 2),
+                        "RSI": round(last["RSI"], 1),
+                        "Vol x": round(last["Vol_ratio"], 2),
+                        "Trend": trend_state,
+                        "Sygnały": " | ".join(sigs),
+                        "News": news_text,
+                        "AI_score": score,
+                        "Kolor": color,
+                        "Komentarz AI": "",
+                        "Sentiment AI": "",
+                        "Fundamental AI": ""
+                    })
+
+                    spark[t] = df["Close"].tail(20).reset_index(drop=True)
+
+                if not rows:
+                    st.warning("Brak spółek z wystarczającą ilością danych.")
+                    st.session_state[f"{key}_df"] = None
+                    return
+
+                df_out = pd.DataFrame(rows).sort_values("AI_score", ascending=False)
+                st.session_state[f"{key}_df"] = df_out
+                st.session_state[f"{key}_spark"] = spark
+
+            play_beep()
+
+        df_out = st.session_state.get(f"{key}_df", None)
+        spark = st.session_state.get(f"{key}_spark", {})
+
+        if df_out is not None:
+
+            col_left, col_right = st.columns([1, 1])
+
+            # ---------------- LEFT: TABELA ----------------
+
+            with col_left:
+                st.subheader("📊 Wyniki analizy technicznej")
+
+                def highlight(row):
+                    if row["Kolor"] == "green":
+                        return ["background-color:#0f5132;color:white"] * len(row)
+                    if row["Kolor"] == "red":
+                        return ["background-color:#8b0000;color:white"] * len(row)
+                    return ["background-color:#ff8c00;color:black"] * len(row)
+
+                cols_order = [
+                    "Ticker", "Kurs", "RSI", "Vol x", "Trend", "Sygnały", "News",
+                    "AI_score", "Kolor",
+                    "Komentarz AI", "Sentiment AI", "Fundamental AI"
+                ]
+
+                st.dataframe(
+                    df_out[cols_order].style.apply(highlight, axis=1),
+                    use_container_width=True
+                )
+
+                st.subheader("📉 Sparklines")
+                cols = st.columns(4)
+                for i, t in enumerate(df_out["Ticker"]):
+                    with cols[i % 4]:
+                        st.caption(t)
+                        if t in spark:
+                            st.line_chart(spark[t])
+
+            # ---------------- RIGHT: AI + CHECKBOXY ----------------
+
+            with col_right:
+                st.subheader("🧠 Wybierz AI")
+
+                ai_choice = st.radio(
+                    "Wybierz AI:",
+                    ["AI #2 — Komentarz LLM",
+                     "AI #3 — Sentiment newsów",
+                     "AI #4 — Fundamentalne ryzyka"],
+                    key=f"{key}_ai_choice"
+                )
+
+                st.subheader("📌 Wybierz spółki do analizy AI")
+
+                selected = []
+                for t in df_out["Ticker"]:
+                    if st.checkbox(t, key=f"{key}_{t}_chk"):
+                        selected.append(t)
+
