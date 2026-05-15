@@ -203,7 +203,6 @@ def compute_signals(df, mode):
     if last["Close"] < prev["Close"] and last["Vol_ratio"] > 1.5 and last["RSI"] < prev["RSI"]:
         signals.append("wzrost sprzedających (mocna podaż)")
 
-    # 7 – placeholder, newsy dokładamy osobno
     return trend_state, signals
 
 # ==========================
@@ -228,7 +227,7 @@ def ai_score(df, mode):
     return score
 
 # ==========================
-# Komentarz LLM
+# Komentarz LLM – wywoływany TYLKO po kliknięciu przycisku
 # ==========================
 
 def llm_comment(ticker, last, mode, trend_state, signals, news_text):
@@ -287,7 +286,7 @@ Zasady:
 st.set_page_config(page_title="Dual Market Scanner FINAL", layout="wide")
 
 st.title("📈🤖 Dual Market Scanner – GPW & USA (Swing / Day / Long)")
-st.caption("Trend rośnie / spada / stoi • wybicia • kupujący / sprzedający • newsy • AI komentarz • ranking siły")
+st.caption("Trend rośnie / spada / stoi • wybicia • kupujący / sprzedający • newsy • AI komentarz na żądanie")
 
 tab_gpw, tab_usa = st.tabs(["🇵🇱 GPW", "🇺🇸 USA"])
 
@@ -299,6 +298,9 @@ def render_market(tab, market_name):
 
         if f"{key_prefix}_tickers" not in st.session_state:
             st.session_state[f"{key_prefix}_tickers"] = []
+
+        if f"{key_prefix}_df" not in st.session_state:
+            st.session_state[f"{key_prefix}_df"] = None
 
         tickers_input = st.text_area(
             "Wpisz swoje tickery (oddzielone przecinkami):",
@@ -326,13 +328,17 @@ def render_market(tab, market_name):
             key=f"{key_prefix}_auto"
         )
 
-        run_button = st.button("🔍 Skanuj teraz", key=f"{key_prefix}_scan")
+        run_button = st.button("🔍 Skanuj teraz (analiza techniczna)", key=f"{key_prefix}_scan")
 
         run_scan = run_button
         if auto_minutes > 0:
             now = datetime.utcnow().minute
             if now % auto_minutes == 0:
                 run_scan = True
+
+        # ======================
+        # ANALIZA TECHNICZNA
+        # ======================
 
         if run_scan:
             if not tickers:
@@ -358,10 +364,8 @@ def render_market(tab, market_name):
 
                     trend_state, sigs = compute_signals(df, mode)
                     news_text = news_flags(t)
-                    comment = llm_comment(t, last, mode, trend_state, sigs, news_text)
                     score = ai_score(df, mode)
 
-                    # kolor
                     if "trend rośnie" in trend_state:
                         color = "green"
                     elif "trend spada" in trend_state:
@@ -379,7 +383,7 @@ def render_market(tab, market_name):
                         "News": news_text,
                         "AI_score": score,
                         "Kolor": color,
-                        "Komentarz LLM": comment
+                        "Komentarz LLM": ""  # na razie puste, wypełni przycisk AI
                     })
 
                     spark_data[t] = df["Close"].tail(20).reset_index(drop=True)
@@ -391,9 +395,18 @@ def render_market(tab, market_name):
                 df_out = pd.DataFrame(results)
                 df_out = df_out.sort_values("AI_score", ascending=False).reset_index(drop=True)
 
+                st.session_state[f"{key_prefix}_df"] = df_out
+                st.session_state[f"{key_prefix}_spark"] = spark_data
+                st.session_state[f"{key_prefix}_mode_last"] = mode
+
             play_beep()
 
-            st.subheader("📊 Tabela sygnałów (posortowana wg AI_score)")
+        df_out = st.session_state.get(f"{key_prefix}_df", None)
+        spark_data = st.session_state.get(f"{key_prefix}_spark", {})
+        mode_last = st.session_state.get(f"{key_prefix}_mode_last", mode)
+
+        if df_out is not None:
+            st.subheader("📊 Tabela sygnałów (analiza techniczna)")
 
             def highlight(row):
                 if row["Kolor"] == "green":
@@ -404,7 +417,8 @@ def render_market(tab, market_name):
                     return ["background-color: #8b0000; color: white"] * len(row)
                 return [""] * len(row)
 
-            show_cols = ["Ticker", "Kurs", "RSI", "Vol x", "Trend", "Sygnały", "News", "AI_score", "Komentarz LLM"]
+            show_cols = ["Ticker", "Kurs", "RSI", "Vol x", "Trend", "Sygnały", "News", "AI_score", "Kolor", "Komentarz LLM"]
+
             st.dataframe(
                 df_out[show_cols].style.apply(highlight, axis=1),
                 use_container_width=True
@@ -424,8 +438,38 @@ def render_market(tab, market_name):
                         s = spark_data.get(t)
                         if s is not None:
                             st.line_chart(s)
+
+            # ======================
+            # OSOBNY PRZYCISK – OPINIA AI
+            # ======================
+
+            if st.button("💬 Opinia AI dla widocznych spółek", key=f"{key_prefix}_ai"):
+                with st.spinner("Generuję komentarze AI..."):
+                    new_rows = []
+                    for _, row in df_out.iterrows():
+                        ticker = row["Ticker"]
+                        # ponownie pobieramy dane tylko dla tej spółki (prościej niż trzymać cały DF)
+                        data_single = download([ticker])
+                        df_single = list(data_single.values())[0]
+                        df_single = indicators(df_single, mode_last).dropna()
+                        last = df_single.iloc[-1]
+                        trend_state, sigs = compute_signals(df_single, mode_last)
+                        news_text = row["News"]
+                        comment = llm_comment(ticker, last, mode_last, trend_state, sigs, news_text)
+                        row["Komentarz LLM"] = comment
+                        new_rows.append(row)
+
+                    df_out = pd.DataFrame(new_rows).reset_index(drop=True)
+                    st.session_state[f"{key_prefix}_df"] = df_out
+
+                st.success("Komentarze AI zaktualizowane.")
+
+                st.dataframe(
+                    df_out[show_cols].style.apply(highlight, axis=1),
+                    use_container_width=True
+                )
         else:
-            st.info("Ustaw tickery, wybierz tryb i kliknij **Skanuj teraz** (lub włącz auto‑skan).")
+            st.info("Ustaw tickery, wybierz tryb i kliknij **Skanuj teraz (analiza techniczna)**.")
 
 render_market(tab_gpw, "GPW")
 render_market(tab_usa, "USA")
