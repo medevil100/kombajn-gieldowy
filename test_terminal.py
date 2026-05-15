@@ -6,7 +6,7 @@ import yfinance as yf
 from openai import OpenAI
 
 st.set_page_config(
-    page_title="Skaner Groszówek AI Pro", 
+    page_title="Skaner Groszówek AI Ultra", 
     page_icon="📱", 
     layout="centered"
 )
@@ -49,7 +49,7 @@ if "spolki_pl" not in st.session_state:
 if "spolki_usa" not in st.session_state:
     st.session_state.spolki_usa = ["SNDL", "NIO", "AAL", "F", "LCID", "RIG"]
 
-# --- FUNKCJE MATEMATYCZNE ---
+# --- MATEMATYKA I SZACOWANIE WSKAŹNIKÓW ---
 def oblicz_wskazniki(df):
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
@@ -82,10 +82,16 @@ def skanuj_wybrane_spolki(lista_tickerow):
     for ticker in lista_tickerow:
         try:
             t = yf.Ticker(ticker.strip().upper())
-            df = t.history(period="60d")
-            if df.empty or len(df) < 30:
+            # Pobieramy dane z ostatniego roku (252 dni robocze) dla 52W High/Low
+            df = t.history(period="260d")
+            if df.empty or len(df) < 50:
                 continue
                 
+            # Wyliczanie ekstremów 52-tygodniowych
+            okres_52w = df.iloc[-252:] if len(df) >= 252 else df
+            high_52w = okres_52w["High"].max()
+            low_52w = okres_52w["Low"].min()
+            
             df = oblicz_wskazniki(df)
             ostatni = df.iloc[-1]
             cena = ostatni["Close"]
@@ -101,6 +107,9 @@ def skanuj_wybrane_spolki(lista_tickerow):
                 if cena >= ostatni['Upper_Band']: pozycja_bb = "🔥 Wybicie Góra"
                 elif cena <= ostatni['Lower_Band']: pozycja_bb = "⚠️ Wybicie Dół"
 
+                # Odległość ceny od historycznego dna (w procentach)
+                odleglosc_od_dna = ((cena - low_52w) / low_52w) * 100
+
                 dane_spolek.append({
                     "Ticker": ticker.strip().upper(),
                     "Cena": round(cena, 2),
@@ -109,30 +118,32 @@ def skanuj_wybrane_spolki(lista_tickerow):
                     "RSI (14)": round(ostatni['RSI'], 1) if not pd.isna(ostatni['RSI']) else 50.0,
                     "MACD Hist": round(ostatni['MACD'] - ostatni['Signal'], 4) if not pd.isna(ostatni['Signal']) else 0.0,
                     "Zmienność (ATR)": round(ostatni['ATR'], 3) if not pd.isna(ostatni['ATR']) else 0.0,
-                    "Wstęgi BB": pozycja_bb
+                    "Wstęgi BB": pozycja_bb,
+                    "52W Low": round(low_52w, 2),
+                    "52W High": round(high_52w, 2),
+                    "Od Dna (%)": round(odleglosc_od_dna, 1)
                 })
         except Exception:
             continue
             
     return pd.DataFrame(dane_spolek)
 
-# --- BEZPIECZNE WYCIĄGANIE ODPOWIEDZI AI ---
 def generuj_raport_pojedynczej_spolki(model, ticker, wiersz_danych):
     client = OpenAI(api_key=OPENAI_API_KEY)
     dane_tekst = wiersz_danych.to_string(index=False)
     
     prompt = f"""
-    Jesteś zawodowym traderem giełdowym. Wykonaj indywidualną, maksymalnie szczegółową analizę techniczną dla spółki {ticker}.
+    Jesteś zawodowym traderem giełdowym. Wykonaj indywidualną, maksymalnie szczegółową analizę dla spółki {ticker}.
     
-    Oto jej aktualne parametry rynkowe:
+    Oto jej pełne parametry rynkowe wraz z poziomami 52-tygodniowymi:
     {dane_tekst}
     
     Zinterpretuj precyzyjnie:
-    1. Czy skok wolumenu potwierdza trwały napływ „grubych ryb” (Smart Money)?
-    2. Co sugeruje poziom RSI i pozycja ceny względem Wstęg Bollingera (BB)?
-    3. Jaki jest dokładny werdykt (KUP / SPRZEDAJ / CZEKAJ) i jakie poziomy ryzyka (ATR) należy przyjąć?
+    1. Czy odległość od historycznego dna ('Od Dna (%)') stanowi bezpieczną strefę akumulacji, czy ryzyko bankructwa?
+    2. Co sugeruje poziom RSI, MACD i pozycja ceny względem Wstęg Bollingera (BB)?
+    3. Jaki jest dokładny werdykt i krótka strategia rynkowa?
     
-    Napisz konkretny, strukturyzowany raport, używając emoji, idealny do przeczytania na telefonie.
+    Napisz konkretny, strukturyzowany raport przy użyciu punktów i emoji pod ekran telefonu.
     """
     
     params = {"model": model, "messages": [{"role": "user", "content": prompt}]}
@@ -141,17 +152,13 @@ def generuj_raport_pojedynczej_spolki(model, ticker, wiersz_danych):
         
     try:
         response = client.chat.completions.create(**params)
-        
-        # ODPORNY PARSER (Obsługuje zarówno obiekty słownikowe, atrybuty Pydantic, jak i surowe struktury o1/o3)
         if hasattr(response, 'choices') and len(response.choices) > 0:
             choice = response.choices[0]
             if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
                 return choice.message.content
-            elif isinstance(choice, dict) and 'message' in choice:
-                return choice['message'].get('content', 'Błąd: Brak zawartości w wiadomości.')
         return str(response)
     except Exception as e:
-        return f"❌ Wystąpił błąd podczas komunikacji z API OpenAI: {str(e)}"
+        return f"❌ Błąd API OpenAI: {str(e)}"
 
 
 # --- INTERFEJS MOBILNY ---
@@ -181,20 +188,63 @@ df_aktywne = skanuj_wybrane_spolki(aktualna_lista)
 
 if not df_aktywne.empty:
     df_aktywne = df_aktywne.sort_values(by="Skok Vol", ascending=False)
-    st.dataframe(df_aktywne, use_container_width=True, hide_index=True)
     
-    # --- SEKCJA ROZDZIELONEJ ANALIZY ---
+    # Wyświetlamy najważniejsze kolumny w tabeli głównej dla przejrzystości na telefonie
+    widok_tabeli = df_aktywne[["Ticker", "Cena", "Skok Vol", "Trend", "RSI (14)", "Wstęgi BB", "Od Dna (%)"]]
+    st.dataframe(widok_tabeli, use_container_width=True, hide_index=True)
+    
+    # --- SEKCJA ROZDZIELONEJ ANALIZY + KALKULATOR RYZYKA ---
     st.markdown("---")
-    st.subheader("🔍 Indywidualna Analiza AI")
+    st.subheader("🔍 Indywidualna Analiza i MM")
     
     lista_tickerow_do_wyboru = df_aktywne["Ticker"].tolist()
-    wybrany_ticker = st.selectbox("Wybierz spółkę do analizy szczegółowej:", lista_tickerow_do_wyboru)
+    wybrany_ticker = st.selectbox("Wybierz spółkę:", lista_tickerow_do_wyboru)
     
-    if st.button(f"🧠 Analizuj tylko {wybrany_ticker}", type="primary", use_container_width=True):
-        dane_spolki = df_aktywne[df_aktywne["Ticker"] == wybrany_ticker]
+    # Pobranie wiersza danych wybranej spółki
+    wiersz_spolki = df_aktywne[df_aktywne["Ticker"] == wybrany_ticker].iloc[0]
+    
+    # --- INTEGRACJA KALKULATORA ATR (MONEY MANAGEMENT) ---
+    st.markdown("##### 🧮 Kalkulator wielkości pozycji (ATR)")
+    waluta = "PLN" if rynek_wybor == "PL (GPW)" else "USD"
+    
+    akceptowalne_ryzyko = st.number_input(
+        f"Maksymalna kwota straty na pozycję ({waluta}):", 
+        min_value=10, max_value=50000, value=200, step=50
+    )
+    
+    # Logika kalkulatora: Stop Loss ustawiany jako odległość 2 * ATR od ceny wejściowej
+    cena_wejscia = wiersz_spolki["Cena"]
+    atr = wiersz_spolki["Zmienność (ATR)"]
+    
+    # Ochrona przed ATR równym 0
+    if atr <= 0:
+        atr = cena_wejscia * 0.05
         
-        with st.spinner(f"Potężny model {gpt_wybor} rozpracowuje ticker {wybrany_ticker}..."):
-            wynik_indywidualny = generuj_raport_pojedynczej_spolki(gpt_wybor, wybrany_ticker, dane_spolki)
+    odleglosc_sl = round(2 * atr, 2)
+    poziom_sl = round(cena_wejscia - odleglosc_sl, 2)
+    
+    if poziom_sl <= 0:
+        poziom_sl = round(cena_wejscia * 0.5, 2)
+        odleglosc_sl = round(cena_wejscia - poziom_sl, 2)
+
+    # Obliczenie wielkości pozycji na podstawie zadeklarowanego ryzyka kwotowego
+    liczba_akcji = int(akceptowalne_ryzyko / odleglosc_sl) if odleglosc_sl > 0 else 0
+    calkowity_kapital = round(liczba_akcji * cena_wejscia, 2)
+
+    # Prezentacja wyników kalkulatora w widoku mobilnym
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric(label="Sugerowana obrona (SL)", value=f"{poziom_sl} {waluta}", delta=f"-{odleglosc_sl}")
+        st.metric(label="Liczba akcji do kupna", value=f"{liczba_akcji} szt.")
+    with col2:
+        st.metric(label="Całkowity koszt pozycji", value=f"{calkowity_kapital} {waluta}")
+        st.metric(label="Dołek 52W", value=f"{wiersz_spolki['52W Low']} {waluta}", delta=f"{wiersz_spolki['Od Dna (%)']}% od dna", delta_color="inverse")
+
+    # Przycisk uruchomienia analizy dedykowanej dla tej spółki z uwzględnieniem danych rocznych
+    if st.button(f"🧠 Generuj Raport AI dla {wybrany_ticker}", type="primary", use_container_width=True):
+        dane_spolki_pelne = df_aktywne[df_aktywne["Ticker"] == wybrany_ticker]
+        with st.spinner(f"Potężny model {gpt_wybor} analizuje profil {wybrany_ticker}..."):
+            wynik_indywidualny = generuj_raport_pojedynczej_spolki(gpt_wybor, wybrany_ticker, dane_spolki_pelne)
             st.markdown(f"### 📝 Raport Głęboki dla {wybrany_ticker}:")
             st.info(wynik_indywidualny)
 else:
