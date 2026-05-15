@@ -27,7 +27,7 @@ try:
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
     APP_PASSWORD = st.secrets["APP_PASSWORD"]
 except Exception:
-    st.error("Błąd: Skonfiguruj 'OPENAI_API_KEY' oraz 'APP_PASSWORD' w Streamlit Secrets.")
+    st.error("Błąd: Skonfiguruj 'OPENAI_API_KEY' oraz 'APP_PASSWORD' in Streamlit Secrets.")
     st.stop()
 
 if "logged_in" not in st.session_state:
@@ -49,29 +49,24 @@ if "spolki_pl" not in st.session_state:
 if "spolki_usa" not in st.session_state:
     st.session_state.spolki_usa = ["SNDL", "NIO", "AAL", "F", "LCID", "RIG"]
 
-# --- ZAAWANSOWANA MATEMATYKA GIEŁDOWA ---
+# --- FUNKCJE MATEMATYCZNE ---
 def oblicz_wskazniki(df):
-    """Kalkuluje dodatkowe wymiary danych technicznych."""
-    # 1. RSI (Pęd rynku / Wykupienie-Wyprzedanie)
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # 2. MACD (Zbieżność i rozbieżność średnich)
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     
-    # 3. Wstęgi Bollingera (Zmienność i ekstrema cenowe)
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['STD20'] = df['Close'].rolling(window=20).std()
     df['Upper_Band'] = df['MA20'] + (df['STD20'] * 2)
     df['Lower_Band'] = df['MA20'] - (df['STD20'] * 2)
     
-    # 4. ATR (Średni rzeczywisty zasięg - zmienność kwotowa)
     high_low = df['High'] - df['Low']
     high_cp = np.abs(df['High'] - df['Close'].shift())
     low_cp = np.abs(df['Low'] - df['Close'].shift())
@@ -87,12 +82,11 @@ def skanuj_wybrane_spolki(lista_tickerow):
     for ticker in lista_tickerow:
         try:
             t = yf.Ticker(ticker.strip().upper())
-            df = t.history(period="60d") # Większy zapas pod wskaźniki kroczące
+            df = t.history(period="60d")
             if df.empty or len(df) < 30:
                 continue
                 
             df = oblicz_wskazniki(df)
-            
             ostatni = df.iloc[-1]
             cena = ostatni["Close"]
             wolumen_teraz = ostatni["Volume"]
@@ -103,7 +97,6 @@ def skanuj_wybrane_spolki(lista_tickerow):
                 skok_vol = wolumen_teraz / wolumen_srednia if wolumen_srednia > 0 else 1.0
                 trend = "🟢 Wzrostowy" if cena > sma_10 else "🔴 Spadkowy"
                 
-                # Określenie pozycji ceny względem wstęg Bollingera
                 pozycja_bb = "Środek"
                 if cena >= ostatni['Upper_Band']: pozycja_bb = "🔥 Wybicie Góra"
                 elif cena <= ostatni['Lower_Band']: pozycja_bb = "⚠️ Wybicie Dół"
@@ -123,29 +116,31 @@ def skanuj_wybrane_spolki(lista_tickerow):
             
     return pd.DataFrame(dane_spolek)
 
-def generuj_raport_mocne_llm(model, dane_tabeli):
+# --- NOWA FUNKCJA: GŁĘBOKA ANALIZA JEDNEJ SPÓŁKI ---
+def generuj_raport_pojedynczej_spolki(model, ticker, wiersz_danych):
     client = OpenAI(api_key=OPENAI_API_KEY)
-    tekst_tabeli = dane_tabeli.to_string(index=False)
+    dane_tekst = wiersz_danych.to_string(index=False)
     
     prompt = f"""
-    Jesteś algorytmicznym traderem groszówek. Dokonaj głębokiej wielowskaźnikowej analizy technicznej:
-
-    {tekst_tabeli}
-
-    Wykorzystaj synergie wskaźników:
-    - OKAZJA KUPNA: Wysoki Skok Vol (>1.5) + Trend Wzrostowy + RSI rosnące ale nie wykupione (<65) + MACD Hist dodatni + Wybicie Góra z BB.
-    - OSTRZEŻENIE/SŁABOŚĆ: Trend Spadkowy + Wybicie Dół z BB LUB skrajne wykupienie na RSI (>75) sugerujące dystrybucję.
+    Jesteś zawodowym traderem giełdowym. Wykonaj indywidualną, maksymalnie szczegółową analizę techniczną dla spółki {ticker}.
     
-    Zwróć ekstremalnie zwięzły, konkretny raport na ekran smartfona. Pogrub kluczowe tickery.
+    Oto jej aktualne parametry rynkowe:
+    {dane_tekst}
+    
+    Zinterpretuj precyzyjnie:
+    1. Czy skok wolumenu potwierdza trwały napływ „grubych ryb” (Smart Money)?
+    2. Co sugeruje poziom RSI i pozycja ceny względem Wstęg Bollingera (BB)?
+    3. Jaki jest dokładny werdykt (KUP / SPRZEDAJ / CZEKAJ) i jakie poziomy ryzyka (ATR) należy przyjąć?
+    
+    Napisz konkretny, strukturyzowany raport, używając emoji, idealny do przeczytania na telefonie.
     """
     
-    # Konfiguracja parametrów zależnie od architektury modelu OpenAI
     params = {"model": model, "messages": [{"role": "user", "content": prompt}]}
     if model == "o3-mini":
-        params["reasoning_effort"] = "high" # Maksymalna moc obliczeniowa i logiczna
+        params["reasoning_effort"] = "high"
         
     response = client.chat.completions.create(**params)
-    return response.choices[0].message.content
+    return response.choices.message.content
 
 
 # --- INTERFEJS MOBILNY ---
@@ -175,14 +170,24 @@ df_aktywne = skanuj_wybrane_spolki(aktualna_lista)
 
 if not df_aktywne.empty:
     df_aktywne = df_aktywne.sort_values(by="Skok Vol", ascending=False)
-    # Wyświetlanie nowej tabeli bogatej we wskaźniki
     st.dataframe(df_aktywne, use_container_width=True, hide_index=True)
     
-    if st.button(f"🧠 Analiza Wielowskaźnikowa ({gpt_wybor})", type="primary", use_container_width=True):
-        with st.spinner("Najmocniejsze AI koreluje wskaźniki..."):
-            wynik_ai = generuj_raport_mocne_llm(gpt_wybor, df_aktywne)
-            st.markdown("### 📝 Strategia i Alerty AI:")
-            st.info(wynik_ai)
+    # --- SEKCJA ROZDZIELONEJ ANALIZY DLA JEDNEJ SPÓŁKI ---
+    st.markdown("---")
+    st.subheader("🔍 Indywidualna Analiza AI")
+    
+    # Lista rozwijana z tickerami dostępnymi w tabeli
+    lista_tickerow_do_wyboru = df_aktywne["Ticker"].tolist()
+    wybrany_ticker = st.selectbox("Wybierz spółkę do analizy szczegółowej:", lista_tickerow_do_wyboru)
+    
+    if st.button(f"🧠 Analizuj tylko {wybrany_ticker}", type="primary", use_container_width=True):
+        # Wyciągamy z tabeli tylko jeden wiersz powiązany z wybraną spółką
+        dane_spolki = df_aktywne[df_aktywne["Ticker"] == wybrany_ticker]
+        
+        with st.spinner(f"Potężny model {gpt_wybor} rozpracowuje ticker {wybrany_ticker}..."):
+            wynik_indywidualny = generuj_raport_pojedynczej_spolki(gpt_wybor, wybrany_ticker, dane_spolki)
+            st.markdown(f"### 📝 Raport Głęboki dla {wybrany_ticker}:")
+            st.info(wynik_indywidualny)
 else:
     st.warning("Lista pusta lub brak aktywności na spółkach.")
 
