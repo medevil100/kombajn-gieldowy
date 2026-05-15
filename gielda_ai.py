@@ -1,6 +1,6 @@
+```python
 import os
 import io
-import time
 import math
 import wave
 import struct
@@ -10,13 +10,12 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
-import plotly.graph_objects as go
 from openai import OpenAI
 
 # ================== USTAWIENIA APLIKACJI ==================
 
 st.set_page_config(
-    page_title="📈 Dual Market Scanner — GPW & USA (4 AI)",
+    page_title="📈 Dual Market Scanner — GPW & USA (3× AI: Swing / Day / Long)",
     page_icon="📈",
     layout="wide",
 )
@@ -120,49 +119,45 @@ def ds_download(tickers, period="240d", interval="1d"):
         result[tickers[0]] = df
     return result
 
-# ================== HYBRYDOWE WSKAŹNIKI ==================
+# ================== WSKAŹNIKI: SWING / DAY / LONG ==================
 
-def ds_indicators_hybrid(df):
+def ds_indicators_all(df):
     df = df.copy()
+    delta = df["Close"].diff()
 
     # Swing
-    df["EMA20"] = df["Close"].ewm(span=20).mean()
-    df["EMA50"] = df["Close"].ewm(span=50).mean()
-    df["EMA200"] = df["Close"].ewm(span=200).mean()
-    delta = df["Close"].diff()
+    df["EMA20_s"] = df["Close"].ewm(span=20).mean()
+    df["EMA50_s"] = df["Close"].ewm(span=50).mean()
+    df["EMA200_s"] = df["Close"].ewm(span=200).mean()
     gain14 = delta.clip(lower=0).rolling(14).mean()
     loss14 = (-delta.clip(upper=0)).rolling(14).mean()
     rs14 = gain14 / loss14
-    df["RSI14"] = 100 - (100 / (1 + rs14))
-    df["Fibo60_high"] = df["Close"].rolling(60).max()
-    df["Fibo60_low"] = df["Close"].rolling(60).min()
-    df["Mom10"] = df["Close"].diff(10)
+    df["RSI14_s"] = 100 - (100 / (1 + rs14))
+    df["Mom10_s"] = df["Close"].diff(10)
+    df["Fibo60_high_s"] = df["Close"].rolling(60).max()
+    df["Fibo60_low_s"] = df["Close"].rolling(60).min()
 
     # Day
-    df["EMA9"] = df["Close"].ewm(span=9).mean()
+    df["EMA9_d"] = df["Close"].ewm(span=9).mean()
     df["EMA20_d"] = df["Close"].ewm(span=20).mean()
     df["EMA50_d"] = df["Close"].ewm(span=50).mean()
     gain7 = delta.clip(lower=0).rolling(7).mean()
     loss7 = (-delta.clip(upper=0)).rolling(7).mean()
     rs7 = gain7 / loss7
-    df["RSI7"] = 100 - (100 / (1 + rs7))
-    df["Fibo20_high"] = df["Close"].rolling(20).max()
-    df["Fibo20_low"] = df["Close"].rolling(20).min()
-    df["Mom3"] = df["Close"].diff(3)
+    df["RSI7_d"] = 100 - (100 / (1 + rs7))
+    df["Mom3_d"] = df["Close"].diff(3)
+    df["Fibo20_high_d"] = df["Close"].rolling(20).max()
+    df["Fibo20_low_d"] = df["Close"].rolling(20).min()
 
     # Long
     df["EMA50_l"] = df["Close"].ewm(span=50).mean()
     df["EMA100_l"] = df["Close"].ewm(span=100).mean()
     df["EMA200_l"] = df["Close"].ewm(span=200).mean()
-    df["Fibo120_high"] = df["Close"].rolling(120).max()
-    df["Fibo120_low"] = df["Close"].rolling(120).min()
+    df["Fibo120_high_l"] = df["Close"].rolling(120).max()
+    df["Fibo120_low_l"] = df["Close"].rolling(120).min()
 
     df["Vol_avg20"] = df["Volume"].rolling(20).mean()
     df["Vol_ratio"] = df["Volume"] / df["Vol_avg20"]
-
-    df["Trend_swing"] = df["EMA20"] - df["EMA50"]
-    df["Trend_day"] = df["EMA9"] - df["EMA20_d"]
-    df["Trend_long"] = df["EMA50_l"] - df["EMA100_l"]
 
     return df
 
@@ -204,163 +199,211 @@ def ds_news_flags(text):
         flags.append("M&A")
     return " | ".join(flags)
 
-# ================== SYGNAŁY HYBRYDOWE ==================
+# ================== SYGNAŁY: SWING / DAY / LONG ==================
 
-def ds_compute_signals_hybrid(df):
+def ds_signals_swing(df):
     last = df.iloc[-1]
-    prev = df.iloc[-2]
+    sig = []
 
-    signals = []
+    up = last["EMA20_s"] > last["EMA50_s"] > last["EMA200_s"]
+    down = last["EMA20_s"] < last["EMA50_s"] < last["EMA200_s"]
 
-    swing_up = last["EMA20"] > last["EMA50"] > last["EMA200"]
-    swing_down = last["EMA20"] < last["EMA50"] < last["EMA200"]
-    day_up = last["EMA9"] > last["EMA20_d"] > last["EMA50_d"]
-    day_down = last["EMA9"] < last["EMA20_d"] < last["EMA50_d"]
-    long_up = last["EMA50_l"] > last["EMA100_l"] > last["EMA200_l"]
-    long_down = last["EMA50_l"] < last["EMA100_l"] < last["EMA200_l"]
-
-    if swing_up and day_up and long_up and last["RSI14"] > 55:
-        trend_state = "mocny trend wzrostowy (Swing+Day+Long)"
-    elif swing_down and day_down and long_down and last["RSI14"] < 45:
-        trend_state = "mocny trend spadkowy (Swing+Day+Long)"
-    elif (swing_up or day_up or long_up) and last["RSI14"] > 50:
-        trend_state = "trend wzrostowy mieszany"
-    elif (swing_down or day_down or long_down) and last["RSI14"] < 50:
-        trend_state = "trend spadkowy mieszany"
+    if up and last["RSI14_s"] > 55:
+        trend = "swing: mocny trend wzrostowy"
+    elif down and last["RSI14_s"] < 45:
+        trend = "swing: mocny trend spadkowy"
+    elif up:
+        trend = "swing: trend wzrostowy"
+    elif down:
+        trend = "swing: trend spadkowy"
     else:
-        trend_state = "trend boczny / niejednoznaczny"
+        trend = "swing: trend boczny / niejednoznaczny"
 
-    signals.append(trend_state)
+    sig.append(trend)
 
-    if last["Close"] >= last["Fibo20_high"] * 0.999:
-        signals.append("wybicie Fibo20 HIGH")
-    if last["Close"] <= last["Fibo20_low"] * 1.001:
-        signals.append("wybicie Fibo20 LOW")
-    if last["Close"] >= last["Fibo60_high"] * 0.999:
-        signals.append("wybicie Fibo60 HIGH")
-    if last["Close"] <= last["Fibo60_low"] * 1.001:
-        signals.append("wybicie Fibo60 LOW")
+    if last["Close"] >= last["Fibo60_high_s"] * 0.999:
+        sig.append("swing: wybicie Fibo60 HIGH")
+    if last["Close"] <= last["Fibo60_low_s"] * 1.001:
+        sig.append("swing: wybicie Fibo60 LOW")
 
-    if last["Mom3"] > 0 and last["Mom10"] > 0:
-        signals.append("mocne momentum wzrostowe (3/10)")
-    if last["Mom3"] < 0 and last["Mom10"] < 0:
-        signals.append("mocne momentum spadkowe (3/10)")
+    if last["Mom10_s"] > 0:
+        sig.append("swing: dodatnie momentum 10")
+    if last["Mom10_s"] < 0:
+        sig.append("swing: ujemne momentum 10")
 
     if last["Vol_ratio"] > 2:
-        signals.append("bardzo wysoki wolumen")
+        sig.append("swing: bardzo wysoki wolumen")
     elif last["Vol_ratio"] > 1.3:
-        signals.append("podwyższony wolumen")
-
-    if last["RSI14"] > 70:
-        signals.append("RSI14 wykupienie")
-    elif last["RSI14"] < 30:
-        signals.append("RSI14 wyprzedanie")
-
-    if last["Close"] > prev["Close"] and last["Vol_ratio"] > 1.3 and last["RSI7"] > prev["RSI7"]:
-        signals.append("wzrost kupujących (RSI7 + wolumen)")
-    if last["Close"] < prev["Close"] and last["Vol_ratio"] > 1.3 and last["RSI7"] < prev["RSI7"]:
-        signals.append("wzrost sprzedających (RSI7 + wolumen)")
+        sig.append("swing: podwyższony wolumen")
 
     score = 0
-    if "wzrostowy" in trend_state:
+    if "wzrostowy" in trend:
         score += 3
-    if "spadkowy" in trend_state:
+    if "spadkowy" in trend:
         score -= 3
-    if "mocne momentum wzrostowe" in signals:
+    if "dodatnie momentum" in " ".join(sig):
+        score += 1
+    if "ujemne momentum" in " ".join(sig):
+        score -= 1
+    if "bardzo wysoki wolumen" in sig:
+        score += 1
+
+    return trend, sig, score, last
+
+def ds_signals_day(df):
+    last = df.iloc[-1]
+    sig = []
+
+    up = last["EMA9_d"] > last["EMA20_d"] > last["EMA50_d"]
+    down = last["EMA9_d"] < last["EMA20_d"] < last["EMA50_d"]
+
+    if up and last["RSI7_d"] > 55:
+        trend = "day: mocny trend wzrostowy"
+    elif down and last["RSI7_d"] < 45:
+        trend = "day: mocny trend spadkowy"
+    elif up:
+        trend = "day: trend wzrostowy"
+    elif down:
+        trend = "day: trend spadkowy"
+    else:
+        trend = "day: trend boczny / niejednoznaczny"
+
+    sig.append(trend)
+
+    if last["Close"] >= last["Fibo20_high_d"] * 0.999:
+        sig.append("day: wybicie Fibo20 HIGH")
+    if last["Close"] <= last["Fibo20_low_d"] * 1.001:
+        sig.append("day: wybicie Fibo20 LOW")
+
+    if last["Mom3_d"] > 0:
+        sig.append("day: dodatnie momentum 3")
+    if last["Mom3_d"] < 0:
+        sig.append("day: ujemne momentum 3")
+
+    if last["Vol_ratio"] > 2:
+        sig.append("day: bardzo wysoki wolumen")
+    elif last["Vol_ratio"] > 1.3:
+        sig.append("day: podwyższony wolumen")
+
+    score = 0
+    if "wzrostowy" in trend:
+        score += 3
+    if "spadkowy" in trend:
+        score -= 3
+    if "dodatnie momentum" in " ".join(sig):
+        score += 1
+    if "ujemne momentum" in " ".join(sig):
+        score -= 1
+    if "bardzo wysoki wolumen" in sig:
+        score += 1
+
+    return trend, sig, score, last
+
+def ds_signals_long(df):
+    last = df.iloc[-1]
+    sig = []
+
+    up = last["EMA50_l"] > last["EMA100_l"] > last["EMA200_l"]
+    down = last["EMA50_l"] < last["EMA100_l"] < last["EMA200_l"]
+
+    if up:
+        trend = "long: trend wzrostowy"
+    elif down:
+        trend = "long: trend spadkowy"
+    else:
+        trend = "long: trend boczny / niejednoznaczny"
+
+    sig.append(trend)
+
+    if last["Close"] >= last["Fibo120_high_l"] * 0.999:
+        sig.append("long: wybicie Fibo120 HIGH")
+    if last["Close"] <= last["Fibo120_low_l"] * 1.001:
+        sig.append("long: wybicie Fibo120 LOW")
+
+    if last["Vol_ratio"] > 2:
+        sig.append("long: bardzo wysoki wolumen")
+    elif last["Vol_ratio"] > 1.3:
+        sig.append("long: podwyższony wolumen")
+
+    score = 0
+    if "wzrostowy" in trend:
         score += 2
-    if "mocne momentum spadkowe" in signals:
+    if "spadkowy" in trend:
         score -= 2
-    if "bardzo wysoki wolumen" in signals:
+    if "bardzo wysoki wolumen" in sig:
         score += 1
-    if "RSI14 wykupienie" in signals:
-        score -= 1
-    if "RSI14 wyprzedanie" in signals:
-        score += 1
-    if any("kupujących" in s for s in signals):
-        score += 1
-    if any("sprzedających" in s for s in signals):
-        score -= 1
 
-    return trend_state, signals, score, last
+    return trend, sig, score, last
 
-# ================== AI #2 / #3 / #4 ==================
+# ================== 3× AI: SWING / DAY / LONG ==================
 
-def ds_ai2_comment(ticker, tech, news_flags, mode_desc):
+def ai_swing_comment(ticker, tech, news_flags):
     prompt = f"""
-Jesteś zawodowym traderem. Otrzymujesz dane techniczne w formacie JSON:
+Jesteś zawodowym traderem swingowym.
 
-DANE_TECHNICZNE:
+DANE_TECHNICZNE (SWING, JSON):
 {tech}
 
 ZADANIE:
-- Zrób profesjonalną analizę techniczną spółki {ticker}.
-- Uwzględnij: trend (krótki/średni/długi), momentum, wolumen, RSI, Fibo, sygnały.
+- Zrób analizę SWING (kilka dni–tygodni) dla spółki {ticker}.
+- Skup się na: trendzie swingowym, momentum 10, RSI14, wolumenie, wybiciach Fibo60.
 - Uwzględnij flagi newsów: {news_flags or "brak"}.
-- Uwzględnij tryb: {mode_desc}.
 - Napisz 2–3 zdania, konkretnie, pod telefon.
-- Zero rekomendacji typu KUP/SPRZEDAJ.
+- Zero słów KUP/SPRZEDAJ.
 - Zero kopiowania JSON.
 - Tylko interpretacja.
-
-FORMAT:
-- 2–3 zdania analizy.
 """
     try:
         r = client.chat.completions.create(
-            model="o3-mini",
-            reasoning_effort="high",
-            temperature=0.1,
+            model="gpt-4o-mini",
+            temperature=0.2,
             messages=[{"role": "user", "content": prompt}],
         )
         return r.choices[0].message.content.strip()
     except Exception as e:
-        return f"Błąd AI #2: {e}"
+        return f"Błąd AI Swing: {e}"
 
-def ds_ai3_sentiment(news_text):
-    if not news_text:
-        return "Brak newsów — brak analizy sentymentu."
+def ai_day_comment(ticker, tech, news_flags):
     prompt = f"""
-Masz newsy o spółce:
+Jesteś daytraderem.
 
-\"\"\"{news_text[:4000]}\"\"\"
+DANE_TECHNICZNE (DAY, JSON):
+{tech}
 
 ZADANIE:
-- Oceń sentyment: pozytywny / neutralny / negatywny.
-- Podaj 1–2 powody.
-- Zero kopiowania newsów.
-- Krótko, pod telefon.
-
-FORMAT:
-- Werdykt (Pozytywny/Neutralny/Negatywny)
-- 1 zdanie uzasadnienia
+- Zrób analizę DAY (krótkie ruchy intraday/sesja) dla spółki {ticker}.
+- Skup się na: trendzie day (EMA9/20/50), momentum 3, RSI7, wolumenie, wybiciach Fibo20.
+- Uwzględnij flagi newsów: {news_flags or "brak"}.
+- Napisz 2–3 zdania, bardzo konkretnie, pod telefon.
+- Zero słów KUP/SPRZEDAJ.
+- Zero kopiowania JSON.
+- Tylko interpretacja.
 """
     try:
         r = client.chat.completions.create(
-            model="o3-mini",
-            reasoning_effort="high",
-            temperature=0.1,
+            model="gpt-4o",
+            temperature=0.2,
             messages=[{"role": "user", "content": prompt}],
         )
         return r.choices[0].message.content.strip()
     except Exception as e:
-        return f"Błąd AI #3: {e}"
+        return f"Błąd AI Day: {e}"
 
-def ds_ai4_fundamental(news_text):
-    if not news_text:
-        return "Brak newsów — brak wykrytych ryzyk."
+def ai_long_comment(ticker, tech, news_flags):
     prompt = f"""
-Masz newsy o spółce:
+Jesteś analitykiem długoterminowym.
 
-\"\"\"{news_text[:4000]}\"\"\"
+DANE_TECHNICZNE (LONG, JSON):
+{tech}
 
 ZADANIE:
-- Wypisz ryzyka fundamentalne (jeśli są).
-- Jeśli brak — napisz to.
-- Zero kopiowania newsów.
-- Krótko, pod telefon.
-
-FORMAT:
-- Lista punktów z emoji
+- Zrób analizę LONG (tygodnie–miesiące) dla spółki {ticker}.
+- Skup się na: trendzie EMA50/100/200, wybiciach Fibo120, wolumenie, ogólnym kierunku.
+- Uwzględnij flagi newsów: {news_flags or "brak"}.
+- Napisz 2–3 zdania, spokojnie, pod telefon.
+- Zero słów KUP/SPRZEDAJ.
+- Zero kopiowania JSON.
+- Tylko interpretacja.
 """
     try:
         r = client.chat.completions.create(
@@ -371,7 +414,7 @@ FORMAT:
         )
         return r.choices[0].message.content.strip()
     except Exception as e:
-        return f"Błąd AI #4: {e}"
+        return f"Błąd AI Long: {e}"
 
 # ================== RYNEK – RENDER ==================
 
@@ -408,25 +451,18 @@ def render_market(tab, market_name):
         tickers = st.session_state[f"{key}_tickers"]
 
         mode = st.selectbox(
-            "Tryb (opis tylko dla AI #2):",
-            ["Swing", "Day", "Long", "Hybrid"],
-            index=3,
+            "Tryb analizy technicznej (bez LLM):",
+            ["Swing", "Day", "Long"],
+            index=0,
             key=f"{key}_mode"
         )
 
-        mode_desc = {
-            "Swing": "swing trading (kilka dni–tygodni)",
-            "Day": "day trading (krótkie ruchy)",
-            "Long": "dłuższy horyzont",
-            "Hybrid": "hybrydowa analiza multi‑frame (Swing+Day+Long)",
-        }[mode]
-
-        if st.button("🔍 AI #1 — Hybrydowa analiza techniczna", key=f"{key}_scan"):
+        if st.button("🔍 Analiza techniczna (bez AI LLM)", key=f"{key}_scan"):
             if not tickers:
                 st.error("Najpierw dodaj spółki.")
                 return
 
-            with st.spinner("AI #1 analizuje technicznie..."):
+            with st.spinner("Liczenie wskaźników..."):
                 data = ds_download(tickers)
 
                 rows = []
@@ -438,11 +474,20 @@ def render_market(tab, market_name):
                     if len(df) < 120:
                         continue
 
-                    df = ds_indicators_hybrid(df).dropna()
+                    df = ds_indicators_all(df).dropna()
                     if df is None or df.empty or len(df) < 10:
                         continue
 
-                    trend_state, sigs, score, last = ds_compute_signals_hybrid(df)
+                    if mode == "Swing":
+                        trend_state, sigs, score, last = ds_signals_swing(df)
+                        rsi_main = last["RSI14_s"]
+                    elif mode == "Day":
+                        trend_state, sigs, score, last = ds_signals_day(df)
+                        rsi_main = last["RSI7_d"]
+                    else:
+                        trend_state, sigs, score, last = ds_signals_long(df)
+                        rsi_main = last["RSI14_s"] if "RSI14_s" in df.columns else 50
+
                     news_raw = ds_news_raw(t)
                     news_flags = ds_news_flags(news_raw)
 
@@ -451,18 +496,17 @@ def render_market(tab, market_name):
                     rows.append({
                         "Ticker": t,
                         "Kurs": round(last["Close"], 2),
-                        "RSI14": round(last["RSI14"], 1),
-                        "RSI7": round(last["RSI7"], 1),
+                        "RSI_main": round(rsi_main, 1),
                         "Vol x": round(last["Vol_ratio"], 2),
                         "Trend": trend_state,
                         "Sygnały": " | ".join(sigs),
                         "News_flags": news_flags,
                         "News_raw": news_raw,
-                        "AI_score": score,
+                        "Score": score,
                         "Kolor": color,
-                        "Komentarz AI": "",
-                        "Sentiment AI": "",
-                        "Fundamental AI": "",
+                        "AI_Swing": "",
+                        "AI_Day": "",
+                        "AI_Long": "",
                     })
 
                     spark[t] = df["Close"].tail(30).reset_index(drop=True)
@@ -472,7 +516,7 @@ def render_market(tab, market_name):
                     st.session_state[f"{key}_df"] = None
                     return
 
-                df_out = pd.DataFrame(rows).sort_values("AI_score", ascending=False)
+                df_out = pd.DataFrame(rows).sort_values("Score", ascending=False)
                 st.session_state[f"{key}_df"] = df_out
                 st.session_state[f"{key}_spark"] = spark
 
@@ -486,7 +530,7 @@ def render_market(tab, market_name):
             col_left, col_right = st.columns([1.3, 1])
 
             with col_left:
-                st.subheader("📊 Wyniki AI #1 — Hybrydowa analiza techniczna")
+                st.subheader("📊 Wyniki analizy technicznej (bez LLM)")
 
                 def highlight(row):
                     if row["Kolor"] == "green":
@@ -496,10 +540,10 @@ def render_market(tab, market_name):
                     return ["background-color:#ff8c00;color:black"] * len(row)
 
                 cols_order = [
-                    "Ticker", "Kurs", "RSI14", "RSI7", "Vol x",
+                    "Ticker", "Kurs", "RSI_main", "Vol x",
                     "Trend", "Sygnały", "News_flags",
-                    "AI_score", "Kolor",
-                    "Komentarz AI", "Sentiment AI", "Fundamental AI",
+                    "Score", "Kolor",
+                    "AI_Swing", "AI_Day", "AI_Long",
                 ]
 
                 st.dataframe(
@@ -516,26 +560,26 @@ def render_market(tab, market_name):
                             st.line_chart(spark[t], height=120)
 
             with col_right:
-                st.subheader("🧠 Moduły Sztucznej Inteligencji")
+                st.subheader("🧠 Wybierz AI do analizy LLM")
 
                 ai_choice = st.selectbox(
-                    "Wybierz moduł analityczny:",
+                    "Które AI ma zrobić analizę?",
                     [
-                        "AI #2 — Komentarz techniczny LLM",
-                        "AI #3 — Sentiment newsów",
-                        "AI #4 — Ryzyka fundamentalne",
+                        "AI Swing — analiza swingowa (gpt-4o-mini)",
+                        "AI Day — analiza daytradingowa (gpt-4o)",
+                        "AI Long — analiza długoterminowa (o3-mini)",
                     ],
                     key=f"{key}_ai_choice",
                 )
 
-                st.markdown("### 📌 Wybierz spółki do analizy:")
+                st.markdown("### 📌 Wybierz spółki do analizy AI:")
 
                 selected = []
                 for t in df_out["Ticker"]:
                     if st.checkbox(f"{t}", key=f"{key}_{t}_chk"):
                         selected.append(t)
 
-                if st.button("🚀 Uruchom wybraną AI", key=f"{key}_ai_run"):
+                if st.button("🚀 Uruchom wybrane AI", key=f"{key}_ai_run"):
                     if not selected:
                         st.warning("Nie wybrano żadnych spółek.")
                     else:
@@ -544,28 +588,43 @@ def render_market(tab, market_name):
 
                             for _, row in df_out.iterrows():
                                 if row["Ticker"] in selected:
+                                    news_flags = row["News_flags"]
 
-                                    if ai_choice.startswith("AI #2"):
+                                    if ai_choice.startswith("AI Swing"):
                                         tech = {
                                             "close": row["Kurs"],
-                                            "rsi14": row["RSI14"],
-                                            "rsi7": row["RSI7"],
+                                            "rsi14": row["RSI_main"],
                                             "vol_ratio": row["Vol x"],
                                             "trend": row["Trend"],
                                             "signals": row["Sygnały"].split(" | "),
                                         }
-                                        row["Komentarz AI"] = ds_ai2_comment(
-                                            row["Ticker"],
-                                            tech,
-                                            row["News_flags"],
-                                            mode_desc,
+                                        row["AI_Swing"] = ai_swing_comment(
+                                            row["Ticker"], tech, news_flags
                                         )
 
-                                    elif ai_choice.startswith("AI #3"):
-                                        row["Sentiment AI"] = ds_ai3_sentiment(row["News_raw"])
+                                    elif ai_choice.startswith("AI Day"):
+                                        tech = {
+                                            "close": row["Kurs"],
+                                            "rsi7": row["RSI_main"],
+                                            "vol_ratio": row["Vol x"],
+                                            "trend": row["Trend"],
+                                            "signals": row["Sygnały"].split(" | "),
+                                        }
+                                        row["AI_Day"] = ai_day_comment(
+                                            row["Ticker"], tech, news_flags
+                                        )
 
-                                    else:
-                                        row["Fundamental AI"] = ds_ai4_fundamental(row["News_raw"])
+                                    else:  # AI Long
+                                        tech = {
+                                            "close": row["Kurs"],
+                                            "rsi": row["RSI_main"],
+                                            "vol_ratio": row["Vol x"],
+                                            "trend": row["Trend"],
+                                            "signals": row["Sygnały"].split(" | "),
+                                        }
+                                        row["AI_Long"] = ai_long_comment(
+                                            row["Ticker"], tech, news_flags
+                                        )
 
                                 new_rows.append(row)
 
@@ -580,13 +639,14 @@ def render_market(tab, market_name):
                         )
 
         else:
-            st.info("Wpisz tickery, a potem uruchom 🔍 AI #1 — Hybrydowa analiza techniczna.")
+            st.info("Wpisz tickery, wybierz tryb (Swing/Day/Long) i uruchom analizę techniczną.")
 
 # ================== UI GŁÓWNE ==================
 
-st.title("📈 Dual Market Scanner — GPW & USA (4 AI, HYBRID + o3‑mini)")
+st.title("📈 Dual Market Scanner — GPW & USA (3× AI: Swing / Day / Long)")
 
 tab_gpw, tab_usa = st.tabs(["🇵🇱 GPW", "🇺🇸 USA"])
 
 render_market(tab_gpw, "GPW")
 render_market(tab_usa, "USA")
+```
