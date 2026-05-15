@@ -1,5 +1,4 @@
 import time
-import requests
 import pandas as pd
 import streamlit as st
 import yfinance as yf
@@ -7,7 +6,7 @@ from openai import OpenAI
 
 # Ustawienia pod telefony komórkowe
 st.set_page_config(
-    page_title="Skaner Groszówek AI", 
+    page_title="Skaner Groszówek AI Pro", 
     page_icon="📱", 
     layout="centered"
 )
@@ -27,7 +26,7 @@ if "logged_in" not in st.session_state:
 if not st.session_state.logged_in:
     st.title("🔒 Autoryzacja")
     haslo = st.text_input("Wpisz hasło mobilne:", type="password")
-    if st.button("Zaloguj się"):
+    if st.button("Zaloguj się", use_container_width=True):
         if haslo == APP_PASSWORD:
             st.session_state.logged_in = True
             st.rerun()
@@ -35,145 +34,143 @@ if not st.session_state.logged_in:
             st.error("Błędne hasło!")
     st.stop()
 
-# --- FUNKCJE DYNAMICZNEGO POBIERANIA SPÓŁEK ---
-@st.cache_data(ttl=3600)  # Cache na godzinę, aby nie przeciążać sieci przy odświeżaniu minutowym
-def pobierz_wszystkie_tickery(rynek):
-    """Pobiera aktualną listę wszystkich dostępnych tickerów z zewnątrz."""
-    try:
-        if rynek == "PL (GPW)":
-            # Pobieranie aktualnej listy spółek z GPW z serwerów Stooq
-            url = "https://stooq.pl"
-            df = pd.read_csv(url, sep='\t', header=None)
-            # Filtrujemy tylko akcje polskie (kończące się na .pl -> zamiana na .WA dla yfinance)
-            tickery = df[0].dropna().tolist()
-            gpw_tickers = [f"{t.upper()}.WA" for t in tickery if t.isalpha()]
-            return gpw_tickers
-        else:
-            # Pobieranie pełnej listy aktywnych spółek z rynku USA
-            url = "https://githubusercontent.com"
-            res = requests.get(url)
-            if res.status_code == 200:
-                return [t.strip() for t in res.text.split('\n') if t.strip().isalpha()]
-            return ["SNDL", "NIO", "AAL", "F", "LCID", "RIG", "SOFI", "BITF", "HUT"]
-    except Exception:
-        # Rezerwowa lista awaryjna
-        if rynek == "PL (GPW)":
-            return ["ATT.WA", "COG.WA", "PCO.WA", "SNS.WA", "RFK.WA", "MSW.WA", "BOW.WA"]
-        return ["SNDL", "NIO", "AAL", "F", "LCID", "RIG", "SOFI", "BITF", "HUT"]
+# --- ZARZĄDZANIE ZAPISANYMI LISTAMI SPÓŁEK ---
+if "spolki_pl" not in st.session_state:
+    # Początkowa lista startowa (możesz ją wyczyścić w aplikacji)
+    st.session_state.spolki_pl = ["ATT.WA", "COG.WA", "PCO.WA", "SNS.WA", "RFK.WA"]
 
-def skanuj_rynek_realtime(rynek):
-    """Skanuje rynek i wyciąga max 100 najtańszych aktywnych spółek spełniających kryteria."""
-    pula_tickerow = pobierz_wszystkie_tickery(rynek)
+if "spolki_usa" not in st.session_state:
+    st.session_state.spolki_usa = ["SNDL", "NIO", "AAL", "F", "LCID", "RIG"]
+
+# --- FUNKCJE ANALITYCZNE ---
+def skanuj_wybrane_spolki(lista_tickerow):
+    """Pobiera dane w czasie rzeczywistym dla zdefiniowanej listy spółek."""
     dane_spolek = []
-    licznik = 0
-    
-    # Pasek postępu widoczny na smartfonie
-    progress_bar = st.progress(0, text="Skanowanie rynku w poszukiwaniu groszówek...")
-    Calkowita_pula = min(len(pula_tickerow), 150) # Ograniczenie wielkości próby dla szybkości mobilnej
-    
-    for idx, ticker in enumerate(pula_tickerow[:calkowita_pula]):
-        if licznik >= 100:
-            break
+    if not lista_tickerow:
+        return pd.DataFrame()
+        
+    for ticker in lista_tickerow:
         try:
-            t = yf.Ticker(ticker)
+            t = yf.Ticker(ticker.strip().upper())
             df = t.history(period="15d")
             if df.empty or len(df) < 10:
                 continue
                 
             cena = df["Close"].iloc[-1]
-            # Kryterium groszówki / centówki (od 0.10 do 5.00 PLN/USD)
-            if 0.10 <= cena <= 5.00:
-                wolumen_teraz = df["Volume"].iloc[-1]
-                wolumen_srednia = df["Volume"].rolling(10).mean().iloc[-1]
+            wolumen_teraz = df["Volume"].iloc[-1]
+            wolumen_srednia = df["Volume"].rolling(10).mean().iloc[-1]
+            
+            if wolumen_teraz > 0:
+                sma_10 = df["Close"].rolling(10).mean().iloc[-1]
+                skok_vol = wolumen_teraz / wolumen_srednia if wolumen_srednia > 0 else 1.0
+                trend = "Wzrostowy" if cena > sma_10 else "Spadkowy"
                 
-                if wolumen_teraz > 0:
-                    sma_10 = df["Close"].rolling(10).mean().iloc[-1]
-                    skok_vol = wolumen_teraz / wolumen_srednia if wolumen_srednia > 0 else 1.0
-                    trend = "Wzrostowy" if cena > sma_10 else "Spadkowy"
-                    
-                    dane_spolek.append({
-                        "Ticker": ticker,
-                        "Cena": round(cena, 2),
-                        "Skok Vol": round(skok_vol, 2),
-                        "Trend": trend
-                    })
-                    licznik += 1
+                dane_spolek.append({
+                    "Ticker": ticker.strip().upper(),
+                    "Cena": round(cena, 2),
+                    "Skok Vol": round(skok_vol, 2),
+                    "Trend": trend
+                })
         except Exception:
             continue
-        progress_bar.progress((idx + 1) / calkowita_pula, text=f"Sprawdzono {idx+1} spółek...")
-        
-    progress_bar.empty()
+            
     return pd.DataFrame(dane_spolek)
 
-def generuj_raport_llm(model, dane_tabeli):
-    """Wysyła pobrane dane dynamiczne bezpośrednio do wybranego modelu GPT."""
+def generuj_raport_mocne_llm(model, dane_tabeli):
+    """Wysyła dane do najsilniejszych modeli OpenAI zoptymalizowanych pod kątem głębokiego rozumowania."""
     client = OpenAI(api_key=OPENAI_API_KEY)
     tekst_tabeli = dane_tabeli.to_string(index=False)
     
     prompt = f"""
-    Przeanalizuj poniższą listę najtańszych spółek rynkowych w czasie rzeczywistym.
-    Wskaż maks. 3 najlepsze okazje (wysoki Skok Vol, cena stabilna lub rosnąca, Trend Wzrostowy).
-    Ostrzeż przed spółkami, które drastycznie tracą siłę (Trend Spadkowy przy dużym obrocie).
-    Napisz bardzo zwięzłą analizę rynkową przygotowaną pod ekran smartfona:
+    Jesteś elitarnym analitykiem ilościowym (Quant) specjalizującym się w spółkach groszowych.
+    Dokonaj rygorystycznej oceny ryzyka i potencjału dla poniższych pozycji giełdowych:
 
     {tekst_tabeli}
+
+    Wskaż:
+    1. Najsilniejsze anomalie wolumenowe potwierdzające napływ kapitału (Skok Vol >> 1.0 + Trend Wzrostowy).
+    2. Spółki z Twojego portfela, które drastycznie tracą siłę (Trend Spadkowy) - wygeneruj dla nich wyraźne ALERT-y.
+    
+    Sformatuj odpowiedź krótko i czytelnie, idealnie pod ekran smartfona. Używaj punktów i emoji.
     """
     
+    # Modele z serii o1/o3 nie zawsze wspierają parametr system prompt lub temperature w tradycyjny sposób,
+    # dlatego przekazujemy pełną instrukcję bezpośrednio w treści wiadomości użytkownika.
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": "Jesteś analitykiem giełdowym. Pisz bardzo krótko, używaj wypunktowań, pogrubień kluczowych tickerów i emoji."},
             {"role": "user", "content": prompt}
-        ],
-        temperature=0.2
+        ]
     )
     return response.choices.message.content
 
 
 # --- INTERFEJS MOBILNY (STREAMLIT) ---
-st.title("📱 Mobilny Skaner AI")
+st.title("📱 Skaner AI Pro")
 
-# Panel kontrolny ukryty w sidebarze (bocznym menu na telefonie)
+# Panel boczny (Sidebar)
 with st.sidebar:
     st.header("⚙️ Parametry")
     rynek_wybor = st.radio("Wybierz okno rynkowe:", ["PL (GPW)", "USA"])
     
-    # 3 Modele GPT do wyboru zgodnie z życzeniem
+    # Wybór najmocniejszych modeli AI na rynku
     gpt_wybor = st.selectbox(
-        "Silnik LLM:", 
-        ["gpt-4o-mini", "gpt-4o", "o1-mini"]
+        "Mocny Silnik AI:", 
+        ["o3-mini", "o1", "gpt-4o"]
     )
     
-    # Regulacja odświeżania od 1 do 60 minut
     interwal = st.slider(
         "Interwał odświeżania (min):", 
         min_value=1, 
         max_value=60, 
         value=5
     )
-    st.caption(f"Aktualizacja nastąpi automatycznie co {interwal} min.")
+    st.caption(f"Aktualizacja automatyczna co {interwal} min.")
 
-# Pobieranie i prezentacja danych bez zapisanych na stałe spółek
-st.subheader(f"📊 TOP Groszówki: {rynek_wybor}")
-df_aktywne = skanuj_rynek_realtime(rynek_wybor)
+# --- SEKCJA RĘCZNEGO DODAWANIA SPÓŁEK ---
+st.subheader("📝 Zarządzaj swoją listą")
+aktualna_lista = st.session_state.spolki_pl if rynek_wybor == "PL (GPW)" else st.session_state.spolki_usa
+
+# Wyświetlanie obecnych tickerów w formie czytelnego ciągu tekstowego
+lista_tekst = ", ".join(aktualna_lista)
+nowa_lista_tekst = st.text_area(
+    f"Edytuj spółki dla {rynek_wybor} (rozdzielaj przecinkami):", 
+    value=lista_tekst,
+    help="Dla GPW pamiętaj o dopisku .WA, np. COG.WA, PCO.WA"
+)
+
+# Zapisywanie zmian wprowadzonych przez użytkownika
+if st.button("💾 Zapisz listę spółek", use_container_width=True):
+    czysta_lista = [t.strip().upper() for t in nowa_lista_tekst.split(",") if t.strip()]
+    if rynek_wybor == "PL (GPW)":
+        st.session_state.spolki_pl = czysta_lista
+    else:
+        st.session_state.spolki_usa = czysta_lista
+    st.success("Lista została pomyślnie zaktualizowana i zapisana!")
+    st.rerun()
+
+
+# --- WYŚWIETLANIE DANYCH I ANALIZA ---
+st.subheader(f"📊 Monitorowane Groszówki: {rynek_wybor}")
+df_aktywne = skanuj_wybrane_spolki(st.session_state.spolki_pl if rynek_wybor == "PL (GPW)" else st.session_state.spolki_usa)
 
 if not df_aktywne.empty:
-    # Sortowanie domyślne po największym skoku obrotów (potencjał wybicia)
-    df_aktywne = df_aktywne.sort_values(by="Skok Vol", ascending=False).head(100)
+    # Sortowanie po anomalii obrotu (najwyższy skok wolumenu na górze)
+    df_aktywne = df_aktywne.sort_values(by="Skok Vol", ascending=False)
     
-    # Wyświetlanie tabeli na całą szerokość ekranu telefonu
+    # Tabela dopasowana pod telefon
     st.dataframe(df_aktywne, use_container_width=True, hide_index=True)
     
-    # Przycisk uruchamiania wybranego GPT
-    if st.button(f"🤖 Analizuj przez {gpt_wybor}", type="primary", use_container_width=True):
-        with st.spinner("Model GPT przetwarza dane rynkowe..."):
-            wynik_ai = generuj_raport_llm(gpt_wybor, df_aktywne)
-            st.markdown("### 📝 Wnioski i Alerty AI:")
-            st.success(wynik_ai)
+    # Przycisk uruchomienia zaawansowanego rozumowania AI
+    if st.button(f"🧠 Analizuj przez {gpt_wybor}", type="primary", use_container_width=True):
+        with st.spinner(f"Potężny model {gpt_wybor} przetwarza i wnioskuje..."):
+            wynik_ai = generuj_raport_llm = analizuj_przez_gpt = raport = analizuj_sentyment_wiadomosci = generuj_raport_mocne_llm(gpt_wybor, df_aktywne)
+            st.markdown("### 📝 Zaawansowany Raport i Alerty AI:")
+            st.info(wynik_ai)
 else:
-    st.warning("W tym momencie brak spółek spełniających kryteria cenowe.")
+    st.warning("Twoja lista jest pusta lub dodane spółki nie handlowały na dzisiejszej sesji.")
 
-# Stopka informacyjna o czasie odświeżenia i pętla czasowa
-st.caption(f"Zaktualizowano: {time.strftime('%H:%M:%S')} | Następne skanowanie za {interwal} min.")
+# Stopka mobilna z odliczaniem czasu
+st.caption(f"Aktualne dane z godziny: {time.strftime('%H:%M:%S')} | Auto-odświeżanie za {interwal} min.")
 time.sleep(interwal * 60)
 st.rerun()
