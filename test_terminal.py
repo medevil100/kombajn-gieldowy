@@ -339,10 +339,18 @@ def render_market(tab, market_name):
                 spark = {}
 
                 for t, df in data.items():
+                    # brak danych
+                    if df is None or df.empty:
+                        continue
                     if len(df) < 80:
                         continue
 
                     df = indicators(df, mode).dropna()
+                    if df is None or df.empty:
+                        continue
+                    if len(df) < 5:
+                        continue
+
                     last = df.iloc[-1]
 
                     trend_state, sigs = compute_signals(df)
@@ -353,9 +361,9 @@ def render_market(tab, market_name):
                         score += 2
                     if "spada" in trend_state:
                         score -= 2
-                    if "kupujących" in sigs:
+                    if any("kupujących" in s for s in sigs):
                         score += 1
-                    if "sprzedających" in sigs:
+                    if any("sprzedających" in s for s in sigs):
                         score -= 1
 
                     color = "green" if "rośnie" in trend_state else "red" if "spada" in trend_state else "orange"
@@ -375,6 +383,11 @@ def render_market(tab, market_name):
 
                     spark[t] = df["Close"].tail(20).reset_index(drop=True)
 
+                if not rows:
+                    st.warning("Brak spółek z wystarczającą ilością danych.")
+                    st.session_state[f"{key}_df"] = None
+                    return
+
                 df_out = pd.DataFrame(rows).sort_values("AI_score", ascending=False)
                 st.session_state[f"{key}_df"] = df_out
                 st.session_state[f"{key}_spark"] = spark
@@ -385,10 +398,6 @@ def render_market(tab, market_name):
         spark = st.session_state.get(f"{key}_spark", {})
 
         if df_out is not None:
-
-            # ============================================================
-            #  UKŁAD DWUKOLUMNOWY (Opcja C — 50% szerokości)
-            # ============================================================
 
             col_left, col_right = st.columns([1, 1])
 
@@ -414,7 +423,8 @@ def render_market(tab, market_name):
                 for i, t in enumerate(df_out["Ticker"]):
                     with cols[i % 4]:
                         st.caption(t)
-                        st.line_chart(spark[t])
+                        if t in spark:
+                            st.line_chart(spark[t])
 
             # ---------------- RIGHT: AI + CHECKBOXY ----------------
 
@@ -444,12 +454,21 @@ def render_market(tab, market_name):
                             new_rows = []
                             for _, row in df_out.iterrows():
                                 if row["Ticker"] in selected:
-
                                     if ai_choice.startswith("AI #2"):
-                                        # Komentarz LLM
                                         data_single = download([row["Ticker"]])
                                         df_single = list(data_single.values())[0]
+
+                                        if df_single is None or df_single.empty:
+                                            row["Komentarz AI"] = "Brak danych"
+                                            new_rows.append(row)
+                                            continue
+
                                         df_single = indicators(df_single, mode).dropna()
+                                        if df_single is None or df_single.empty or len(df_single) < 5:
+                                            row["Komentarz AI"] = "Za mało danych"
+                                            new_rows.append(row)
+                                            continue
+
                                         last = df_single.iloc[-1]
                                         trend_state, sigs = compute_signals(df_single)
                                         comment = ai2_comment(row["Ticker"], last, trend_state, sigs, row["News"])
@@ -473,6 +492,9 @@ def render_market(tab, market_name):
                             df_out.style.apply(highlight, axis=1),
                             use_container_width=True
                         )
+
+        else:
+            st.info("Wpisz tickery, wybierz tryb i uruchom 🔍 Analiza techniczna (AI #1).")
 
 # ============================================================
 #  RENDERUJEMY RYNKI
