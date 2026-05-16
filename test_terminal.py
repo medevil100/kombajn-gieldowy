@@ -1,15 +1,17 @@
 import os
 import time
+import re
+import asyncio
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
-from openai import OpenAI
+from openai import AsyncOpenAI  # Zmiana na klienta asynchronicznego
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
-    page_title="Skaner Groszówek AI Master", page_icon="📱", layout="centered"
+    page_title="Skaner Groszówek AI Master Pro", page_icon="📱", layout="centered"
 )
 
 # --- MATRYCA WIZUALNA (CSS) ---
@@ -21,6 +23,9 @@ st.markdown(
     div.stButton > button:first-child {
         background-color: #00ff66 !important; color: #000000 !important; font-weight: bold !important;
         border-radius: 6px !important; border: none !important; box-shadow: 0 0 12px rgba(0, 255, 102, 0.5);
+    }
+    .consensus-box {
+        padding: 15px; border-radius: 8px; border: 1px solid #30363D; text-align: center; margin-bottom: 20px;
     }
     </style>
 """,
@@ -160,36 +165,32 @@ def skanuj_wybrane_spolki(lista_tickerow):
                 )
                 trend = "🟢 Wzrostowy" if cena > sma_10 else "🔴 Spadkowy"
 
-                # --- NOWOŚĆ: Pozycja ceny na wstęgach Bollingera ---
                 u_band = ostatni["Upper_Band"]
                 l_band = ostatni["Lower_Band"]
                 m_band = ostatni["MA20"]
                 
-                pozycja_bb = "Środek (Konsolidacja)"
+                pozycja_bb = "Środek"
                 if cena >= u_band:
-                    pozycja_bb = "🔥 Wybicie Górą (Przejedzenie)"
+                    pozycja_bb = "🔥 Wybicie Górą"
                 elif cena <= l_band:
-                    pozycja_bb = "⚠️ Wybicie Dołem (Wyprzedanie)"
+                    pozycja_bb = "⚠️ Wybicie Dołem"
                 elif cena > m_band:
-                    pozycja_bb = "📈 Powyżej Średniej MA20"
+                    pozycja_bb = "📈 Powyżej MA20"
                 elif cena < m_band:
-                    pozycja_bb = "📉 Poniżej Średniej MA20"
+                    pozycja_bb = "📉 Poniżej MA20"
 
-                # --- NOWOŚĆ: Poziomy i Zniesienia Fibonacciego ---
-                f23 = high_52w - (0.236 * roznica_52w)
                 f38 = high_52w - (0.382 * roznica_52w)
                 f50 = high_52w - (0.500 * roznica_52w)
                 f61 = high_52w - (0.618 * roznica_52w)
 
                 odleglosc_od_dna = ((cena - low_52w) / low_52w) * 100
                 
-                # Określenie strefy Fibonacci (High / Środek / Low)
                 if cena >= f38:
-                    strefa_fibo = "👑 HIGH (Blisko Szczytów)"
+                    strefa_fibo = "👑 HIGH"
                 elif cena < f38 and cena >= f61:
-                    strefa_fibo = "⚖️ ŚRODEK (Strefa Tranzytowa)"
+                    strefa_fibo = "⚖️ ŚRODEK"
                 else:
-                    strefa_fibo = "🛒 LOW (Głęboka Przecena / Promocja)"
+                    strefa_fibo = "🛒 LOW"
 
                 formacja = wykryj_formacje_swiecowe(df)
 
@@ -230,14 +231,14 @@ def skanuj_wybrane_spolki(lista_tickerow):
     return pd.DataFrame(dane_spolek), slownik_df
 
 
-# --- GENEROWANIE RAPORTU DLA POJEDYNCZEGO MODELU ---
-def generuj_odpowiedz_modelu(client, model, prompt):
+# --- NOWOŚĆ: ASYNCHRONICZNE ODPYTYWANIE OPENAI ---
+async def async_generuj_odpowiedz_modelu(client, model, prompt):
     params = {"model": model, "messages": [{"role": "user", "content": prompt}]}
     if model == "o3-mini":
         params["reasoning_effort"] = "high"
 
     try:
-        response = client.chat.completions.create(**params)
+        response = await client.chat.completions.create(**params)
         if response.choices and len(response.choices) > 0:
             return response.choices[0].message.content
         return "❌ Błąd: Odpowiedź modelu jest pusta."
@@ -245,92 +246,81 @@ def generuj_odpowiedz_modelu(client, model, prompt):
         return f"❌ Błąd OpenAI dla {model}: {str(e)}"
 
 
+# Koordynator asynchroniczny uruchamiający 3 modele na raz
+async def pobierz_wszystkie_raporty(api_key, prompt):
+    client = AsyncOpenAI(api_key=api_key)
+    zadania = [
+        async_generuj_odpowiedz_modelu(client, "o3-mini", prompt),
+        async_generuj_odpowiedz_modelu(client, "gpt-4o", prompt),
+        async_generuj_odpowiedz_modelu(client, "gpt-4o-mini", prompt)
+    ]
+    return await asyncio.gather(*zadania)
+
+
+# --- PARSER PUNKTACJI CONSENSUS SCORE ---
+def wyciagnij_score(tekst_raportu):
+    match = re.search(r"\[SCORE:\s*([1-5])\]", tekst_raportu)
+    if match:
+        return int(match.group(1))
+    return None
+
+
 # --- WIZUALIZACJA WYKRESU INTERAKTYWNEGO Z BB I FIBO ---
 def rysuj_wykres(df, ticker):
     fig = go.Figure()
-    
-    # Świece
-    fig.add_trace(
-        go.Candlestick(
-            x=df.index, open=df["Open"], high=df["High"],
-            low=df["Low"], close=df["Close"], name="Cena"
-        )
-    )
-    
-    # Bollinger Bands
+    fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Cena"))
     fig.add_trace(go.Scatter(x=df.index, y=df["Upper_Band"], line=dict(color="rgba(255, 0, 100, 0.6)", width=1.5, dash="dash"), name="BB Górna"))
     fig.add_trace(go.Scatter(x=df.index, y=df["MA20"], line=dict(color="rgba(255, 255, 255, 0.4)", width=1), name="BB Środek (MA20)"))
     fig.add_trace(go.Scatter(x=df.index, y=df["Lower_Band"], line=dict(color="rgba(0, 150, 255, 0.6)", width=1.5, dash="dash"), name="BB Dolna"))
     
-    # Fibonacci z ostatnich 252 dni
     okres_52w = df.iloc[-252:] if len(df) >= 252 else df
     h_52w = okres_52w["High"].max()
     l_52w = okres_52w["Low"].min()
     diff = h_52w - l_52w
 
     poziomy_fibo = {
-        "Fibo 100%": h_52w,
-        "Fibo 61.8%": h_52w - (0.382 * diff),
-        "Fibo 50.0%": h_52w - (0.500 * diff),
-        "Fibo 38.2%": h_52w - (0.618 * diff),
-        "Fibo 23.6%": h_52w - (0.764 * diff),
-        "Fibo 0%": l_52w
+        "Fibo 100%": h_52w, "Fibo 61.8%": h_52w - (0.382 * diff), "Fibo 50.0%": h_52w - (0.500 * diff),
+        "Fibo 38.2%": h_52w - (0.618 * diff), "Fibo 23.6%": h_52w - (0.764 * diff), "Fibo 0%": l_52w
     }
-
     colors = ["#ff4d4d", "#ffaa00", "#ffff00", "#00ffaa", "#00aaff", "#aa00ff"]
     for (nazwa, poziom), kolor in zip(poziomy_fibo.items(), colors):
-        fig.add_trace(
-            go.Scatter(
-                x=[df.index[0], df.index[-1]], y=[poziom, poziom],
-                mode="lines", line=dict(color=kolor, width=1, dash="dot"),
-                name=nazwa
-            )
-        )
+        fig.add_trace(go.Scatter(x=[df.index[0], df.index[-1]], y=[poziom, poziom], mode="lines", line=dict(color=kolor, width=1, dash="dot"), name=nazwa))
 
-    fig.update_layout(
-        title=f"Wykres techniczny {ticker} (Wstęgi BB + Poziomy Fibo)",
-        template="plotly_dark",
-        xaxis_rangeslider_visible=False,
-        height=450,
-    )
+    fig.update_layout(title=f"Wykres techniczny {ticker}", template="plotly_dark", xaxis_rangeslider_visible=False, height=450)
     st.plotly_chart(fig, use_container_width=True)
 
 
-# --- INTERFEJS UŻYTKOWNIKA (STREAMLIT) ---
-st.title("📱 Skaner AI Pro Master")
+# --- INTERFEJS UŻYTKOWNIKA ---
+st.title("📱 Skaner AI Pro Master v2")
 
-# --- PANEL BOCZNY (SIDEBAR) ---
 with st.sidebar:
     st.header("⚙️ Panel Sterowania")
     rynek = st.radio("Wybierz rynek:", ["PL (GPW)", "USA (NYSE/NASDAQ)"])
+    
+    # --- NOWOŚĆ: Bezpiecznik portfela API (Inteligentne Sito) ---
+    aktywuj_sito = st.checkbox("🛡️ Aktywuj Inteligentne Sito AI", value=True, help="Blokuje odpytywanie AI dla spółek o niskim wolumenie i bez wyraźnego układu technicznego. Oszczędza tokeny.")
+    
     lista_tickerow = wczytaj_liste_z_pliku(rynek)
 
     st.subheader("📝 Edycja Listy Spółek")
-    nowa_lista_str = st.text_area(
-        "Wpisz tickery po przecinku:", value=", ".join(lista_tickerow)
-    )
+    nowa_lista_str = st.text_area("Wpisz tickery po przecinku:", value=", ".join(lista_tickerow))
 
     if st.button("Zapisz listę spółek", use_container_width=True):
-        zaktualizowana_lista = [
-            t.strip().upper() for t in nowa_lista_str.split(",") if t.strip()
-        ]
+        zaktualizowana_lista = [t.strip().upper() for t in nowa_lista_str.split(",") if t.strip()]
         zapisz_liste_do_pliku(rynek, zaktualizowana_lista)
         st.success("Lista została zapisana!")
         st.rerun()
 
-# --- GŁÓWNY EKRAN SKANOWANIA ---
 if st.button("🚀 URUCHOM SKANOWANIE RYNKU", use_container_width=True):
-    with st.spinner("Pobieranie danych i obliczanie wskaźników technicznych..."):
+    with st.spinner("Pobieranie danych i obliczanie wskaźników..."):
         df_wyniki, slownik_df = skanuj_wybrane_spolki(lista_tickerow)
-
         if df_wyniki.empty:
-            st.warning("Brak danych. Sprawdź poprawność tickerów.")
+            st.warning("Brak danych.")
         else:
             st.session_state["df_wyniki"] = df_wyniki
             st.session_state["slownik_df"] = slownik_df
             st.success(f"Przeskanowano {len(df_wyniki)} spółek!")
 
-# Prezentacja danych
 if "df_wyniki" in st.session_state and not st.session_state["df_wyniki"].empty:
     df_wyniki = st.session_state["df_wyniki"]
     slownik_df = st.session_state["slownik_df"]
@@ -339,73 +329,95 @@ if "df_wyniki" in st.session_state and not st.session_state["df_wyniki"].empty:
     st.dataframe(df_wyniki, use_container_width=True)
 
     st.divider()
-    st.subheader("🤖 Automatyczne Porównanie 3 Generacji AI")
+    st.subheader("🤖 Błyskawiczna Multi-Analiza Asynchroniczna AI")
 
-    wybrany_ticker = st.selectbox(
-        "Wybierz spółkę do multi-analizy AI:", df_wyniki["Ticker"].tolist()
-    )
-
+    wybrany_ticker = st.selectbox("Wybierz spółkę do analizy:", df_wyniki["Ticker"].tolist())
     wiersz = df_wyniki[df_wyniki["Ticker"] == wybrany_ticker].iloc[0]
 
-    # Parametry wejścia tradera
+    # Bezpiecznik sita rynkowego przed AI
+    sito_zaliczone = True
+    powod_blokady = ""
+    if aktywuj_sito:
+        if wiersz["Skok Vol"] < 1.5 and wiersz["Formacja"] == "Neutralna" and wiersz["Wstęgi BB"] == "Środek":
+            sito_zaliczone = False
+            powod_blokady = "Niski wolumen (Skok Vol < 1.5) oraz brak jasnych sygnałów technicznych (Formacja Neutralna, Wstęgi BB: Środek)."
+
     st.write(f"### 🎯 Konfiguracja pozycji dla {wybrany_ticker}")
     col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        tp1 = st.number_input("TP1", value=float(wiersz["Cena"] * 1.05), step=0.01)
-    with col2:
-        tp2 = st.number_input("TP2", value=float(wiersz["Cena"] * 1.10), step=0.01)
-    with col3:
-        tp3 = st.number_input("TP3", value=float(wiersz["Cena"] * 1.20), step=0.01)
-    with col4:
-        sl = st.number_input("Stop Loss", value=float(wiersz["Cena"] * 0.95), step=0.01)
+    with col1: tp1 = st.number_input("TP1", value=float(wiersz["Cena"] * 1.05), step=0.01)
+    with col2: tp2 = st.number_input("TP2", value=float(wiersz["Cena"] * 1.10), step=0.01)
+    with col3: tp3 = st.number_input("TP3", value=float(wiersz["Cena"] * 1.20), step=0.01)
+    with col4: sl = st.number_input("Stop Loss", value=float(wiersz["Cena"] * 0.95), step=0.01)
 
-    dane_tp = {"tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl}
+    tp_tekst = f"Cele: TP1={tp1}, TP2={tp2}, TP3={tp3}, SL={sl}."
 
-    # Główny przycisk do generowania trzech raportów jednocześnie
-    if st.button("🔥 GENERUJ PORÓWNANIE 3 MODELI (o3-mini vs gpt-4o vs gpt-4o-mini)", use_container_width=True):
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        
+    # Blokada przycisku, jeśli aktywowane jest sito i warunki nie zostały spełnione
+    if not sito_zaliczone:
+        st.warning(f"🚫 **Sito AI zablokowało tę spółkę**: {powod_blokady}")
+        generuj_klik = st.button("Uruchom mimo blokady sita (Wymuś)", use_container_width=True)
+    else:
+        generuj_klik = st.button("⚡ GENERUJ ASYNCHRONICZNE PORÓWNANIE (3 MODELE)", use_container_width=True)
+
+    if generuj_klik:
         dane_tekst = wiersz.to_string()
-        tp_tekst = f"Cele tradera: TP1={tp1}, TP2={tp2}, TP3={tp3}, SL={sl}."
         
+        # Wymuszenie formatu rygorystycznego punktowania za pomocą tagu [SCORE: X]
         prompt = f"""
-        Jesteś elitarnym traderem algorytmicznym. Wykonaj analizę techniczną dla spółki {wybrany_ticker}:
+        Jesteś elitarnym traderem. Wykonaj natychmiastową analizę techniczną.
         
-        [DANE RYNKOWE I MATEMATYCZNE]:
+        NAJWAŻNIEJSZA REGUŁA: Twoja odpowiedź MUSI zaczynać się od sztywnego formatu oceny pozycji w pierwszej linijce, np: '[SCORE: 4]' (gdzie 1 to mocne sprzedaj, 5 to mocne kup). Nie używaj żadnego tekstu przed tym tagiem!
+        
+        [DANE TECH-MATH]:
         {dane_tekst}
         
-        [STRATEGIA WEJŚCIA]:
+        [STRATEGIA TRADERA]:
         {tp_tekst}
         
-        Zinterpretuj krytycznie:
-        1. Pozycję firmy na siatce Fibonacciego ({wiersz['Strefa Fibo']}) oraz położenie ceny względem linii i wstęg Bollingera ({wiersz['Wstęgi BB']}). Czy to akumulacja, czy dystrybucja?
-        2. Czy w oparciu o geometrię rynku (Fibo), zmienność ATR, skok wolumenu oraz RSI/MACD, wyznaczone cele TP1, TP2, TP3 mają silne uzasadnienie matematyczne, czy są życzeniowe?
-        3. Wydaj ostateczną decyzję (KUP / SPRZEDAJ / CZEKAJ) z podaniem procentowego prawdopodobieństwa sukcesu transakcji.
+        Zinterpretuj krytycznie w punktach:
+        1. Położenie na siatce Fibonacciego ({wiersz['Strefa Fibo']}) i wstęgach Bollingera ({wiersz['Wstęgi BB']}).
+        2. Realność matematyczną celów TP1, TP2, TP3 w oparciu o zmienność ATR i Skok Wolumenu.
+        3. Ostateczną decyzję (KUP / SPRZEDAJ / CZEKAJ).
         
-        Pisz krótko, surowo, bez owijania w bawełnę. Używaj wypunktowania i emoji.
+        Surowo, technicznie, krótko. Używaj emoji.
         """
         
-        # Wyświetlanie loaderów i jednoczesne pobieranie odpowiedzi
-        with st.spinner("Trwa symulacja i pobieranie danych ze wszystkich 3 modeli..."):
-            raport_o3 = generuj_odpowiedz_modelu(client, "o3-mini", prompt)
-            raport_4o = generuj_odpowiedz_modelu(client, "gpt-4o", prompt)
-            raport_mini = generuj_odpowiedz_modelu(client, "gpt-4o-mini", prompt)
+        with st.spinner("Asynchroniczny silnik pobiera odpowiedzi równolegle ze wszystkich 3 modeli..."):
+            # Wywołanie pętli asynchronicznej wewnątrz synchronicznego Streamlita
+            raport_o3, raport_4o, raport_mini = asyncio.run(pobierz_wszystkie_raporty(OPENAI_API_KEY, prompt))
             
-        # Wizualizacja wyników obok siebie przy użyciu komponentu Tabs
-        tab1, tab2, tab3 = st.tabs(["🧠 o3-mini (Głębokie Myślenie)", "⚡ gpt-4o (Analiza Pro)", "💨 gpt-4o-mini (Szybki Werdykt)"])
+        # Obliczanie Consensus Score
+        score_o3 = wyciagnij_score(raport_o3)
+        score_4o = wyciagnij_score(raport_4o)
+        score_mini = wyciagnij_score(raport_mini)
         
-        with tab1:
-            st.markdown("### 📊 Werdykt Matematyczny: o3-mini")
-            st.info(raport_o3)
+        wyniki_score = [s for s in [score_o3, score_4o, score_mini] if s is not None]
+        
+        # Sekcja wizualna Consensus Score
+        if wyniki_score:
+            srednia_consensus = round(np.mean(wyniki_score), 2)
+            if srednia_consensus >= 4.0:
+                kolor_box, tekst_box = "#004d1a", "🟢 SILNY KONSENSUS KUPNA"
+            elif srednia_consensus <= 2.2:
+                kolor_box, tekst_box = "#4d0000", "🔴 SILNY KONSENSUS SPRZEDAŻY"
+            else:
+                kolor_box, tekst_box = "#332200", "🟡 BRAK JEDNOMYŚLNOŚCI / CZEKAJ"
+                
+            st.markdown(
+                f"""
+                <div class="consensus-box" style="background-color: {kolor_box};">
+                    <h2 style="color: white; margin: 0;">📊 Średni AI Consensus Score: {srednia_consensus} / 5.0</h2>
+                    <strong style="color: #00ff66;">{tekst_box}</strong><br>
+                    <small style="color: #cccccc;">(o3-mini: {score_o3 if score_o3 else 'N/A'} | gpt-4o: {score_4o if score_4o else 'N/A'} | gpt-4o-mini: {score_mini if score_mini else 'N/A'})</small>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
             
-        with tab2:
-            st.markdown("### 📊 Werdykt Rynkowy: gpt-4o")
-            st.success(raport_4o)
-            
-        with tab3:
-            st.markdown("### 📊 Werdykt Ekspresowy: gpt-4o-mini")
-            st.warning(raport_mini)
+        # Wyświetlanie wyników w zakładkach
+        tab1, tab2, tab3 = st.tabs(["🧠 o3-mini (Rozumowanie)", "⚡ gpt-4o (Główny Analityk)", "💨 gpt-4o-mini (Weryfikator)"])
+        with tab1: st.info(raport_o3)
+        with tab2: st.success(raport_4o)
+        with tab3: st.warning(raport_mini)
 
-    # Rysowanie zaawansowanego wykresu
     if wybrany_ticker in slownik_df:
         rysuj_wykres(slownik_df[wybrany_ticker], wybrany_ticker)
