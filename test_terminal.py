@@ -7,6 +7,7 @@ import streamlit as st
 import yfinance as yf
 from openai import OpenAI
 
+# --- KONFIGURACJA STRONY ---
 st.set_page_config(
     page_title="Skaner Groszówek AI Master", page_icon="📱", layout="centered"
 )
@@ -26,6 +27,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# --- SECRETS & AUTORYZACJA ---
 try:
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
     APP_PASSWORD = st.secrets["APP_PASSWORD"]
@@ -201,6 +203,7 @@ def skanuj_wybrane_spolki(lista_tickerow):
     return pd.DataFrame(dane_spolek), slownik_df
 
 
+# --- GENEROWANIE RAPORTU AI (Z OBSŁUGĄ 3 MODELI) ---
 def generuj_raport_pojedynczej_spolki(model, ticker, wiersz_danych, dane_tp):
     client = OpenAI(api_key=OPENAI_API_KEY)
     dane_tekst = wiersz_danych.to_string(index=False)
@@ -225,208 +228,153 @@ def generuj_raport_pojedynczej_spolki(model, ticker, wiersz_danych, dane_tp):
     """
 
     params = {"model": model, "messages": [{"role": "user", "content": prompt}]}
+
+    # Dodatkowa konfiguracja specyficzna dla o3-mini
     if model == "o3-mini":
         params["reasoning_effort"] = "high"
 
     try:
         response = client.chat.completions.create(**params)
-        # --- FIX: POPRAWNE INDEKSOWANIE WYNIKU DLA LISTY CHOICES ---
         if response.choices and len(response.choices) > 0:
             return response.choices[0].message.content
-        return "❌ Błąd: Odpowiedź modeli OpenAI jest pusta."
+        return "❌ Błąd: Odpowiedź modelu OpenAI jest pusta."
     except Exception as e:
-        return f"❌ Błąd OpenAI: {str(e)}"
+        return f"❌ Błąd OpenAI ({model}): {str(e)}"
 
 
-# --- INTERFEJS MOBILNY ---
+# --- WIZUALIZACJA WYKRESU INTERAKTYWNEGO ---
+def rysuj_wykres(df, ticker):
+    fig = go.Figure()
+    fig.add_trace(
+        go.Candlestick(
+            x=df.index,
+            open=df["Open"],
+            high=df["High"],
+            low=df["Low"],
+            close=df["Close"],
+            name="Cena",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df["Upper_Band"],
+            line=dict(color="rgba(255, 0, 0, 0.4)", width=1),
+            name="Górna Wstęga BB",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df["Lower_Band"],
+            line=dict(color="rgba(0, 0, 255, 0.4)", width=1),
+            name="Dolna Wstęga BB",
+        )
+    )
+    fig.update_layout(
+        title=f"Wykres techniczny {ticker}",
+        template="plotly_dark",
+        xaxis_rangeslider_visible=False,
+        height=400,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# --- INTERFEJS UŻYTKOWNIKA (STREAMLIT) ---
 st.title("📱 Skaner AI Pro Master")
 
+# --- PANEL BOCZNY (SIDEBAR) ---
 with st.sidebar:
-    st.header("⚙️ Parametry")
-    rynek_wybor = st.radio("Wybierz okno rynkowe:", ["PL (GPW)", "USA"])
-    gpt_wybor = st.selectbox("Mocny Silnik AI:", ["o3-mini", "gpt-4o", "o1"])
-    interwal = st.slider(
-        "Interwał odświeżania (min):", min_value=1, max_value=60, value=5
+    st.header("⚙️ Panel Sterowania")
+
+    rynek = st.radio("Wybierz rynek:", ["PL (GPW)", "USA (NYSE/NASDAQ)"])
+
+    # Wybór modelu GPT z trzech obiecanych opcji
+    wybrany_model = st.selectbox(
+        "🧠 Wybierz model AI:",
+        ["o3-mini", "gpt-4o", "gpt-4o-mini"],
+        index=0,
+        help="o3-mini: głębokie rozumowanie (najlepszy do matematyki). gpt-4o: zaawansowana analiza rynkowa. gpt-4o-mini: najszybsza odpowiedź.",
     )
 
-# Zarządzanie listą
-st.subheader("📝 Trwała Lista Spółek")
-aktualna_lista = wczytaj_liste_z_pliku(rynek_wybor)
-lista_tekst = ", ".join(aktualna_lista)
+    lista_tickerow = wczytaj_liste_z_pliku(rynek)
 
-nowa_lista_tekst = st.text_area(
-    f"Modyfikuj listę dla {rynek_wybor}:", value=lista_tekst
-)
-
-if st.button("💾 Zapisz na Stałe", use_container_width=True):
-    czysta_lista = [
-        t.strip().upper() for t in nowa_lista_tekst.split(",") if t.strip()
-    ]
-    zapisz_liste_do_pliku(rynek_wybor, czysta_lista)
-    st.success("Zapisano trwale w pamięci aplikacji!")
-    st.rerun()
-
-st.subheader(f"📊 Monitorowane Groszówki: {rynek_wybor}")
-df_aktywne, pełne_dfs = skanuj_wybrane_spolki(aktualna_lista)
-
-if not df_aktywne.empty:
-    df_aktywne = df_aktywne.sort_values(by="Skok Vol", ascending=False)
-
-    # --- WYSZUKIWANIE SPÓŁEK PO SŁOWACH KLUCZOWYCH ---
-    szukaj_frazy = st.text_input(
-        "🔍 Szukaj (wpisz Ticker, Formację lub Trend, np. 'Młot', '🟢', 'SNDL'):"
+    st.subheader("📝 Edycja Listy Spółek")
+    nowa_lista_str = st.text_area(
+        "Wpisz tickery po przecinku:", value=", ".join(lista_tickerow)
     )
-    if szukaj_frazy:
-        maska = (
-            df_aktywne["Ticker"].str.contains(szukaj_frazy, case=False, na=False)
 
-            | df_aktywne["Trend"].str.contains(szukaj_frazy, case=False, na=False)
-            | df_aktywne["Formacja"].str.contains(szukaj_frazy, case=False, na=False)
-        )
-        df_wyswietlane = df_aktywne[maska]
-    else:
-        df_wyswietlane = df_aktywne
-
-    # Widok tabeli na telefon
-    widok_tabeli = df_wyswietlane[
-        [
-            "Ticker",
-            "Cena",
-            "Skok Vol",
-            "Trend",
-            "RSI (14)",
-            "Od Dna (%)",
-            "Formacja",
+    if st.button("Zapisz listę spółek", use_container_width=True):
+        zaktualizowana_lista = [
+            t.strip().upper() for t in nowa_lista_str.split(",") if t.strip()
         ]
-    ]
-    st.dataframe(widok_tabeli, use_container_width=True, hide_index=True)
+        zapisz_liste_do_pliku(rynek, zaktualizowana_lista)
+        st.success("Lista została zaktualizowana i zapisana!")
+        st.rerun()
 
-    if df_wyswietlane.empty:
-        st.info("Brak wyników dla wpisanej frazy kluczowej.")
+# --- GŁÓWNY EKRAN SKANOWANIA ---
+if st.button("🚀 URUCHOM SKANOWANIE RYNKU", use_container_width=True):
+    with st.spinner("Pobieranie danych i obliczanie wskaźników..."):
+        df_wyniki, slownik_df = skanuj_wybrane_spolki(lista_tickerow)
 
-    # --- INDYWIDUALNA ANALIZA I WYKRES ---
-    st.markdown("---")
-    st.subheader("🔍 Detale i Wykres Spółki")
+        if df_wyniki.empty:
+            st.warning("Brak danych do wyświetlenia. Sprawdź tickery.")
+        else:
+            st.session_state["df_wyniki"] = df_wyniki
+            st.session_state["slownik_df"] = slownik_df
+            st.success(f"Przeskanowano {len(df_wyniki)} spółek!")
 
-    lista_tickerow_do_wyboru = (
-        df_wyswietlane["Ticker"].tolist()
-        if not df_wyswietlane.empty
-        else df_aktywne["Ticker"].tolist()
-    )
+# Prezentacja danych jeśli są w sesji
+if "df_wyniki" in st.session_state and not st.session_state["df_wyniki"].empty:
+    df_wyniki = st.session_state["df_wyniki"]
+    slownik_df = st.session_state["slownik_df"]
+
+    st.subheader("📊 Wyniki Analizy Technicznej")
+    st.dataframe(df_wyniki, use_container_width=True)
+
+    st.divider()
+    st.subheader("🤖 Analiza Strategiczna AI")
+
+    # Wybór spółki do pogłębionego raportu AI
     wybrany_ticker = st.selectbox(
-        "Wybierz ticker do analizy:", lista_tickerow_do_wyboru
+        "Wybierz spółkę do raportu i wykresu:", df_wyniki["Ticker"].tolist()
     )
 
-    if wybrany_ticker in pełne_dfs:
-        df_wykres = pełne_dfs[wybrany_ticker].tail(30)
-        fig = go.Figure()
-        fig.add_trace(
-            go.Candlestick(
-                x=df_wykres.index,
-                open=df_wykres["Open"],
-                high=df_wykres["High"],
-                low=df_wykres["Low"],
-                close=df_wykres["Close"],
-                name="Cena",
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=df_wykres.index,
-                y=df_wykres["Upper_Band"],
-                line=dict(color="rgba(0, 255, 102, 0.3)", width=1),
-                name="BB Górna",
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=df_wykres.index,
-                y=df_wykres["Lower_Band"],
-                line=dict(color="rgba(255, 51, 51, 0.3)", width=1),
-                name="BB Dolna",
-            )
-        )
-        fig.update_layout(
-            template="plotly_dark",
-            xaxis_rangeslider_visible=False,
-            height=240,
-            margin=dict(l=10, r=10, t=10, b=10),
-            showlegend=False,
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    wiersz = df_wyniki[df_wyniki["Ticker"] == wybrany_ticker].iloc[0]
 
-    # --- KALKULATOR RYZYKA I WIELOPOZIOMOWYCH TP ---
-    wiersz_spolki = df_aktywne[df_aktywne["Ticker"] == wybrany_ticker].iloc[0]
-    waluta = "PLN" if rynek_wybor == "PL (GPW)" else "USD"
-
-    st.markdown("##### 🧮 Kalkulator Wielkości i Targetów (TP)")
-    akceptowalne_ryzyko = st.number_input(
-        f"Ryzyko kwotowe ({waluta}):", min_value=10, value=200, step=50
-    )
-
-    cena_wejscia = wiersz_spolki["Cena"]
-    atr = wiersz_spolki["Zmienność (ATR)"]
-    if atr <= 0:
-        atr = cena_wejscia * 0.05
-
-    odleglosc_sl = round(2 * atr, 2)
-    poziom_sl = round(cena_wejscia - odleglosc_sl, 2)
-    if poziom_sl <= 0:
-        poziom_sl = round(cena_wejscia * 0.5, 2)
-        odleglosc_sl = round(cena_wejscia - poziom_sl, 2)
-
-    # STRATEGIA WIELOPOZIOMOWEGO TAKE PROFIT (R:R)
-    poziom_tp1 = round(cena_wejscia + odleglosc_sl, 2)
-    poziom_tp2 = round(cena_wejscia + (2 * odleglosc_sl), 2)
-    poziom_tp3 = round(cena_wejscia + (3 * odleglosc_sl), 2)
-
-    liczba_akcji = (
-        int(akceptowalne_ryzyko / odleglosc_sl) if odleglosc_sl > 0 else 0
-    )
-    calkowity_kapital = round(liczba_akcji * cena_wejscia, 2)
-
-    col1, col2 = st.columns(2)
+    # Formularz celów tradera do promptu
+    st.write(f"### 🎯 Parametry pozycji dla {wybrany_ticker}")
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric(
-            label="Stop Loss (Obrona)",
-            value=f"{poziom_sl} {waluta}",
-            delta=f"-{odleglosc_sl}",
+        tp1 = st.number_input(
+            "TP1", value=float(wiersz["Cena"] * 1.05), step=0.01
         )
-        st.metric(label="Kup akcji", value=f"{liczba_akcji} szt.")
     with col2:
-        st.metric(label="Koszt pozycji", value=f"{calkowity_kapital} {waluta}")
-        st.metric(label="Od Dna 52W", value=f"{wiersz_spolki['Od Dna (%)']}%")
+        tp2 = st.number_input(
+            "TP2", value=float(wiersz["Cena"] * 1.10), step=0.01
+        )
+    with col3:
+        tp3 = st.number_input(
+            "TP3", value=float(wiersz["Cena"] * 1.20), step=0.01
+        )
+    with col4:
+        sl = st.number_input(
+            "Stop Loss", value=float(wiersz["Cena"] * 0.95), step=0.01
+        )
 
-    st.markdown("**🎯 Wielopoziomowe Targety Cenowe (Take Profit):**")
-    c1, c2, c3 = st.columns(3)
-    c1.metric(label="TP1 (Zabezpieczenie 1:1)", value=f"{poziom_tp1} {waluta}")
-    c2.metric(label="TP2 (Cel Główny 1:2)", value=f"{poziom_tp2} {waluta}")
-    c3.metric(label="TP3 (Rakieta 1:3)", value=f"{poziom_tp3} {waluta}")
+    dane_tp = {"tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl}
 
-    slownik_tp = {
-        "sl": poziom_sl,
-        "tp1": poziom_tp1,
-        "tp2": poziom_tp2,
-        "tp3": poziom_tp3,
-    }
-
+    # Przycisk generowania raportu wybranym modelem
     if st.button(
-        "🧠 Analiza i Ocena Celów przez AI",
-        type="primary",
-        use_container_width=True,
+        f"🤖 Generuj Raport AI ({wybrany_model})", use_container_width=True
     ):
-        dane_spolki_pelne = df_aktywne[df_aktywne["Ticker"] == wybrany_ticker]
-        with st.spinner("Najsilniejsze AI weryfikuje poziomy TP i geometrię świec..."):
-            wynik_indywidualny = generuj_raport_pojedynczej_spolki(
-                gpt_wybor, wybrany_ticker, dane_spolki_pelne, slownik_tp
+        with st.spinner(f"Model {wybrany_model} analizuje dane rynkowe..."):
+            raport = generuj_raport_pojedynczej_spolki(
+                wybrany_model, wybrany_ticker, wiersz, dane_tp
             )
-            st.markdown(f"### 📝 Strategiczny Raport AI dla {wybrany_ticker}:")
-            st.info(wynik_indywidualny)
-else:
-    st.warning("Lista pusta lub brak aktywności na spółkach.")
+            st.markdown(f"### 📋 Raport Tradera AI ({wybrany_model})")
+            st.info(raport)
 
-st.caption(
-    f"Aktualizacja: {time.strftime('%H:%M:%S')} | Odświeżenie za {interwal} min."
-)
-time.sleep(interwal * 60)
-st.rerun()
+    # Rysowanie wykresu dla wybranej spółki
+    if wybrany_ticker in slownik_df:
+        rysuj_wykres(slownik_df[wybrany_ticker], wybrany_ticker)
