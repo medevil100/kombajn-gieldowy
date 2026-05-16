@@ -1,18 +1,23 @@
-# ================== konfig ==================
-st.set_page_config(page_title="3× ai — terminal groszówek", layout="wide")
+import streamlit as st
+from openai import OpenAI
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-# Opcja awaryjna: Wklej swój klucz bezpośrednio tutaj, jeśli st.secrets nie działa lokalnie
-MOJ_KLUCZ_AWARYJNY = "sk-proj-TUTAJ_WKLEJ_SWÓJ_PRAWDZIWY_KLUCZ"
+# 1. TO MUSI BYĆ ABSOLUTNIE PIERWSZA KOMENDA STREAMLIT W KODZIE!
+st.set_page_config(page_title="3× AI — Multi-Terminal", layout="wide")
 
+# 2. Dopiero teraz sprawdzamy klucze i generujemy ewentualne komunikaty o błędach
 if "openai_api_key" in st.secrets:
     client = OpenAI(api_key=st.secrets["openai_api_key"])
-elif MOJ_KLUCZ_AWARYJNY != "sk-proj-TUTAJ_WKLEJ_SWÓJ_PRAWDZIWY_KLUCZ":
-    client = OpenAI(api_key=MOJ_KLUCZ_AWARYJNY)
 else:
-    st.error("brak klucza openai_api_key! Wklej go w kodzie w zmiennej MOJ_KLUCZ_AWARYJNY lub dodaj do secrets.toml")
+    st.error("Brak klucza openai_api_key w st.secrets! Dodaj go w konfiguracji Streamlit Cloud.")
     st.stop()
 
-    st.stop()
+# 3. Dalej wklejasz resztę kodu (style CSS, funkcje i interfejs)...
+
 
 # ================== STYLE CSS ==================
 st.markdown("""
