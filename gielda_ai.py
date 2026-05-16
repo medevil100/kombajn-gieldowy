@@ -1,4 +1,3 @@
-
 import streamlit as st
 from openai import OpenAI
 import yfinance as yf
@@ -9,7 +8,12 @@ from plotly.subplots import make_subplots
 
 # ================== KONFIG ==================
 st.set_page_config(page_title="3× AI — Terminal Groszówek", layout="wide")
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
+if "OPENAI_API_KEY" in st.secrets:
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+else:
+    st.error("Brak klucza OPENAI_API_KEY w st.secrets! Dodaj go w konfiguracji Streamlit.")
+    st.stop()
 
 # ================== STYLE ==================
 st.markdown("""
@@ -58,16 +62,24 @@ body {
     margin-top: 10px;
 }
 
+.heatmap-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 15px;
+}
+
 .heatmap-tile {
-    display: inline-block;
-    width: 110px;
-    height: 80px;
-    margin: 4px;
+    width: 120px;
+    height: 85px;
     border-radius: 8px;
-    padding: 6px;
+    padding: 8px;
     font-size: 12px;
-    color: #e5e7eb;
+    color: white;
     box-shadow: 0 0 10px rgba(0,0,0,0.6);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
 }
 
 .alert-box {
@@ -166,20 +178,27 @@ Dane wejściowe:
 # ================== DANE I WSKAŹNIKI ==================
 
 def get_ohlc(ticker: str, tf: str) -> pd.DataFrame:
-    if tf == "D1":
-        df = yf.download(ticker, period="1y", interval="1d", auto_adjust=False)
-    else:
-        df = yf.download(ticker, period="30d", interval="60m", auto_adjust=False)
+    try:
+        if tf == "D1":
+            df = yf.download(ticker, period="1y", interval="1d", auto_adjust=False, progress=False)
+        else:
+            df = yf.download(ticker, period="30d", interval="60m", auto_adjust=False, progress=False)
 
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.droplevel(0)
+        if df.empty:
+            return pd.DataFrame()
 
-    df.columns = [c.strip() for c in df.columns]
+        # POPRAWKA: Bezpieczne czyszczenie MultiIndex
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(-1)
 
-    if "Close" not in df.columns:
+        df.columns = [str(c).strip() for c in df.columns]
+
+        if "Close" not in df.columns:
+            return pd.DataFrame()
+
+        return df.dropna()
+    except Exception:
         return pd.DataFrame()
-
-    return df.dropna()
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -210,7 +229,6 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         (low - prev_close).abs()
     ], axis=1).max(axis=1)
     df["ATR14"] = tr.rolling(14).mean()
-
     df["VolMA20"] = df["Volume"].rolling(20).mean()
 
     return df
@@ -219,20 +237,19 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 def detect_trend_from_df(df: pd.DataFrame) -> str:
     last = df.iloc[-1]
-    sma200 = last.get("SMA200", np.nan)
-    sma50 = last.get("SMA50", np.nan)
+    
+    # POPRAWKA: wyciąganie czystych wartości float
+    close_val = float(last["Close"].iloc[0]) if isinstance(last["Close"], pd.Series) else float(last["Close"])
+    sma200 = float(last["SMA200"].iloc[0]) if isinstance(last.get("SMA200"), pd.Series) else float(last.get("SMA200", np.nan))
+    sma50 = float(last["SMA50"].iloc[0]) if isinstance(last.get("SMA50"), pd.Series) else float(last.get("SMA50", np.nan))
 
     if pd.notna(sma200):
-        if last["Close"] > sma200 * 1.01:
-            return "bull"
-        if last["Close"] < sma200 * 0.99:
-            return "bear"
+        if close_val > sma200 * 1.01: return "bull"
+        if close_val < sma200 * 0.99: return "bear"
 
     if pd.notna(sma50):
-        if last["Close"] > sma50:
-            return "bull"
-        if last["Close"] < sma50:
-            return "bear"
+        if close_val > sma50: return "bull"
+        if close_val < sma50: return "bear"
 
     return "side"
 
@@ -245,15 +262,16 @@ def compute_trend_score(df: pd.DataFrame, trend_code: str) -> float:
     last = df.iloc[-1]
     score = 0
 
+    close_val = float(last["Close"].iloc[0]) if isinstance(last["Close"], pd.Series) else float(last["Close"])
+    sma50 = float(last["SMA50"].iloc[0]) if isinstance(last.get("SMA50"), pd.Series) else float(last.get("SMA50", np.nan))
+    sma200 = float(last["SMA200"].iloc[0]) if isinstance(last.get("SMA200"), pd.Series) else float(last.get("SMA200", np.nan))
+    rsi = float(last["RSI14"].iloc[0]) if isinstance(last.get("RSI14"), pd.Series) else float(last.get("RSI14", np.nan))
+
     if trend_code == "bull": score += 30
-    if last["Close"] < 5: score += 10
+    if close_val < 5: score += 10
 
-    sma50 = last.get("SMA50", np.nan)
-    sma200 = last.get("SMA200", np.nan)
-    rsi = last.get("RSI14", np.nan)
-
-    if pd.notna(sma50) and last["Close"] > sma50: score += 15
-    if pd.notna(sma200) and last["Close"] > sma200: score += 15
+    if pd.notna(sma50) and close_val > sma50: score += 15
+    if pd.notna(sma200) and close_val > sma200: score += 15
     if pd.notna(sma50) and pd.notna(sma200) and sma50 > sma200: score += 20
 
     if pd.notna(rsi):
@@ -262,344 +280,173 @@ def compute_trend_score(df: pd.DataFrame, trend_code: str) -> float:
 
     return score
 
+# POPRAWKA: Dokończona funkcja detekcji wolumenu (VSA)
 def detect_volume_breakout_signals(df: pd.DataFrame, ticker: str) -> list:
     sigs = []
     if "VolMA20" not in df.columns or "ATR14" not in df.columns:
         return sigs
     last = df.iloc[-1]
-    vol = last["Volume"]
-    vol_ma = last["VolMA20"]
-    atr = last["ATR14"]
+    
+    vol = float(last["Volume"].iloc[0]) if isinstance(last["Volume"], pd.Series) else float(last["Volume"])
+    vol_ma = float(last["VolMA20"].iloc[0]) if isinstance(last["VolMA20"], pd.Series) else float(last["VolMA20"])
+    atr = float(last["ATR14"].iloc[0]) if isinstance(last["ATR14"], pd.Series) else float(last["ATR14"])
+    close_val = float(last["Close"].iloc[0]) if isinstance(last["Close"], pd.Series) else float(last["Close"])
+    open_val = float(last["Open"].iloc[0]) if isinstance(last["Open"], pd.Series) else float(last["Open"])
+    bb_upper = float(last["BB_upper"].iloc[0]) if isinstance(last["BB_upper"], pd.Series) else float(last["BB_upper"])
+    bb_lower = float(last["BB_lower"].iloc[0]) if isinstance(last["BB_lower"], pd.Series) else float(last["BB_lower"])
+
     if pd.isna(vol_ma) or pd.isna(atr) or atr == 0:
         return sigs
 
-    body = abs(last["Close"] - last["Open"])
+    body = abs(close_val - open_val)
     cond_vol2 = vol > 2 * vol_ma
     cond_vol15 = vol > 1.5 * vol_ma
     cond_body = body > atr
-    cond_bb = (last["Close"] > last["BB_upper"]) or (last["Close"] < last["BB_lower"])
+    cond_bb = (close_val > bb_upper) or (close_val < bb_lower)
 
     if cond_vol2 and cond_body and cond_bb:
-        sigs.append(f"🔥 {ticker}: silne wybicie (wolumen >2×, świeca > ATR, wybicie z BB).")
-    elif cond_vol15 and cond_body:
-        sigs.append(f"⚡ {ticker}: wybicie wolumenowe (wolumen >1.5×, świeca > ATR).")
-
-    if cond_vol2 and body < atr * 0.5 and last["Close"] < last["Open"]:
-        sigs.append(f"📉 {ticker}: możliwa dystrybucja (duży wolumen, słaba świeca).")
-    if cond_vol2 and body < atr * 0.5 and last["Close"] > last["Open"]:
-        sigs.append(f"📈 {ticker}: możliwa akumulacja (duży wolumen, świeca z małym spreadem).")
-
+        sigs.append(f"🔥 {ticker}: Silne wybicie VSA z potężnym wolumenem!")
+    elif cond_vol15:
+        sigs.append(f"⚡ {ticker}: Podwyższony obrót wolumenu (>1.5x MA).")
+    
     return sigs
 
-def detect_trend_alerts(df: pd.DataFrame, ticker: str, trend_code: str) -> list:
-    alerts = []
-    if len(df) < 3:
-        return alerts
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    sma50 = last.get("SMA50", np.nan)
-    sma200 = last.get("SMA200", np.nan)
-
-    if pd.notna(sma50) and pd.notna(sma200):
-        prev_rel = prev["Close"] > prev["SMA50"]
-        now_rel = last["Close"] > sma50
-        if not prev_rel and now_rel and trend_code == "bull":
-            alerts.append(f"🔥 {ticker}: świeży sygnał bull (Close przebił SMA50, trend wzrostowy).")
-
-    if pd.notna(sma200):
-        prev_below = prev["Close"] > prev["SMA200"]
-        now_below = last["Close"] < sma200
-        if prev_below and now_below:
-            alerts.append(f"⚠️ {ticker}: przełamanie wsparcia SMA200 (możliwa zmiana trendu).")
-
-    return alerts
-
-# ================== MULTICHART ==================
-
-def plot_multichart(df: pd.DataFrame):
-    df = df.tail(120)
-    x = df.index
-
-    fig = make_subplots(
-        rows=3, cols=1, shared_xaxes=True,
-        vertical_spacing=0.05, row_heights=[0.55, 0.25, 0.20]
-    )
-
+# ================== FUNKCJA WYKRESU PLOTLY ==================
+def plot_multichart(df: pd.DataFrame, ticker: str):
+    df_plot = df.tail(90)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
+    
+    # Świecznik
     fig.add_trace(go.Candlestick(
-        x=x, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
-        increasing_line_color="#00ff88",
-        decreasing_line_color="#ff0055",
-        name="Świece"
+        x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'],
+        name="Kurs", legendgroup="1"
     ), row=1, col=1)
+    
+    # Wskaźniki SMA
+    if "SMA50" in df_plot.columns:
+        fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['SMA50'], line=dict(color='cyan', width=1.5), name="SMA50", legendgroup="1"), row=1, col=1)
+    if "SMA200" in df_plot.columns:
+        fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['SMA200'], line=dict(color='magenta', width=1.5), name="SMA200", legendgroup="1"), row=1, col=1)
+        
+    # Wolumen
+    fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['Volume'], name="Wolumen", marker_color='orange', legendgroup="2"), row=2, col=1)
+    
+    fig.update_layout(title=f"Wykres techniczny {ticker}", template="plotly_dark", height=500, xaxis_rangeslider_visible=False, margin=dict(l=20, r=20, t=40, b=20))
+    return fig
 
-    for w, color in [(20, "#ffaa00"), (50, "#00e5ff"), (100, "#cc66ff"), (200, "#888888")]:
-        if f"SMA{w}" in df.columns:
-            fig.add_trace(go.Scatter(
-                x=x, y=df[f"SMA{w}"],
-                line=dict(color=color, width=1.8),
-                name=f"SMA{w}"
-            ), row=1, col=1)
+# ================== INTERFEJS I PĘTLA GŁÓWNA ==================
+st.sidebar.header("Ustawienia skanera")
+market_selection = st.sidebar.selectbox("Wybierz rynek domyślny", ["USA Groszówki", "Polska Spekulacja", "Własna lista"])
+timeframe = st.sidebar.selectbox("Interwał danych", ["D1", "1H"])
 
-    if "BB_upper" in df.columns and "BB_lower" in df.columns:
-        fig.add_trace(go.Scatter(
-            x=x, y=df["BB_upper"],
-            line=dict(color="#60a5fa", dash="dash", width=1.5),
-            name="BB Upper"
-        ), row=1, col=1)
-        fig.add_trace(go.Scatter(
-            x=x, y=df["BB_lower"],
-            line=dict(color="#60a5fa", dash="dash", width=1.5),
-            name="BB Lower"
-        ), row=1, col=1)
+# Definiowanie list tickerów
+if market_selection == "USA Groszówki":
+    tickers_input = st.sidebar.text_area("Lista tickerów (rozdziel przecinkami)", value="SNDL, HUBC, OTLY, KAVL, MVIS")
+elif market_selection == "Polska Spekulacja":
+    tickers_input = st.sidebar.text_area("Lista tickerów (GPW / NewConnect)", value="BBD.WA, ATT.WA, COG.WA, BIO.WA")
+else:
+    tickers_input = st.sidebar.text_area("Wpisz tickery", value="AAPL, TSLA")
 
-    if "RSI14" in df.columns:
-        fig.add_trace(go.Scatter(
-            x=x, y=df["RSI14"],
-            line=dict(color="#ffff00", width=2),
-            name="RSI14"
-        ), row=2, col=1)
-        fig.add_hline(y=70, line=dict(color="#ff4444", dash="dot"), row=2, col=1)
-        fig.add_hline(y=30, line=dict(color="#44ff44", dash="dot"), row=2, col=1)
+ticker_list = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
-    fig.add_trace(go.Bar(
-        x=x, y=df["Volume"],
-        marker_color="#aa44ff",
-        name="Volume"
-    ), row=3, col=1)
+if st.sidebar.button("Uruchom Skaner i AI 🚀"):
+    all_market_data = []
+    global_alerts = []
+    global_volume_sigs = []
+    processed_dfs = {}
 
-    fig.update_layout(
-        template="plotly_dark",
-        height=800,
-        margin=dict(l=20, r=20, t=30, b=20),
-        paper_bgcolor="#020617",
-        plot_bgcolor="#020617",
-        font=dict(color="#e5e7eb"),
-        title="📊 MULTICHART — neonowa analiza techniczna"
-    )
-
-    st.markdown('<div class="plot-border">', unsafe_allow_html=True)
-    st.plotly_chart(fig, use_container_width=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# ================== UI: SKANER RYNKU ==================
-
-col_left, col_right = st.columns([2, 1])
-
-with col_left:
-    st.subheader("🧪 Skaner groszówek PL + USA — ranking trendów + heatmapa")
-    tickers_text = st.text_area(
-        "Lista tickerów (oddzielone przecinkami lub nową linią):",
-        "AAPL, TSLA, NVDA, CDR, AMC, MULN",
-        height=100,
-    )
-    only_pennies = st.checkbox("Filtruj tylko groszówki (Close < 5)", value=True)
-    tf_scan = st.selectbox("Interwał skanera:", ["D1", "H1"])
-    tf_scan_code = "D1" if tf_scan == "D1" else "H1"
-    run_scan = st.button("Skanuj rynek i zbuduj ranking")
-
-with col_right:
-    st.subheader("⚙️ Ustawienia AI META")
-    use_ai_meta = st.checkbox("Uruchom AI META po skanie (wybór najlepszych spółek)", value=True)
-
-ranking_df = None
-scan_results = {}
-all_alerts = []
-all_volume_signals = []
-
-if run_scan:
-    raw = tickers_text.replace("\n", ",")
-    tickers = [t.strip().upper() for t in raw.split(",") if t.strip()]
-    tickers = list(dict.fromkeys(tickers))
-
-    rows = []
-    for t in tickers:
-        try:
-            df_t = get_ohlc(t, tf_scan_code)
-            if df_t.empty:
-                continue
-            df_t = add_indicators(df_t)
-            trend_code = detect_trend_from_df(df_t)
-            last = df_t.iloc[-1]
-            close = float(last["Close"])
-            rsi = float(last.get("RSI14", np.nan)) if not pd.isna(last.get("RSI14", np.nan)) else np.nan
-            atr = float(last.get("ATR14", np.nan)) if not pd.isna(last.get("ATR14", np.nan)) else np.nan
-            vol = float(last.get("Volume", np.nan)) if not pd.isna(last.get("Volume", np.nan)) else np.nan
-            vol_ma = float(last.get("VolMA20", np.nan)) if not pd.isna(last.get("VolMA20", np.nan)) else np.nan
-            score = compute_trend_score(df_t, trend_code)
-
-            if only_pennies and close >= 5:
-                continue
-
-            rows.append({
-                "Ticker": t,
-                "Trend": trend_code,
-                "Close": round(close, 4),
-                "RSI14": round(rsi, 2) if not np.isnan(rsi) else np.nan,
-                "ATR14": round(atr, 4) if not np.isnan(atr) else np.nan,
-                "Volume": vol,
-                "VolMA20": vol_ma,
-                "TrendScore": round(score, 2),
-            })
-            scan_results[t] = df_t
-
-            all_alerts.extend(detect_trend_alerts(df_t, t, trend_code))
-            all_volume_signals.extend(detect_volume_breakout_signals(df_t, t))
-        except Exception:
+    progress_bar = st.progress(0)
+    
+    for idx, tk in enumerate(ticker_list):
+        progress_bar.progress((idx + 1) / len(ticker_list))
+        df_raw = get_ohlc(tk, timeframe)
+        
+        if df_raw.empty or len(df_raw) < 20:
             continue
+            
+        df_feats = add_indicators(df_raw)
+        trend_c = detect_trend_from_df(df_feats)
+        score_t = compute_trend_score(df_feats, trend_c)
+        v_sigs = detect_volume_breakout_signals(df_feats, tk)
+        
+        last_row = df_feats.iloc[-1]
+        c_val = float(last_row["Close"].iloc[0]) if isinstance(last_row["Close"], pd.Series) else float(last_row["Close"])
+        
+        all_market_data.append({
+            "Ticker": tk,
+            "Trend": trend_c,
+            "Close": c_val,
+            "TrendScore": score_t
+        })
+        
+        global_volume_sigs.extend(v_sigs)
+        if trend_c == "bull":
+            global_alerts.append(f"🟢 {tk} - Sygnał silnego trendu wzrostowego (Bull).")
+        elif trend_c == "bear":
+            global_alerts.append(f"🔴 {tk} - Presja niedźwiedzia (Bear).")
+            
+        processed_dfs[tk] = (df_feats, trend_c, score_t)
 
-    if rows:
-        ranking_df = pd.DataFrame(rows)
-        ranking_df = ranking_df.sort_values("TrendScore", ascending=False).reset_index(drop=True)
+    market_summary_df = pd.DataFrame(all_market_data)
 
-        st.markdown("### 🏆 Ranking spółek (wg TrendScore)")
-        st.dataframe(ranking_df, use_container_width=True)
-
-        st.markdown("### 🌈 Heatmapa PRO (trend + RSI + wolumen + ATR)")
-        if not ranking_df.empty:
-            for _, row in ranking_df.iterrows():
-                t = row["Ticker"]
-                trend = row["Trend"]
-                rsi = row["RSI14"]
-                atr = row["ATR14"]
-                vol = row["Volume"]
-                vol_ma = row["VolMA20"]
-
-                if trend == "bull":
-                    bg = "#14532d"
-                elif trend == "bear":
-                    bg = "#7f1d1d"
-                else:
-                    bg = "#78350f"
-
-                border_color = "#4ade80"
-                if not np.isnan(rsi):
-                    if rsi > 70:
-                        border_color = "#f97316"
-                    elif rsi < 30:
-                        border_color = "#38bdf8"
-
-                vol_icon = "🌑"
-                if not np.isnan(vol) and not np.isnan(vol_ma) and vol_ma > 0:
-                    if vol > 2 * vol_ma:
-                        vol_icon = "🔥"
-                    elif vol > 1.5 * vol_ma:
-                        vol_icon = "⚡"
-
-                sat = 0.6
-                if not np.isnan(atr) and row["Close"] > 0:
-                    rel_vol = min(atr / row["Close"], 0.2)
-                    sat = 0.4 + rel_vol
-
-                tile_html = f"""
-                <div class="heatmap-tile" style="background: {bg}; border: 2px solid {border_color}; opacity:{0.8 + sat*0.2};">
-                    <b>{t}</b> {vol_icon}<br/>
-                    Trend: {trend}<br/>
-                    RSI: {'' if np.isnan(rsi) else round(rsi,1)}<br/>
-                    ATR: {'' if np.isnan(atr) else round(atr,3)}
+    # 1. Mapa Heatmap wizualna rynku
+    st.subheader("📊 Mapa Skanera (Trend Score)")
+    if not market_summary_df.empty:
+        st.markdown('<div class="heatmap-container">', unsafe_allow_html=True)
+        for _, row in market_summary_df.iterrows():
+            bg_color = "#064e3b" if row["Trend"] == "bull" else ("#7f1d1d" if row["Trend"] == "bear" else "#78350f")
+            st.markdown(f"""
+                <div class="heatmap-tile" style="background-color: {bg_color};">
+                    <b style="font-size:15px;">{row['Ticker']}</b>
+                    <span>Cena: {row['Close']:.2f}</span>
+                    <span>Score: {row['TrendScore']:.0f}</span>
                 </div>
-                """
-                st.markdown(tile_html, unsafe_allow_html=True)
-        st.markdown("---")
-
-        st.subheader("🚨 Alerty trendów i wolumenów")
-        if not all_alerts and not all_volume_signals:
-            st.info("Brak silnych alertów dla podanych tickerów.")
-        else:
-            for a in all_alerts:
-                css = "alert-bull" if "bull" in a or "🔥" in a else "alert-bear"
-                st.markdown(f'<div class="alert-box {css}">{a}</div>', unsafe_allow_html=True)
-            for v in all_volume_signals:
-                css = "alert-vol"
-                if "akumulacja" in v or "dystrybucja" in v:
-                    css = "alert-vsa"
-                st.markdown(f'<div class="alert-box {css}">{v}</div>', unsafe_allow_html=True)
-
-        if use_ai_meta:
-            st.subheader("🧠 AI META — wybór najlepszych spółek")
-            meta_text = ai_meta_pick(ranking_df, all_alerts, all_volume_signals)
-            st.markdown(f'<div class="box long"><b>Wynik AI META:</b><br>{meta_text}</div>', unsafe_allow_html=True)
-
+            """, unsafe_allow_html=True)
+        st.markdown('</div><br>', unsafe_allow_html=True)
     else:
-        st.warning("Brak danych dla podanych tickerów.")
+        st.warning("Brak wystarczających danych do zbudowania mapy rynkowej.")
 
-# ================== ANALIZA POJEDYNCZEJ SPÓŁKI + AI ==================
+    # 2. Raport META Analizy AI
+    st.subheader("🤖 Globalny Raport Strategiczny META AI")
+    with st.spinner("Model o3-mini analizuje strukturę rynkową..."):
+        meta_opinion = ai_meta_pick(market_summary_df, global_alerts, global_volume_sigs)
+        st.info(meta_opinion)
 
-st.markdown("---")
-st.subheader("🤖 Analiza AI wybranej spółki + MULTICHART")
-
-col_a, col_b, col_c = st.columns(3)
-with col_a:
-    if ranking_df is not None and not ranking_df.empty:
-        selected_ticker = st.selectbox("Ticker z rankingu:", ranking_df["Ticker"].tolist())
+    # 3. Indywidualny Podgląd Techniczny Wybranej Spółki
+    st.subheader("🔍 Szczegółowa inspekcja spółki")
+    if processed_dfs:
+        selected_tk = st.selectbox("Wybierz spółkę z przeskanowanych, aby zobaczyć wykres i analizę 3 modeli AI:", list(processed_dfs.keys()))
+        
+        if selected_tk:
+            df_selected, trend_c, score_t = processed_dfs[selected_tk]
+            label, css_class = trend_label_and_css(trend_c)
+            
+            st.markdown(f'<div class="trend-box {css_class}">Wybrany walor: {selected_tk} — {label} (Score: {score_t:.0f}/100)</div>', unsafe_allow_html=True)
+            
+            # Renderowanie wykresu Plotly w ładnej ramce
+            st.markdown('<div class="plot-border">', unsafe_allow_html=True)
+            st.plotly_chart(plot_multichart(df_selected, selected_tk), use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            # Indywidualne analizy trzech modeli AI
+            st.markdown("### 💬 Konsylium analityczne modeli AI dla pojedynczej spółki")
+            c1, c2, c3 = st.columns(3)
+            
+            # Przygotowanie uproszczonego zestawu tekstowego pod prompt pojedynczy
+            last_bar = df_selected.iloc[-1]
+            raw_close = float(last_bar["Close"].iloc[0]) if isinstance(last_bar["Close"], pd.Series) else float(last_bar["Close"])
+            raw_rsi = float(last_bar["RSI14"].iloc[0]) if isinstance(last_bar["RSI14"], pd.Series) else float(last_bar["RSI14"]) if pd.notna(last_bar.get("RSI14")) else 50.0
+            
+            summary_prompt_payload = f"Cena: {raw_close:.4f}, RSI14: {raw_rsi:.1f}, Trend bazowy: {trend_c}, Score: {score_t}"
+            
+            with c1:
+                st.markdown('<div class="box swing">🎯 SWING TRADER (gpt-4o-mini)</div>', unsafe_allow_html=True)
+                st.write(ai_swing(selected_tk, summary_prompt_payload))
+            with c2:
+                st.markdown('<div class="box day">⚡ DAYTRADER (gpt-4o)</div>', unsafe_allow_html=True)
+                st.write(ai_day(selected_tk, summary_prompt_payload))
+            with c3:
+                st.markdown('<div class="box long">⏳ LONG-TERM (o3-mini)</div>', unsafe_allow_html=True)
+                st.write(ai_long(selected_tk, summary_prompt_payload))
     else:
-        selected_ticker = st.text_input("Ticker:", "AAPL")
-
-with col_b:
-    tf_detail = st.selectbox("Interwał analizy:", ["D1", "H1"])
-    tf_detail_code = "D1" if tf_detail == "D1" else "H1"
-
-with col_c:
-    ai_choice = st.selectbox(
-        "Wybierz AI:",
-        ["AI Swing — gpt‑4o‑mini", "AI Day — gpt‑4o", "AI Long — o3‑mini"]
-    )
-
-user_notes = st.text_area("Twoje notatki / kontekst:", "")
-
-if st.button("Analizuj wybraną spółkę (AI + wykres)"):
-    try:
-        if ranking_df is not None and selected_ticker in scan_results:
-            df_single = scan_results[selected_ticker]
-        else:
-            df_single = get_ohlc(selected_ticker, tf_detail_code)
-            if df_single.empty:
-                st.error("Brak danych dla tego tickera / interwału.")
-                st.stop()
-            df_single = add_indicators(df_single)
-    except Exception as e:
-        st.error(f"Problem z pobraniem danych dla {selected_ticker}: {e}")
-        st.stop()
-
-    trend_code = detect_trend_from_df(df_single)
-    trend_label, trend_css = trend_label_and_css(trend_code)
-
-    st.markdown(
-        f'<div class="trend-box {trend_css}"><b>Trend główny:</b> {trend_label}</div>',
-        unsafe_allow_html=True,
-    )
-
-    last = df_single.iloc[-1]
-    summary = f"""
-Ticker: {selected_ticker}
-Interwał: {tf_detail_code}
-Trend: {trend_label}
-Close: {last['Close']:.2f}
-RSI14: {last.get('RSI14', np.nan):.2f if not pd.isna(last.get('RSI14', np.nan)) else float('nan')}
-Notatki użytkownika: {user_notes}
-"""
-
-    if "Swing" in ai_choice:
-        wynik = ai_swing(selected_ticker, summary)
-        css = "swing"
-    elif "Day" in ai_choice:
-        wynik = ai_day(selected_ticker, summary)
-        css = "day"
-    else:
-        wynik = ai_long(selected_ticker, summary)
-        css = "long"
-
-    st.markdown(f'<div class="box {css}"><b>Wynik AI ({ai_choice}):</b><br>{wynik}</div>', unsafe_allow_html=True)
-
-    with st.expander("📈 MULTICHART — pełna analiza techniczna (realne dane)"):
-        plot_multichart(df_single)
-
-st.markdown(
-    """
-<div class="info-box">
-To narzędzie jest eksperymentalnym terminalem analitycznym dla groszówek (PL + USA).
-Łączy skaner trendów, heatmapę, alerty wolumenowe, analizę AI META oraz trzy tryby AI (Swing / Day / Long).
-Nie jest to rekomendacja inwestycyjna. Zawsze używaj własnego planu i risk managementu.
-</div>
-""",
-    unsafe_allow_html=True,
-)
+        st.error("Brak przetworzonych spółek. Sprawdź poprawność wprowadzonych tickerów.")
