@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 from openai import OpenAI
 import yfinance as yf
@@ -8,13 +9,7 @@ from plotly.subplots import make_subplots
 
 # ================== KONFIG ==================
 st.set_page_config(page_title="3× AI — Swing / Day / Long", layout="centered")
-
-# Bezpieczne pobieranie klucza API
-if "OPENAI_API_KEY" in st.secrets:
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-else:
-    st.error("Brak klucza OPENAI_API_KEY w st.secrets!")
-    st.stop()
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # ================== STYLE ==================
 st.markdown("""
@@ -123,9 +118,21 @@ Zadanie:
 
 def get_ohlc(ticker: str, tf: str) -> pd.DataFrame:
     if tf == "D1":
-        df = yf.download(ticker, period="1y", interval="1d", auto_adjust=False)
+        df = yf.download(
+            ticker,
+            period="1y",
+            interval="1d",
+            auto_adjust=False,
+            group_by="column",
+        )
     else:
-        df = yf.download(ticker, period="30d", interval="60m", auto_adjust=False)
+        df = yf.download(
+            ticker,
+            period="30d",
+            interval="60m",
+            auto_adjust=False,
+            group_by="column",
+        )
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(-1)
@@ -170,22 +177,19 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 def detect_trend_from_df(df: pd.DataFrame) -> str:
     last = df.iloc[-1]
-    
-    # POPRAWKA: Konwersja na czysty float, aby uniknąć błędów z typem Series
-    close_val = float(last["Close"])
-    sma200 = float(last["SMA200"]) if pd.notna(last.get("SMA200")) else np.nan
-    sma50 = float(last["SMA50"]) if pd.notna(last.get("SMA50")) else np.nan
+    sma200 = last.get("SMA200", np.nan)
+    sma50 = last.get("SMA50", np.nan)
 
     if pd.notna(sma200):
-        if close_val > sma200 * 1.01:
+        if last["Close"] > sma200 * 1.01:
             return "bull"
-        if close_val < sma200 * 0.99:
+        if last["Close"] < sma200 * 0.99:
             return "bear"
 
     if pd.notna(sma50):
-        if close_val > sma50:
+        if last["Close"] > sma50:
             return "bull"
-        if close_val < sma50:
+        if last["Close"] < sma50:
             return "bear"
 
     return "side"
@@ -201,26 +205,20 @@ def trend_label_and_css(trend_code: str):
 
 def detect_bollinger_signal(df: pd.DataFrame):
     last = df.iloc[-1]
-    close_val = float(last["Close"])
-    upper_val = float(last["BB_upper"])
-    lower_val = float(last["BB_lower"])
-    
-    if close_val > upper_val:
+    if last["Close"] > last["BB_upper"]:
         return ["Cena powyżej górnej wstęgi — silne momentum / możliwe wykupienie."]
-    if close_val < lower_val:
+    if last["Close"] < last["BB_lower"]:
         return ["Cena poniżej dolnej wstęgi — możliwe wyprzedanie / odbicie."]
     return ["Cena wewnątrz wstęg — brak skrajnych odchyleń."]
 
 
 def detect_sma_signals(df: pd.DataFrame):
     last = df.iloc[-1]
-    close_val = float(last["Close"])
     res = []
     for w in [20, 50, 100, 200]:
         col = f"SMA{w}"
         if col in df.columns and pd.notna(last[col]):
-            sma_val = float(last[col])
-            if close_val > sma_val:
+            if last["Close"] > last[col]:
                 res.append(f"Cena powyżej SMA{w} — wsparcie trendu wzrostowego.")
             else:
                 res.append(f"Cena poniżej SMA{w} — presja podażowa.")
@@ -228,7 +226,7 @@ def detect_sma_signals(df: pd.DataFrame):
 
 
 def detect_rsi_signal(df: pd.DataFrame):
-    rsi = float(df.iloc[-1]["RSI14"])
+    rsi = df.iloc[-1]["RSI14"]
     if pd.isna(rsi):
         return ["RSI14: brak danych."]
     if rsi > 70:
@@ -242,8 +240,8 @@ def detect_rsi_signal(df: pd.DataFrame):
 
 def compute_sl_tp(df: pd.DataFrame, trend_code: str):
     last = df.iloc[-1]
-    close = float(last["Close"])
-    atr = float(last["ATR14"])
+    close = last["Close"]
+    atr = last["ATR14"]
 
     if pd.isna(atr) or atr == 0:
         return "SL/TP: brak danych ATR.", ""
@@ -274,7 +272,7 @@ def build_summary_for_ai(df: pd.DataFrame, trend_code: str, tf: str) -> str:
 
     lines = [
         f"Timeframe: {tf}",
-        f"Ostatnie Close: {float(last['Close']):.2f}, High: {float(last['High']):.2f}, Low: {float(last['Low']):.2f}, Volume: {int(last['Volume'])}",
+        f"Ostatnie Close: {last['Close']:.2f}, High: {last['High']:.2f}, Low: {last['Low']:.2f}, Volume: {int(last['Volume'])}",
         f"Trend: {trend_label}",
         f"RSI14: {rsi_sig[0]}",
         f"Bollinger: {boll[0]}",
@@ -293,10 +291,10 @@ def compute_trend_score(df: pd.DataFrame, trend_code: str) -> float:
     if trend_code == "bull":
         score += 30
 
-    close = float(last["Close"])
-    sma50 = float(last["SMA50"]) if pd.notna(last.get("SMA50")) else np.nan
-    sma200 = float(last["SMA200"]) if pd.notna(last.get("SMA200")) else np.nan
-    rsi = float(last["RSI14"]) if pd.notna(last.get("RSI14")) else np.nan
+    sma50 = last.get("SMA50", np.nan)
+    sma200 = last.get("SMA200", np.nan)
+    close = last["Close"]
+    rsi = last.get("RSI14", np.nan)
 
     if pd.notna(sma50) and close > sma50:
         score += 15
@@ -316,50 +314,266 @@ def compute_trend_score(df: pd.DataFrame, trend_code: str) -> float:
     return score
 
 
-# ================== INTERFEJS UŻYTKOWNIKA (DOKOŃCZENIE) ==================
+# ================== WYKRES MULTICHART ==================
 
-st.sidebar.header("Ustawienia analizy")
-ticker = st.sidebar.text_input("Ticker giełdowy (np. AAPL, TSLA, BTC-USD)", value="AAPL")
-timeframe = st.sidebar.selectbox("Interwał", options=["D1", "1H"])
+def plot_multichart(df: pd.DataFrame):
+    df = df.dropna().tail(120).copy()
+    x = df.index
 
-if st.sidebar.button("Uruchom analizę 🚀"):
-    with st.spinner("Pobieranie danych giełdowych..."):
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.05,
+        row_heights=[0.55, 0.25, 0.20]
+    )
+
+    fig.add_trace(go.Candlestick(
+        x=x,
+        open=df["Open"],
+        high=df["High"],
+        low=df["Low"],
+        close=df["Close"],
+        increasing_line_color="lime",
+        decreasing_line_color="red",
+        name="Świece"
+    ), row=1, col=1)
+
+    for w, color in [(20, "orange"), (50, "cyan"), (100, "violet"), (200, "gray")]:
+        col = f"SMA{w}"
+        if col in df.columns and df[col].notna().any():
+            fig.add_trace(go.Scatter(
+                x=x, y=df[col],
+                line=dict(color=color, width=1.3),
+                name=f"SMA{w}"
+            ), row=1, col=1)
+
+    if "BB_upper" in df.columns and "BB_lower" in df.columns:
+        fig.add_trace(go.Scatter(
+            x=x, y=df["BB_upper"],
+            line=dict(color="#60a5fa", dash="dash", width=1),
+            name="BB Upper"
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=x, y=df["BB_lower"],
+            line=dict(color="#60a5fa", dash="dash", width=1),
+            name="BB Lower"
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=list(x) + list(x[::-1]),
+            y=list(df["BB_upper"]) + list(df["BB_lower"][::-1]),
+            fill="toself",
+            fillcolor="rgba(76, 29, 149, 0.18)",
+            line=dict(color="rgba(0,0,0,0)"),
+            hoverinfo="skip",
+            showlegend=False
+        ), row=1, col=1)
+
+    if "RSI14" in df.columns:
+        fig.add_trace(go.Scatter(
+            x=x, y=df["RSI14"],
+            line=dict(color="yellow", width=2),
+            name="RSI14"
+        ), row=2, col=1)
+        fig.add_hline(y=70, line=dict(color="red", dash="dot"), row=2, col=1)
+        fig.add_hline(y=30, line=dict(color="lime", dash="dot"), row=2, col=1)
+
+    fig.add_trace(go.Bar(
+        x=x, y=df["Volume"],
+        marker_color="purple",
+        name="Volume"
+    ), row=3, col=1)
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=800,
+        margin=dict(l=20, r=20, t=30, b=20),
+        paper_bgcolor="#020617",
+        plot_bgcolor="#020617",
+        font=dict(color="#e5e7eb"),
+        title="📊 MULTICHART: realne dane (świece + SMA + BB + RSI + Volume)"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# ================== UI — SKANER RYNKU ==================
+
+st.subheader("🧪 Skaner groszówek PL + USA — ranking trendów")
+
+tickers_text = st.text_area(
+    "Lista tickerów (oddzielone przecinkami lub nową linią):",
+    "AAPL, TSLA, NVDA",
+    height=100,
+)
+
+only_pennies = st.checkbox("Filtruj tylko groszówki (Close < 5 w walucie notowania)", value=True)
+tf_scan = st.selectbox("Interwał dla skanera:", ["D1 (świece dzienne)", "H1 (świece godzinowe)"])
+tf_scan_code = "D1" if tf_scan.startswith("D1") else "H1"
+
+ranking_df = None
+scan_results = {}
+
+if st.button("Skanuj rynek i zbuduj ranking trendów"):
+    raw = tickers_text.replace("\n", ",")
+    tickers = [t.strip().upper() for t in raw.split(",") if t.strip()]
+    tickers = list(dict.fromkeys(tickers))
+
+    rows = []
+    for t in tickers:
         try:
-            df_raw = get_ohlc(ticker, timeframe)
-            if df_raw.empty:
-                st.error("Nie znaleziono danych dla podanego tickera.")
+            df_t = get_ohlc(t, tf_scan_code)
+            if df_t.empty:
+                continue
+            df_t = add_indicators(df_t)
+            trend_code = detect_trend_from_df(df_t)
+            last = df_t.iloc[-1]
+            close = float(last["Close"])
+            rsi = float(last.get("RSI14", np.nan)) if not pd.isna(last.get("RSI14", np.nan)) else np.nan
+            sma50 = float(last.get("SMA50", np.nan)) if not pd.isna(last.get("SMA50", np.nan)) else np.nan
+            sma200 = float(last.get("SMA200", np.nan)) if not pd.isna(last.get("SMA200", np.nan)) else np.nan
+            score = compute_trend_score(df_t, trend_code)
+
+            if only_pennies and close >= 5:
+                continue
+
+            rows.append({
+                "Ticker": t,
+                "Trend": trend_code,
+                "Close": round(close, 4),
+                "RSI14": round(rsi, 2) if not np.isnan(rsi) else np.nan,
+                "SMA50": round(sma50, 4) if not np.isnan(sma50) else np.nan,
+                "SMA200": round(sma200, 4) if not np.isnan(sma200) else np.nan,
+                "TrendScore": round(score, 2),
+            })
+            scan_results[t] = df_t
+        except Exception:
+            continue
+
+    if rows:
+        ranking_df = pd.DataFrame(rows)
+        ranking_df = ranking_df[ranking_df["Trend"] == "bull"]
+        ranking_df = ranking_df.sort_values("TrendScore", ascending=False).reset_index(drop=True)
+
+        if ranking_df.empty:
+            st.warning("Brak spółek w wyraźnym trendzie wzrostowym dla podanych tickerów.")
+        else:
+            st.markdown("### 🏆 Ranking spółek w trendzie wzrostowym")
+            st.dataframe(ranking_df, use_container_width=True)
+    else:
+        st.warning("Nie udało się pobrać danych dla żadnego z podanych tickerów.")
+
+# ================== UI — ANALIZA PO WYBRANIU Z RANKINGU ==================
+
+st.subheader("🤖 Analiza AI wybranej spółki")
+
+selected_ticker = None
+if ranking_df is not None and not ranking_df.empty:
+    selected_ticker = st.selectbox(
+        "Wybierz ticker z rankingu do analizy AI:",
+        ranking_df["Ticker"].tolist(),
+    )
+else:
+    selected_ticker = st.text_input("Ticker (fallback, gdy brak rankingu):", "AAPL")
+
+tf_detail = st.selectbox(
+    "Interwał danych do analizy szczegółowej:",
+    ["D1 (świece dzienne)", "H1 (świece godzinowe)"],
+)
+tf_detail_code = "D1" if tf_detail.startswith("D1") else "H1"
+
+ai_choice = st.selectbox(
+    "Wybierz AI:",
+    ["AI Swing — gpt‑4o‑mini", "AI Day — gpt‑4o", "AI Long — o3‑mini"]
+)
+
+user_notes = st.text_area(
+    "Twoje notatki / kontekst (opcjonalne):",
+    "",
+    placeholder="Np. ważne poziomy, newsy, własne obserwacje..."
+)
+
+if st.button("Analizuj wybraną spółkę (realne dane + AI)"):
+    try:
+        if ranking_df is not None and selected_ticker in scan_results:
+            df = scan_results[selected_ticker]
+        else:
+            df = get_ohlc(selected_ticker, tf_detail_code)
+            if df.empty:
+                st.error("Brak danych dla tego tickera / interwału.")
                 st.stop()
-                
-            df_features = add_indicators(df_raw)
-            trend_code = detect_trend_from_df(df_features)
-            trend_label, trend_css = trend_label_and_css(trend_code)
-            summary_text = build_summary_for_ai(df_features, trend_code, timeframe)
-            score = compute_trend_score(df_features, trend_code)
-            
-            # Prezentacja wyników technicznych
-            st.subheader(f"Wyniki analizy technicznej dla: {ticker}")
-            st.markdown(f'<div class="trend-box {trend_css}">{trend_label} (Score: {score:.0f}/100)</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="info-box"><pre style="color:inherit; background:transparent; margin:0;">{summary_text}</pre></div>', unsafe_allow_html=True)
-            
-            # Generowanie opinii AI
-            st.subheader("🤖 Rekomendacje Modeli AI")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.markdown('<div class="box swing">🎯 SWING TRADER (gpt-4o-mini)</div>', unsafe_allow_html=True)
-                with st.spinner("Generowanie..."):
-                    st.write(ai_swing(ticker, summary_text))
-                    
-            with col2:
-                st.markdown('<div class="box day">⚡ DAYTRADER (gpt-4o)</div>', unsafe_allow_html=True)
-                with st.spinner("Generowanie..."):
-                    st.write(ai_day(ticker, summary_text))
-                    
-            with col3:
-                st.markdown('<div class="box long">⏳ LONG-TERM (o3-mini)</div>', unsafe_allow_html=True)
-                with st.spinner("Generowanie..."):
-                    st.write(ai_long(ticker, summary_text))
-                    
-        except Exception as e:
-            st.error(f"Wystąpił nieoczekiwany błąd: {e}")
+            df = add_indicators(df)
+    except Exception as e:
+        st.error(f"Problem z pobraniem danych dla {selected_ticker}: {e}")
+        st.stop()
+
+    trend_code = detect_trend_from_df(df)
+    trend_label, trend_css = trend_label_and_css(trend_code)
+
+    st.subheader("🔍 Analiza techniczna (realne dane)")
+
+    st.markdown(
+        f"""
+        <div class="trend-box {trend_css}">
+            <b>Trend główny:</b> {trend_label}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    boll = detect_bollinger_signal(df)
+    sma_sig = detect_sma_signals(df)
+    rsi_sig = detect_rsi_signal(df)
+    sl_txt, tp_txt = compute_sl_tp(df, trend_code)
+
+    st.markdown("**Wstęgi Bollingera:**")
+    for b in boll:
+        st.markdown(f"- {b}")
+
+    st.markdown("**SMA / średnie kroczące:**")
+    for s in sma_sig:
+        st.markdown(f"- {s}")
+
+    st.markdown("**RSI14:**")
+    for r in rsi_sig:
+        st.markdown(f"- {r}")
+
+    st.markdown("**SL / TP (na bazie ATR14):**")
+    st.markdown(f"- {sl_txt}")
+    st.markdown(f"- {tp_txt}")
+
+    with st.expander("📈 MULTICHART — pełna analiza techniczna (realne dane)"):
+        plot_multichart(df)
+
+    st.markdown(
+        """
+        <div class="info-box">
+            Analiza oparta na realnych danych z Yahoo Finance (yfinance).
+            Zawsze łącz to z własnym planem, risk managementem i kontekstem rynkowym.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    summary = build_summary_for_ai(df, trend_code, tf_detail_code)
+    if user_notes.strip():
+        summary += "\n\nNotatki użytkownika:\n" + user_notes.strip()
+
+    if "Swing" in ai_choice:
+        wynik = ai_swing(selected_ticker, summary)
+        css = "swing"
+    elif "Day" in ai_choice:
+        wynik = ai_day(selected_ticker, summary)
+        css = "day"
+    else:
+        wynik = ai_long(selected_ticker, summary)
+        css = "long"
+
+    st.markdown(
+        f"""
+        <div class="box {css}">
+            <b>Wynik AI ({ai_choice}):</b><br>{wynik}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+```
