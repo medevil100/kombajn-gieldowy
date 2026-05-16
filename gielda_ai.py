@@ -1,7 +1,9 @@
+
 import streamlit as st
 from openai import OpenAI
-import matplotlib.pyplot as plt
 import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
@@ -241,7 +243,6 @@ def detect_trend(text: str):
         return "bear"
     if "boczny" in t or "konsolidacja" in t or "range" in t:
         return "side"
-    # fallback na podstawie słów
     if "wzrost" in t:
         return "bull"
     if "spad" in t:
@@ -251,15 +252,17 @@ def detect_trend(text: str):
 
 def trend_label_and_color(trend_code: str):
     if trend_code == "bull":
-        return "Trend wzrostowy (🐂 byczy)", "trend-bull", "green"
+        return "Trend wzrostowy (🐂 byczy)", "trend-bull"
     if trend_code == "bear":
-        return "Trend spadkowy (🐻 niedźwiedzi)", "trend-bear", "red"
-    return "Trend boczny / konsolidacja (➖)", "trend-side", "yellow"
+        return "Trend spadkowy (🐻 niedźwiedzi)", "trend-bear"
+    return "Trend boczny / konsolidacja (➖)", "trend-side"
 
+
+# ================== WYKRESY PLOTLY ==================
 
 def plot_trend_chart(trend_code: str):
-    # prosta syntetyczna seria tylko do wizualizacji
     x = np.arange(50)
+
     if trend_code == "bull":
         y = np.linspace(1, 1.8, 50) + np.random.normal(0, 0.02, 50)
         color = "lime"
@@ -270,28 +273,165 @@ def plot_trend_chart(trend_code: str):
         y = 1 + 0.05 * np.sin(np.linspace(0, 6, 50)) + np.random.normal(0, 0.01, 50)
         color = "gold"
 
-    # Bollinger na syntetycznych danych
     ma = np.convolve(y, np.ones(5)/5, mode="same")
     std = np.std(y)
     upper = ma + 2 * std
     lower = ma - 2 * std
 
-    fig, ax = plt.subplots(figsize=(6, 3))
-    ax.plot(x, y, color=color, label="Cena (syntetyczna)")
-    ax.plot(x, ma, color="white", linewidth=1.2, label="Środkowa banda (MA)")
-    ax.plot(x, upper, color="#60a5fa", linestyle="--", linewidth=0.8, label="Górna banda")
-    ax.plot(x, lower, color="#60a5fa", linestyle="--", linewidth=0.8, label="Dolna banda")
-    ax.fill_between(x, lower, upper, color="#4c1d95", alpha=0.15)
+    fig = go.Figure()
 
-    ax.set_facecolor("#020617")
-    fig.patch.set_facecolor("#020617")
-    ax.tick_params(colors="#9ca3af")
-    for spine in ax.spines.values():
-        spine.set_color("#4b5563")
-    ax.legend(facecolor="#020617", edgecolor="#4b5563", labelcolor="#e5e7eb", fontsize=8)
-    ax.set_title("Syntetyczny wykres trendu + Bollinger Bands", color="#e5e7eb", fontsize=10)
+    fig.add_trace(go.Scatter(
+        x=x, y=y,
+        mode="lines",
+        line=dict(color=color, width=3),
+        name="Cena (syntetyczna)"
+    ))
 
-    st.pyplot(fig)
+    fig.add_trace(go.Scatter(
+        x=x, y=ma,
+        mode="lines",
+        line=dict(color="white", width=1.5),
+        name="Środkowa banda (MA)"
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=x, y=upper,
+        mode="lines",
+        line=dict(color="#60a5fa", width=1, dash="dash"),
+        name="Górna banda"
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=x, y=lower,
+        mode="lines",
+        line=dict(color="#60a5fa", width=1, dash="dash"),
+        name="Dolna banda"
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=np.concatenate([x, x[::-1]]),
+        y=np.concatenate([upper, lower[::-1]]),
+        fill="toself",
+        fillcolor="rgba(76, 29, 149, 0.2)",
+        line=dict(color="rgba(255,255,255,0)"),
+        hoverinfo="skip",
+        showlegend=False
+    ))
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=300,
+        margin=dict(l=20, r=20, t=30, b=20),
+        paper_bgcolor="#020617",
+        plot_bgcolor="#020617",
+        font=dict(color="#e5e7eb"),
+        title="Syntetyczny wykres trendu + Bollinger Bands"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def plot_multichart(trend_code: str):
+    n = 80
+    x = np.arange(n)
+
+    if trend_code == "bull":
+        base = np.linspace(1, 1.8, n)
+    elif trend_code == "bear":
+        base = np.linspace(1, 0.4, n)
+    else:
+        base = 1 + 0.05 * np.sin(np.linspace(0, 6, n))
+
+    noise = np.random.normal(0, 0.03, n)
+    close = base + noise
+    open_ = close - np.random.normal(0, 0.02, n)
+    high = np.maximum(open_, close) + np.random.normal(0, 0.015, n)
+    low = np.minimum(open_, close) - np.random.normal(0, 0.015, n)
+
+    def sma(arr, window):
+        return np.convolve(arr, np.ones(window)/window, mode="same")
+
+    sma20 = sma(close, 20)
+    sma50 = sma(close, 50)
+    sma100 = sma(close, 100)
+    sma200 = sma(close, 200)
+
+    ma = sma(close, 20)
+    std = np.std(close)
+    upper = ma + 2 * std
+    lower = ma - 2 * std
+
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = sma(gain, 14)
+    avg_loss = sma(loss, 14)
+    rs = avg_gain / (avg_loss + 1e-6)
+    rsi = 100 - (100 / (1 + rs))
+
+    volume = np.random.randint(80, 150, n)
+
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.05,
+        row_heights=[0.55, 0.25, 0.20]
+    )
+
+    fig.add_trace(go.Candlestick(
+        x=x,
+        open=open_,
+        high=high,
+        low=low,
+        close=close,
+        increasing_line_color="lime",
+        decreasing_line_color="red",
+        name="Świece"
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(x=x, y=sma20, line=dict(color="orange", width=1.5), name="SMA20"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=sma50, line=dict(color="cyan", width=1.5), name="SMA50"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=sma100, line=dict(color="violet", width=1.5), name="SMA100"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=sma200, line=dict(color="gray", width=1.5), name="SMA200"), row=1, col=1)
+
+    fig.add_trace(go.Scatter(x=x, y=upper, line=dict(color="#60a5fa", dash="dash"), name="BB Upper"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=lower, line=dict(color="#60a5fa", dash="dash"), name="BB Lower"), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=np.concatenate([x, x[::-1]]),
+        y=np.concatenate([upper, lower[::-1]]),
+        fill="toself",
+        fillcolor="rgba(76, 29, 149, 0.2)",
+        line=dict(color="rgba(255,255,255,0)"),
+        hoverinfo="skip",
+        showlegend=False
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=x, y=rsi,
+        line=dict(color="yellow", width=2),
+        name="RSI"
+    ), row=2, col=1)
+
+    fig.add_hline(y=70, line=dict(color="red", dash="dot"), row=2, col=1)
+    fig.add_hline(y=30, line=dict(color="lime", dash="dot"), row=2, col=1)
+
+    fig.add_trace(go.Bar(
+        x=x, y=volume,
+        marker_color="purple",
+        name="Volume"
+    ), row=3, col=1)
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=800,
+        margin=dict(l=20, r=20, t=30, b=20),
+        paper_bgcolor="#020617",
+        plot_bgcolor="#020617",
+        font=dict(color="#e5e7eb"),
+        title="📊 MULTICHART: Trend + BB + SMA + RSI + Volume"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
 
 
 # ================== UI ==================
@@ -310,19 +450,16 @@ Sygnały:
 - Momentum dodatnie"""
 )
 
-# --- Analiza tekstowa przed wyborem AI ---
-
 patterns = detect_patterns(dane)
 sma_info = analyze_sma(dane)
 sl_tp_info = analyze_sl_tp(dane)
 fibo_info = analyze_fibo(dane)
 bb_info = analyze_bollinger(dane)
 trend_code = detect_trend(dane)
-trend_label, trend_css, trend_color = trend_label_and_color(trend_code)
+trend_label, trend_css = trend_label_and_color(trend_code)
 
 st.subheader("🔍 Wykryte elementy techniczne")
 
-# Trend (kolorowe ramki + niedźwiedź/byk)
 st.markdown(
     f"""
     <div class="trend-box {trend_css}">
@@ -357,8 +494,11 @@ if sl_tp_info:
     for r in sl_tp_info:
         st.markdown(f"- {r}")
 
-with st.expander("📊 Podgląd syntetycznego wykresu trendu + Bollinger"):
+with st.expander("📊 Syntetyczny wykres trendu + Bollinger"):
     plot_trend_chart(trend_code)
+
+with st.expander("📈 MULTICHART — pełna analiza techniczna"):
+    plot_multichart(trend_code)
 
 st.markdown(
     """
