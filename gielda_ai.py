@@ -7,8 +7,8 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+# ================== KONFIG ==================
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-
 st.set_page_config(page_title="3× AI — Swing / Day / Long", layout="centered")
 
 # ================== STYLE ==================
@@ -50,8 +50,8 @@ st.markdown("""
 
 st.title("📈 3× AI — Swing / Day / Long (3 modele GPT, realne dane)")
 
+# ================== AI MODUŁY ==================
 
-# ================== AI #1 — SWING (gpt‑4o‑mini) ==================
 def ai_swing(ticker, text):
     prompt = f"""
 Jesteś agresywnym traderem swingowym.
@@ -73,7 +73,6 @@ Zadanie:
     return r.choices[0].message.content.strip()
 
 
-# ================== AI #2 — DAY (gpt‑4o) ==================
 def ai_day(ticker, text):
     prompt = f"""
 Jesteś precyzyjnym daytraderem.
@@ -95,7 +94,6 @@ Zadanie:
     return r.choices[0].message.content.strip()
 
 
-# ================== AI #3 — LONG (o3‑mini) ==================
 def ai_long(ticker, text):
     prompt = f"""
 Jesteś spokojnym analitykiem długoterminowym.
@@ -131,17 +129,22 @@ def get_ohlc(ticker: str, tf: str) -> pd.DataFrame:
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
     close = df["Close"]
 
     # SMA
     for w in [20, 50, 100, 200]:
         df[f"SMA{w}"] = close.rolling(w).mean()
 
-    # Bollinger (20)
-    ma = df["SMA20"]
-    std = close.rolling(20).std()
-    df["BB_upper"] = ma + 2 * std
-    df["BB_lower"] = ma - 2 * std
+    # Bollinger (klasyczny: MA20 + 2*STD20 na CLOSE)
+    ma20 = close.rolling(20).mean()
+    std20 = close.rolling(20).std()
+
+    bb_upper = (ma20 + 2 * std20)
+    bb_lower = (ma20 - 2 * std20)
+
+    df["BB_upper"] = bb_upper.reindex(df.index).astype(float)
+    df["BB_lower"] = bb_lower.reindex(df.index).astype(float)
 
     # RSI14
     delta = close.diff()
@@ -173,7 +176,6 @@ def detect_trend_from_df(df: pd.DataFrame) -> str:
             return "bull"
         if last["Close"] < last["SMA200"] * 0.99:
             return "bear"
-    # fallback na SMA50
     if pd.notna(last.get("SMA50")):
         if last["Close"] > last["SMA50"]:
             return "bull"
@@ -207,12 +209,11 @@ def detect_sma_signals(df: pd.DataFrame):
     res = []
     for w in [20, 50, 100, 200]:
         col = f"SMA{w}"
-        if pd.notna(last[col]):
+        if col in df.columns and pd.notna(last[col]):
             if last["Close"] > last[col]:
                 res.append(f"Cena powyżej SMA{w} — wsparcie trendu wzrostowego.")
             elif last["Close"] < last[col]:
                 res.append(f"Cena poniżej SMA{w} — presja podażowa względem SMA{w}.")
-    # golden / death cross (ostatnie 5 świec)
     if df["SMA50"].notna().sum() > 5 and df["SMA200"].notna().sum() > 5:
         s50 = df["SMA50"].tail(5)
         s200 = df["SMA200"].tail(5)
@@ -268,7 +269,6 @@ def build_summary_for_ai(df: pd.DataFrame, trend_code: str, tf: str) -> str:
     sma_sig = detect_sma_signals(df)
     rsi_sig = detect_rsi_signal(df)
     sl_txt, tp_txt = compute_sl_tp(df, trend_code)
-
     trend_label, _ = trend_label_and_css(trend_code)
 
     lines = []
@@ -285,11 +285,11 @@ def build_summary_for_ai(df: pd.DataFrame, trend_code: str, tf: str) -> str:
     return "\n".join(lines)
 
 
-# ================== WYKRESY ==================
+# ================== WYKRES MULTICHART ==================
 
 def plot_multichart(df: pd.DataFrame):
     df = df.dropna().copy()
-    df = df.tail(120)  # nie za dużo, żeby było czytelnie
+    df = df.tail(120)
 
     x = df.index
 
@@ -313,7 +313,7 @@ def plot_multichart(df: pd.DataFrame):
 
     for w, color in [(20, "orange"), (50, "cyan"), (100, "violet"), (200, "gray")]:
         col = f"SMA{w}"
-        if col in df.columns:
+        if col in df.columns and df[col].notna().any():
             fig.add_trace(go.Scatter(
                 x=x, y=df[col],
                 line=dict(color=color, width=1.3),
@@ -451,7 +451,7 @@ if st.button("Analizuj (realne dane + AI)"):
         """
         <div class="info-box">
             Analiza oparta na realnych danych z Yahoo Finance (yfinance).
-            Warto zawsze skonfrontować ją z własnym planem i zarządzaniem ryzykiem.
+            Zawsze łącz to z własnym planem, risk managementem i kontekstem rynkowym.
         </div>
         """,
         unsafe_allow_html=True,
