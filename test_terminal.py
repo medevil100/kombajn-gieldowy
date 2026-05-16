@@ -25,7 +25,9 @@ st.markdown(
         border-radius: 6px !important; border: none !important; box-shadow: 0 0 12px rgba(0, 255, 102, 0.5);
     }
     .consensus-box {
-        padding: 15px; border-radius: 8px; border: 1px solid #30363D; text-align: center; margin-bottom: 20px;
+        padding: 20px; border-radius: 8px; border: 1px solid #30363D; 
+        background-color: #161B22; color: #E6EDF2; text-align: left; 
+        margin-top: 20px; margin-bottom: 20px; line-height: 1.6;
     }
     </style>
 """,
@@ -273,7 +275,7 @@ def skanuj_wybrane_spolki(lista_tickerow):
     return df_wynikowy, slownik_df
 
 
-# --- ASYNCHRONICZNE ODPYTYWANIE OPENAI ---
+# --- NAPRAWIONE ASYNCHRONICZNE ODPYTYWANIE OPENAI ---
 async def async_generuj_odpowiedz_modelu(client, model, prompt):
     params = {"model": model, "messages": [{"role": "user", "content": prompt}]}
     if model == "o3-mini":
@@ -281,7 +283,8 @@ async def async_generuj_odpowiedz_modelu(client, model, prompt):
 
     try:
         response = await client.chat.completions.create(**params)
-        return response.choices.message.content
+        # NAPRAWA BŁĘDU MAPOWANIA STRUKTURY ODPOWIEDZI DLA NOWEGO API OPENAI
+        return response.choices[0].message.content
     except Exception as e:
         return f"Błąd LLM ({model}): {str(e)}"
 
@@ -327,11 +330,10 @@ def main():
         ]
         
         if not okazje.empty:
-            # Wyzwolenie fizycznego dźwięku oraz komunikatu na PC
             wyzwól_alarm_dzwiekowy_pc()
             st.error(f"🚨 ALARM SYSTEMOWY PC: Wykryto okazje zakupowe dla spółek: {', '.join(okazje['Ticker'].tolist())}!")
 
-        # Analiza Konsensusu AI
+        # Analiza Konsensusu AI (Panel z ulepszonym stylem wyświetlania)
         st.subheader("🤖 Analiza Konsensusu Sztucznej Inteligencji")
         client = AsyncOpenAI(api_key=OPENAI_API_KEY)
         
@@ -340,12 +342,13 @@ def main():
         {df_wyniki.to_string(index=False)}
         
         Wskaż 2 najlepsze okazje inwestycyjne oparte o sygnały Wstęg Bollingera (BB), poziomów Fibonacciego (Fibo) oraz nowego oscylatora Stochastic i trendu MA10/MA50.
-        Podaj jasne i precyzyjne uzasadnienie.
+        Podaj jasne i precyzyjne uzasadnienie w punktach.
         """
         
         with st.spinner("AI generuje konsensus analityczny..."):
             analiza_tekst = asyncio.run(async_generuj_odpowiedz_modelu(client, model_ai, prompt_ai))
             
+        # Wyświetlenie komentarza AI w sformatowanym panelu consensus-box
         st.markdown(f'<div class="consensus-box">{analiza_tekst}</div>', unsafe_allow_html=True)
 
         st.subheader("📈 Interaktywny podgląd wykresów technicznych")
