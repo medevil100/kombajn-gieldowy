@@ -54,7 +54,7 @@ def ai_day(ticker, text):
 def ai_long(ticker, text):
     r = client.chat.completions.create(
         model="o3-mini",
-        messages=[{"role": "user", "content": f"Długoterminowy analityk ryzyka. Analiza dla {ticker} (groszówka): {text}. Zadanie: 2-3 zdania oceny stabilności."}],
+        messages=[{"role": "user", "content": f"Długoterminowy analityk ryzyka. Analiza dla {ticker}: {text}. Zadanie: 2-3 zdania oceny stabilności."}],
     )
     return r.choices[0].message.content.strip()
 
@@ -72,41 +72,47 @@ def ai_meta_pick(market_df: pd.DataFrame, alerts: list, volume_signals: list) ->
 def ai_swing_verdict(ticker, text):
     r = client.chat.completions.create(
         model="gpt-4o-mini",
-        temperature=0.2,
+        temperature=0.1,
         messages=[{
             "role": "user",
-            "content": f"Jesteś swing traderem. Dane: {text}. "
-                       f"Zwróć jedno słowo: KUP, CZEKAJ lub SPRZEDAJ."
+            "content": f"Analiza swing trading dla {ticker}. Dane: {text}. "
+                       f"Podaj werdykt w formacie: SWING: KUP / CZEKAJ / SPRZEDAJ."
         }],
     )
-    out = r.choices[0].message.content.strip().upper()
-    return "KUP" if "KUP" in out else "SPRZEDAJ" if "SPRZED" in out else "CZEKAJ"
+    out = r.choices[0].message.content.upper()
+    if "KUP" in out: return "KUP"
+    if "SPRZED" in out: return "SPRZEDAJ"
+    return "CZEKAJ"
 
 def ai_day_verdict(ticker, text):
     r = client.chat.completions.create(
         model="gpt-4o",
-        temperature=0.2,
+        temperature=0.1,
         messages=[{
             "role": "user",
-            "content": f"Jesteś daytraderem. Dane: {text}. "
-                       f"Zwróć jedno słowo: KUP, CZEKAJ lub SPRZEDAJ."
+            "content": f"Analiza daytrading dla {ticker}. Dane: {text}. "
+                       f"Podaj werdykt w formacie: DAY: KUP / CZEKAJ / SPRZEDAJ."
         }],
     )
-    out = r.choices[0].message.content.strip().upper()
-    return "KUP" if "KUP" in out else "SPRZEDAJ" if "SPRZED" in out else "CZEKAJ"
+    out = r.choices[0].message.content.upper()
+    if "KUP" in out: return "KUP"
+    if "SPRZED" in out: return "SPRZEDAJ"
+    return "CZEKAJ"
 
 def ai_long_verdict(ticker, text):
     r = client.chat.completions.create(
         model="o3-mini",
-        temperature=0.2,
+        temperature=0.1,
         messages=[{
             "role": "user",
-            "content": f"Jesteś analitykiem długoterminowym. Dane: {text}. "
-                       f"Zwróć jedno słowo: KUP, CZEKAJ lub SPRZEDAJ."
+            "content": f"Analiza długoterminowa dla {ticker}. Dane: {text}. "
+                       f"Podaj werdykt w formacie: LONG: KUP / CZEKAJ / SPRZEDAJ."
         }],
     )
-    out = r.choices[0].message.content.strip().upper()
-    return "KUP" if "KUP" in out else "SPRZEDAJ" if "SPRZED" in out else "CZEKAJ"
+    out = r.choices[0].message.content.upper()
+    if "KUP" in out: return "KUP"
+    if "SPRZED" in out: return "SPRZEDAJ"
+    return "CZEKAJ"
 
 def ai_risk_score(text):
     r = client.chat.completions.create(
@@ -148,14 +154,13 @@ def ai_signal(text):
                        f"Zwróć jedną etykietę: BUY, WATCH lub AVOID."
         }],
     )
-    out = r.choices[0].message.content.strip().upper()
+    out = r.choices[0].message.content.upper()
     if "BUY" in out: return "BUY"
     if "AVOID" in out: return "AVOID"
     return "WATCH"
 
 # ================== DANE I WSKAŹNIKI ==================
 def get_ohlc(ticker: str, tf: str) -> pd.DataFrame:
-    # Pobieramy większy zapas danych dla D1 (2 lata), żeby SMA200 na pewno się wyliczyło
     period_str = "2y" if tf == "D1" else "60d"
     interval_str = "1d" if tf == "D1" else "60m"
     
@@ -164,13 +169,10 @@ def get_ohlc(ticker: str, tf: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
-    # POPRAWKA: Zaawansowane oczyszczanie MultiIndex w nowym yfinance
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
     df.columns = [str(c).strip() for c in df.columns]
-    
-    # Usuwamy tylko puste podstawowe wiersze OHLCV, nie ruszając wskaźników
     df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
     return df
 
@@ -178,7 +180,6 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     close = df["Close"]
 
-    # Obliczanie SMA (jeśli brakuje danych, kolumna będzie miała częściowe NaN, ale nie kasujemy wierszy!)
     for w in [20, 50, 100, 200]:
         df[f"SMA{w}"] = close.rolling(w).mean()
 
@@ -208,7 +209,6 @@ def detect_trend_from_df(df: pd.DataFrame) -> str:
     last = df.iloc[-1]
     close_val = float(last["Close"])
     
-    # Sprawdzamy bezpiecznie czy wskaźnik SMA200/50 w ogóle istnieje i nie jest NaN
     sma200 = float(last["SMA200"]) if "SMA200" in df.columns and pd.notna(last["SMA200"]) else None
     sma50 = float(last["SMA50"]) if "SMA50" in df.columns and pd.notna(last["SMA50"]) else None
 
@@ -318,101 +318,4 @@ if st.sidebar.button("Uruchom Skaner i AI 🚀"):
         df_feats = add_indicators(df_raw)
         trend_c = detect_trend_from_df(df_feats)
         score_t = compute_trend_score(df_feats, trend_c)
-        v_sigs = detect_volume_breakout_signals(df_feats, tk)
-        
-        c_val = float(df_feats.iloc[-1]["Close"])
-        
-        all_market_data.append({"Ticker": tk, "Trend": trend_c, "Close": c_val, "TrendScore": score_t})
-        global_volume_sigs.extend(v_sigs)
-        
-        if trend_c == "bull": global_alerts.append(f"🟢 {tk} - Silny trend wzrostowy.")
-        elif trend_c == "bear": global_alerts.append(f"🔴 {tk} - Presja podażowa.")
-            
-        processed_dfs[tk] = (df_feats, trend_c, score_t)
-
-    if processed_dfs:
-        market_summary_df = pd.DataFrame(all_market_data)
-
-        # 1. Heatmapa rynku
-        st.subheader("📊 Wizualna mapa skanera (Trend Score)")
-        st.markdown('<div class="heatmap-container">', unsafe_allow_html=True)
-        for _, row in market_summary_df.iterrows():
-            bg_color = "#064e3b" if row["Trend"] == "bull" else ("#7f1d1d" if row["Trend"] == "bear" else "#78350f")
-            st.markdown(f"""
-                <div class="heatmap-tile" style="background-color: {bg_color};">
-                    <b style="font-size:14px;">{row['Ticker']}</b>
-                    <span>Cena: {row['Close']:.2f}</span>
-                    <span>Score: {row['TrendScore']:.0f}</span>
-                </div>
-            """, unsafe_allow_html=True)
-        st.markdown('</div><br>', unsafe_allow_html=True)
-
-        # 2. Tabela 3× AI dla wszystkich spółek
-        st.subheader("🤖 3× AI — Werdykty dla wszystkich spółek")
-        verdict_rows = []
-        for _, row in market_summary_df.iterrows():
-            tk = row["Ticker"]
-            df_t, trend_t, score_t = processed_dfs[tk]
-            last = df_t.iloc[-1]
-            payload = f"Cena: {last['Close']:.4f}, RSI: {last['RSI14']:.1f}, Trend: {trend_t}, Score: {score_t}"
-            v_swing = ai_swing_verdict(tk, payload)
-            v_day = ai_day_verdict(tk, payload)
-            v_long = ai_long_verdict(tk, payload)
-            votes = [v_swing, v_day, v_long]
-            final = max(set(votes), key=votes.count)
-            risk = ai_risk_score(payload)
-            opp = ai_opportunity_score(payload)
-            sig = ai_signal(payload)
-            verdict_rows.append({
-                "Ticker": tk,
-                "Cena": row["Close"],
-                "Trend": trend_t,
-                "Score": score_t,
-                "SWING": v_swing,
-                "DAY": v_day,
-                "LONG": v_long,
-                "FINAL": final,
-                "RISK": risk,
-                "OPPORTUNITY": opp,
-                "SIGNAL": sig
-            })
-        verdict_df = pd.DataFrame(verdict_rows)
-        verdict_df = verdict_df.sort_values(["FINAL", "Score"], ascending=[True, False])
-        st.dataframe(verdict_df, use_container_width=True)
-
-        # 3. Generowanie Raportu Meta-AI
-        st.subheader("🤖 Globalny Raport Strategiczny META AI")
-        with st.spinner("Model o3-mini analizuje strukturę rynkową..."):
-            st.info(ai_meta_pick(market_summary_df, global_alerts, global_volume_sigs))
-
-        # 4. Szczegółowy podgląd pojedynczej spółki
-        st.subheader("🔍 Szczegółowa inspekcja spółki")
-        selected_tk = st.selectbox("Wybierz walor do analizy 3 modeli AI:", list(processed_dfs.keys()))
-        
-        if selected_tk:
-            df_selected, trend_c, score_t = processed_dfs[selected_tk]
-            label, css_class = trend_label_and_css(trend_c)
-            
-            st.markdown(f'<div class="trend-box {css_class}">Wybrany walor: {selected_tk} — {label} (Score: {score_t:.0f}/100)</div>', unsafe_allow_html=True)
-            
-            st.markdown('<div class="plot-border">', unsafe_allow_html=True)
-            st.plotly_chart(plot_multichart(df_selected, selected_tk), use_container_width=True)
-            st.markdown('</div>', unsafe_allow_html=True)
-            
-            st.markdown("### 💬 Konsylium analityczne modeli AI")
-            c1, c2, c3 = st.columns(3)
-            
-            last_bar = df_selected.iloc[-1]
-            summary_payload = f"Cena: {float(last_bar['Close']):.4f}, RSI14: {float(last_bar['RSI14']):.1f}, Trend: {trend_c}"
-            
-            with c1:
-                st.markdown('<div class="box swing">🎯 SWING TRADER</div>', unsafe_allow_html=True)
-                st.write(ai_swing(selected_tk, summary_payload))
-            with c2:
-                st.markdown('<div class="box day">⚡ DAYTRADER</div>', unsafe_allow_html=True)
-                st.write(ai_day(selected_tk, summary_payload))
-            with c3:
-                st.markdown('<div class="box long">⏳ LONG-TERM</div>', unsafe_allow_html=True)
-                st.write(ai_long(selected_tk, summary_payload))
-    else:
-        st.error("Brak przetworzonych spółek. Wszystkie wybrane tickery zwróciły puste dane lub miały zbyt krótką historię notowań w tym interwale.")
+        v_sigs = detect_volume_breakout_signals(df_feats,
