@@ -203,7 +203,6 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["VolMA20"] = df["Volume"].rolling(20).mean()
 
     return df
-
 # ================== TREND, SCORE, SYGNAŁY ==================
 def detect_trend_from_df(df: pd.DataFrame) -> str:
     last = df.iloc[-1]
@@ -318,4 +317,31 @@ if st.sidebar.button("Uruchom Skaner i AI 🚀"):
         df_feats = add_indicators(df_raw)
         trend_c = detect_trend_from_df(df_feats)
         score_t = compute_trend_score(df_feats, trend_c)
-        v_sigs = detect_volume_breakout_signals(df_feats,
+        v_sigs = detect_volume_breakout_signals(df_feats, tk)
+
+        c_val = float(df_feats.iloc[-1]["Close"])
+        
+        all_market_data.append({"Ticker": tk, "Trend": trend_c, "Close": c_val, "TrendScore": score_t})
+        global_volume_sigs.extend(v_sigs)
+        
+        if trend_c == "bull": global_alerts.append(f"🟢 {tk} - Silny trend wzrostowy.")
+        elif trend_c == "bear": global_alerts.append(f"🔴 {tk} - Presja podażowa.")
+            
+        processed_dfs[tk] = (df_feats, trend_c, score_t)
+
+    if processed_dfs:
+        market_summary_df = pd.DataFrame(all_market_data)
+
+        # 1. Heatmapa rynku
+        st.subheader("📊 Wizualna mapa skanera (Trend Score)")
+        st.markdown('<div class="heatmap-container">', unsafe_allow_html=True)
+        for _, row in market_summary_df.iterrows():
+            bg_color = "#064e3b" if row["Trend"] == "bull" else ("#7f1d1d" if row["Trend"] == "bear" else "#78350f")
+            st.markdown(f"""
+                <div class="heatmap-tile" style="background-color: {bg_color};">
+                    <b style="font-size:14px;">{row['Ticker']}</b>
+                    <span>Cena: {row['Close']:.2f}</span>
+                    <span>Score: {row['TrendScore']:.0f}</span>
+                </div>
+            """, unsafe_allow_html=True)
+        st.markdown('</div><br>', unsafe_allow_html=True)
