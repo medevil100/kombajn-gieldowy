@@ -124,9 +124,8 @@ def calculate_indicators(ticker: str, interval: str):
     except Exception:
         return None, None
 
-# ================== SILNIK MASOWYCH ZAPYTAŃ AI ==================
+# ================== SILNIK MASOWYCH ZAPYTAŃ AI (3× STRATEGIE) ==================
 def ask_ai_batch(ticker: str, text: str):
-    """Pobiera analizę dla 3 strategii w jednym zapytaniu LLM, oszczędzając czas i limity API"""
     try:
         r = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -170,6 +169,62 @@ def ask_ai_batch(ticker: str, text: str):
             "v_day": "CZEKAJ",
             "v_long": "CZEKAJ"
         }
+
+# ================== AI MARKET REGIME DETECTOR ==================
+def ai_market_regime(summary_text: str):
+    try:
+        r = client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0.25,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Jesteś analitykiem rynku groszówek. "
+                    "Na podstawie poniższego zbiorczego raportu z wielu spółek oceń:\n"
+                    "- sentyment rynku (BULL / NEUTRAL / BEAR)\n"
+                    "- poziom ryzyka systemowego (0–100)\n"
+                    "- poziom spekulacji (0–100)\n"
+                    "- czy rynek jest w fazie: ACCUMULATION / DISTRIBUTION / EXPLOSION / PANIC\n"
+                    "- krótka rekomendacja stylu gry (agresywny / defensywny / neutralny)\n\n"
+                    f"Raport:\n{summary_text}\n\n"
+                    "Zwróć odpowiedź w formacie:\n"
+                    "[SENTYMENT] ...\n"
+                    "[RYZYKO] ...\n"
+                    "[SPEKULACJA] ...\n"
+                    "[FAZA] ...\n"
+                    "[REKOMENDACJA] ..."
+                )
+            }]
+        )
+        return r.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Błąd AI-MRD: {e}"
+
+# ================== AI PATTERN DETECTOR ==================
+def ai_pattern_detector(ticker: str, text: str):
+    try:
+        r = client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0.35,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Analizujesz spółkę {ticker}. Dane techniczne:\n{text}\n\n"
+                    "Wykryj formacje:\n"
+                    "- świecowe (np. młot, objęcie, harami, pinbar)\n"
+                    "- wolumenowe (climax, dry-up, breakout)\n"
+                    "- trendowe (kanał, wybicie, odwrócenie)\n"
+                    "- anomalie (short squeeze setup, liquidity trap, exhaustion)\n\n"
+                    "Zwróć odpowiedź w formacie:\n"
+                    "[FORMACJE] ...\n"
+                    "[ANOMALIE] ...\n"
+                    "[OCENA] (0–100 siła sygnału)"
+                )
+            }]
+        )
+        return r.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Błąd AI-PD: {e}"
 
 # ================== DODATKOWE 3× AI: RISK / OPPORTUNITY / SIGNAL ==================
 def ai_risk_score(text: str) -> int:
@@ -306,7 +361,8 @@ if tickers_input:
                     "SIGNAL": sig,
                     "swing_txt": ai_res["swing_txt"],
                     "day_txt": ai_res["day_txt"],
-                    "long_txt": ai_res["long_txt"]
+                    "long_txt": ai_res["long_txt"],
+                    "raport_tekst": raport_tekst
                 })
             else:
                 st.warning(f"⚠️ Pominięto {t} — brak danych w yfinance lub zbyt niska płynność.")
@@ -321,6 +377,15 @@ if tickers_input:
             
     if "df_ranking" in st.session_state and not st.session_state.df_ranking.empty:
         st.subheader("🏆 Główny Ranking Groszówek (Sortowanie: Skok Wolumenu)")
+        
+        # === AI MARKET REGIME DETECTOR ===
+        st.subheader("🌐 AI Market Regime — Ocena całego rynku groszówek")
+        market_summary = "\n".join([
+            f"{row['Ticker']}: zmiana {row['Zmiana %']}%, wolumen x{row['Skok Wolumenu']}, RSI {row['RSI (14)']}"
+            for _, row in st.session_state.df_ranking.iterrows()
+        ])
+        mrd = ai_market_regime(market_summary)
+        st.markdown(f"<div class='box long'>{mrd}</div>", unsafe_allow_html=True)
         
         st.subheader("🤖 3× AI — Werdykty + Risk/Opportunity/Signal")
         display_cols = [
@@ -353,6 +418,11 @@ if tickers_input:
             with col3:
                 st.markdown("### 💎 LONG TERM")
                 st.markdown(f'<div class="box long">{row["long_txt"]}</div>', unsafe_allow_html=True)
+            
+            # AI PATTERN DETECTOR dla wybranego waloru
+            st.subheader("🧠 AI Pattern Detector — Formacje i anomalie")
+            pattern_text = ai_pattern_detector(selected_ticker, row["raport_tekst"])
+            st.markdown(f'<div class="box day">{pattern_text}</div>', unsafe_allow_html=True)
             
             if selected_ticker in st.session_state.calculated_dfs:
                 df_plot = st.session_state.calculated_dfs[selected_ticker]
