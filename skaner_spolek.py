@@ -36,7 +36,7 @@ body { background-color: #020617; color: #e5e7eb; font-family: system-ui, sans-s
 
 st.title("📈 3× AI — Terminal Groszówek (PL + USA)")
 
-# ================== AI MODUŁY ==================
+# ================== AI MODUŁY (OPISOWE) ==================
 def ai_swing(ticker, text):
     r = client.chat.completions.create(
         model="gpt-4o-mini", temperature=0.4,
@@ -68,6 +68,91 @@ def ai_meta_pick(market_df: pd.DataFrame, alerts: list, volume_signals: list) ->
     )
     return r.choices[0].message.content.strip()
 
+# ================== AI MODUŁY (WERDYKTY / SCORE) ==================
+def ai_swing_verdict(ticker, text):
+    r = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0.2,
+        messages=[{
+            "role": "user",
+            "content": f"Jesteś swing traderem. Dane: {text}. "
+                       f"Zwróć jedno słowo: KUP, CZEKAJ lub SPRZEDAJ."
+        }],
+    )
+    out = r.choices[0].message.content.strip().upper()
+    return "KUP" if "KUP" in out else "SPRZEDAJ" if "SPRZED" in out else "CZEKAJ"
+
+def ai_day_verdict(ticker, text):
+    r = client.chat.completions.create(
+        model="gpt-4o",
+        temperature=0.2,
+        messages=[{
+            "role": "user",
+            "content": f"Jesteś daytraderem. Dane: {text}. "
+                       f"Zwróć jedno słowo: KUP, CZEKAJ lub SPRZEDAJ."
+        }],
+    )
+    out = r.choices[0].message.content.strip().upper()
+    return "KUP" if "KUP" in out else "SPRZEDAJ" if "SPRZED" in out else "CZEKAJ"
+
+def ai_long_verdict(ticker, text):
+    r = client.chat.completions.create(
+        model="o3-mini",
+        temperature=0.2,
+        messages=[{
+            "role": "user",
+            "content": f"Jesteś analitykiem długoterminowym. Dane: {text}. "
+                       f"Zwróć jedno słowo: KUP, CZEKAJ lub SPRZEDAJ."
+        }],
+    )
+    out = r.choices[0].message.content.strip().upper()
+    return "KUP" if "KUP" in out else "SPRZEDAJ" if "SPRZED" in out else "CZEKAJ"
+
+def ai_risk_score(text):
+    r = client.chat.completions.create(
+        model="o3-mini",
+        temperature=0.1,
+        messages=[{
+            "role": "user",
+            "content": f"Oceń ryzyko inwestycyjne (0-100) na podstawie: {text}. "
+                       f"Zwróć tylko liczbę."
+        }],
+    )
+    try:
+        return int("".join([c for c in r.choices[0].message.content if c.isdigit()]))
+    except:
+        return 50
+
+def ai_opportunity_score(text):
+    r = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0.1,
+        messages=[{
+            "role": "user",
+            "content": f"Oceń potencjał spekulacyjny (0-100) na podstawie: {text}. "
+                       f"Zwróć tylko liczbę."
+        }],
+    )
+    try:
+        return int("".join([c for c in r.choices[0].message.content if c.isdigit()]))
+    except:
+        return 50
+
+def ai_signal(text):
+    r = client.chat.completions.create(
+        model="gpt-4o",
+        temperature=0.2,
+        messages=[{
+            "role": "user",
+            "content": f"Na podstawie danych: {text}. "
+                       f"Zwróć jedną etykietę: BUY, WATCH lub AVOID."
+        }],
+    )
+    out = r.choices[0].message.content.strip().upper()
+    if "BUY" in out: return "BUY"
+    if "AVOID" in out: return "AVOID"
+    return "WATCH"
+
 # ================== DANE I WSKAŹNIKI ==================
 def get_ohlc(ticker: str, tf: str) -> pd.DataFrame:
     # Pobieramy większy zapas danych dla D1 (2 lata), żeby SMA200 na pewno się wyliczyło
@@ -79,26 +164,21 @@ def get_ohlc(ticker: str, tf: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
-    # POPRAWKA: zaawansowane oczyszczanie MultiIndex w nowym yfinance
+    # POPRAWKA: Zaawansowane oczyszczanie MultiIndex w nowym yfinance
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(-1)
+        df.columns = df.columns.get_level_values(0)
 
     df.columns = [str(c).strip() for c in df.columns]
     
-    # 🔥 KLUCZOWA POPRAWKA — NIE USUWAMY WIERSZY, TYLKO UZUPEŁNIAMY
-    df["Open"]   = df["Open"].fillna(method="ffill").fillna(method="bfill")
-    df["High"]   = df["High"].fillna(df["Open"])
-    df["Low"]    = df["Low"].fillna(df["Open"])
-    df["Close"]  = df["Close"].fillna(method="ffill").fillna(method="bfill")
-    df["Volume"] = df["Volume"].fillna(0)
-
+    # Usuwamy tylko puste podstawowe wiersze OHLCV, nie ruszając wskaźników
+    df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
     return df
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     close = df["Close"]
 
-    # SMA
+    # Obliczanie SMA (jeśli brakuje danych, kolumna będzie miała częściowe NaN, ale nie kasujemy wierszy!)
     for w in [20, 50, 100, 200]:
         df[f"SMA{w}"] = close.rolling(w).mean()
 
@@ -128,6 +208,7 @@ def detect_trend_from_df(df: pd.DataFrame) -> str:
     last = df.iloc[-1]
     close_val = float(last["Close"])
     
+    # Sprawdzamy bezpiecznie czy wskaźnik SMA200/50 w ogóle istnieje i nie jest NaN
     sma200 = float(last["SMA200"]) if "SMA200" in df.columns and pd.notna(last["SMA200"]) else None
     sma50 = float(last["SMA50"]) if "SMA50" in df.columns and pd.notna(last["SMA50"]) else None
 
@@ -266,12 +347,45 @@ if st.sidebar.button("Uruchom Skaner i AI 🚀"):
             """, unsafe_allow_html=True)
         st.markdown('</div><br>', unsafe_allow_html=True)
 
-        # 2. Generowanie Raportu Meta-AI
+        # 2. Tabela 3× AI dla wszystkich spółek
+        st.subheader("🤖 3× AI — Werdykty dla wszystkich spółek")
+        verdict_rows = []
+        for _, row in market_summary_df.iterrows():
+            tk = row["Ticker"]
+            df_t, trend_t, score_t = processed_dfs[tk]
+            last = df_t.iloc[-1]
+            payload = f"Cena: {last['Close']:.4f}, RSI: {last['RSI14']:.1f}, Trend: {trend_t}, Score: {score_t}"
+            v_swing = ai_swing_verdict(tk, payload)
+            v_day = ai_day_verdict(tk, payload)
+            v_long = ai_long_verdict(tk, payload)
+            votes = [v_swing, v_day, v_long]
+            final = max(set(votes), key=votes.count)
+            risk = ai_risk_score(payload)
+            opp = ai_opportunity_score(payload)
+            sig = ai_signal(payload)
+            verdict_rows.append({
+                "Ticker": tk,
+                "Cena": row["Close"],
+                "Trend": trend_t,
+                "Score": score_t,
+                "SWING": v_swing,
+                "DAY": v_day,
+                "LONG": v_long,
+                "FINAL": final,
+                "RISK": risk,
+                "OPPORTUNITY": opp,
+                "SIGNAL": sig
+            })
+        verdict_df = pd.DataFrame(verdict_rows)
+        verdict_df = verdict_df.sort_values(["FINAL", "Score"], ascending=[True, False])
+        st.dataframe(verdict_df, use_container_width=True)
+
+        # 3. Generowanie Raportu Meta-AI
         st.subheader("🤖 Globalny Raport Strategiczny META AI")
         with st.spinner("Model o3-mini analizuje strukturę rynkową..."):
             st.info(ai_meta_pick(market_summary_df, global_alerts, global_volume_sigs))
 
-        # 3. Szczegółowy podgląd pojedynczej spółki
+        # 4. Szczegółowy podgląd pojedynczej spółki
         st.subheader("🔍 Szczegółowa inspekcja spółki")
         selected_tk = st.selectbox("Wybierz walor do analizy 3 modeli AI:", list(processed_dfs.keys()))
         
