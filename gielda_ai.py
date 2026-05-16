@@ -1,7 +1,9 @@
 
 import streamlit as st
 from openai import OpenAI
+import yfinance as yf
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -46,7 +48,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 3× AI — Swing / Day / Long (3 modele GPT)")
+st.title("📈 3× AI — Swing / Day / Long (3 modele GPT, realne dane)")
 
 
 # ================== AI #1 — SWING (gpt‑4o‑mini) ==================
@@ -55,7 +57,7 @@ def ai_swing(ticker, text):
 Jesteś agresywnym traderem swingowym.
 Patrzysz na momentum, RSI, wolumen i wybicia.
 
-Analiza SWING dla {ticker}:
+Analiza SWING dla {ticker} (realne dane):
 {text}
 
 Zadanie:
@@ -77,7 +79,7 @@ def ai_day(ticker, text):
 Jesteś precyzyjnym daytraderem.
 Analizujesz mikro‑ruchy, momentum 3, RSI7, wolumen intraday.
 
-Analiza DAYTRADING dla {ticker}:
+Analiza DAYTRADING dla {ticker} (realne dane):
 {text}
 
 Zadanie:
@@ -99,7 +101,7 @@ def ai_long(ticker, text):
 Jesteś spokojnym analitykiem długoterminowym.
 Patrzysz na trend EMA50/100/200, stabilność i wolumen.
 
-Analiza LONG-TERM dla {ticker}:
+Analiza LONG-TERM dla {ticker} (realne dane):
 {text}
 
 Zadanie:
@@ -115,142 +117,72 @@ Zadanie:
     return r.choices[0].message.content.strip()
 
 
-# ================== MODUŁY ANALIZY TEKSTOWEJ ==================
+# ================== DANE I WSKAŹNIKI ==================
 
-def detect_patterns(text: str):
-    text_low = text.lower()
-    patterns = []
+def get_ohlc(ticker: str, tf: str) -> pd.DataFrame:
+    if tf == "D1":
+        df = yf.download(ticker, period="1y", interval="1d", auto_adjust=False)
+    else:  # H1
+        df = yf.download(ticker, period="30d", interval="60m", auto_adjust=False)
 
-    # Trendy
-    if "wzrost" in text_low or "rosną" in text_low or "rosnie" in text_low:
-        patterns.append("Trend wzrostowy")
-    if "spad" in text_low:
-        patterns.append("Trend spadkowy")
-    if "boczny" in text_low or "konsolidacja" in text_low or "range" in text_low:
-        patterns.append("Trend boczny / konsolidacja")
-
-    # Momentum
-    if "momentum dodatnie" in text_low:
-        patterns.append("Momentum dodatnie")
-    if "momentum ujemne" in text_low:
-        patterns.append("Momentum ujemne")
-
-    # EMA / MA
-    if "ema20 > ema50" in text_low:
-        patterns.append("Wybicie krótkoterminowe (EMA20 ponad EMA50)")
-    if "ema50 > ema200" in text_low:
-        patterns.append("Długoterminowy trend wzrostowy (EMA50 ponad EMA200)")
-    if "ema50 < ema200" in text_low:
-        patterns.append("Długoterminowy trend spadkowy (EMA50 poniżej EMA200)")
-
-    # RSI
-    if "rsi" in text_low:
-        if "powyżej 70" in text_low or "powyzej 70" in text_low:
-            patterns.append("RSI w strefie wykupienia")
-        if "poniżej 30" in text_low or "ponizej 30" in text_low:
-            patterns.append("RSI w strefie wyprzedania")
-        if "powyżej 50" in text_low or "powyzej 50" in text_low:
-            patterns.append("RSI wspiera trend wzrostowy")
-
-    # Formacje świecowe
-    if "doji" in text_low:
-        patterns.append("Formacja Doji — sygnał niezdecydowania")
-    if "młot" in text_low or "mlot" in text_low or "hammer" in text_low:
-        patterns.append("Formacja Hammer — potencjalne odbicie")
-    if "objęcie hossy" in text_low or "objecie hossy" in text_low:
-        patterns.append("Bullish Engulfing — silny sygnał wzrostowy")
-    if "objęcie bessy" in text_low or "objecie bessy" in text_low:
-        patterns.append("Bearish Engulfing — sygnał spadkowy")
-
-    return patterns
+    df = df.dropna()
+    df = df.rename(columns=str.strip)
+    return df
 
 
-def analyze_sma(text: str):
-    t = text.lower()
-    res = []
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    close = df["Close"]
 
-    if "sma20" in t or "ma20" in t:
-        res.append("SMA20: krótkoterminowy kierunek rynku.")
-    if "sma50" in t or "ma50" in t:
-        res.append("SMA50: średnioterminowy trend kontroluje ruch.")
-    if "sma100" in t or "ma100" in t:
-        res.append("SMA100: filtruje szum, pokazuje głębszy trend.")
-    if "sma200" in t or "ma200" in t:
-        res.append("SMA200: kluczowa granica byków i niedźwiedzi.")
+    # SMA
+    for w in [20, 50, 100, 200]:
+        df[f"SMA{w}"] = close.rolling(w).mean()
 
-    if "sma50 > sma200" in t or "ma50 > ma200" in t:
-        res.append("Golden cross (SMA50 ponad SMA200) — silny sygnał byczy.")
-    if "sma50 < sma200" in t or "ma50 < ma200" in t:
-        res.append("Death cross (SMA50 poniżej SMA200) — przewaga niedźwiedzi.")
+    # Bollinger (20)
+    ma = df["SMA20"]
+    std = close.rolling(20).std()
+    df["BB_upper"] = ma + 2 * std
+    df["BB_lower"] = ma - 2 * std
 
-    return res
+    # RSI14
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    roll_up = gain.rolling(14).mean()
+    roll_down = loss.rolling(14).mean()
+    rs = roll_up / (roll_down + 1e-9)
+    df["RSI14"] = 100 - (100 / (1 + rs))
 
+    # ATR14
+    high = df["High"]
+    low = df["Low"]
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        (high - low),
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ], axis=1).max(axis=1)
+    df["ATR14"] = tr.rolling(14).mean()
 
-def analyze_sl_tp(text: str):
-    t = text.lower()
-    res = []
-
-    if "atr" in t:
-        res.append("Możliwy SL: ~1.5× ATR poniżej kluczowego swingu.")
-        res.append("Możliwy TP: 2–3× ATR w kierunku dominującego trendu.")
-    if "swing low" in t or "lokalne minimum" in t:
-        res.append("Logiczny SL pod ostatnim lokalnym minimum (swing low).")
-    if "opór" in t or "opor" in t:
-        res.append("TP można rozważyć przy najbliższej strefie oporu.")
-    if not res:
-        res.append("Brak jednoznacznych danych — SL/TP do doprecyzowania względem zmienności i ostatnich swingów.")
-
-    return res
+    return df
 
 
-def analyze_fibo(text: str):
-    t = text.lower()
-    res = []
-
-    if "0.382" in t:
-        res.append("Reakcja na 0.382 — płytka korekta, trend wciąż silny.")
-    if "0.5" in t:
-        res.append("Poziom 0.5 — klasyczna, symetryczna korekta.")
-    if "0.618" in t:
-        res.append("Złoty poziom 0.618 — kluczowa strefa decyzyjna.")
-    if "0.786" in t:
-        res.append("Głęboka korekta 0.786 — często ostatnia linia obrony trendu.")
-
-    return res
-
-
-def analyze_bollinger(text: str):
-    t = text.lower()
-    res = []
-
-    if "wybicie górnej" in t or "wybicie gornej" in t:
-        res.append("Wybicie górnej wstęgi — silne momentum wzrostowe.")
-    if "odbicie od dolnej" in t:
-        res.append("Odbicie od dolnej wstęgi — potencjalne odbicie w górę.")
-    if "squeeze" in t or "ścisk" in t or "scisk" in t:
-        res.append("Squeeze Bollingera — możliwy silny ruch po wybiciu.")
-    if not res:
-        res.append("Brak wyraźnych sygnałów z wstęg Bollingera w danych tekstowych.")
-
-    return res
-
-
-def detect_trend(text: str):
-    t = text.lower()
-    if "trend: wzrostowy" in t or "trend wzrostowy" in t or "byczy" in t:
-        return "bull"
-    if "trend: spadkowy" in t or "trend spadkowy" in t or "niedźwiedzi" in t or "niedzwiedzi" in t:
-        return "bear"
-    if "boczny" in t or "konsolidacja" in t or "range" in t:
-        return "side"
-    if "wzrost" in t:
-        return "bull"
-    if "spad" in t:
-        return "bear"
+def detect_trend_from_df(df: pd.DataFrame) -> str:
+    last = df.iloc[-1]
+    if pd.notna(last.get("SMA200")):
+        if last["Close"] > last["SMA200"] * 1.01:
+            return "bull"
+        if last["Close"] < last["SMA200"] * 0.99:
+            return "bear"
+    # fallback na SMA50
+    if pd.notna(last.get("SMA50")):
+        if last["Close"] > last["SMA50"]:
+            return "bull"
+        if last["Close"] < last["SMA50"]:
+            return "bear"
     return "side"
 
 
-def trend_label_and_color(trend_code: str):
+def trend_label_and_css(trend_code: str):
     if trend_code == "bull":
         return "Trend wzrostowy (🐂 byczy)", "trend-bull"
     if trend_code == "bear":
@@ -258,118 +190,108 @@ def trend_label_and_color(trend_code: str):
     return "Trend boczny / konsolidacja (➖)", "trend-side"
 
 
-# ================== WYKRESY PLOTLY ==================
+def detect_bollinger_signal(df: pd.DataFrame):
+    last = df.iloc[-1]
+    sig = []
+    if pd.notna(last["BB_upper"]) and last["Close"] > last["BB_upper"]:
+        sig.append("Cena powyżej górnej wstęgi — silne momentum / możliwe wykupienie.")
+    elif pd.notna(last["BB_lower"]) and last["Close"] < last["BB_lower"]:
+        sig.append("Cena poniżej dolnej wstęgi — możliwe wyprzedanie / odbicie.")
+    else:
+        sig.append("Cena wewnątrz wstęg — brak skrajnych odchyleń.")
+    return sig
 
-def plot_trend_chart(trend_code: str):
-    x = np.arange(50)
+
+def detect_sma_signals(df: pd.DataFrame):
+    last = df.iloc[-1]
+    res = []
+    for w in [20, 50, 100, 200]:
+        col = f"SMA{w}"
+        if pd.notna(last[col]):
+            if last["Close"] > last[col]:
+                res.append(f"Cena powyżej SMA{w} — wsparcie trendu wzrostowego.")
+            elif last["Close"] < last[col]:
+                res.append(f"Cena poniżej SMA{w} — presja podażowa względem SMA{w}.")
+    # golden / death cross (ostatnie 5 świec)
+    if df["SMA50"].notna().sum() > 5 and df["SMA200"].notna().sum() > 5:
+        s50 = df["SMA50"].tail(5)
+        s200 = df["SMA200"].tail(5)
+        if (s50.iloc[-2] < s200.iloc[-2]) and (s50.iloc[-1] > s200.iloc[-1]):
+            res.append("Golden cross (SMA50 przecięła SMA200 w górę) — silny sygnał byczy.")
+        if (s50.iloc[-2] > s200.iloc[-2]) and (s50.iloc[-1] < s200.iloc[-1]):
+            res.append("Death cross (SMA50 przecięła SMA200 w dół) — sygnał niedźwiedzi.")
+    return res
+
+
+def detect_rsi_signal(df: pd.DataFrame):
+    last = df.iloc[-1]
+    rsi = last["RSI14"]
+    if pd.isna(rsi):
+        return ["RSI14: brak wystarczającej liczby danych."]
+    if rsi > 70:
+        return [f"RSI14 ≈ {rsi:.1f} — strefa wykupienia."]
+    if rsi < 30:
+        return [f"RSI14 ≈ {rsi:.1f} — strefa wyprzedania."]
+    if rsi > 50:
+        return [f"RSI14 ≈ {rsi:.1f} — przewaga byków."]
+    return [f"RSI14 ≈ {rsi:.1f} — neutralnie / lekka przewaga podaży."]
+
+
+def compute_sl_tp(df: pd.DataFrame, trend_code: str):
+    last = df.iloc[-1]
+    close = last["Close"]
+    atr = last["ATR14"]
+    if pd.isna(atr) or atr == 0:
+        return "SL/TP: za mało danych ATR.", ""
 
     if trend_code == "bull":
-        y = np.linspace(1, 1.8, 50) + np.random.normal(0, 0.02, 50)
-        color = "lime"
+        sl = close - 1.5 * atr
+        tp = close + 2.5 * atr
+        side = "LONG"
     elif trend_code == "bear":
-        y = np.linspace(1, 0.4, 50) + np.random.normal(0, 0.02, 50)
-        color = "red"
+        sl = close + 1.5 * atr
+        tp = close - 2.5 * atr
+        side = "SHORT"
     else:
-        y = 1 + 0.05 * np.sin(np.linspace(0, 6, 50)) + np.random.normal(0, 0.01, 50)
-        color = "gold"
+        sl = close - 1.0 * atr
+        tp = close + 1.5 * atr
+        side = "RANGE / MEAN REVERSION"
 
-    ma = np.convolve(y, np.ones(5)/5, mode="same")
-    std = np.std(y)
-    upper = ma + 2 * std
-    lower = ma - 2 * std
-
-    fig = go.Figure()
-
-    fig.add_trace(go.Scatter(
-        x=x, y=y,
-        mode="lines",
-        line=dict(color=color, width=3),
-        name="Cena (syntetyczna)"
-    ))
-
-    fig.add_trace(go.Scatter(
-        x=x, y=ma,
-        mode="lines",
-        line=dict(color="white", width=1.5),
-        name="Środkowa banda (MA)"
-    ))
-
-    fig.add_trace(go.Scatter(
-        x=x, y=upper,
-        mode="lines",
-        line=dict(color="#60a5fa", width=1, dash="dash"),
-        name="Górna banda"
-    ))
-
-    fig.add_trace(go.Scatter(
-        x=x, y=lower,
-        mode="lines",
-        line=dict(color="#60a5fa", width=1, dash="dash"),
-        name="Dolna banda"
-    ))
-
-    fig.add_trace(go.Scatter(
-        x=np.concatenate([x, x[::-1]]),
-        y=np.concatenate([upper, lower[::-1]]),
-        fill="toself",
-        fillcolor="rgba(76, 29, 149, 0.2)",
-        line=dict(color="rgba(255,255,255,0)"),
-        hoverinfo="skip",
-        showlegend=False
-    ))
-
-    fig.update_layout(
-        template="plotly_dark",
-        height=300,
-        margin=dict(l=20, r=20, t=30, b=20),
-        paper_bgcolor="#020617",
-        plot_bgcolor="#020617",
-        font=dict(color="#e5e7eb"),
-        title="Syntetyczny wykres trendu + Bollinger Bands"
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
+    sl_txt = f"{side}: SL ≈ {sl:.2f}"
+    tp_txt = f"{side}: TP ≈ {tp:.2f}"
+    return sl_txt, tp_txt
 
 
-def plot_multichart(trend_code: str):
-    n = 80
-    x = np.arange(n)
+def build_summary_for_ai(df: pd.DataFrame, trend_code: str, tf: str) -> str:
+    last = df.iloc[-1]
+    boll = detect_bollinger_signal(df)
+    sma_sig = detect_sma_signals(df)
+    rsi_sig = detect_rsi_signal(df)
+    sl_txt, tp_txt = compute_sl_tp(df, trend_code)
 
-    if trend_code == "bull":
-        base = np.linspace(1, 1.8, n)
-    elif trend_code == "bear":
-        base = np.linspace(1, 0.4, n)
-    else:
-        base = 1 + 0.05 * np.sin(np.linspace(0, 6, n))
+    trend_label, _ = trend_label_and_css(trend_code)
 
-    noise = np.random.normal(0, 0.03, n)
-    close = base + noise
-    open_ = close - np.random.normal(0, 0.02, n)
-    high = np.maximum(open_, close) + np.random.normal(0, 0.015, n)
-    low = np.minimum(open_, close) - np.random.normal(0, 0.015, n)
+    lines = []
+    lines.append(f"Timeframe: {tf}")
+    lines.append(f"Ostatnie Close: {last['Close']:.2f}, High: {last['High']:.2f}, Low: {last['Low']:.2f}, Volume: {int(last['Volume'])}")
+    lines.append(f"Trend: {trend_label}")
+    lines.append(f"RSI14: {rsi_sig[0]}")
+    lines.append(f"Bollinger: {boll[0]}")
+    if sma_sig:
+        lines.append("SMA sygnały: " + " | ".join(sma_sig[:3]))
+    lines.append(f"SL: {sl_txt}")
+    lines.append(f"TP: {tp_txt}")
 
-    def sma(arr, window):
-        return np.convolve(arr, np.ones(window)/window, mode="same")
+    return "\n".join(lines)
 
-    sma20 = sma(close, 20)
-    sma50 = sma(close, 50)
-    sma100 = sma(close, 100)
-    sma200 = sma(close, 200)
 
-    ma = sma(close, 20)
-    std = np.std(close)
-    upper = ma + 2 * std
-    lower = ma - 2 * std
+# ================== WYKRESY ==================
 
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = sma(gain, 14)
-    avg_loss = sma(loss, 14)
-    rs = avg_gain / (avg_loss + 1e-6)
-    rsi = 100 - (100 / (1 + rs))
+def plot_multichart(df: pd.DataFrame):
+    df = df.dropna().copy()
+    df = df.tail(120)  # nie za dużo, żeby było czytelnie
 
-    volume = np.random.randint(80, 150, n)
+    x = df.index
 
     fig = make_subplots(
         rows=3, cols=1,
@@ -380,43 +302,56 @@ def plot_multichart(trend_code: str):
 
     fig.add_trace(go.Candlestick(
         x=x,
-        open=open_,
-        high=high,
-        low=low,
-        close=close,
+        open=df["Open"],
+        high=df["High"],
+        low=df["Low"],
+        close=df["Close"],
         increasing_line_color="lime",
         decreasing_line_color="red",
         name="Świece"
     ), row=1, col=1)
 
-    fig.add_trace(go.Scatter(x=x, y=sma20, line=dict(color="orange", width=1.5), name="SMA20"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x, y=sma50, line=dict(color="cyan", width=1.5), name="SMA50"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x, y=sma100, line=dict(color="violet", width=1.5), name="SMA100"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x, y=sma200, line=dict(color="gray", width=1.5), name="SMA200"), row=1, col=1)
+    for w, color in [(20, "orange"), (50, "cyan"), (100, "violet"), (200, "gray")]:
+        col = f"SMA{w}"
+        if col in df.columns:
+            fig.add_trace(go.Scatter(
+                x=x, y=df[col],
+                line=dict(color=color, width=1.3),
+                name=f"SMA{w}"
+            ), row=1, col=1)
 
-    fig.add_trace(go.Scatter(x=x, y=upper, line=dict(color="#60a5fa", dash="dash"), name="BB Upper"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x, y=lower, line=dict(color="#60a5fa", dash="dash"), name="BB Lower"), row=1, col=1)
-    fig.add_trace(go.Scatter(
-        x=np.concatenate([x, x[::-1]]),
-        y=np.concatenate([upper, lower[::-1]]),
-        fill="toself",
-        fillcolor="rgba(76, 29, 149, 0.2)",
-        line=dict(color="rgba(255,255,255,0)"),
-        hoverinfo="skip",
-        showlegend=False
-    ), row=1, col=1)
+    if "BB_upper" in df.columns and "BB_lower" in df.columns:
+        fig.add_trace(go.Scatter(
+            x=x, y=df["BB_upper"],
+            line=dict(color="#60a5fa", dash="dash", width=1),
+            name="BB Upper"
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=x, y=df["BB_lower"],
+            line=dict(color="#60a5fa", dash="dash", width=1),
+            name="BB Lower"
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=list(x) + list(x[::-1]),
+            y=list(df["BB_upper"]) + list(df["BB_lower"][::-1]),
+            fill="toself",
+            fillcolor="rgba(76, 29, 149, 0.18)",
+            line=dict(color="rgba(0,0,0,0)"),
+            hoverinfo="skip",
+            showlegend=False
+        ), row=1, col=1)
 
-    fig.add_trace(go.Scatter(
-        x=x, y=rsi,
-        line=dict(color="yellow", width=2),
-        name="RSI"
-    ), row=2, col=1)
-
-    fig.add_hline(y=70, line=dict(color="red", dash="dot"), row=2, col=1)
-    fig.add_hline(y=30, line=dict(color="lime", dash="dot"), row=2, col=1)
+    if "RSI14" in df.columns:
+        fig.add_trace(go.Scatter(
+            x=x, y=df["RSI14"],
+            line=dict(color="yellow", width=2),
+            name="RSI14"
+        ), row=2, col=1)
+        fig.add_hline(y=70, line=dict(color="red", dash="dot"), row=2, col=1)
+        fig.add_hline(y=30, line=dict(color="lime", dash="dot"), row=2, col=1)
 
     fig.add_trace(go.Bar(
-        x=x, y=volume,
+        x=x, y=df["Volume"],
         marker_color="purple",
         name="Volume"
     ), row=3, col=1)
@@ -428,7 +363,7 @@ def plot_multichart(trend_code: str):
         paper_bgcolor="#020617",
         plot_bgcolor="#020617",
         font=dict(color="#e5e7eb"),
-        title="📊 MULTICHART: Trend + BB + SMA + RSI + Volume"
+        title="📊 MULTICHART: realne dane (świece + SMA + BB + RSI + Volume)"
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -436,79 +371,16 @@ def plot_multichart(trend_code: str):
 
 # ================== UI ==================
 
-ticker = st.text_input("Ticker:", "AAPL")
+col1, col2 = st.columns(2)
+with col1:
+    ticker = st.text_input("Ticker:", "AAPL")
+with col2:
+    tf = st.selectbox(
+        "Interwał danych:",
+        ["D1 (świece dzienne)", "H1 (świece godzinowe)"]
+    )
 
-dane = st.text_area(
-    "Dane techniczne (czytelne):",
-    """Close: 190.20
-RSI14: 55
-Volume ratio: 1.2
-Trend: wzrostowy
-Sygnały:
-- EMA20 > EMA50
-- RSI powyżej 50
-- Momentum dodatnie"""
-)
-
-patterns = detect_patterns(dane)
-sma_info = analyze_sma(dane)
-sl_tp_info = analyze_sl_tp(dane)
-fibo_info = analyze_fibo(dane)
-bb_info = analyze_bollinger(dane)
-trend_code = detect_trend(dane)
-trend_label, trend_css = trend_label_and_color(trend_code)
-
-st.subheader("🔍 Wykryte elementy techniczne")
-
-st.markdown(
-    f"""
-    <div class="trend-box {trend_css}">
-        <b>Trend główny:</b> {trend_label}
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-if patterns:
-    st.markdown("**Formacje / sygnały:**")
-    for p in patterns:
-        st.markdown(f"- {p}")
-
-if sma_info:
-    st.markdown("**SMA / średnie kroczące:**")
-    for s in sma_info:
-        st.markdown(f"- {s}")
-
-if fibo_info:
-    st.markdown("**Poziomy Fibonacciego:**")
-    for f in fibo_info:
-        st.markdown(f"- {f}")
-
-if bb_info:
-    st.markdown("**Wstęgi Bollingera:**")
-    for b in bb_info:
-        st.markdown(f"- {b}")
-
-if sl_tp_info:
-    st.markdown("**Propozycje SL / TP (logika tekstowa):**")
-    for r in sl_tp_info:
-        st.markdown(f"- {r}")
-
-with st.expander("📊 Syntetyczny wykres trendu + Bollinger"):
-    plot_trend_chart(trend_code)
-
-with st.expander("📈 MULTICHART — pełna analiza techniczna"):
-    plot_multichart(trend_code)
-
-st.markdown(
-    """
-    <div class="info-box">
-        Powyższa analiza jest oparta na danych tekstowych, bez realnych notowań.
-        Służy jako szybki, wizualny i logiczny kontekst przed uruchomieniem jednego z trzech modeli GPT.
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+tf_code = "D1" if tf.startswith("D1") else "H1"
 
 ai_choice = st.selectbox(
     "Wybierz AI:",
@@ -519,19 +391,88 @@ ai_choice = st.selectbox(
     ]
 )
 
-if st.button("Analizuj"):
+user_notes = st.text_area(
+    "Twoje notatki / kontekst (opcjonalne):",
+    "",
+    placeholder="Np. ważne poziomy, newsy, własne obserwacje..."
+)
+
+if st.button("Analizuj (realne dane + AI)"):
+    try:
+        df = get_ohlc(ticker, tf_code)
+    except Exception as e:
+        st.error(f"Problem z pobraniem danych dla {ticker}: {e}")
+        st.stop()
+
+    if df.empty:
+        st.error("Brak danych dla tego tickera / interwału.")
+        st.stop()
+
+    df = add_indicators(df)
+    trend_code = detect_trend_from_df(df)
+    trend_label, trend_css = trend_label_and_css(trend_code)
+
+    st.subheader("🔍 Analiza techniczna (realne dane)")
+
+    st.markdown(
+        f"""
+        <div class="trend-box {trend_css}">
+            <b>Trend główny:</b> {trend_label}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    boll = detect_bollinger_signal(df)
+    sma_sig = detect_sma_signals(df)
+    rsi_sig = detect_rsi_signal(df)
+    sl_txt, tp_txt = compute_sl_tp(df, trend_code)
+
+    st.markdown("**Wstęgi Bollingera:**")
+    for b in boll:
+        st.markdown(f"- {b}")
+
+    st.markdown("**SMA / średnie kroczące:**")
+    for s in sma_sig:
+        st.markdown(f"- {s}")
+
+    st.markdown("**RSI14:**")
+    for r in rsi_sig:
+        st.markdown(f"- {r}")
+
+    st.markdown("**SL / TP (na bazie ATR14):**")
+    st.markdown(f"- {sl_txt}")
+    st.markdown(f"- {tp_txt}")
+
+    with st.expander("📈 MULTICHART — pełna analiza techniczna (realne dane)"):
+        plot_multichart(df)
+
+    st.markdown(
+        """
+        <div class="info-box">
+            Analiza oparta na realnych danych z Yahoo Finance (yfinance).
+            Warto zawsze skonfrontować ją z własnym planem i zarządzaniem ryzykiem.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    summary = build_summary_for_ai(df, trend_code, tf_code)
+    if user_notes.strip():
+        summary = summary + "\n\nNotatki użytkownika:\n" + user_notes.strip()
+
     if "Swing" in ai_choice:
-        wynik = ai_swing(ticker, dane)
+        wynik = ai_swing(ticker, summary)
         css = "swing"
     elif "Day" in ai_choice:
-        wynik = ai_day(ticker, dane)
+        wynik = ai_day(ticker, summary)
         css = "day"
     else:
-        wynik = ai_long(ticker, dane)
+        wynik = ai_long(ticker, summary)
         css = "long"
 
     st.markdown(f"""
     <div class="box {css}">
-        <b>Wynik AI:</b><br>{wynik}
+        <b>Wynik AI ({ai_choice}):</b><br>{wynik}
     </div>
     """, unsafe_allow_html=True)
