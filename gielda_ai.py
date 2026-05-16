@@ -1,4 +1,4 @@
-```python
+
 import streamlit as st
 from openai import OpenAI
 import yfinance as yf
@@ -576,4 +576,4 @@ if st.button("Analizuj wybraną spółkę (realne dane + AI)"):
         """,
         unsafe_allow_html=True,
     )
-```
+
