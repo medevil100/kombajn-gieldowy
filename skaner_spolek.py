@@ -1,4 +1,3 @@
-
 import streamlit as st
 from openai import OpenAI
 import yfinance as yf
@@ -71,6 +70,7 @@ def ai_meta_pick(market_df: pd.DataFrame, alerts: list, volume_signals: list) ->
 
 # ================== DANE I WSKAŹNIKI ==================
 def get_ohlc(ticker: str, tf: str) -> pd.DataFrame:
+    # Pobieramy większy zapas danych dla D1 (2 lata), żeby SMA200 na pewno się wyliczyło
     period_str = "2y" if tf == "D1" else "60d"
     interval_str = "1d" if tf == "D1" else "60m"
     
@@ -79,13 +79,13 @@ def get_ohlc(ticker: str, tf: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
-    # POPRAWKA MultiIndex
+    # POPRAWKA: zaawansowane oczyszczanie MultiIndex w nowym yfinance
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(-1)
 
     df.columns = [str(c).strip() for c in df.columns]
-
-    # 🔥 KLUCZOWA POPRAWKA — NIE USUWAMY WIERSZY
+    
+    # 🔥 KLUCZOWA POPRAWKA — NIE USUWAMY WIERSZY, TYLKO UZUPEŁNIAMY
     df["Open"]   = df["Open"].fillna(method="ffill").fillna(method="bfill")
     df["High"]   = df["High"].fillna(df["Open"])
     df["Low"]    = df["Low"].fillna(df["Open"])
@@ -98,6 +98,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     close = df["Close"]
 
+    # SMA
     for w in [20, 50, 100, 200]:
         df[f"SMA{w}"] = close.rolling(w).mean()
 
@@ -127,13 +128,13 @@ def detect_trend_from_df(df: pd.DataFrame) -> str:
     last = df.iloc[-1]
     close_val = float(last["Close"])
     
-    sma200 = float(last["SMA200"]) if pd.notna(last.get("SMA200")) else None
-    sma50 = float(last["SMA50"]) if pd.notna(last.get("SMA50")) else None
+    sma200 = float(last["SMA200"]) if "SMA200" in df.columns and pd.notna(last["SMA200"]) else None
+    sma50 = float(last["SMA50"]) if "SMA50" in df.columns and pd.notna(last["SMA50"]) else None
 
-    if sma200:
+    if sma200 is not None:
         if close_val > sma200 * 1.01: return "bull"
         if close_val < sma200 * 0.99: return "bear"
-    if sma50:
+    if sma50 is not None:
         if close_val > sma50: return "bull"
         if close_val < sma50: return "bear"
 
@@ -152,9 +153,9 @@ def compute_trend_score(df: pd.DataFrame, trend_code: str) -> float:
     if trend_code == "bull": score += 30
     if close_val < 5: score += 10
 
-    sma50 = float(last["SMA50"]) if pd.notna(last.get("SMA50")) else None
-    sma200 = float(last["SMA200"]) if pd.notna(last.get("SMA200")) else None
-    rsi = float(last["RSI14"]) if pd.notna(last.get("RSI14")) else None
+    sma50 = float(last["SMA50"]) if "SMA50" in df.columns and pd.notna(last["SMA50"]) else None
+    sma200 = float(last["SMA200"]) if "SMA200" in df.columns and pd.notna(last["SMA200"]) else None
+    rsi = float(last["RSI14"]) if "RSI14" in df.columns and pd.notna(last["RSI14"]) else None
 
     if sma50 and close_val > sma50: score += 15
     if sma200 and close_val > sma200: score += 15
@@ -294,4 +295,10 @@ if st.sidebar.button("Uruchom Skaner i AI 🚀"):
                 st.markdown('<div class="box swing">🎯 SWING TRADER</div>', unsafe_allow_html=True)
                 st.write(ai_swing(selected_tk, summary_payload))
             with c2:
-                st.markdown('<div class="box day">
+                st.markdown('<div class="box day">⚡ DAYTRADER</div>', unsafe_allow_html=True)
+                st.write(ai_day(selected_tk, summary_payload))
+            with c3:
+                st.markdown('<div class="box long">⏳ LONG-TERM</div>', unsafe_allow_html=True)
+                st.write(ai_long(selected_tk, summary_payload))
+    else:
+        st.error("Brak przetworzonych spółek. Wszystkie wybrane tickery zwróciły puste dane lub miały zbyt krótką historię notowań w tym interwale.")
