@@ -143,6 +143,7 @@ def skanuj_wybrane_spolki(lista_tickerow):
             okres_52w = df.iloc[-252:] if len(df) >= 252 else df
             high_52w = okres_52w["High"].max()
             low_52w = okres_52w["Low"].min()
+            roznica_52w = high_52w - low_52w if (high_52w - low_52w) > 0 else 0.001
 
             df = oblicz_wskazniki(df)
             ostatni = df.iloc[-1]
@@ -159,13 +160,37 @@ def skanuj_wybrane_spolki(lista_tickerow):
                 )
                 trend = "🟢 Wzrostowy" if cena > sma_10 else "🔴 Spadkowy"
 
-                pozycja_bb = "Środek"
-                if cena >= ostatni["Upper_Band"]:
-                    pozycja_bb = "🔥 Wybicie Góra"
-                elif cena <= ostatni["Lower_Band"]:
-                    pozycja_bb = "⚠️ Wybicie Dół"
+                # --- NOWOŚĆ: Pozycja ceny na wstęgach Bollingera ---
+                u_band = ostatni["Upper_Band"]
+                l_band = ostatni["Lower_Band"]
+                m_band = ostatni["MA20"]
+                
+                pozycja_bb = "Środek (Konsolidacja)"
+                if cena >= u_band:
+                    pozycja_bb = "🔥 Wybicie Górą (Przejedzenie)"
+                elif cena <= l_band:
+                    pozycja_bb = "⚠️ Wybicie Dołem (Wyprzedanie)"
+                elif cena > m_band:
+                    pozycja_bb = "📈 Powyżej Średniej MA20"
+                elif cena < m_band:
+                    pozycja_bb = "📉 Poniżej Średniej MA20"
+
+                # --- NOWOŚĆ: Poziomy i Zniesienia Fibonacciego ---
+                f23 = high_52w - (0.236 * roznica_52w)
+                f38 = high_52w - (0.382 * roznica_52w)
+                f50 = high_52w - (0.500 * roznica_52w)
+                f61 = high_52w - (0.618 * roznica_52w)
 
                 odleglosc_od_dna = ((cena - low_52w) / low_52w) * 100
+                
+                # Określenie strefy Fibonacci (High / Środek / Low)
+                if cena >= f38:
+                    strefa_fibo = "👑 HIGH (Blisko Szczytów)"
+                elif cena < f38 and cena >= f61:
+                    strefa_fibo = "⚖️ ŚRODEK (Strefa Tranzytowa)"
+                else:
+                    strefa_fibo = "🛒 LOW (Głęboka Przecena / Promocja)"
+
                 formacja = wykryj_formacje_swiecowe(df)
 
                 dane_spolek.append(
@@ -190,6 +215,8 @@ def skanuj_wybrane_spolki(lista_tickerow):
                             else 0.0
                         ),
                         "Wstęgi BB": pozycja_bb,
+                        "Strefa Fibo": strefa_fibo,
+                        "Fibo 50%": round(f50, 2),
                         "52W Low": round(low_52w, 2),
                         "52W High": round(high_52w, 2),
                         "Od Dna (%)": round(odleglosc_od_dna, 1),
@@ -203,33 +230,9 @@ def skanuj_wybrane_spolki(lista_tickerow):
     return pd.DataFrame(dane_spolek), slownik_df
 
 
-# --- GENEROWANIE RAPORTU AI (Z OBSŁUGĄ 3 MODELI) ---
-def generuj_raport_pojedynczej_spolki(model, ticker, wiersz_danych, dane_tp):
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    dane_tekst = wiersz_danych.to_string(index=False)
-    tp_tekst = (
-        f"Planowane cele Take Profit: TP1={dane_tp['tp1']}, "
-        f"TP2={dane_tp['tp2']}, TP3={dane_tp['tp3']}. Stop Loss={dane_tp['sl']}."
-    )
-
-    prompt = f"""
-    Jesteś zawodowym traderem. Wykonaj analizę dla spółki {ticker}:
-    {dane_tekst}
-    
-    Zaimplementowany plan rynkowy tradera:
-    {tp_tekst}
-    
-    Zinterpretuj i oceń:
-    1. Czy odległość od dna i formacja świecowa dają przewagę rynkową?
-    2. Czy w oparciu o RSI, MACD i Skok Vol wyznaczone poziomy Take Profit (TP1, TP2, TP3) są matematycznie i technicznie realne do osiągnięcia w najbliższych dniach?
-    3. Werdykt końcowy (KUP / SPRZEDAJ / CZEKAJ).
-    
-    Krótko, konkretnie, pod telefon. Używaj punktów i emoji.
-    """
-
+# --- GENEROWANIE RAPORTU DLA POJEDYNCZEGO MODELU ---
+def generuj_odpowiedz_modelu(client, model, prompt):
     params = {"model": model, "messages": [{"role": "user", "content": prompt}]}
-
-    # Dodatkowa konfiguracja specyficzna dla o3-mini
     if model == "o3-mini":
         params["reasoning_effort"] = "high"
 
@@ -237,45 +240,58 @@ def generuj_raport_pojedynczej_spolki(model, ticker, wiersz_danych, dane_tp):
         response = client.chat.completions.create(**params)
         if response.choices and len(response.choices) > 0:
             return response.choices[0].message.content
-        return "❌ Błąd: Odpowiedź modelu OpenAI jest pusta."
+        return "❌ Błąd: Odpowiedź modelu jest pusta."
     except Exception as e:
-        return f"❌ Błąd OpenAI ({model}): {str(e)}"
+        return f"❌ Błąd OpenAI dla {model}: {str(e)}"
 
 
-# --- WIZUALIZACJA WYKRESU INTERAKTYWNEGO ---
+# --- WIZUALIZACJA WYKRESU INTERAKTYWNEGO Z BB I FIBO ---
 def rysuj_wykres(df, ticker):
     fig = go.Figure()
+    
+    # Świece
     fig.add_trace(
         go.Candlestick(
-            x=df.index,
-            open=df["Open"],
-            high=df["High"],
-            low=df["Low"],
-            close=df["Close"],
-            name="Cena",
+            x=df.index, open=df["Open"], high=df["High"],
+            low=df["Low"], close=df["Close"], name="Cena"
         )
     )
-    fig.add_trace(
-        go.Scatter(
-            x=df.index,
-            y=df["Upper_Band"],
-            line=dict(color="rgba(255, 0, 0, 0.4)", width=1),
-            name="Górna Wstęga BB",
+    
+    # Bollinger Bands
+    fig.add_trace(go.Scatter(x=df.index, y=df["Upper_Band"], line=dict(color="rgba(255, 0, 100, 0.6)", width=1.5, dash="dash"), name="BB Górna"))
+    fig.add_trace(go.Scatter(x=df.index, y=df["MA20"], line=dict(color="rgba(255, 255, 255, 0.4)", width=1), name="BB Środek (MA20)"))
+    fig.add_trace(go.Scatter(x=df.index, y=df["Lower_Band"], line=dict(color="rgba(0, 150, 255, 0.6)", width=1.5, dash="dash"), name="BB Dolna"))
+    
+    # Fibonacci z ostatnich 252 dni
+    okres_52w = df.iloc[-252:] if len(df) >= 252 else df
+    h_52w = okres_52w["High"].max()
+    l_52w = okres_52w["Low"].min()
+    diff = h_52w - l_52w
+
+    poziomy_fibo = {
+        "Fibo 100%": h_52w,
+        "Fibo 61.8%": h_52w - (0.382 * diff),
+        "Fibo 50.0%": h_52w - (0.500 * diff),
+        "Fibo 38.2%": h_52w - (0.618 * diff),
+        "Fibo 23.6%": h_52w - (0.764 * diff),
+        "Fibo 0%": l_52w
+    }
+
+    colors = ["#ff4d4d", "#ffaa00", "#ffff00", "#00ffaa", "#00aaff", "#aa00ff"]
+    for (nazwa, poziom), kolor in zip(poziomy_fibo.items(), colors):
+        fig.add_trace(
+            go.Scatter(
+                x=[df.index[0], df.index[-1]], y=[poziom, poziom],
+                mode="lines", line=dict(color=kolor, width=1, dash="dot"),
+                name=nazwa
+            )
         )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=df.index,
-            y=df["Lower_Band"],
-            line=dict(color="rgba(0, 0, 255, 0.4)", width=1),
-            name="Dolna Wstęga BB",
-        )
-    )
+
     fig.update_layout(
-        title=f"Wykres techniczny {ticker}",
+        title=f"Wykres techniczny {ticker} (Wstęgi BB + Poziomy Fibo)",
         template="plotly_dark",
         xaxis_rangeslider_visible=False,
-        height=400,
+        height=450,
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -286,17 +302,7 @@ st.title("📱 Skaner AI Pro Master")
 # --- PANEL BOCZNY (SIDEBAR) ---
 with st.sidebar:
     st.header("⚙️ Panel Sterowania")
-
     rynek = st.radio("Wybierz rynek:", ["PL (GPW)", "USA (NYSE/NASDAQ)"])
-
-    # Wybór modelu GPT z trzech obiecanych opcji
-    wybrany_model = st.selectbox(
-        "🧠 Wybierz model AI:",
-        ["o3-mini", "gpt-4o", "gpt-4o-mini"],
-        index=0,
-        help="o3-mini: głębokie rozumowanie (najlepszy do matematyki). gpt-4o: zaawansowana analiza rynkowa. gpt-4o-mini: najszybsza odpowiedź.",
-    )
-
     lista_tickerow = wczytaj_liste_z_pliku(rynek)
 
     st.subheader("📝 Edycja Listy Spółek")
@@ -309,72 +315,97 @@ with st.sidebar:
             t.strip().upper() for t in nowa_lista_str.split(",") if t.strip()
         ]
         zapisz_liste_do_pliku(rynek, zaktualizowana_lista)
-        st.success("Lista została zaktualizowana i zapisana!")
+        st.success("Lista została zapisana!")
         st.rerun()
 
 # --- GŁÓWNY EKRAN SKANOWANIA ---
 if st.button("🚀 URUCHOM SKANOWANIE RYNKU", use_container_width=True):
-    with st.spinner("Pobieranie danych i obliczanie wskaźników..."):
+    with st.spinner("Pobieranie danych i obliczanie wskaźników technicznych..."):
         df_wyniki, slownik_df = skanuj_wybrane_spolki(lista_tickerow)
 
         if df_wyniki.empty:
-            st.warning("Brak danych do wyświetlenia. Sprawdź tickery.")
+            st.warning("Brak danych. Sprawdź poprawność tickerów.")
         else:
             st.session_state["df_wyniki"] = df_wyniki
             st.session_state["slownik_df"] = slownik_df
             st.success(f"Przeskanowano {len(df_wyniki)} spółek!")
 
-# Prezentacja danych jeśli są w sesji
+# Prezentacja danych
 if "df_wyniki" in st.session_state and not st.session_state["df_wyniki"].empty:
     df_wyniki = st.session_state["df_wyniki"]
     slownik_df = st.session_state["slownik_df"]
 
-    st.subheader("📊 Wyniki Analizy Technicznej")
+    st.subheader("📊 Wyniki Analizy Technicznej + Fibo + BB")
     st.dataframe(df_wyniki, use_container_width=True)
 
     st.divider()
-    st.subheader("🤖 Analiza Strategiczna AI")
+    st.subheader("🤖 Automatyczne Porównanie 3 Generacji AI")
 
-    # Wybór spółki do pogłębionego raportu AI
     wybrany_ticker = st.selectbox(
-        "Wybierz spółkę do raportu i wykresu:", df_wyniki["Ticker"].tolist()
+        "Wybierz spółkę do multi-analizy AI:", df_wyniki["Ticker"].tolist()
     )
 
     wiersz = df_wyniki[df_wyniki["Ticker"] == wybrany_ticker].iloc[0]
 
-    # Formularz celów tradera do promptu
-    st.write(f"### 🎯 Parametry pozycji dla {wybrany_ticker}")
+    # Parametry wejścia tradera
+    st.write(f"### 🎯 Konfiguracja pozycji dla {wybrany_ticker}")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        tp1 = st.number_input(
-            "TP1", value=float(wiersz["Cena"] * 1.05), step=0.01
-        )
+        tp1 = st.number_input("TP1", value=float(wiersz["Cena"] * 1.05), step=0.01)
     with col2:
-        tp2 = st.number_input(
-            "TP2", value=float(wiersz["Cena"] * 1.10), step=0.01
-        )
+        tp2 = st.number_input("TP2", value=float(wiersz["Cena"] * 1.10), step=0.01)
     with col3:
-        tp3 = st.number_input(
-            "TP3", value=float(wiersz["Cena"] * 1.20), step=0.01
-        )
+        tp3 = st.number_input("TP3", value=float(wiersz["Cena"] * 1.20), step=0.01)
     with col4:
-        sl = st.number_input(
-            "Stop Loss", value=float(wiersz["Cena"] * 0.95), step=0.01
-        )
+        sl = st.number_input("Stop Loss", value=float(wiersz["Cena"] * 0.95), step=0.01)
 
     dane_tp = {"tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl}
 
-    # Przycisk generowania raportu wybranym modelem
-    if st.button(
-        f"🤖 Generuj Raport AI ({wybrany_model})", use_container_width=True
-    ):
-        with st.spinner(f"Model {wybrany_model} analizuje dane rynkowe..."):
-            raport = generuj_raport_pojedynczej_spolki(
-                wybrany_model, wybrany_ticker, wiersz, dane_tp
-            )
-            st.markdown(f"### 📋 Raport Tradera AI ({wybrany_model})")
-            st.info(raport)
+    # Główny przycisk do generowania trzech raportów jednocześnie
+    if st.button("🔥 GENERUJ PORÓWNANIE 3 MODELI (o3-mini vs gpt-4o vs gpt-4o-mini)", use_container_width=True):
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        
+        dane_tekst = wiersz.to_string()
+        tp_tekst = f"Cele tradera: TP1={tp1}, TP2={tp2}, TP3={tp3}, SL={sl}."
+        
+        prompt = f"""
+        Jesteś elitarnym traderem algorytmicznym. Wykonaj analizę techniczną dla spółki {wybrany_ticker}:
+        
+        [DANE RYNKOWE I MATEMATYCZNE]:
+        {dane_tekst}
+        
+        [STRATEGIA WEJŚCIA]:
+        {tp_tekst}
+        
+        Zinterpretuj krytycznie:
+        1. Pozycję firmy na siatce Fibonacciego ({wiersz['Strefa Fibo']}) oraz położenie ceny względem linii i wstęg Bollingera ({wiersz['Wstęgi BB']}). Czy to akumulacja, czy dystrybucja?
+        2. Czy w oparciu o geometrię rynku (Fibo), zmienność ATR, skok wolumenu oraz RSI/MACD, wyznaczone cele TP1, TP2, TP3 mają silne uzasadnienie matematyczne, czy są życzeniowe?
+        3. Wydaj ostateczną decyzję (KUP / SPRZEDAJ / CZEKAJ) z podaniem procentowego prawdopodobieństwa sukcesu transakcji.
+        
+        Pisz krótko, surowo, bez owijania w bawełnę. Używaj wypunktowania i emoji.
+        """
+        
+        # Wyświetlanie loaderów i jednoczesne pobieranie odpowiedzi
+        with st.spinner("Trwa symulacja i pobieranie danych ze wszystkich 3 modeli..."):
+            raport_o3 = generuj_odpowiedz_modelu(client, "o3-mini", prompt)
+            raport_4o = generuj_odpowiedz_modelu(client, "gpt-4o", prompt)
+            raport_mini = generuj_odpowiedz_modelu(client, "gpt-4o-mini", prompt)
+            
+        # Wizualizacja wyników obok siebie przy użyciu komponentu Tabs
+        tab1, tab2, tab3 = st.tabs(["🧠 o3-mini (Głębokie Myślenie)", "⚡ gpt-4o (Analiza Pro)", "💨 gpt-4o-mini (Szybki Werdykt)"])
+        
+        with tab1:
+            st.markdown("### 📊 Werdykt Matematyczny: o3-mini")
+            st.info(raport_o3)
+            
+        with tab2:
+            st.markdown("### 📊 Werdykt Rynkowy: gpt-4o")
+            st.success(raport_4o)
+            
+        with tab3:
+            st.markdown("### 📊 Werdykt Ekspresowy: gpt-4o-mini")
+            st.warning(raport_mini)
 
-    # Rysowanie wykresu dla wybranej spółki
+    # Rysowanie zaawansowanego wykresu
     if wybrany_ticker in slownik_df:
         rysuj_wykres(slownik_df[wybrany_ticker], wybrany_ticker)
