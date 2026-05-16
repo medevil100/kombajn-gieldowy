@@ -1,16 +1,18 @@
 import streamlit as st
-from openai import OpenAI
-import yfinance as yf
-import numpy as np
 import pandas as pd
+import numpy as np
+import yfinance as yf
+from openai import OpenAI
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# ================== KONFIG ==================
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+# ================== 1. KONFIGURACJA STREAMLIT (MUSI BYĆ PIERWSZA!) ==================
 st.set_page_config(page_title="3× AI — Swing / Day / Long", layout="centered")
 
-# ================== STYLE ==================
+# Teraz bezpiecznie możemy inicjalizować klienta OpenAI i pobierać sekrety
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
+# ================== STYLE CSS ==================
 st.markdown("""
 <style>
 .box {
@@ -106,9 +108,9 @@ Zadanie:
 - styl spokojny, analityczny
 - zero kopiowania danych
 """
+    # Dla o3-mini usuwamy temperature=0.1, aby uniknąć błędów walidacji API
     r = client.chat.completions.create(
         model="o3-mini",
-        temperature=0.1,
         messages=[{"role": "user", "content": prompt}],
     )
     return r.choices[0].message.content.strip()
@@ -123,12 +125,22 @@ def get_ohlc(ticker: str, tf: str) -> pd.DataFrame:
         df = yf.download(ticker, period="30d", interval="60m", auto_adjust=False)
 
     df = df.dropna()
-    df = df.rename(columns=str.strip)
+    
+    # Zabezpieczenie przed MultiIndex w nowym yfinance
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(1)
+        
+    df.columns = df.columns.str.strip()
     return df
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    
+    # Konwersja na typ float, gdyby yfinance zwrócił obiekty
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        df[col] = df[col].astype(float)
+        
     close = df["Close"]
 
     # SMA
@@ -164,7 +176,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ================== POPRAWIONA FUNKCJA TRENDÓW (NIEZAWODNA) ==================
+# ================== FUNKCJE POMOCNICZE I TRENDY ==================
 
 def detect_trend_from_df(df: pd.DataFrame) -> str:
     last = df.iloc[-1]
@@ -172,14 +184,12 @@ def detect_trend_from_df(df: pd.DataFrame) -> str:
     sma200 = last.get("SMA200", np.nan)
     sma50 = last.get("SMA50", np.nan)
 
-    # SMA200
     if pd.notna(sma200):
         if last["Close"] > sma200 * 1.01:
             return "bull"
         if last["Close"] < sma200 * 0.99:
             return "bear"
 
-    # SMA50
     if pd.notna(sma50):
         if last["Close"] > sma50:
             return "bull"
@@ -211,9 +221,9 @@ def detect_sma_signals(df: pd.DataFrame):
     res = []
     for w in [20, 50, 100, 200]:
         col = f"SMA{w}"
-        if pd.notna(last[col]):
+        if col in last and pd.notna(last[col]):
             if last["Close"] > last[col]:
-                res.append(f"Cena powyżej SMA{w} — wsparcie trendu wzrostowego.")
+                res.append(f"Cena powyżej SMA{w} — wsparcie trendu.")
             else:
                 res.append(f"Cena poniżej SMA{w} — presja podażowa.")
     return res
@@ -278,7 +288,7 @@ def build_summary_for_ai(df: pd.DataFrame, trend_code: str, tf: str) -> str:
     return "\n".join(lines)
 
 
-# ================== WYKRES MULTICHART ==================
+# ================== WYKRES MULTICHART (DOKOŃCZONY) ==================
 
 def plot_multichart(df: pd.DataFrame):
     df = df.dropna().tail(120).copy()
@@ -288,9 +298,10 @@ def plot_multichart(df: pd.DataFrame):
         rows=3, cols=1,
         shared_xaxes=True,
         vertical_spacing=0.05,
-        row_heights=[0.55, 0.25, 0.20]
+        row_heights=[0.55, 0.20, 0.25]
     )
 
+    # 1. Świece (Row 1)
     fig.add_trace(go.Candlestick(
         x=x,
         open=df["Open"],
@@ -299,164 +310,103 @@ def plot_multichart(df: pd.DataFrame):
         close=df["Close"],
         increasing_line_color="lime",
         decreasing_line_color="red",
-        name="Świece"
+        name="Cena"
     ), row=1, col=1)
 
+    # Wstęgi Bollingera (Row 1)
+    fig.add_trace(go.Scatter(x=x, y=df["BB_upper"], line=dict(color="rgba(173,216,230,0.5)", dash="dash"), name="BB Upper"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=df["BB_lower"], line=dict(color="rgba(173,216,230,0.5)", dash="dash"), name="BB Lower"), row=1, col=1)
+
+    # Średnie kroczące SMA (Row 1)
     for w, color in [(20, "orange"), (50, "cyan"), (100, "violet"), (200, "gray")]:
         col = f"SMA{w}"
         if df[col].notna().any():
             fig.add_trace(go.Scatter(
                 x=x, y=df[col],
                 line=dict(color=color, width=1.3),
-                name=f"SMA{w}"
+                name=f"SMA {w}"
             ), row=1, col=1)
 
-    fig.add_trace(go.Scatter(
-        x=x, y=df["BB_upper"],
-        line=dict(color="#60a5fa", dash="dash", width=1),
-        name="BB Upper"
-    ), row=1, col=1)
-
-    fig.add_trace(go.Scatter(
-        x=x, y=df["BB_lower"],
-        line=dict(color="#60a5fa", dash="dash", width=1),
-        name="BB Lower"
-    ), row=1, col=1)
-
-    fig.add_trace(go.Scatter(
-        x=list(x) + list(x[::-1]),
-        y=list(df["BB_upper"]) + list(df["BB_lower"][::-1]),
-        fill="toself",
-        fillcolor="rgba(76, 29, 149, 0.18)",
-        line=dict(color="rgba(0,0,0,0)"),
-        hoverinfo="skip",
-        showlegend=False
-    ), row=1, col=1)
-
-    fig.add_trace(go.Scatter(
-        x=x, y=df["RSI14"],
-        line=dict(color="yellow", width=2),
-        name="RSI14"
-    ), row=2, col=1)
-
-    fig.add_hline(y=70, line=dict(color="red", dash="dot"), row=2, col=1)
-    fig.add_hline(y=30, line=dict(color="lime", dash="dot"), row=2, col=1)
-
+    # 2. Wolumen (Row 2)
     fig.add_trace(go.Bar(
         x=x, y=df["Volume"],
-        marker_color="purple",
-        name="Volume"
+        marker_color="dodgerblue",
+        name="Wolumen"
+    ), row=2, col=1)
+
+    # 3. RSI (Row 3)
+    fig.add_trace(go.Scatter(
+        x=x, y=df["RSI14"],
+        line=dict(color="purple", width=1.5),
+        name="RSI14"
     ), row=3, col=1)
+    
+    # Linie poziomów RSI (30, 50, 70)
+    fig.add_shape(type="line", x0=x[0], y0=70, x1=x[-1], y1=70, line=dict(color="red", dash="dash"), row=3, col=1)
+    fig.add_shape(type="line", x0=x[0], y0=30, x1=x[-1], y1=30, line=dict(color="green", dash="dash"), row=3, col=1)
 
     fig.update_layout(
+        height=700,
+        xaxis_rangeslider_visible=False,
         template="plotly_dark",
-        height=800,
-        margin=dict(l=20, r=20, t=30, b=20),
-        paper_bgcolor="#020617",
-        plot_bgcolor="#020617",
-        font=dict(color="#e5e7eb"),
-        title="📊 MULTICHART: realne dane (świece + SMA + BB + RSI + Volume)"
+        margin=dict(l=10, r=10, t=30, b=10)
     )
+    return fig
 
-    st.plotly_chart(fig, use_container_width=True)
 
+# ================== INTERFEJS UŻYTKOWNIKA STREAMLIT ==================
 
-# ================== UI ==================
+ticker_input = st.text_input("Wpisz ticker giełdowy (np. AAPL, TSLA, BTC-USD):", value="AAPL").upper()
+timeframe = st.selectbox("Wybierz interwał (Timeframe):", ["D1", "1H"])
 
-col1, col2 = st.columns(2)
-with col1:
-    ticker = st.text_input("Ticker:", "AAPL")
-with col2:
-    tf = st.selectbox("Interwał danych:", ["D1 (świece dzienne)", "H1 (świece godzinowe)"])
-
-tf_code = "D1" if tf.startswith("D1") else "H1"
-
-ai_choice = st.selectbox(
-    "Wybierz AI:",
-    ["AI Swing — gpt‑4o‑mini", "AI Day — gpt‑4o", "AI Long — o3‑mini"]
-)
-
-user_notes = st.text_area(
-    "Twoje notatki / kontekst (opcjonalne):",
-    "",
-    placeholder="Np. ważne poziomy, newsy, własne obserwacje..."
-)
-
-if st.button("Analizuj (realne dane + AI)"):
-
-    df = get_ohlc(ticker, tf_code)
-    if df.empty:
-        st.error("Brak danych dla tego tickera / interwału.")
-        st.stop()
-
-    df = add_indicators(df)
-    trend_code = detect_trend_from_df(df)
-    trend_label, trend_css = trend_label_and_css(trend_code)
-
-    st.subheader("🔍 Analiza techniczna (realne dane)")
-
-    st.markdown(
-        f"""
-        <div class="trend-box {trend_css}">
-            <b>Trend główny:</b> {trend_label}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    boll = detect_bollinger_signal(df)
-    sma_sig = detect_sma_signals(df)
-    rsi_sig = detect_rsi_signal(df)
-    sl_txt, tp_txt = compute_sl_tp(df, trend_code)
-
-    st.markdown("**Wstęgi Bollingera:**")
-    for b in boll:
-        st.markdown(f"- {b}")
-
-    st.markdown("**SMA / średnie kroczące:**")
-    for s in sma_sig:
-        st.markdown(f"- {s}")
-
-    st.markdown("**RSI14:**")
-    for r in rsi_sig:
-        st.markdown(f"- {r}")
-
-    st.markdown("**SL / TP (na bazie ATR14):**")
-    st.markdown(f"- {sl_txt}")
-    st.markdown(f"- {tp_txt}")
-
-    with st.expander("📈 MULTICHART — pełna analiza techniczna (realne dane)"):
-        plot_multichart(df)
-
-    st.markdown(
-        """
-        <div class="info-box">
-            Analiza oparta na realnych danych z Yahoo Finance (yfinance).
-            Zawsze łącz to z własnym planem, risk managementem i kontekstem rynkowym.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    summary = build_summary_for_ai(df, trend_code, tf_code)
-    if user_notes.strip():
-        summary += "\n\nNotatki użytkownika:\n" + user_notes.strip()
-
-    if "Swing" in ai_choice:
-        wynik = ai_swing(ticker, summary)
-        css = "swing"
-    elif "Day" in ai_choice:
-        wynik = ai_day(ticker, summary)
-        css = "day"
-    else:
-        wynik = ai_long(ticker, summary)
-        css = "long"
-
-    st.markdown(
-        f"""
-        <div class="box {css}">
-            <b>Wynik AI ({ai_choice}):</b><br>{wynik}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+if st.button("Uruchom analizę"):
+    with st.spinner("Pobieranie danych i generowanie analizy przez AI..."):
+        try:
+            # 1. Pobieranie danych
+            raw_data = get_ohlc(ticker_input, timeframe)
+            
+            if raw_data.empty:
+                st.error("Nie znaleziono danych dla podanego tickera. Sprawdź symbol.")
+            else:
+                # 2. Obliczanie wskaźników
+                df_with_indicators = add_indicators(raw_data)
+                trend = detect_trend_from_df(df_with_indicators)
+                label, css_class = trend_label_and_css(trend)
+                
+                # 3. Wyświetlanie trendu
+                st.markdown(f'<div class="trend-box {css_class}">Obecny stan techniczny: <b>{label}</b></div>', unsafe_allow_html=True)
+                
+                # 4. Budowanie podsumowania tekstowego dla modeli LLM
+                ai_summary = build_summary_for_ai(df_with_indicators, trend, timeframe)
+                
+                # Wyświetlenie wyciągu danych w sekcji info
+                with st.expander("Zobacz surowe dane wysyłane do AI"):
+                    st.text(ai_summary)
+                
+                # 5. Generowanie odpowiedzi z 3 modeli AI równolegle/kolejno
+                st.subheader("🤖 Rekomendacje Modeli AI")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.markdown('<div class="box swing">⚡ SWING TRADING (gpt-4o-mini)</div>', unsafe_allow_html=True)
+                    res_swing = ai_swing(ticker_input, ai_summary)
+                    st.markdown(f'<div class="info-box">{res_swing}</div>', unsafe_allow_html=True)
+                    
+                with col2:
+                    st.markdown('<div class="box day">🔥 DAYTRADING (gpt-4o)</div>', unsafe_allow_html=True)
+                    res_day = ai_day(ticker_input, ai_summary)
+                    st.markdown(f'<div class="info-box">{res_day}</div>', unsafe_allow_html=True)
+                    
+                with col3:
+                    st.markdown('<div class="box long">🏛️ LONG-TERM (o3-mini)</div>', unsafe_allow_html=True)
+                    res_long = ai_long(ticker_input, ai_summary)
+                    st.markdown(f'<div class="info-box">{res_long}</div>', unsafe_allow_html=True)
+                
+                # 6. Rysowanie wykresu
+                st.subheader("📊 Wykres techniczny (Ostatnie 120 świec)")
+                chart_fig = plot_multichart(df_with_indicators)
+                st.plotly_chart(chart_fig, use_container_width=True)
+                
+        except Exception as e:
+            st.error(f"Wystąpił nieoczekiwany błąd: {e}")
