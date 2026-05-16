@@ -1,7 +1,6 @@
 import streamlit as st
 from openai import OpenAI
 import yfinance as yf
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -35,7 +34,7 @@ body { background-color: #020617; color: #e5e7eb; font-family: system-ui, sans-s
 
 st.title("📈 3× AI — Terminal Groszówek (PL + USA)")
 
-# ================== MODUŁY AI – OPISOWE ==================
+# ================== AI – OPISOWE ==================
 def ai_swing(ticker: str, text: str) -> str:
     try:
         r = client.chat.completions.create(
@@ -96,7 +95,28 @@ def ai_long(ticker: str, text: str) -> str:
         return f"(LONG AI – błąd: {e})"
 
 
-# ================== MODUŁY AI – WERDYKTY ==================
+# ================== AI – WERDYKTY / SCORE / SIGNAL ==================
+def clean_payload(df: pd.DataFrame, trend: str, score: float) -> str:
+    last = df.iloc[-1]
+
+    def safe(v, prec=4):
+        try:
+            if pd.isna(v):
+                return "brak"
+            return f"{float(v):.{prec}f}"
+        except Exception:
+            return "brak"
+
+    return (
+        f"Cena: {safe(last['Close'])}, "
+        f"RSI14: {safe(last.get('RSI14'), 1)}, "
+        f"SMA50: {safe(last.get('SMA50'))}, "
+        f"SMA200: {safe(last.get('SMA200'))}, "
+        f"Trend: {trend}, "
+        f"TrendScore: {score:.0f}"
+    )
+
+
 def ai_swing_verdict(ticker: str, text: str) -> str:
     try:
         r = client.chat.completions.create(
@@ -106,8 +126,7 @@ def ai_swing_verdict(ticker: str, text: str) -> str:
                 "role": "user",
                 "content": (
                     f"Jesteś swing traderem. Dane o spółce {ticker}: {text}. "
-                    f"Na podstawie tych danych podejmij decyzję swing tradingową. "
-                    f"Zwróć werdykt w formacie: SWING = KUP / CZEKAJ / SPRZEDAJ."
+                    f"Zwróć werdykt: SWING = KUP / CZEKAJ / SPRZEDAJ."
                 )
             }],
         )
@@ -130,8 +149,7 @@ def ai_day_verdict(ticker: str, text: str) -> str:
                 "role": "user",
                 "content": (
                     f"Jesteś daytraderem. Dane o spółce {ticker}: {text}. "
-                    f"Na podstawie tych danych podejmij decyzję na najbliższą sesję. "
-                    f"Zwróć werdykt w formacie: DAY = KUP / CZEKAJ / SPRZEDAJ."
+                    f"Zwróć werdykt: DAY = KUP / CZEKAJ / SPRZEDAJ."
                 )
             }],
         )
@@ -154,8 +172,7 @@ def ai_long_verdict(ticker: str, text: str) -> str:
                 "role": "user",
                 "content": (
                     f"Jesteś analitykiem długoterminowym. Dane o spółce {ticker}: {text}. "
-                    f"Na podstawie tych danych podejmij decyzję długoterminową. "
-                    f"Zwróć werdykt w formacie: LONG = KUP / CZEKAJ / SPRZEDAJ."
+                    f"Zwróć werdykt: LONG = KUP / CZEKAJ / SPRZEDAJ."
                 )
             }],
         )
@@ -169,7 +186,6 @@ def ai_long_verdict(ticker: str, text: str) -> str:
         return "CZEKAJ"
 
 
-# ================== MODUŁY AI – SCORE / SIGNAL ==================
 def ai_risk_score(text: str) -> int:
     try:
         r = client.chat.completions.create(
@@ -236,7 +252,7 @@ def ai_signal(text: str) -> str:
         return "WATCH"
 
 
-# ================== DANE ==================
+# ================== DANE / INDIKATORY ==================
 def get_ohlc(ticker: str, tf: str) -> pd.DataFrame:
     period = "2y" if tf == "D1" else "60d"
     interval = "1d" if tf == "D1" else "60m"
@@ -435,23 +451,14 @@ if st.sidebar.button("Uruchom skaner i 3×AI 🚀"):
         """, unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # TABELA 3×AI
+    # 3× AI – tabela
     st.subheader("🤖 3× AI — Werdykty + Risk/Opportunity/Signal")
     verdict_rows = []
     for _, r in mdf.iterrows():
         tk = r["Ticker"]
         df_t, trend_t, score_t = dfs[tk]
-        last = df_t.iloc[-1]
 
-        rsi_val = float(last["RSI14"]) if "RSI14" in df_t.columns and pd.notna(last["RSI14"]) else None
-        rsi_str = f"{rsi_val:.1f}" if rsi_val is not None else "brak"
-
-        payload = (
-            f"Cena: {float(last['Close']):.4f}, "
-            f"RSI14: {rsi_str}, "
-            f"Trend: {trend_t}, "
-            f"TrendScore: {score_t:.0f}"
-        )
+        payload = clean_payload(df_t, trend_t, score_t)
 
         v_swing = ai_swing_verdict(tk, payload)
         v_day = ai_day_verdict(tk, payload)
@@ -481,7 +488,7 @@ if st.sidebar.button("Uruchom skaner i 3×AI 🚀"):
     vdf = pd.DataFrame(verdict_rows)
     st.dataframe(vdf, use_container_width=True)
 
-    # Szczegółowa analiza jednej spółki
+    # Szczegółowa analiza
     st.subheader("🔍 Szczegółowa analiza wybranego waloru (3×AI + wykres)")
     selected = st.selectbox("Wybierz ticker", list(dfs.keys()))
     if selected:
@@ -494,24 +501,15 @@ if st.sidebar.button("Uruchom skaner i 3×AI 🚀"):
         st.plotly_chart(plot_multichart(df_s, selected), use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-        last = df_s.iloc[-1]
-        rsi_val = float(last["RSI14"]) if "RSI14" in df_s.columns and pd.notna(last["RSI14"]) else None
-        rsi_str = f"{rsi_val:.1f}" if rsi_val is not None else "brak"
-
-        payload = (
-            f"Cena: {float(last['Close']):.4f}, "
-            f"RSI14: {rsi_str}, "
-            f"Trend: {trend_s}, "
-            f"TrendScore: {score_s:.0f}"
-        )
+        payload_s = clean_payload(df_s, trend_s, score_s)
 
         c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown('<div class="box swing">🎯 SWING TRADER</div>', unsafe_allow_html=True)
-            st.write(ai_swing(selected, payload))
+            st.write(ai_swing(selected, payload_s))
         with c2:
             st.markdown('<div class="box day">⚡ DAYTRADER</div>', unsafe_allow_html=True)
-            st.write(ai_day(selected, payload))
+            st.write(ai_day(selected, payload_s))
         with c3:
             st.markdown('<div class="box long">⏳ LONG-TERM</div>', unsafe_allow_html=True)
-            st.write(ai_long(selected, payload))
+            st.write(ai_long(selected, payload_s))
