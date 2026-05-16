@@ -54,7 +54,7 @@ def ai_day(ticker, text):
 def ai_long(ticker, text):
     r = client.chat.completions.create(
         model="o3-mini",
-        messages=[{"role": "user", "content": f"Długoterminowy analityk ryzyka. Analiza dla {ticker}: {text}. Zadanie: 2-3 zdania oceny stabilności."}],
+        messages=[{"role": "user", "content": f"Długoterminowy analityk ryzyka. Analiza dla {ticker} (groszówka): {text}. Zadanie: 2-3 zdania oceny stabilności."}],
     )
     return r.choices[0].message.content.strip()
 
@@ -203,6 +203,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["VolMA20"] = df["Volume"].rolling(20).mean()
 
     return df
+
 # ================== TREND, SCORE, SYGNAŁY ==================
 def detect_trend_from_df(df: pd.DataFrame) -> str:
     last = df.iloc[-1]
@@ -318,7 +319,7 @@ if st.sidebar.button("Uruchom Skaner i AI 🚀"):
         trend_c = detect_trend_from_df(df_feats)
         score_t = compute_trend_score(df_feats, trend_c)
         v_sigs = detect_volume_breakout_signals(df_feats, tk)
-
+        
         c_val = float(df_feats.iloc[-1]["Close"])
         
         all_market_data.append({"Ticker": tk, "Trend": trend_c, "Close": c_val, "TrendScore": score_t})
@@ -345,3 +346,73 @@ if st.sidebar.button("Uruchom Skaner i AI 🚀"):
                 </div>
             """, unsafe_allow_html=True)
         st.markdown('</div><br>', unsafe_allow_html=True)
+
+        # 2. Tabela 3× AI dla wszystkich spółek
+        st.subheader("🤖 3× AI — Werdykty dla wszystkich spółek")
+        verdict_rows = []
+        for _, row in market_summary_df.iterrows():
+            tk = row["Ticker"]
+            df_t, trend_t, score_t = processed_dfs[tk]
+            last = df_t.iloc[-1]
+            payload = f"Cena: {last['Close']:.4f}, RSI: {last['RSI14']:.1f}, Trend: {trend_t}, Score: {score_t}"
+            v_swing = ai_swing_verdict(tk, payload)
+            v_day = ai_day_verdict(tk, payload)
+            v_long = ai_long_verdict(tk, payload)
+            votes = [v_swing, v_day, v_long]
+            final = max(set(votes), key=votes.count)
+            risk = ai_risk_score(payload)
+            opp = ai_opportunity_score(payload)
+            sig = ai_signal(payload)
+            verdict_rows.append({
+                "Ticker": tk,
+                "Cena": row["Close"],
+                "Trend": trend_t,
+                "Score": score_t,
+                "SWING": v_swing,
+                "DAY": v_day,
+                "LONG": v_long,
+                "FINAL": final,
+                "RISK": risk,
+                "OPPORTUNITY": opp,
+                "SIGNAL": sig
+            })
+        verdict_df = pd.DataFrame(verdict_rows)
+        verdict_df = verdict_df.sort_values(["FINAL", "Score"], ascending=[True, False])
+        st.dataframe(verdict_df, use_container_width=True)
+
+        # 3. Globalny Raport META AI
+        st.subheader("🤖 Globalny Raport Strategiczny META AI")
+        with st.spinner("Model o3-mini analizuje strukturę rynkową..."):
+            st.info(ai_meta_pick(market_summary_df, global_alerts, global_volume_sigs))
+
+        # 4. Szczegółowa inspekcja spółki
+        st.subheader("🔍 Szczegółowa inspekcja spółki")
+        selected_tk = st.selectbox("Wybierz walor do analizy 3 modeli AI:", list(processed_dfs.keys()))
+        
+        if selected_tk:
+            df_selected, trend_c, score_t = processed_dfs[selected_tk]
+            label, css_class = trend_label_and_css(trend_c)
+            
+            st.markdown(f'<div class="trend-box {css_class}">Wybrany walor: {selected_tk} — {label} (Score: {score_t:.0f}/100)</div>', unsafe_allow_html=True)
+            
+            st.markdown('<div class="plot-border">', unsafe_allow_html=True)
+            st.plotly_chart(plot_multichart(df_selected, selected_tk), use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            st.markdown("### 💬 Konsylium analityczne modeli AI")
+            c1, c2, c3 = st.columns(3)
+            
+            last_bar = df_selected.iloc[-1]
+            summary_payload = f"Cena: {float(last_bar['Close']):.4f}, RSI14: {float(last_bar['RSI14']):.1f}, Trend: {trend_c}"
+            
+            with c1:
+                st.markdown('<div class="box swing">🎯 SWING TRADER</div>', unsafe_allow_html=True)
+                st.write(ai_swing(selected_tk, summary_payload))
+            with c2:
+                st.markdown('<div class="box day">⚡ DAYTRADER</div>', unsafe_allow_html=True)
+                st.write(ai_day(selected_tk, summary_payload))
+            with c3:
+                st.markdown('<div class="box long">⏳ LONG-TERM</div>', unsafe_allow_html=True)
+                st.write(ai_long(selected_tk, summary_payload))
+    else:
+        st.error("Brak przetworzonych spółek. Wszystkie wybrane tickery zwróciły puste dane lub miały zbyt krótką historię notowań w tym interwale.")
