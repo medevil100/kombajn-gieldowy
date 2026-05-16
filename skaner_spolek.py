@@ -1,29 +1,24 @@
+
 import streamlit as st
-from openai import OpenAI
 import yfinance as yf
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from openai import OpenAI
 
-# ================== KONFIG ==================
-st.set_page_config(page_title="3× AI — Terminal Groszówek", layout="wide")
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+# ================== KONFIGURACJA STRONY ==================
+st.set_page_config(page_title="3× Prawdziwe AI — Skaner Groszówek (PL + USA)", layout="wide")
 
-# ================== STYLE ==================
 st.markdown("""
 <style>
 body { background-color: #020617; color: #e5e7eb; }
-.box { padding: 15px; border-radius: 10px; margin-top: 15px; color: white; font-size: 15px; }
-.swing { background-color: #0f5132; }
-.day { background-color: #0d6efd; }
-.long { background-color: #6f42c1; }
-.trend-box { padding: 10px; border-radius: 8px; margin-top: 10px; color: white; font-size: 15px; }
+.box { padding: 10px; border-radius: 10px; margin-top: 10px; color: white; font-size: 14px; }
+.trend-box { padding: 8px; border-radius: 8px; margin-top: 10px; color: white; font-size: 14px; }
 .trend-bull { background-color: #14532d; border: 2px solid #22c55e; }
 .trend-bear { background-color: #7f1d1d; border: 2px solid #ef4444; }
 .trend-side { background-color: #78350f; border: 2px solid #fbbf24; }
 .plot-border { border: 3px solid #6f42c1; border-radius: 12px; padding: 8px; margin-top: 10px; }
-.heatmap-tile { display:inline-block; width:110px; height:80px; margin:4px; border-radius:8px; padding:6px; font-size:12px; color:#e5e7eb; }
 .alert-box { padding:8px; border-radius:8px; margin-top:6px; font-size:13px; color:#e5e7eb; }
 .alert-bull { background:#064e3b; border:1px solid #22c55e; }
 .alert-bear { background:#7f1d1d; border:1px solid #ef4444; }
@@ -33,102 +28,36 @@ body { background-color: #020617; color: #e5e7eb; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 3× AI — Terminal Groszówek (PL + USA)")
+st.title("📈 3× Prawdziwe AI — Skaner Groszówek (PL + USA) — wiele spółek, 3 werdykty, 1 tabela")
 
-# ================== AI ==================
-def ai_swing(ticker, text):
-    r = client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0.4,
-        messages=[{"role": "user", "content": f"""
-Jesteś agresywnym traderem swingowym.
-Analiza SWING dla {ticker} (groszówka / spekulacyjna spółka):
-{text}
-Zadanie: 2–3 zdania, dynamicznie, bez kopiowania liczb, skup się na kierunku i ryzyku.
-"""}],
-    )
-    return r.choices[0].message.content.strip()
+# ================== OPENAI CLIENT ==================
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-def ai_day(ticker, text):
-    r = client.chat.completions.create(
-        model="gpt-4o",
-        temperature=0.2,
-        messages=[{"role": "user", "content": f"""
-Jesteś precyzyjnym daytraderem.
-Analiza DAYTRADING dla {ticker}:
-{text}
-Zadanie: 2–3 zdania, szybko i konkretnie, bez kopiowania liczb.
-"""}],
-    )
-    return r.choices[0].message.content.strip()
-
-def ai_long(ticker, text):
-    r = client.chat.completions.create(
-        model="o3-mini",
-        messages=[{"role": "user", "content": f"""
-Jesteś spokojnym analitykiem długoterminowym.
-Analiza LONG-TERM dla {ticker} (wysokie ryzyko, groszówka):
-{text}
-Zadanie: 2–3 zdania, spokojnie i analitycznie, bez kopiowania liczb.
-"""}],
-    )
-    return r.choices[0].message.content.strip()
-
-def ai_meta_pick(market_df: pd.DataFrame, alerts: list, volume_signals: list) -> str:
-    base_text = "Dane rynku (wybrane kolumny):\n"
-    if market_df is not None and not market_df.empty:
-        sample = market_df[["Ticker", "Trend", "Close", "TrendScore"]].head(30)
-        base_text += sample.to_string(index=False)
-    else:
-        base_text += "Brak danych.\n"
-
-    base_text += "\n\nAlerty trendów i wolumenów:\n"
-    if alerts:
-        for a in alerts[:30]:
-            base_text += f"- {a}\n"
-    if volume_signals:
-        base_text += "\nSygnały wolumenowe:\n"
-        for v in volume_signals[:30]:
-            base_text += f"- {v}\n"
-
-    r = client.chat.completions.create(
-        model="o3-mini",
-        messages=[{"role": "user", "content": f"""
-Jesteś zaawansowanym analitykiem rynku groszówek (PL + USA).
-Masz dane o trendach, wolumenie, momentum i alertach.
-Na tej podstawie zbuduj własny scoring META i wybierz 3–5 najlepszych spółek
-pod kątem potencjału spekulacyjnego (krótko- i średnioterminowego).
-
-Zasady:
-- nie kopiuj liczb z danych
-- podaj ticker + krótkie uzasadnienie (3–4 zdania)
-- uwzględnij: trend, momentum, wolumen, ryzyko, zmienność
-- bądź konkretny, ale nie dawaj rekomendacji inwestycyjnych
-
-Dane wejściowe:
-{base_text}
-"""}],
-    )
-    return r.choices[0].message.content.strip()
-
-# ================== NORMALIZACJA TICKERÓW ==================
+# ================== NARZĘDZIA ==================
 def normalize_ticker(t: str) -> str:
     t = t.upper().strip()
     if len(t) <= 4 and "." not in t:
         return t + ".WA"
     return t
 
-# ================== POBIERANIE DANYCH ==================
 def get_ohlc(ticker: str, tf: str) -> pd.DataFrame:
     ticker = normalize_ticker(ticker)
+
+    is_gpw = ticker.endswith(".WA")
+    if is_gpw and tf != "D1":
+        return pd.DataFrame()
+
+    interval = "1d" if tf == "D1" else "60m"
+    period = "1y" if tf == "D1" else "60d"
+
     try:
         df = yf.download(
             ticker,
-            period="1y" if tf == "D1" else "30d",
-            interval="1d" if tf == "D1" else "60m",
+            period=period,
+            interval=interval,
             auto_adjust=False
         )
-    except:
+    except Exception:
         return pd.DataFrame()
 
     if isinstance(df.columns, pd.MultiIndex):
@@ -149,7 +78,6 @@ def get_ohlc(ticker: str, tf: str) -> pd.DataFrame:
 
     return df
 
-# ================== WSKAŹNIKI ==================
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     close = df["Close"]
@@ -183,7 +111,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["VolMA20"] = df["Volume"].rolling(20).mean()
 
     return df
-# ================== TREND ==================
+
 def detect_trend_from_df(df: pd.DataFrame) -> str:
     last = df.iloc[-1]
     sma50 = last.get("SMA50", np.nan)
@@ -203,12 +131,6 @@ def detect_trend_from_df(df: pd.DataFrame) -> str:
 
     return "side"
 
-def trend_label_and_css(code: str):
-    if code == "bull": return "Trend wzrostowy (🐂)", "trend-bull"
-    if code == "bear": return "Trend spadkowy (🐻)", "trend-bear"
-    return "Trend boczny (➖)", "trend-side"
-
-# ================== SCORE ==================
 def compute_trend_score(df: pd.DataFrame, trend_code: str) -> float:
     last = df.iloc[-1]
     score = 0
@@ -230,7 +152,6 @@ def compute_trend_score(df: pd.DataFrame, trend_code: str) -> float:
 
     return score
 
-# ================== ALERTY TRENDÓW ==================
 def detect_trend_alerts(df: pd.DataFrame, ticker: str, trend_code: str) -> list:
     alerts = []
     if len(df) < 3:
@@ -255,7 +176,6 @@ def detect_trend_alerts(df: pd.DataFrame, ticker: str, trend_code: str) -> list:
 
     return alerts
 
-# ================== ALERTY WOLUMENOWE PRO ==================
 def detect_volume_breakout_signals(df: pd.DataFrame, ticker: str) -> list:
     sigs = []
     if "VolMA20" not in df.columns or "ATR14" not in df.columns:
@@ -285,8 +205,7 @@ def detect_volume_breakout_signals(df: pd.DataFrame, ticker: str) -> list:
 
     return sigs
 
-# ================== MULTICHART ==================
-def plot_multichart(df: pd.DataFrame):
+def plot_multichart(df: pd.DataFrame, ticker: str):
     df = df.tail(120)
     x = df.index
 
@@ -345,15 +264,92 @@ def plot_multichart(df: pd.DataFrame):
         paper_bgcolor="#020617",
         plot_bgcolor="#020617",
         font=dict(color="#e5e7eb"),
-        title="📊 MULTICHART — neonowa analiza techniczna"
+        title=f"📊 MULTICHART — {ticker}"
     )
 
     st.markdown('<div class="plot-border">', unsafe_allow_html=True)
     st.plotly_chart(fig, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
-# ================== SKANER RYNKU ==================
+
+# ================== PRAWIDZWE AI — WERDYKT DLA JEDNEJ SPÓŁKI ==================
+def build_tech_summary_for_ai(df: pd.DataFrame, row: pd.Series) -> str:
+    last = df.iloc[-1]
+    close = last["Close"]
+    rsi = last.get("RSI14", np.nan)
+    atr = last.get("ATR14", np.nan)
+    sma50 = last.get("SMA50", np.nan)
+    sma200 = last.get("SMA200", np.nan)
+    bb_upper = last.get("BB_upper", np.nan)
+    bb_lower = last.get("BB_lower", np.nan)
+
+    trend = row["Trend"]
+    score = row["TrendScore"]
+
+    txt = f"""
+Ticker: {row['Ticker']}
+Close: {close:.4f}
+Trend: {trend}
+TrendScore: {score:.2f}
+RSI14: {rsi:.2f if not np.isnan(rsi) else 'brak'}
+ATR14: {atr:.4f if not np.isnan(atr) else 'brak'}
+SMA50: {sma50:.4f if not np.isnan(sma50) else 'brak'}
+SMA200: {sma200:.4f if not np.isnan(sma200) else 'brak'}
+BB_upper: {bb_upper:.4f if not np.isnan(bb_upper) else 'brak'}
+BB_lower: {bb_lower:.4f if not np.isnan(bb_lower) else 'brak'}
+"""
+    return txt
+
+def call_model_for_verdict(model_name: str, role_desc: str, summary: str) -> str:
+    """
+    Zwraca jedno słowo: KUP / CZEKAJ / SPRZEDAJ
+    """
+    resp = client.chat.completions.create(
+        model=model_name,
+        temperature=0.1,
+        messages=[
+            {
+                "role": "system",
+                "content": f"""
+Jesteś {role_desc}.
+Masz podjąć decyzję tradingową dla groszówki na podstawie danych technicznych.
+Odpowiadasz TYLKO jednym słowem (bez kropki, bez komentarza):
+KUP
+CZEKAJ
+SPRZEDAJ
+Nic więcej.
+"""
+            },
+            {
+                "role": "user",
+                "content": f"Dane techniczne spółki:\n{summary}\n\nJaki jest Twój werdykt?"
+            }
+        ]
+    )
+    raw = resp.choices[0].message.content.strip().upper()
+    if "KUP" in raw:
+        return "KUP"
+    if "SPRZED" in raw:
+        return "SPRZEDAJ"
+    if "CZEKAJ" in raw:
+        return "CZEKAJ"
+    # fallback gdyby model odleciał
+    return "CZEKAJ"
+
+def verdict_for_single_stock_real_ai(df: pd.DataFrame, row: pd.Series):
+    summary = build_tech_summary_for_ai(df, row)
+
+    v1 = call_model_for_verdict("o3-mini", "ostrożnym modelem rozumującym (o3-mini)", summary)
+    v2 = call_model_for_verdict("gpt-4o", "głównym analitykiem technicznym (gpt-4o)", summary)
+    v3 = call_model_for_verdict("gpt-4o-mini", "szybkim weryfikatorem sygnałów (gpt-4o-mini)", summary)
+
+    votes = [v1, v2, v3]
+    final = max(set(votes), key=votes.count)
+
+    return v1, v2, v3, final
+
+# ================== UI — SKANER WIELU SPÓŁEK ==================
 st.markdown("---")
-st.subheader("🧪 Skaner groszówek PL + USA — ranking trendów + heatmapa + alerty + AI META")
+st.subheader("🧪 Skaner groszówek PL + USA — ranking + 3× prawdziwe AI dla każdej spółki")
 
 col_left, col_right = st.columns([2, 1])
 
@@ -363,15 +359,23 @@ with col_left:
         "HRT.WA,CFS.WA,PRT.WA,ATT.WA,STX.WA,PUR.WA,BCS.WA,KCH.WA,GTN.WA,LBW.WA,"
         "PGV.WA,HPE.WA,DNS.WA,ZUK.WA,VVD.WA,HIVE,MLN.WA,MER.WA,APS.WA,NVG.WA,"
         "IOVA,PLRX,HUMA,TCRX,GOSS,MREO,ADTX",
-        height=120,
+        height=140,
     )
     only_pennies = st.checkbox("Filtruj tylko groszówki (Close < 5)", value=True)
     tf_scan = st.selectbox("Interwał skanera:", ["D1", "H1"])
     tf_scan_code = "D1" if tf_scan == "D1" else "H1"
-    run_scan = st.button("Skanuj rynek i zbuduj ranking")
+    run_scan = st.button("Skanuj rynek + odpal 3× AI dla każdej spółki")
 
 with col_right:
-    use_ai_meta = st.checkbox("Uruchom AI META po skanie (wybór najlepszych spółek)", value=True)
+    st.markdown("""
+    <div class="info-box">
+    <b>Uwaga:</b><br/>
+    • To są prawdziwe modele OpenAI (o3-mini, gpt-4o, gpt-4o-mini).<br/>
+    • Dla każdej spółki są 3 osobne wywołania API → 100 spółek = 300 requestów.<br/>
+    • Będzie to kosztować i chwilę potrwa, ale werdykty są realne, nie symulowane.<br/>
+    • GPW w Yahoo ma tylko D1, USA ma D1/H1.
+    </div>
+    """, unsafe_allow_html=True)
 
 ranking_df = None
 scan_results = {}
@@ -385,40 +389,47 @@ if run_scan:
     tickers = [normalize_ticker(t) for t in tickers]
 
     rows = []
+    progress = st.progress(0.0, text="Pobieranie danych i liczenie wskaźników...")
+    total = len(tickers)
+    done = 0
+
     for t in tickers:
-        try:
-            df_t = get_ohlc(t, tf_scan_code)
-            if df_t.empty:
-                continue
-            df_t = add_indicators(df_t)
-            trend_code = detect_trend_from_df(df_t)
-            last = df_t.iloc[-1]
-            close = float(last["Close"])
-            rsi = float(last.get("RSI14", np.nan)) if not pd.isna(last.get("RSI14", np.nan)) else np.nan
-            atr = float(last.get("ATR14", np.nan)) if not pd.isna(last.get("ATR14", np.nan)) else np.nan
-            vol = float(last.get("Volume", np.nan)) if not pd.isna(last.get("Volume", np.nan)) else np.nan
-            vol_ma = float(last.get("VolMA20", np.nan)) if not pd.isna(last.get("VolMA20", np.nan)) else np.nan
-            score = compute_trend_score(df_t, trend_code)
+        df_t = get_ohlc(t, tf_scan_code)
+        done += 1
+        progress.progress(done / total, text=f"Pobieranie i analiza: {t} ({done}/{total})")
 
-            if only_pennies and close >= 5:
-                continue
-
-            rows.append({
-                "Ticker": t,
-                "Trend": trend_code,
-                "Close": round(close, 4),
-                "RSI14": round(rsi, 2) if not np.isnan(rsi) else np.nan,
-                "ATR14": round(atr, 4) if not np.isnan(atr) else np.nan,
-                "Volume": vol,
-                "VolMA20": vol_ma,
-                "TrendScore": round(score, 2),
-            })
-            scan_results[t] = df_t
-
-            all_alerts.extend(detect_trend_alerts(df_t, t, trend_code))
-            all_volume_signals.extend(detect_volume_breakout_signals(df_t, t))
-        except Exception:
+        if df_t.empty:
             continue
+        df_t = add_indicators(df_t)
+        trend_code = detect_trend_from_df(df_t)
+        last = df_t.iloc[-1]
+
+        close = float(last["Close"])
+        rsi = float(last.get("RSI14", np.nan)) if not pd.isna(last.get("RSI14", np.nan)) else np.nan
+        atr = float(last.get("ATR14", np.nan)) if not pd.isna(last.get("ATR14", np.nan)) else np.nan
+        vol = float(last.get("Volume", np.nan)) if not pd.isna(last.get("Volume", np.nan)) else np.nan
+        vol_ma = float(last.get("VolMA20", np.nan)) if not pd.isna(last.get("VolMA20", np.nan)) else np.nan
+        score = compute_trend_score(df_t, trend_code)
+
+        if only_pennies and close >= 5:
+            continue
+
+        rows.append({
+            "Ticker": t,
+            "Trend": trend_code,
+            "Close": round(close, 4),
+            "RSI14": round(rsi, 2) if not np.isnan(rsi) else np.nan,
+            "ATR14": round(atr, 4) if not np.isnan(atr) else np.nan,
+            "Volume": vol,
+            "VolMA20": vol_ma,
+            "TrendScore": round(score, 2),
+        })
+        scan_results[t] = df_t
+
+        all_alerts.extend(detect_trend_alerts(df_t, t, trend_code))
+        all_volume_signals.extend(detect_volume_breakout_signals(df_t, t))
+
+    progress.empty()
 
     if rows:
         ranking_df = pd.DataFrame(rows)
@@ -427,46 +438,43 @@ if run_scan:
         st.markdown("### 🏆 Ranking spółek (wg TrendScore)")
         st.dataframe(ranking_df, use_container_width=True)
 
-        st.markdown("### 🌈 Heatmapa PRO (trend + RSI + wolumen + ATR)")
-        if not ranking_df.empty:
-            for _, row in ranking_df.iterrows():
-                t = row["Ticker"]
-                trend = row["Trend"]
-                rsi = row["RSI14"]
-                atr = row["ATR14"]
-                vol = row["Volume"]
-                vol_ma = row["VolMA20"]
+        st.markdown("### 🧠 3× Prawdziwe AI — Werdykty dla wszystkich spółek")
+        verdict_rows = []
+        total_ai = len(ranking_df)
+        ai_prog = st.progress(0.0, text="Modele AI analizują spółki...")
+        done_ai = 0
 
-                if trend == "bull":
-                    bg = "#14532d"
-                elif trend == "bear":
-                    bg = "#7f1d1d"
-                else:
-                    bg = "#78350f"
+        for _, row in ranking_df.iterrows():
+            t = row["Ticker"]
+            df_t = scan_results.get(t)
+            if df_t is None or df_t.empty:
+                continue
 
-                border_color = "#4ade80"
-                if not np.isnan(rsi):
-                    if rsi > 70:
-                        border_color = "#f97316"
-                    elif rsi < 30:
-                        border_color = "#38bdf8"
+            done_ai += 1
+            ai_prog.progress(done_ai / total_ai, text=f"AI analizuje: {t} ({done_ai}/{total_ai})")
 
-                vol_icon = "🌑"
-                if not np.isnan(vol) and not np.isnan(vol_ma) and vol_ma > 0:
-                    if vol > 2 * vol_ma:
-                        vol_icon = "🔥"
-                    elif vol > 1.5 * vol_ma:
-                        vol_icon = "⚡"
+            v1, v2, v3, final = verdict_for_single_stock_real_ai(df_t, row)
+            verdict_rows.append({
+                "Ticker": t,
+                "Trend": row["Trend"],
+                "Close": row["Close"],
+                "RSI14": row["RSI14"],
+                "Score": row["TrendScore"],
+                "o3-mini": v1,
+                "gpt-4o": v2,
+                "gpt-4o-mini": v3,
+                "FINAL": final,
+            })
 
-                tile_html = f"""
-                <div class="heatmap-tile" style="background: {bg}; border: 2px solid {border_color};">
-                    <b>{t}</b> {vol_icon}<br/>
-                    Trend: {trend}<br/>
-                    RSI: {'' if np.isnan(rsi) else round(rsi,1)}<br/>
-                    ATR: {'' if np.isnan(atr) else round(atr,3)}
-                </div>
-                """
-                st.markdown(tile_html, unsafe_allow_html=True)
+        ai_prog.empty()
+
+        if verdict_rows:
+            verdict_df = pd.DataFrame(verdict_rows)
+            verdict_df["FINAL_rank"] = verdict_df["FINAL"].map({"KUP": 0, "CZEKAJ": 1, "SPRZEDAJ": 2})
+            verdict_df = verdict_df.sort_values(["FINAL_rank", "Score"], ascending=[True, False]).drop(columns=["FINAL_rank"])
+            st.dataframe(verdict_df, use_container_width=True)
+        else:
+            st.info("Brak spółek do oceny werdyktów.")
 
         st.markdown("### 🚨 Alerty trendów i wolumenów")
         if not all_alerts and not all_volume_signals:
@@ -479,94 +487,20 @@ if run_scan:
                 css = "alert-vsa" if ("akumulacja" in v or "dystrybucja" in v) else "alert-vol"
                 st.markdown(f'<div class="alert-box {css}">{v}</div>', unsafe_allow_html=True)
 
-        if use_ai_meta:
-            st.markdown("### 🧠 AI META — wybór najlepszych spółek")
-            meta_text = ai_meta_pick(ranking_df, all_alerts, all_volume_signals)
-            st.markdown(f'<div class="box long"><b>Wynik AI META:</b><br>{meta_text}</div>', unsafe_allow_html=True)
-
+        st.markdown("### 🔍 Podgląd wykresu wybranej spółki")
+        tickers_list = ranking_df["Ticker"].tolist()
+        sel = st.selectbox("Wybierz ticker do podglądu wykresu:", tickers_list)
+        if sel:
+            df_sel = scan_results.get(sel)
+            if df_sel is not None and not df_sel.empty:
+                plot_multichart(df_sel, sel)
     else:
-        st.warning("Brak danych dla podanych tickerów.")
-# ================== ANALIZA POJEDYNCZEJ SPÓŁKI ==================
-st.markdown("---")
-st.subheader("🤖 Analiza AI wybranej spółki + MULTICHART")
+        st.warning("Brak danych dla podanych tickerów (dla wybranego interwału i filtrów).")
 
-col_a, col_b, col_c = st.columns(3)
-with col_a:
-    if ranking_df is not None and not ranking_df.empty:
-        selected_ticker = st.selectbox("Ticker z rankingu:", ranking_df["Ticker"].tolist())
-    else:
-        selected_ticker = st.text_input("Ticker:", "HRT.WA")
-
-with col_b:
-    tf_detail = st.selectbox("Interwał analizy:", ["D1", "H1"])
-    tf_detail_code = "D1" if tf_detail == "D1" else "H1"
-
-with col_c:
-    ai_choice = st.selectbox(
-        "Wybierz AI:",
-        ["AI Swing — gpt‑4o‑mini", "AI Day — gpt‑4o", "AI Long — o3‑mini"]
-    )
-
-user_notes = st.text_area("Twoje notatki / kontekst:", "")
-
-if st.button("Analizuj wybraną spółkę (AI + wykres)"):
-    try:
-        norm_ticker = normalize_ticker(selected_ticker)
-        if ranking_df is not None and norm_ticker in scan_results:
-            df_single = scan_results[norm_ticker]
-        else:
-            df_single = get_ohlc(norm_ticker, tf_detail_code)
-            if df_single.empty:
-                st.error("Brak danych dla tego tickera / interwału.")
-                st.stop()
-            df_single = add_indicators(df_single)
-    except Exception as e:
-        st.error(f"Problem z pobraniem danych dla {selected_ticker}: {e}")
-        st.stop()
-
-    trend_code = detect_trend_from_df(df_single)
-    trend_label, trend_css = trend_label_and_css(trend_code)
-
-    st.markdown(
-        f'<div class="trend-box {trend_css}"><b>Trend główny:</b> {trend_label}</div>',
-        unsafe_allow_html=True,
-    )
-
-    last = df_single.iloc[-1]
-    rsi_val = last.get("RSI14", np.nan)
-    rsi_txt = "brak" if pd.isna(rsi_val) else f"{rsi_val:.2f}"
-
-    summary = f"""
-Ticker: {norm_ticker}
-Interwał: {tf_detail_code}
-Trend: {trend_label}
-Close: {last['Close']:.2f}
-RSI14: {rsi_txt}
-Notatki użytkownika: {user_notes}
-"""
-
-    if "Swing" in ai_choice:
-        wynik = ai_swing(norm_ticker, summary)
-        css = "swing"
-    elif "Day" in ai_choice:
-        wynik = ai_day(norm_ticker, summary)
-        css = "day"
-    else:
-        wynik = ai_long(norm_ticker, summary)
-        css = "long"
-
-    st.markdown(f'<div class="box {css}"><b>Wynik ({ai_choice}):</b><br>{wynik}</div>', unsafe_allow_html=True)
-
-    with st.expander("📈 MULTICHART — pełna analiza techniczna (realne dane)"):
-        plot_multichart(df_single)
-
-st.markdown(
-    """
+st.markdown("""
 <div class="info-box">
-To narzędzie jest eksperymentalnym terminalem analitycznym dla groszówek (PL + USA).
-Łączy skaner trendów, heatmapę, alerty wolumenowe, analizę AI META oraz trzy tryby AI (Swing / Day / Long).
-Nie jest to rekomendacja inwestycyjna. Zawsze używaj własnego planu i risk managementu.
+To narzędzie używa prawdziwych modeli OpenAI (o3-mini, gpt-4o, gpt-4o-mini)
+do wydawania werdyktów KUP / CZEKAJ / SPRZEDAJ dla wielu spółek jednocześnie.
+To nie jest rekomendacja inwestycyjna — traktuj to jako zaawansowany filtr / skaner.
 </div>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
