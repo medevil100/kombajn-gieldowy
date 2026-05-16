@@ -39,59 +39,64 @@ st.title("📈 3× AI — Terminal Groszówek (PL + USA)")
 def calculate_indicators(ticker: str, interval: str):
     try:
         stock = yf.Ticker(ticker)
-        period = "60d" if interval == "1h" else "6mo"
+        # 730 dni dla 1h zapewnia potężną bazę danych dla spółek o niskiej płynności
+        period = "730d" if interval == "1h" else "1y"
         df = stock.history(period=period, interval=interval)
         
-        if df.empty or len(df) < 20:
-            return None, "Za mało danych historycznych do obliczenia zaawansowanych wskaźników."
+        if df.empty or len(df) < 15:
+            return None, "Brak wystarczających danych handlowych dla tej spółki w systemie yfinance."
         
-        # 1. Klasyczne RSI (14)
+        d_len = len(df)
+        w_rsi = min(14, max(5, d_len // 3))
+        w_ma = min(20, max(5, d_len // 2))
+        
+        # 1. Klasyczne RSI
         delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        df['RSI14'] = 100 - (100 / (1 + (gain / loss)))
+        gain = (delta.where(delta > 0, 0)).rolling(window=w_rsi).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=w_rsi).mean()
+        df['RSI14'] = 100 - (100 / (1 + (gain / (loss + 0.00001))))
         
-        # 2. NOWOŚĆ: Stochastyczne RSI (StochRSI 14, 3, 3)
-        rsi_min = df['RSI14'].rolling(window=14).min()
-        rsi_max = df['RSI14'].rolling(window=14).max()
+        # 2. Stochastyczne RSI
+        rsi_min = df['RSI14'].rolling(window=w_rsi).min()
+        rsi_max = df['RSI14'].rolling(window=w_rsi).max()
         df['StochRSI'] = (df['RSI14'] - rsi_min) / (rsi_max - rsi_min + 0.00001) * 100
-        df['StochRSI_K'] = df['StochRSI'].rolling(window=3).mean()
+        df['StochRSI_K'] = df['StochRSI'].rolling(window=min(3, max(1, d_len // 10))).mean()
         
-        # 3. Średnie Kroczące: SMA 20, SMA 50, SMA 200 + NOWOŚĆ: EMA 9
-        df['EMA9'] = df['Close'].ewm(span=9, adjust=False).mean()
-        df['SMA20'] = df['Close'].rolling(window=20).mean()
-        df['SMA50'] = df['Close'].rolling(window=50).mean()
-        df['SMA200'] = df['Close'].rolling(window=200).mean() if len(df) >= 200 else df['SMA50']
+        # 3. Dynamiczne Średnie Kroczące
+        df['EMA9'] = df['Close'].ewm(span=min(9, d_len // 2), adjust=False).mean()
+        df['SMA20'] = df['Close'].rolling(window=w_ma).mean()
+        df['SMA50'] = df['Close'].rolling(window=min(50, d_len // 2)).mean().bfill().ffill()
+        df['SMA200'] = df['Close'].rolling(window=min(200, d_len // 2)).mean().bfill().ffill()
         
         # 4. MACD
-        exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-        exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+        exp1 = df['Close'].ewm(span=min(12, d_len // 3), adjust=False).mean()
+        exp2 = df['Close'].ewm(span=min(26, d_len // 2), adjust=False).mean()
         df['MACD'] = exp1 - exp2
-        df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-        df['Vol_Avg10'] = df['Volume'].rolling(window=10).mean()
+        df['Signal'] = df['MACD'].ewm(span=min(9, d_len // 3), adjust=False).mean()
+        df['Vol_Avg10'] = df['Volume'].rolling(window=min(10, d_len // 2)).mean()
         
         # 5. Wstęgi Bollingera
         df['BB_Mid'] = df['SMA20']
-        df['BB_Std'] = df['Close'].rolling(window=20).std()
+        df['BB_Std'] = df['Close'].rolling(window=w_ma).std()
         df['BB_Upper'] = df['BB_Mid'] + (df['BB_Std'] * 2)
         df['BB_Lower'] = df['BB_Mid'] - (df['BB_Std'] * 2)
         
-        # 6. ATR (14)
+        # 6. ATR
         high_low = df['High'] - df['Low']
         high_cp = (df['High'] - df['Close'].shift()).abs()
         low_cp = (df['Low'] - df['Close'].shift()).abs()
         tr = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1)
-        df['ATR'] = tr.rolling(window=14).mean()
+        df['ATR'] = tr.rolling(window=w_rsi).mean()
         
-        # 7. NOWOŚĆ: VWAP (Tylko dla 1h ma fizyczny sens matematyczny, dla 1d robimy przybliżenie sesyjne)
+        # 7. VWAP
         typical_price = (df['High'] + df['Low'] + df['Close']) / 3
         df['VWAP'] = (typical_price * df['Volume']).cumsum() / (df['Volume'].cumsum() + 0.00001)
         
-        # 8. NOWOŚĆ: OBV (On-Balance Volume)
+        # 8. OBV (On-Balance Volume)
         df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
-        df['OBV_Slope'] = df['OBV'].diff() # Sprawdzenie kierunku napływu kapitału
+        df['OBV_Slope'] = df['OBV'].diff()
         
-        # 9. Formacja Świecowa (Ostatni bar)
+        # 9. Analiza Formacji Świecowej
         last_s = df.iloc[-1]
         body = abs(last_s['Close'] - last_s['Open'])
         candle_range = last_s['High'] - last_s['Low'] if (last_s['High'] - last_s['Low']) > 0 else 0.0001
@@ -100,15 +105,14 @@ def calculate_indicators(ticker: str, interval: str):
         
         candle_type = "Neutralna"
         if body / candle_range < 0.2: candle_type = "Doji (Niezdecydowanie)"
-        elif lower_shadow / candle_range > 0.6: candle_type = "Młot (Sygnał popytowy)"
-        elif upper_shadow / candle_range > 0.6: candle_type = "Spadająca Gwiazda (Sygnał podażowy)"
-        
+        elif lower_shadow / candle_range > 0.6: candle_type = "Młot (Popyt)"
+        elif upper_shadow / candle_range > 0.6: candle_type = "Spadająca Gwiazda (Podaż)"
         df['Candle_Analysis'] = candle_type
         
-        # 10. Fibonacci
+        # 10. Geometria Fibonacciego
         max_p = df['High'].max()
         min_p = df['Low'].min()
-        diff = max_p - min_p
+        diff = max_p - min_p if (max_p - min_p) > 0 else 0.0001
         fibo = {
             "100.0% (Szczyt)": max_p,
             "61.8%": max_p - 0.382 * diff,
@@ -122,12 +126,12 @@ def calculate_indicators(ticker: str, interval: str):
     except Exception as e:
         return None, str(e)
 
-# ================== FUNKCJE AGENTÓW AI ==================
+# ================== SEKCIJA KOMUNIKACJI Z AI ==================
 def ai_swing(ticker: str, text: str) -> str:
     try:
         r = client.chat.completions.create(
             model="gpt-4o-mini", temperature=0.4,
-            messages=[{"role": "user", "content": f"Jesteś agresywnym swing traderem. Analizujesz spółkę {ticker}. Dane techniczne (RSI, StochRSI, VWAP, OBV, Fibo): {text}. Napisz 2–3 krótkie zdania po polsku, skupione na ruchu na kilka dni, punktach zwrotnych na bazie VWAP oraz podaj sugerowane agresywne poziomy ST i TP."}],
+            messages=[{"role": "user", "content": f"Jesteś agresywnym swing traderem na groszówkach. Analizujesz spółkę {ticker}. Dane techniczne: {text}. Napisz 2–3 krótkie zdania po polsku, skupione na ruchu na kilka dni, punktach zwrotnych na bazie VWAP oraz podaj sugerowane agresywne poziomy ST i TP."}],
         )
         return r.choices[0].message.content.strip()
     except Exception as e: return f"(SWING AI – błąd: {e})"
@@ -191,27 +195,21 @@ if ticker_input:
             cena = last['Close']
             zmiana_proc = ((cena - prev['Close']) / prev['Close']) * 100
             
-            # --- LOGIKA KOLORÓW DLA NOWYCH WSKAŹNIKÓW ---
+            # --- MAPOWANIE STATUSÓW I KOLORÓW KAFELKÓW ---
             rsi_stat = "bull" if last['RSI14'] < 30 else ("bear" if last['RSI14'] > 70 else "side")
-            
-            # StochRSI status (wyprzedanie < 20 / wykupienie > 80)
             stoch_stat = "bull" if last['StochRSI_K'] < 20 else ("bear" if last['StochRSI_K'] > 80 else "side")
-            
-            # VWAP status (Cena powyżej = Bullish, poniżej = Bearish)
             vwap_stat = "bull" if cena > last['VWAP'] else "bear"
-            
-            # OBV status (Jeśli skumulowany wolumen rośnie względem poprzedniego baru = Akumulacja)
             obv_stat = "bull" if last['OBV_Slope'] > 0 else "bear"
             
             vol_ratio = last['Volume'] / last['Vol_Avg10'] if last['Vol_Avg10'] > 0 else 1
             vol_stat = "bull" if vol_ratio > 1.8 else ("bear" if vol_ratio < 0.5 else "side")
-            bb_stat = "bear" if cena >= last['BB_Upper']*0.98 else ("bull" if cena <= last['BB_Lower']*1.02 else "side")
+            bb_stat = "bear" if cena >= last['BB_Upper'] * 0.98 else ("bull" if cena <= last['BB_Lower'] * 1.02 else "side")
             candle_stat = "bull" if "popyt" in last['Candle_Analysis'].lower() or "młot" in last['Candle_Analysis'].lower() else ("bear" if "podaż" in last['Candle_Analysis'].lower() or "gwiazda" in last['Candle_Analysis'].lower() else "side")
             
             trend_val = "Wzrostowy" if cena > last['SMA50'] else "Spadkowy"
             trend_score = 100 if cena > last['SMA50'] and cena > last['SMA200'] else (0 if cena < last['SMA50'] and cena < last['SMA200'] else 50)
 
-            # Generowanie rozbudowanego raportu tekstowego do silników GPT
+            # Budowa paczki tekstowej dla LLM
             fibo_summary = ", ".join([f"{k}: {v:.4f}" for k, v in fibo_data.items()])
             raport_tekst = (
                 f"Cena: {cena:.4f}, Zmiana: {zmiana_proc:+.2f}%, RSI14: {last['RSI14']:.1f}, StochRSI_K: {last['StochRSI_K']:.1f}, "
@@ -221,7 +219,7 @@ if ticker_input:
                 f"Poziomy Fibo: {fibo_summary}, Bollinger: Góra={last['BB_Upper']:.4f}, Dół={last['BB_Lower']:.4f}"
             )
             
-            # Odpytanie modeli AI o oceny i decyzje
+            # Pobieranie ocen skumulowanych i werdyktów
             risk_score = ai_score("ryzyka inwestycyjnego (0=bezpiecznie, 100=skrajna spekulacja)", raport_tekst)
             opp_score = ai_score("potencjału zysku / szansy na wybicie (0=brak ruchu, 100=rakieta)", raport_tekst)
             
@@ -229,7 +227,7 @@ if ticker_input:
             v_day = ai_verdict("daytraderem szukającym momentum", ticker_input, raport_tekst)
             v_long = ai_verdict("analitykiem długoterminowym", ticker_input, raport_tekst)
 
-            # --- NOWY ZESTAW KAFELKÓW (HEATMAP) ---
+            # --- PANEL KAFELKÓW (HEATMAP DIAGNOSTYCZNA) ---
             st.subheader("📊 Rozszerzona Diagnostyka Sygnałów Giełdowych")
             st.markdown(f"""
             <div class="heatmap-container">
@@ -240,19 +238,19 @@ if ticker_input:
                 <div class="heatmap-tile status-{obv_stat}"><div>OBV (KAPITAŁ)</div><div>{ 'Napływ' if obv_stat=='bull' else 'Odpływ' }</div></div>
                 <div class="heatmap-tile status-{vol_stat}"><div>WOLUMEN</div><div>{vol_ratio:.1f}x</div></div>
                 <div class="heatmap-tile status-{bb_stat}"><div>BOLLINGER</div><div>{ 'Góra' if bb_stat=='bear' else ('Dół' if bb_stat=='bull' else 'Środek') }</div></div>
-                <div class="heatmap-tile status-{candle_stat}"><div>ŚWIECA</div><div>{last['Candle_Analysis'].replace(' (Niezdecydowanie)', '').replace(' (Sygnał popytowy)', '').replace(' (Sygnał podażowy)', '')}</div></div>
+                <div class="heatmap-tile status-{candle_stat}"><div>ŚWIECA</div><div>{last['Candle_Analysis'].replace(' (Niezdecydowanie)', '').replace(' (Popyt)', '').replace(' (Podaż)', '')}</div></div>
                 <div class="heatmap-tile status-{'bear' if risk_score > 60 else 'bull'}"><div>RYZYKO (AI)</div><div>{risk_score}/100</div></div>
                 <div class="heatmap-tile status-{'bull' if opp_score > 60 else 'side'}"><div>SZANSA (AI)</div><div>{opp_score}/100</div></div>
             </div>
             """, unsafe_allow_html=True)
 
-            # --- PANEL ELEMENTÓW GEOMETRII FIBO ---
+            # --- SIZATKA POZIOMÓW FIBONACCIEGO ---
             st.subheader("📐 Kluczowe Zniesienia Fibonacciego")
             f_cols = st.columns(6)
             for idx, (lvl, val) in enumerate(fibo_data.items()):
                 f_cols[idx].metric(label=lvl, value=f"{val:.4f}")
 
-            # --- KONSULTACJE SPEKULACYJNE AI ---
+            # --- STRATEGIE I OPISY 3× AI ---
             st.subheader("🤖 Decyzje i Strategie 3× AI (Sugerowane ST / TP)")
             col1, col2, col3 = st.columns(3)
             
@@ -266,7 +264,7 @@ if ticker_input:
                 st.markdown(f"### 💎 LONG TERM — **{v_long}**")
                 st.markdown(f'<div class="box long">{ai_long(ticker_input, raport_tekst)}</div>', unsafe_allow_html=True)
 
-            # --- ZAAWANSOWANY WYKRES PLOTLY ---
+            # --- INTERAKTYWNY WYKRES PLOTLY ---
             st.subheader("📈 Wykres Świecowy i Panele Techniczne")
             fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
             
