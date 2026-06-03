@@ -16,8 +16,7 @@ st.title("⚡ Terminal AI MAX 2.0 – Fundamenty, Momentum, Skanery, Raport ULTR
 # =========================================================
 # KLUCZ OPENAI
 # =========================================================
-KLUCZ_OPENAI = "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"
-
+KLUCZ_OPENAI = "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"
 if not KLUCZ_OPENAI or KLUCZ_OPENAI.startswith("WKLEJ"):
     st.error("❌ Wklej poprawny klucz API OpenAI w zmiennej KLUCZ_OPENAI.")
     st.stop()
