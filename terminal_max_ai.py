@@ -7,37 +7,11 @@ import streamlit as st
 import plotly.graph_objects as go
 from openai import OpenAI
 
-# AUDIO / GŁOS – WebRTC, TTS, STT
-from streamlit_webrtc import webrtc_streamer, WebRtcMode
-import av
-import io
-import numpy as np
-
 # =========================================================
 # KONFIGURACJA STRONY
 # =========================================================
 st.set_page_config(layout="wide", page_title="Terminal Finansowy AI MAX")
 st.title("⚡ Terminal AI MAX – Fundamenty, Momentum, Skanery, Raport ULTRA, Asystent AI")
-
-# =========================================================
-# SYSTEM PROMPT – OSOBOWOŚĆ I ZASADY AI
-# =========================================================
-AI_SYSTEM = """
-Jesteś profesjonalnym analitykiem finansowym, traderem i asystentem inwestora.
-
-Zasady:
-- Analizujesz wyłącznie dane dostarczone przez aplikację.
-- Nigdy nie piszesz, że nie masz dostępu do danych lub internetu.
-- Styl: techniczny, konkretny, zero lania wody.
-- Nie powtarzasz tych samych zdań innymi słowami.
-- Nie opisujesz spółek encyklopedycznie.
-- Nie odsyłasz do Yahoo, Google, Bloomberg, GPW itd.
-- Podajesz sygnały, scenariusze, poziomy, ryzyka i rekomendacje.
-- W czacie zachowujesz się jak analityk techniczny + fundamentalny + trader.
-
-Jeśli użytkownik poda ticker — analizujesz go automatycznie.
-Jeśli aplikacja dostarczy kontekst ostatniej spółki — używasz go.
-"""
 
 # =========================================================
 # KLUCZ OPENAI – WPROWADZANY W STREAMLICIE
@@ -61,7 +35,20 @@ if not st.session_state.openai_key:
 client = OpenAI(api_key=st.session_state.openai_key)
 
 # =========================================================
-# PAMIĘĆ I KONTEKST
+# GLOBALNY SYSTEM PROMPT – OSOBOWOŚĆ ASYSTENTA
+# =========================================================
+AI_SYSTEM = """
+Jesteś profesjonalnym analitykiem finansowym i asystentem inwestora.
+Masz dostęp do danych, które dostarcza aplikacja (ceny, wskaźniki, fundamenty).
+NIGDY nie pisz, że nie masz dostępu do danych rynkowych, internetu ani notowań.
+Analizujesz TYLKO na podstawie danych przekazanych przez użytkownika lub aplikację.
+Nie odsyłaj do Yahoo, Google, GPW, Bloomberg ani żadnych stron.
+Pisz konkretnie, technicznie, po polsku, bez lania wody.
+Zachowuj się jak ekspert, nie jak chatbot.
+"""
+
+# =========================================================
+# SESJA – PAMIĘĆ I KONTEKST
 # =========================================================
 if "ai_memory" not in st.session_state:
     st.session_state["ai_memory"] = []
@@ -72,11 +59,8 @@ if "ostatnia_spolka" not in st.session_state:
 if "historia_czatu" not in st.session_state:
     st.session_state["historia_czatu"] = []
 
-if "voice_log" not in st.session_state:
-    st.session_state["voice_log"] = []
-
 # =========================================================
-# AUTO-WYKRYWANIE TRYBU GŁOSOWEGO (SpeechRecognition – tryb B)
+# AUTO-WYKRYWANIE TRYBU GŁOSOWEGO
 # =========================================================
 try:
     import speech_recognition as sr
@@ -91,7 +75,7 @@ st.sidebar.header("⚙️ Ustawienia AI i rynku")
 
 wybrany_model = st.sidebar.selectbox(
     "Model OpenAI:",
-    ["gpt-4o", "gpt-4.1", "gpt-4o-mini"],
+    ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
     index=0
 )
 
@@ -133,13 +117,15 @@ def wyciagnij_ticker_z_tekstu(tekst: str) -> Optional[str]:
     """
     Bardzo prosta heurystyka:
     - szukamy tokenów z kropką (np. HRT.WA, STX.WA)
-    - jeśli brak, bierzemy ostatnie słowo złożone z liter/cyfr o długości 2–6
+    - jeśli brak, bierzemy ostatni "słowo" złożone z liter/cyfr o długości 2–6
     """
     raw = tekst.replace(",", " ").replace(":", " ").replace(";", " ")
     tokens = [t.strip().upper() for t in raw.split() if t.strip()]
+    # najpierw coś z kropką
     for tok in tokens:
         if "." in tok and len(tok) >= 3:
             return tok
+    # potem czyste tickery
     kandydaci = [t for t in tokens if t.isalnum() and 2 <= len(t) <= 6]
     if kandydaci:
         return kandydaci[-1]
@@ -179,6 +165,7 @@ def oblicz_wskazniki(df: pd.DataFrame) -> pd.DataFrame:
         trend = "Silny Trend Wzrostowy"
     elif cena < ema20 < ema50:
         trend = "Silny Trend Spadkowy"
+        # else:
     else:
         trend = "Konsolidacja / brak wyraźnego trendu"
 
@@ -412,15 +399,14 @@ Wymagania:
     return odp.choices[0].message.content
 
 # =========================================================
-# STREAMING ODPOWIEDZI AI
+# STREAMING ODPOWIEDZI
 # =========================================================
-def ai_stream(model: str, messages: List[Dict[str, str]], temperature: float = 0.3):
+def ai_stream(model, messages, temperature=0.4):
     response = client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=temperature,
-        stream=True,
-        max_tokens=1200,
+        stream=True
     )
     full = ""
     for chunk in response:
@@ -430,36 +416,6 @@ def ai_stream(model: str, messages: List[Dict[str, str]], temperature: float = 0
     return full
 
 # =========================================================
-# AUDIO – STT (mowa → tekst) i TTS (tekst → mowa)
-# =========================================================
-def transcribe_audio(audio_bytes: bytes) -> str:
-    try:
-        audio_file = io.BytesIO(audio_bytes)
-        audio_file.name = "audio.wav"
-        transcript = client.audio.transcriptions.create(
-            model="gpt-4o-mini-transcribe",
-            file=audio_file,
-            response_format="text"
-        )
-        return transcript
-    except Exception as e:
-        return f"[Błąd transkrypcji: {e}]"
-
-
-def text_to_speech(text: str) -> bytes:
-    try:
-        audio = client.audio.speech.create(
-            model="gpt-4o-mini-tts",
-            voice="alloy",
-            input=text,
-            format="mp3"
-        )
-        return audio
-    except Exception as e:
-        st.error(f"Błąd TTS: {e}")
-        return b""
-
-# =========================================================
 # UI – ZAKŁADKI
 # =========================================================
 zakladki = st.tabs([
@@ -467,8 +423,7 @@ zakladki = st.tabs([
     "🔥 Raport ULTRA",
     "📊 Skanery",
     "🗺️ Heatmapa rynku",
-    "💬 Asystent AI",
-    "🎙️ Asystent głosowy"
+    "💬 Asystent AI"
 ])
 
 # ---------------------------------------------------------------------
@@ -622,7 +577,7 @@ with zakladki[3]:
                 st.dataframe(df_heat, use_container_width=True)
 
 # ---------------------------------------------------------------------
-# ZAKŁADKA 5 – ASYSTENT AI (tekst)
+# ZAKŁADKA 5 – ASYSTENT AI
 # ---------------------------------------------------------------------
 with zakladki[4]:
     st.subheader("💬 Asystent AI – rozmowa jak z analitykiem")
@@ -640,7 +595,7 @@ with zakladki[4]:
     user_msg = st.text_input("Napisz wiadomość:", "", key="czat_input")
 
     if GLOS_OK:
-        if st.button("🎤 Nagraj głos (jednorazowo)"):
+        if st.button("🎤 Nagraj głos"):
             recognizer = sr.Recognizer()
             with sr.Microphone() as source:
                 st.info("Mów…")
@@ -652,7 +607,7 @@ with zakladki[4]:
                 st.error("Nie udało się rozpoznać głosu.")
                 user_msg = ""
     else:
-        st.info("🎤 Tryb nagrywania głosu (SpeechRecognition) niedostępny.")
+        st.info("🎤 Tryb głosowy niedostępny (brak modułu SpeechRecognition).")
 
     if user_msg.lower().startswith("zapamiętaj:"):
         st.session_state["ai_memory"].append(user_msg[11:].strip())
@@ -661,6 +616,7 @@ with zakladki[4]:
 
     if st.button("Wyślij", type="primary"):
         if user_msg.strip():
+            # AUTO-ANALIZA TICKERA Z WIADOMOŚCI
             tick = wyciagnij_ticker_z_tekstu(user_msg)
             if tick:
                 wyniki_auto = analizuj_spolke(tick, domyslny_rynek)
@@ -729,73 +685,3 @@ ZASADY:
     if st.button("Wyczyść czat"):
         st.session_state["historia_czatu"] = []
         st.rerun()
-
-# ---------------------------------------------------------------------
-# ZAKŁADKA 6 – ASYSTENT GŁOSOWY (ciągła rozmowa WebRTC)
-# ---------------------------------------------------------------------
-with zakladki[5]:
-    st.subheader("🎙️ Asystent głosowy – ciągła rozmowa (WebRTC)")
-
-    st.info("Przeglądarka poprosi o dostęp do mikrofonu. Załóż słuchawki, żeby uniknąć sprzężenia.")
-
-    webrtc_ctx = webrtc_streamer(
-        key="voice-chat",
-        mode=WebRtcMode.SENDONLY,
-        audio_receiver_size=1024,
-        media_stream_constraints={"audio": True, "video": False},
-    )
-
-    if webrtc_ctx and webrtc_ctx.audio_receiver:
-        audio_frames = webrtc_ctx.audio_receiver.get_frames(timeout=1)
-        for frame in audio_frames:
-            pcm = frame.to_ndarray().tobytes()
-            user_text = transcribe_audio(pcm)
-
-            if user_text and not user_text.startswith("[Błąd"):
-                st.session_state["voice_log"].append({"role": "user", "content": user_text})
-
-                messages = [{"role": "system", "content": AI_SYSTEM}]
-
-                if st.session_state.get("ostatnia_spolka"):
-                    f = st.session_state["ostatnia_spolka"]
-                    kontekst = f"""
-ANALIZA SPÓŁKI — PEŁNY KONTEKST:
-
-Ticker: {f['ticker']}
-Cena: {f['cena']}
-Trend: {f['trend']}
-RSI(14): {f['rsi']}
-MACD: {f['macd']}
-Signal: {f['signal']}
-Wolumen: {f['wolumen']}
-
-Poziomy systemowe:
-SL: {f['sl']}
-TP: {f['tp']}
-
-Fundamenty:
-P/E: {f['pe']}
-P/B: {f['pb']}
-Dywidenda: {f['dywidenda']}
-"""
-                    messages.append({"role": "system", "content": kontekst})
-
-                messages += st.session_state["voice_log"]
-                messages.append({"role": "user", "content": user_text})
-
-                ai_reply = ""
-                for fragment in ai_stream(wybrany_model, messages):
-                    ai_reply += fragment
-
-                st.session_state["voice_log"].append({"role": "assistant", "content": ai_reply})
-
-                audio_bytes = text_to_speech(ai_reply)
-                if audio_bytes:
-                    st.audio(audio_bytes, format="audio/mp3")
-
-    st.markdown("#### Historia rozmowy głosowej")
-    for msg in st.session_state["voice_log"]:
-        if msg["role"] == "user":
-            st.markdown(f"**Ty (głos):** {msg['content']}")
-        else:
-            st.markdown(f"**AI (głos):** {msg['content']}")
