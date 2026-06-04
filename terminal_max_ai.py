@@ -14,41 +14,58 @@ st.set_page_config(layout="wide", page_title="Terminal Finansowy AI MAX")
 st.title("⚡ Terminal AI MAX – Fundamenty, Momentum, Skanery, Raport ULTRA, Asystent AI")
 
 # =========================================================
-# AUTOMATYCZNE POBIERANIE KLUCZA OPENAI (ST.SECRETS)
+# KLUCZ OPENAI – PRIORYTET SECRETS, FALLBACK UI
 # =========================================================
-# Sprawdzenie czy klucz istnieje w sekretach Streamlit
-if "OPENAI_API_KEY" not in st.secrets:
-    st.error("❌ Brak klucza API! Skonfiguruj plik .streamlit/secrets.toml lub ustawienia chmury.")
-    # Zamiast st.stop(), całą resztę kodu zamykamy w bloku 'else'
-    has_key = False
-else:
-    has_key = True
+openai_key = None
+
+# 1) Priorytet: st.secrets (Cloud / produkcja)
+if "OPENAI_API_KEY" in st.secrets:
     openai_key = st.secrets["OPENAI_API_KEY"]
-    client = OpenAI(api_key=openai_key)
+
+# 2) Jeśli brak — pobieramy z UI (lokalnie)
+st.sidebar.subheader("🔑 Klucz OpenAI")
+
+if "openai_key" not in st.session_state:
+    st.session_state["openai_key"] = None
+
+key_input = st.sidebar.text_input(
+    "Wklej swój klucz API (format: sk-...):",
+    value=st.session_state["openai_key"] or "",
+    type="password",
+    placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+)
+
+if key_input:
+    st.session_state["openai_key"] = key_input
+
+# 3) Jeśli UI podało klucz — nadpisuje brak w secrets
+if st.session_state["openai_key"]:
+    openai_key = st.session_state["openai_key"]
+
+# 4) Walidacja
+if not openai_key:
+    st.error("❌ Wprowadź poprawny klucz OpenAI, aby kontynuować.")
+    st.stop()
+
+# 5) Klient OpenAI
+client = OpenAI(api_key=openai_key)
 
 # =========================================================
-# GŁÓWNA LOGIKA APLIKACJI (Uruchamia się tylko z kluczem)
-# =========================================================
-if has_key:
-    st.success("✅ Klucz API został wczytany automatycznie. Terminal jest gotowy do pracy!")
-    
-    # -----------------------------------------------------
-    # TUTAJ WKLEJ CAŁĄ RESZTĘ SWOJEGO KODU TERMINALA
-    # (pobieranie danych z yfinance, wykresy Plotly, itp.)
-    # -----------------------------------------------------
-    
-
-
-# =========================================================
-# GLOBALNY SYSTEM PROMPT – OSOBOWOŚĆ ASYSTENTA
+# SYSTEM PROMPT
 # =========================================================
 AI_SYSTEM = """
-Jesteś profesjonalnym analitykiem finansowym i asystentem inwestora.
-Masz dostęp do danych, które dostarcza aplikacja (ceny, wskaźniki, fundamenty).
-NIGDY nie pisz, że nie masz dostępu do danych rynkowych, internetu ani notowań.
-Analizujesz TYLKO na podstawie danych przekazanych przez użytkownika lub aplikację.
-Nie odsyłaj do Yahoo, Google, GPW, Bloomberg ani żadnych stron.
-Pisz konkretnie, technicznie, po polsku, bez lania wody.
+Jesteś zaawansowanym asystentem tradingowym i analitykiem rynków akcji.
+Twoje zadania:
+- Analiza techniczna (trend, momentum, wsparcia, opory, scenariusze).
+- Analiza fundamentalna (jakość biznesu, ryzyka, wycena, marże, zadłużenie).
+- Łączenie danych ilościowych (wskaźniki, poziomy) z kontekstem rynkowym.
+- Generowanie konkretnych wniosków, scenariuszy i poziomów (wejście, SL, TP, invalidation).
+
+Zasady:
+- Zero lania wody.
+- Zero ogólników.
+- Nie powtarzaj tych samych zdań innymi słowami.
+- Pisz konkretnie, technicznie, po polsku.
 Zachowuj się jak ekspert, nie jak chatbot.
 """
 
@@ -122,15 +139,13 @@ def wyciagnij_ticker_z_tekstu(tekst: str) -> Optional[str]:
     """
     Bardzo prosta heurystyka:
     - szukamy tokenów z kropką (np. HRT.WA, STX.WA)
-    - jeśli brak, bierzemy ostatni "słowo" złożone z liter/cyfr o długości 2–6
+    - jeśli brak, bierzemy ostatnie słowo złożone z liter/cyfr o długości 2–6
     """
     raw = tekst.replace(",", " ").replace(":", " ").replace(";", " ")
     tokens = [t.strip().upper() for t in raw.split() if t.strip()]
-    # najpierw coś z kropką
     for tok in tokens:
         if "." in tok and len(tok) >= 3:
             return tok
-    # potem czyste tickery
     kandydaci = [t for t in tokens if t.isalnum() and 2 <= len(t) <= 6]
     if kandydaci:
         return kandydaci[-1]
@@ -170,7 +185,6 @@ def oblicz_wskazniki(df: pd.DataFrame) -> pd.DataFrame:
         trend = "Silny Trend Wzrostowy"
     elif cena < ema20 < ema50:
         trend = "Silny Trend Spadkowy"
-        # else:
     else:
         trend = "Konsolidacja / brak wyraźnego trendu"
 
@@ -419,6 +433,23 @@ def ai_stream(model, messages, temperature=0.4):
             full += chunk.choices[0].delta.content
             yield chunk.choices[0].delta.content
     return full
+
+# =========================================================
+# TTS – TEKST → GŁOS AI
+# =========================================================
+def tts_ai(text: str):
+    try:
+        audio_resp = client.audio.speech.create(
+            model="gpt-4o-mini-tts",
+            voice="alloy",
+            input=text,
+            format="mp3"
+        )
+        audio_bytes = audio_resp.read()
+        return audio_bytes
+    except Exception as e:
+        st.error(f"Błąd TTS: {e}")
+        return None
 
 # =========================================================
 # UI – ZAKŁADKI
@@ -678,12 +709,20 @@ ZASADY:
 
             for fragment in ai_stream(wybrany_model, messages):
                 full_answer += fragment
-                placeholder.markdown(f"**AI:** {full_answer}")
+                placeholder.markdown(
+                    f"<div style='white-space: pre-wrap; font-size: 1.05rem;'>**AI:** {full_answer}</div>",
+                    unsafe_allow_html=True
+                )
 
             st.session_state["historia_czatu"].append({
                 "role": "assistant",
                 "content": full_answer
             })
+
+            # 🔊 TTS – AI mówi odpowiedź
+            audio_bytes = tts_ai(full_answer)
+            if audio_bytes:
+                st.audio(audio_bytes, format="audio/mp3")
 
             st.rerun()
 
