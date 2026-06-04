@@ -14,14 +14,25 @@ st.set_page_config(layout="wide", page_title="Terminal Finansowy AI MAX 2.0")
 st.title("⚡ Terminal AI MAX 2.0 – Fundamenty, Momentum, Skanery, Raport ULTRA, Asystent Pro")
 
 # =========================================================
-# KLUCZ OPENAI
+# KLUCZ OPENAI – WPROWADZANY W STREAMLICIE
 # =========================================================
-KLUCZ_OPENAI = ""
-if not KLUCZ_OPENAI or KLUCZ_OPENAI.startswith("WKLEJ"):
-    st.error("❌ Wklej poprawny klucz API OpenAI w zmiennej KLUCZ_OPENAI.")
+if "openai_key" not in st.session_state:
+    st.session_state.openai_key = ""
+
+st.sidebar.subheader("🔑 Klucz OpenAI")
+st.session_state.openai_key = st.sidebar.text_input(
+    "Wklej swój klucz OpenAI:",
+    value=st.session_state.openai_key,
+    type="password",
+    placeholder="sk-...",
+)
+
+if not st.session_state.openai_key:
+    st.warning("⚠️ Wprowadź klucz OpenAI, aby uruchomić asystenta.")
     st.stop()
 
-client = OpenAI(api_key=KLUCZ_OPENAI)
+client = OpenAI(api_key=st.session_state.openai_key)
+
 
 # =========================================================
 # GLOBALNY SYSTEM PROMPT – OSOBOWOŚĆ ASYSTENTA
