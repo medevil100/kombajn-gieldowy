@@ -10,32 +10,41 @@ from openai import OpenAI
 # =========================================================
 # KONFIGURACJA STRONY
 # =========================================================
-st.set_page_config(layout="wide", page_title="Terminal Finansowy AI MAX 2.0")
+st.set_page_config(
+    layout="wide",
+    page_title="Terminal Finansowy AI MAX 2.0"
+)
 st.title("⚡ Terminal AI MAX 2.0 – Fundamenty, Momentum, Skanery, Raport ULTRA, Asystent Pro")
 
 # =========================================================
 # KLUCZ OPENAI – WPROWADZANY W STREAMLICIE
 # =========================================================
+st.sidebar.subheader("🔑 Klucz OpenAI")
+
 if "openai_key" not in st.session_state:
     st.session_state.openai_key = ""
 
-st.sidebar.subheader("🔑 Klucz OpenAI")
 st.session_state.openai_key = st.sidebar.text_input(
     "Wklej swój klucz OpenAI:",
     value=st.session_state.openai_key,
     type="password",
-    placeholder="sk-...",
+    placeholder="sk-proj-...",
 )
 
 if not st.session_state.openai_key:
-    st.warning("⚠️ Wprowadź klucz OpenAI, aby uruchomić asystenta.")
+    st.error("❌ Wprowadź poprawny klucz OpenAI, aby kontynuować.")
     st.stop()
 
-client = OpenAI(api_key=st.session_state.openai_key)
-
+try:
+    client = OpenAI(api_key=st.session_state.openai_key)
+except Exception as e:
+    st.error(f"❌ Błąd inicjalizacji OpenAI: {e}")
+    st.stop()
 
 # =========================================================
 # GLOBALNY SYSTEM PROMPT – OSOBOWOŚĆ ASYSTENTA
+# =========================================================
+
 # =========================================================
 AI_SYSTEM_BASE = """
 Jesteś profesjonalnym analitykiem finansowym i asystentem inwestora.
