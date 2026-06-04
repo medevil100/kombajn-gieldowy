@@ -19,18 +19,24 @@ st.title("⚡ Terminal AI MAX – Fundamenty, Momentum, Skanery, Raport ULTRA, A
 # Sprawdzenie czy klucz istnieje w sekretach Streamlit
 if "OPENAI_API_KEY" not in st.secrets:
     st.error("❌ Brak klucza API! Skonfiguruj plik .streamlit/secrets.toml lub ustawienia chmury.")
-    st.stop()
-
-# Pobranie klucza w tle
-openai_key = st.secrets["OPENAI_API_KEY"]
-
-# Inicjalizacja klienta OpenAI
-client = OpenAI(api_key=openai_key)
+    # Zamiast st.stop(), całą resztę kodu zamykamy w bloku 'else'
+    has_key = False
+else:
+    has_key = True
+    openai_key = st.secrets["OPENAI_API_KEY"]
+    client = OpenAI(api_key=openai_key)
 
 # =========================================================
-# RESZTA TWOJEGO KODU TERMINALA
+# GŁÓWNA LOGIKA APLIKACJI (Uruchamia się tylko z kluczem)
 # =========================================================
-st.success("✅ Klucz API został wczytany automatycznie. Terminal jest gotowy do pracy!")
+if has_key:
+    st.success("✅ Klucz API został wczytany automatycznie. Terminal jest gotowy do pracy!")
+    
+    # -----------------------------------------------------
+    # TUTAJ WKLEJ CAŁĄ RESZTĘ SWOJEGO KODU TERMINALA
+    # (pobieranie danych z yfinance, wykresy Plotly, itp.)
+    # -----------------------------------------------------
+    
 
 
 # =========================================================
