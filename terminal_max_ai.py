@@ -14,25 +14,24 @@ st.set_page_config(layout="wide", page_title="Terminal Finansowy AI MAX")
 st.title("⚡ Terminal AI MAX – Fundamenty, Momentum, Skanery, Raport ULTRA, Asystent AI")
 
 # =========================================================
-# KLUCZ OPENAI – WPROWADZANY W STREAMLICIE
+# AUTOMATYCZNE POBIERANIE KLUCZA OPENAI (ST.SECRETS)
 # =========================================================
-st.sidebar.subheader("🔑 Klucz OpenAI")
-
-if "openai_key" not in st.session_state:
-    st.session_state.openai_key = ""
-
-st.session_state.openai_key = st.sidebar.text_input(
-    "Wklej swój klucz API (format: sk-...):",
-    value=st.session_state.openai_key,
-    type="password",
-    placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-)
-
-if not st.session_state.openai_key:
-    st.error("❌ Wprowadź poprawny klucz OpenAI, aby kontynuować.")
+# Sprawdzenie czy klucz istnieje w sekretach Streamlit
+if "OPENAI_API_KEY" not in st.secrets:
+    st.error("❌ Brak klucza API! Skonfiguruj plik .streamlit/secrets.toml lub ustawienia chmury.")
     st.stop()
 
-client = OpenAI(api_key=st.session_state.openai_key)
+# Pobranie klucza w tle
+openai_key = st.secrets["OPENAI_API_KEY"]
+
+# Inicjalizacja klienta OpenAI
+client = OpenAI(api_key=openai_key)
+
+# =========================================================
+# RESZTA TWOJEGO KODU TERMINALA
+# =========================================================
+st.success("✅ Klucz API został wczytany automatycznie. Terminal jest gotowy do pracy!")
+
 
 # =========================================================
 # GLOBALNY SYSTEM PROMPT – OSOBOWOŚĆ ASYSTENTA
