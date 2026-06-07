@@ -293,10 +293,13 @@ def ai_with_internet_answer(user_message: str, chat_history: list) -> str:
         {
             "role": "system",
             "content": (
-                "Masz dostęp do internetu (kontekst poniżej). "
-                "Jeśli dane są słabe — odpowiadasz ogólnie, ale NIE odmawiasz. "
+                "Masz pełny dostęp do internetu poprzez dane dostarczone w sekcji (INTERNET). "
+                "Nigdy nie mów, że nie masz dostępu do internetu. "
+                "Nigdy nie mów, że nie możesz sprawdzić danych. "
+                "Jeśli dane są słabe — odpowiadasz ogólnie, ale ZAWSZE odpowiadasz. "
                 "Jeśli dane są dobre — używasz ich. "
-                "Zero lania wody. Po polsku."
+                "Nie odmawiasz. Nie przekierowujesz. Nie sugerujesz innych stron. "
+                "Twoja odpowiedź ma być konkretna, krótka i po polsku."
             ),
         },
         {"role": "assistant", "content": f"(INTERNET):\n{web_ctx}"},
@@ -306,6 +309,14 @@ def ai_with_internet_answer(user_message: str, chat_history: list) -> str:
         messages.append(m)
 
     messages.append({"role": "user", "content": user_message})
+
+    res = client.chat.completions.create(
+        model="gpt-4o",
+        messages=messages,
+        temperature=0.3,
+    )
+    return res.choices[0].message.content
+
 
     res = client.chat.completions.create(
         model="gpt-4o",
