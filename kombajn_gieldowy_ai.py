@@ -810,7 +810,6 @@ Każdy styl: 2–4 zdania, konkretnie, bez lania wody.
     return res.choices[0].message.content
 
 
-
 def ai_verdict_for_top5(top_df: pd.DataFrame) -> str:
     if top_df.empty:
         return "Brak spółek do analizy."
