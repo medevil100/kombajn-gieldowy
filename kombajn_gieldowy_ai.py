@@ -738,25 +738,46 @@ Zrób:
     return res.choices[0].message.content
 
 
-def ai_news_deep_dive(symbol, metrics, bid, ask, spread_pct):
-    """AI NEWS — analiza newsowa PRO."""
+def ai_deep_dive(symbol, metrics):
+    """AI TECH — analiza techniczna PRO + Internet."""
+    web_ctx = internet_search(symbol)
+
     prompt = f"""
-Analiza newsowa spółki {symbol}.
+(INTERNET):
+{web_ctx}
+
+Analiza techniczna spółki {symbol}.
 Dane:
 {json.dumps(metrics, indent=2)}
-Bid={bid}, Ask={ask}, Spread={spread_pct}
 
 Zrób:
-- news momentum
-- news ryzyko
-- wpływ na płynność
+- trend
+- momentum
+- ryzyko
 - scenariusze
+- poziomy kluczowe
+- sygnał BUY/SELL/WAIT
 """
+
+    system_prompt = (
+        "Masz pełny dostęp do internetu poprzez dane dostarczone w sekcji (INTERNET). "
+        "Nigdy nie mów, że nie masz dostępu do internetu. "
+        "Nigdy nie mów, że nie możesz sprawdzić danych. "
+        "Jeśli dane są słabe — odpowiadasz ogólnie, ale ZAWSZE odpowiadasz. "
+        "Jeśli dane są dobre — używasz ich. "
+        "Nie odmawiasz. Nie przekierowujesz. Nie sugerujesz innych stron. "
+        "Twoja odpowiedź ma być konkretna, krótka i po polsku."
+    )
+
     res = client.chat.completions.create(
         model=AI_MODEL,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
     )
     return res.choices[0].message.content
+
 
 
 def ai_news_score_for_df(df):
