@@ -9,17 +9,17 @@ import plotly.express as px
 import streamlit as st
 
 # ============================================================
-#   CYBER‑DESK PRO ULTRA v3
+#   CYBER‑DESK PRO ULTRA v4 — COMPACT EDITION
 # ============================================================
 
 st.set_page_config(
-    page_title="CYBER‑DESK PRO ULTRA v3",
+    page_title="CYBER‑DESK PRO ULTRA v4",
     page_icon="💠",
     layout="wide",
 )
 
 # ============================================================
-#   GLOBAL NEON THEME
+#   GLOBAL NEON THEME (COMPACT + ETYKIETY)
 # ============================================================
 
 st.markdown("""
@@ -91,7 +91,7 @@ if "mode" not in st.session_state:
 
 col_nav1, col_nav2 = st.columns([3, 2])
 with col_nav1:
-    st.markdown('<div class="nav-title">💠 CYBER‑DESK PRO ULTRA v3</div>', unsafe_allow_html=True)
+    st.markdown('<div class="nav-title">💠 CYBER‑DESK PRO ULTRA v4</div>', unsafe_allow_html=True)
 with col_nav2:
     c1, c2 = st.columns(2)
     with c1:
@@ -102,7 +102,7 @@ with col_nav2:
             st.session_state.mode = "TRADING"
 
 # ============================================================
-#   HELPERS
+#   HELPER: SCALAR FIX
 # ============================================================
 
 def to_scalar(x):
@@ -117,7 +117,6 @@ def to_scalar(x):
         return float(x)
     except Exception:
         return np.nan
-
 # ============================================================
 #   AI ENGINE — TAVILY + TICKER ANALYSIS
 # ============================================================
@@ -182,7 +181,7 @@ def ai_generate_response(user_msg: str):
                 f"**Ticker wykryty:** {ticker}\n"
                 f"- Cena: {data['price']:.2f}\n"
                 f"- RSI‑proxy: {data['rsi']:.2f}\n"
-                f"- MA20: {data['ma20']:.2f}\n"
+                f"-- MA20: {data['ma20']:.2f}\n"
                 f"- Trend: {data['trend']}\n"
             )
         else:
@@ -229,14 +228,14 @@ def render_ai_chat():
             time.sleep(0.3)
             out = ai_generate_response(user_msg)
         st.markdown(out)
-
 # ============================================================
 #   TRADING ENGINE — INDICATORS / SCORE / SIGNAL / RISK
 # ============================================================
+
 def compute_indicators(close, volume):
     close = close.copy()
 
-    # RSI
+    # --- RSI ---
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -245,13 +244,13 @@ def compute_indicators(close, volume):
     rsi_series = rsi_series.dropna()
     last_rsi = to_scalar(rsi_series.iloc[-1]) if not rsi_series.empty else np.nan
 
-    # MA10 / MA30
+    # --- MA10 / MA30 ---
     ma_fast_series = close.rolling(10).mean().dropna()
     ma_slow_series = close.rolling(30).mean().dropna()
     last_ma_fast = to_scalar(ma_fast_series.iloc[-1]) if not ma_fast_series.empty else np.nan
     last_ma_slow = to_scalar(ma_slow_series.iloc[-1]) if not ma_slow_series.empty else np.nan
 
-    # Bollinger Bands
+    # --- Bollinger Bands ---
     ma_bb = close.rolling(20).mean()
     std_bb = close.rolling(20).std()
     upper_bb = ma_bb + 2 * std_bb
@@ -259,25 +258,25 @@ def compute_indicators(close, volume):
     last_upper_bb = to_scalar(upper_bb.iloc[-1]) if not upper_bb.dropna().empty else np.nan
     last_lower_bb = to_scalar(lower_bb.iloc[-1]) if not lower_bb.dropna().empty else np.nan
 
-    # MACD
+    # --- MACD ---
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     macd_series = ema12 - ema26
     macd_signal_series = macd_series.ewm(span=9, adjust=False).mean()
     macd_hist_series = macd_series - macd_signal_series
 
-    # Volatility
+    # --- Volatility ---
     vol_series = close.pct_change().rolling(20).std().dropna()
     last_vol = to_scalar(vol_series.iloc[-1]) if not vol_series.empty else np.nan
 
-    # Volume
+    # --- Volume ---
     last_volume = to_scalar(volume.iloc[-1]) if not volume.empty else np.nan
 
-    # SL / TP
+    # --- SL / TP ---
     sl_level = last_lower_bb
     tp_level = last_upper_bb
 
-    # Trend
+    # --- Trend ---
     if not np.isnan(last_ma_fast) and not np.isnan(last_ma_slow):
         if last_ma_fast > last_ma_slow:
             trend = "Uptrend"
@@ -306,6 +305,10 @@ def compute_indicators(close, volume):
         "trend": trend,
     }
 
+
+# ============================================================
+#   SCORING ENGINE 3.0 — działa nawet przy 1 świecy
+# ============================================================
 
 def compute_score(price, ind):
     score = 50
@@ -366,6 +369,7 @@ def compute_score(price, ind):
             score += 15
             details.append("Cena w środku kanału → +15.")
 
+    # --- FINAL ---
     score = max(0, min(100, score))
 
     if score >= 80:
@@ -381,17 +385,10 @@ def compute_score(price, ind):
 
     return score, label, details
 
-def compute_risk_summary(price, sl, tp):
-    if any(np.isnan(x) for x in [price, sl, tp]) or price == 0:
-        return None
-    risk_pct = (price - sl) / price * 100
-    reward_pct = (tp - price) / price * 100
-    rr = reward_pct / abs(risk_pct) if risk_pct > 0 else np.nan
-    return {
-        "risk_pct": risk_pct,
-        "reward_pct": reward_pct,
-        "rr": rr,
-    }
+
+# ============================================================
+#   SIGNAL ENGINE 3.0 — BUY / SELL / HOLD
+# ============================================================
 
 def generate_signal(price, ind):
     rsi = ind["rsi"]
@@ -409,20 +406,36 @@ def generate_signal(price, ind):
     if rsi < 25:
         reasons.append("RSI < 25 → silne wyprzedanie.")
         if trend in ["Uptrend", "Unknown"]:
-            return "BUY", "\n".join(["- " + r for r in reasons])
+            return "BUY", "\n".join(f"- {r}" for r in reasons)
 
     # --- SELL ---
     if rsi > 75:
         reasons.append("RSI > 75 → silne wykupienie.")
         if trend in ["Downtrend", "Unknown"]:
-            return "SELL", "\n".join(["- " + r for r in reasons])
+            return "SELL", "\n".join(f"- {r}" for r in reasons)
 
     # --- HOLD ---
     reasons.append("Brak jednoznacznego edge → HOLD.")
-    return "HOLD", "\n".join(["- " + r for r in reasons])
+    return "HOLD", "\n".join(f"- {r}" for r in reasons)
+
 
 # ============================================================
-#   CHARTS — MAIN + MINI (ULTRA‑COMPACT)
+#   RISK / REWARD
+# ============================================================
+
+def compute_risk_summary(price, sl, tp):
+    if any(np.isnan(x) for x in [price, sl, tp]) or price == 0:
+        return None
+    risk_pct = (price - sl) / price * 100
+    reward_pct = (tp - price) / price * 100
+    rr = reward_pct / abs(risk_pct) if risk_pct > 0 else np.nan
+    return {
+        "risk_pct": risk_pct,
+        "reward_pct": reward_pct,
+        "rr": rr,
+    }
+# ============================================================
+#   CHARTS — MAIN + MINI (COMPACT + ETYKIETY)
 # ============================================================
 
 def render_main_chart(ticker, data, ind, price):
@@ -431,7 +444,7 @@ def render_main_chart(ticker, data, ind, price):
     high = data["High"]
     low = data["Low"]
 
-    height = 300
+    height = 380
     margin = dict(l=8, r=8, t=28, b=8)
 
     fig = go.Figure()
@@ -462,26 +475,20 @@ def render_main_chart(ticker, data, ind, price):
         plot_bgcolor="#020617",
         paper_bgcolor="#020617",
         font=dict(color="#e5e7eb"),
-        xaxis=dict(
-            gridcolor="#1f2937",
-            rangebreaks=[dict(bounds=["sat", "mon"])],
-            showticklabels=False,
-        ),
-        yaxis=dict(
-            gridcolor="#1f2937",
-            fixedrange=False,
-            showticklabels=False,
-        ),
-        title=f"{ticker} — świece",
+        xaxis=dict(gridcolor="#1f2937"),
+        yaxis=dict(gridcolor="#1f2937"),
+        title=f"{ticker} — wykres świecowy",
     )
     st.plotly_chart(fig, use_container_width=True)
 
+
 def render_mini_charts(close, ind):
-    height = 110
+    height = 120
     margin = dict(l=5, r=5, t=20, b=5)
 
     st.markdown("### 📉 Mini‑wykresy")
 
+    # --- Sparkline ---
     mini_close = close.tail(60)
     fig_spark = go.Figure()
     fig_spark.add_trace(go.Scatter(
@@ -494,12 +501,13 @@ def render_mini_charts(close, ind):
         plot_bgcolor="#020617",
         paper_bgcolor="#020617",
         font=dict(color="#e5e7eb"),
-        xaxis=dict(showgrid=False, showticklabels=False),
+        xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=False),
         title="Sparkline",
     )
     st.plotly_chart(fig_spark, use_container_width=True)
 
+    # --- MACD ---
     macd = ind["macd"].tail(60)
     macd_sig = ind["macd_signal"].tail(60)
     fig_macd = go.Figure()
@@ -517,12 +525,13 @@ def render_mini_charts(close, ind):
         plot_bgcolor="#020617",
         paper_bgcolor="#020617",
         font=dict(color="#e5e7eb"),
-        xaxis=dict(showgrid=False, showticklabels=False),
+        xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=False),
         title="Mini‑MACD",
     )
     st.plotly_chart(fig_macd, use_container_width=True)
 
+    # --- RSI proxy ---
     rsi_proxy = close.pct_change().rolling(14).std().dropna().tail(60) * 100
     fig_rsi = go.Figure()
     fig_rsi.add_trace(go.Scatter(
@@ -535,11 +544,12 @@ def render_mini_charts(close, ind):
         plot_bgcolor="#020617",
         paper_bgcolor="#020617",
         font=dict(color="#e5e7eb"),
-        xaxis=dict(showgrid=False, showticklabels=False),
+        xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=False),
         title="Mini‑RSI",
     )
     st.plotly_chart(fig_rsi, use_container_width=True)
+
 
 # ============================================================
 #   MAKRO / HEATMAPA / MULTI‑TICKER / MONITOR
@@ -580,6 +590,7 @@ def fetch_macro_and_sectors():
 
     return macro_data, sector_data
 
+
 def render_multi_ticker(multi_tickers):
     st.markdown("### 📚 Szybki przegląd wielu tickerów")
     tick_list = [t.strip() for t in multi_tickers.split(",") if t.strip()]
@@ -614,6 +625,7 @@ def render_multi_ticker(multi_tickers):
             )
         except Exception:
             col.write(f"**{tck}:** błąd danych")
+
 
 def render_monitor(monitor_tickers, refresh_choice):
     st.markdown("### 🖥️ Monitor 5 spółek (auto‑odświeżanie)")
@@ -662,6 +674,7 @@ def render_monitor(monitor_tickers, refresh_choice):
         except Exception:
             col.write(f"**{tck}:** błąd danych")
 
+
 def render_macro_and_heatmap():
     st.markdown("### 🌍 Makro — indeksy i rynek długu / zmienności")
     macro_data, sector_data = fetch_macro_and_sectors()
@@ -707,13 +720,14 @@ def render_macro_and_heatmap():
     else:
         st.write("Brak danych sektorowych.")
 
+
 # ============================================================
-#   TRADING PANEL
+#   TRADING PANEL — JEDNA STRONA (bez zakładek)
 # ============================================================
 
 def render_trading():
-    st.markdown("## 📈 Kombajn Tradingowy — ULTRA Panel")
-    st.caption("Świece · Wskaźniki · Sygnały · Scoring · Ryzyko · Makro · Heatmapa · Multi‑Ticker · Monitor")
+    st.markdown("## 📈 Kombajn Tradingowy — ULTRA Panel v4 (COMPACT)")
+    st.caption("Świece · Wskaźniki · Sygnały · Scoring · Ryzyko · Mini‑wykresy · Makro · Heatmapa · Multi‑Ticker · Monitor")
 
     ticker = st.text_input("Ticker (np. AAPL, MSFT, STX.WA):", "AAPL")
 
@@ -754,88 +768,79 @@ def render_trading():
             ind = compute_indicators(close, volume)
             price = to_scalar(close.iloc[-1])
 
-            tab_main, tab_mini, tab_macro = st.tabs(
-                ["📊 Główny wykres + sygnał", "📉 Mini‑wykresy + scoring", "🌍 Makro + heatmapa"]
+            # --- MAIN CHART ---
+            render_main_chart(ticker, data, ind, price)
+
+            # --- SIGNAL ---
+            signal, explanation = generate_signal(price, ind)
+            score, score_label, score_details = compute_score(price, ind)
+            risk_summary = compute_risk_summary(price, ind["sl"], ind["tp"])
+
+            if signal == "BUY":
+                sig_icon = "🟢⬆️"
+                sig_class = "signal-buy"
+            elif signal == "SELL":
+                sig_icon = "🟠⬇️"
+                sig_class = "signal-sell"
+            elif signal == "STOP":
+                sig_icon = "🔴⛔"
+                sig_class = "signal-sell"
+            else:
+                sig_icon = "⚪⏸️"
+                sig_class = "signal-hold"
+
+            st.markdown("### 🤖 AI Sygnał automatyczny")
+            st.markdown(
+                f"""
+                <div class="neon-box">
+                    <div class="neon-title">
+                        {sig_icon} <span class="{sig_class}">Sygnał: {signal}</span>
+                    </div>
+                    <div class="neon-sub">
+                        Ticker: <b>{ticker}</b><br/>
+                        Cena: <b>{price:.2f}</b>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
 
-            with tab_main:
-                render_main_chart(ticker, data, ind, price)
-                signal, explanation = generate_signal(price, ind)
-                score, score_label, score_details = compute_score(price, ind)
-                risk_summary = compute_risk_summary(price, ind["sl"], ind["tp"])
-
-                if signal == "BUY":
-                    sig_icon = "🟢⬆️"
-                    sig_class = "signal-buy"
-                elif signal == "SELL":
-                    sig_icon = "🟠⬇️"
-                    sig_class = "signal-sell"
-                elif signal == "STOP":
-                    sig_icon = "🔴⛔"
-                    sig_class = "signal-sell"
-                else:
-                    sig_icon = "⚪⏸️"
-                    sig_class = "signal-hold"
-
-                st.markdown("### 🤖 AI Sygnał automatyczny")
-                st.markdown(
-                    f"""
-                    <div class="neon-box">
-                        <div class="neon-title">
-                            {sig_icon} <span class="{sig_class}">Sygnał: {signal}</span>
-                        </div>
-                        <div class="neon-sub">
-                            Ticker: <b>{ticker}</b><br/>
-                            Cena: <b>{price:.2f}</b>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-                col_sig1, col_sig2 = st.columns(2)
-                with col_sig1:
-                    if not np.isnan(ind["rsi"]):
-                        st.write(f"**RSI (14):** {ind['rsi']:.1f}")
-                    st.write(f"**MA10:** {ind['ma_fast']:.2f}")
-                    st.write(f"**MA30:** {ind['ma_slow']:.2f}")
-                    st.write(f"**Trend:** {ind['trend']}")
-                    st.write(f"**Zmienność (20):** {ind['vol']:.4f}")
-                    st.write(f"**Wolumen:** {ind['volume']:.0f}")
-                with col_sig2:
-                    st.write(f"**SL:** {ind['sl']:.2f}")
-                    st.write(f"**TP:** {ind['tp']:.2f}")
-                    st.markdown(
-                        f'<span class="score-badge">Scoring: {score}/100 – {score_label}</span>',
-                        unsafe_allow_html=True,
-                    )
-                    if risk_summary:
-                        st.write(
-                            f"**Ryzyko:** {risk_summary['risk_pct']:+.1f}% | "
-                            f"**Potencjał:** {risk_summary['reward_pct']:+.1f}%"
-                        )
-                        if not np.isnan(risk_summary["rr"]):
-                            st.write(f"**R/R:** {risk_summary['rr']:.2f}")
-
-                st.markdown("### Uzasadnienie sygnału")
-                st.markdown(explanation)
-                st.markdown("### Detale scoringu")
-                for d in score_details:
-                    st.markdown(f"- {d}")
-
-            with tab_mini:
-                render_mini_charts(close, ind)
-                st.markdown("### 📊 Scoring 0–100")
-                score, score_label, score_details = compute_score(price, ind)
+            col_sig1, col_sig2 = st.columns(2)
+            with col_sig1:
+                if not np.isnan(ind["rsi"]):
+                    st.write(f"**RSI (14):** {ind['rsi']:.1f}")
+                st.write(f"**MA10:** {ind['ma_fast']:.2f}")
+                st.write(f"**MA30:** {ind['ma_slow']:.2f}")
+                st.write(f"**Trend:** {ind['trend']}")
+                st.write(f"**Zmienność (20):** {ind['vol']:.4f}")
+                st.write(f"**Wolumen:** {ind['volume']:.0f}")
+            with col_sig2:
+                st.write(f"**SL:** {ind['sl']:.2f}")
+                st.write(f"**TP:** {ind['tp']:.2f}")
                 st.markdown(
                     f'<span class="score-badge">Scoring: {score}/100 – {score_label}</span>',
                     unsafe_allow_html=True,
                 )
-                for d in score_details:
-                    st.markdown(f"- {d}")
+                if risk_summary:
+                    st.write(
+                        f"**Ryzyko:** {risk_summary['risk_pct']:+.1f}% | "
+                        f"**Potencjał:** {risk_summary['reward_pct']:+.1f}%"
+                    )
+                    if not np.isnan(risk_summary["rr"]):
+                        st.write(f"**R/R:** {risk_summary['rr']:.2f}")
 
-            with tab_macro:
-                render_macro_and_heatmap()
+            st.markdown("### Uzasadnienie sygnału")
+            st.markdown(explanation)
+
+            st.markdown("### Detale scoringu")
+            for d in score_details:
+                st.markdown(f"- {d}")
+
+            st.markdown("---")
+            render_mini_charts(close, ind)
+
+            st.markdown("---")
+            render_macro_and_heatmap()
 
             if multi_tickers.strip():
                 st.markdown("---")
@@ -846,6 +851,7 @@ def render_trading():
 
     st.markdown("---")
     render_monitor(monitor_tickers, refresh_choice)
+
 
 # ============================================================
 #   ROUTING
