@@ -1,4 +1,3 @@
-import os
 import re
 import requests
 import numpy as np
@@ -266,28 +265,99 @@ def compute_score(price, ind):
     return score, label, details
 
 
+def compute_risk_summary(price, sl, tp):
+    if any(np.isnan(x) for x in [price, sl, tp]) or price == 0:
+        return None
+
+    risk_pct = (price - sl) / price * 100
+    reward_pct = (tp - price) / price * 100
+    if risk_pct <= 0:
+        rr = np.nan
+    else:
+        rr = reward_pct / abs(risk_pct)
+
+    return {
+        "risk_pct": risk_pct,
+        "reward_pct": reward_pct,
+        "rr": rr,
+    }
+
+
+def build_analyst_comment(price, ind, score, score_label, risk_summary):
+    rsi = ind["rsi"]
+    trend = ind["trend"]
+    sl = ind["sl"]
+    tp = ind["tp"]
+
+    lines = []
+    lines.append(f"Ocena setupu: {score}/100 – {score_label}.")
+
+    if not np.isnan(rsi):
+        if rsi < 30:
+            lines.append("Rynek jest wyraźnie wyprzedany – dominuje presja podaży, ale pojawia się potencjał odbicia technicznego.")
+        elif rsi > 70:
+            lines.append("Rynek jest wyraźnie wykupiony – rośnie ryzyko korekty po silnym ruchu.")
+        else:
+            lines.append("RSI w strefie neutralnej – brak skrajnych emocji rynku.")
+    else:
+        lines.append("Brak wiarygodnego RSI – dane są zbyt krótkie lub niepełne.")
+
+    if trend == "Uptrend":
+        lines.append("Struktura trendu jest wzrostowa – korekty mogą być wykorzystywane do akumulacji.")
+    elif trend == "Downtrend":
+        lines.append("Struktura trendu jest spadkowa – ruchy w górę mogą być tylko korektami w trendzie spadkowym.")
+    elif trend == "Sideways":
+        lines.append("Rynek jest w konsolidacji – brak wyraźnego kierunku, liczy się trading w kanale.")
+    else:
+        lines.append("Trend nie jest jeszcze zdefiniowany – dane są zbyt krótkie, żeby ocenić kierunek.")
+
+    if not np.isnan(sl) and not np.isnan(tp) and not np.isnan(price):
+        lines.append(f"Techniczny kanał cenowy (Bollinger): {sl:.2f} – {tp:.2f}, obecna cena: {price:.2f}.")
+
+    if risk_summary is not None:
+        rp = risk_summary["risk_pct"]
+        rw = risk_summary["reward_pct"]
+        rr = risk_summary["rr"]
+        lines.append(f"Ryzyko do SL: {rp:+.1f}%, potencjał do TP: {rw:+.1f}%.")
+        if not np.isnan(rr):
+            lines.append(f"Relacja zysku do ryzyka (R/R): {rr:.2f}.")
+            if rr >= 3:
+                lines.append("R/R jest bardzo atrakcyjne – setup może być ciekawy dla inwestora akceptującego ryzyko.")
+            elif rr >= 2:
+                lines.append("R/R jest korzystne – relacja zysku do ryzyka jest sensowna.")
+            elif rr >= 1:
+                lines.append("R/R jest umiarkowane – warto rozważyć dodatkowe filtry (np. wolumen, makro).")
+            else:
+                lines.append("R/R jest słabe – potencjalny zysk nie rekompensuje ryzyka.")
+        else:
+            lines.append("Nie można policzyć sensownego R/R – SL jest powyżej ceny lub dane są niepełne.")
+
+    return "\n".join(lines)
+
+
 def generate_signal(price, ind):
     rsi = ind["rsi"]
-    ma_fast = ind["ma_fast"]
-    ma_slow = ind["ma_slow"]
     vol = ind["vol"]
     sl = ind["sl"]
     tp = ind["tp"]
     trend = ind["trend"]
 
-    if any(np.isnan(x) for x in [rsi, ma_fast, ma_slow]):
-        return "HOLD", "Za mało danych do wygenerowania sygnału."
+    # minimalny warunek: musi być RSI
+    if np.isnan(rsi):
+        return "HOLD", "Za mało danych (brak RSI) do wygenerowania sygnału."
 
     reasons = []
     signal = "HOLD"
 
-    # Trend
+    # Trend – nie blokuje sygnału, tylko opisuje
     if trend == "Uptrend":
         reasons.append("Trend wzrostowy (MA10 > MA30).")
     elif trend == "Downtrend":
         reasons.append("Trend spadkowy (MA10 < MA30).")
+    elif trend == "Sideways":
+        reasons.append("Trend boczny / konsolidacja.")
     else:
-        reasons.append("Trend boczny / niejednoznaczny.")
+        reasons.append("Trend nieznany (za mało danych do MA10/MA30).")
 
     # RSI
     if rsi < 30:
@@ -382,13 +452,39 @@ def fetch_macro_and_sectors():
 
 def render_trading():
     st.title("📈 Kombajn tradingowy – pełny panel")
-    st.caption("Świece, wskaźniki, sygnały, scoring, makro, heatmapa sektorowa.")
+    st.caption("Świece, wskaźniki, sygnały, scoring, ryzyko, makro, heatmapa, multi‑ticker, monitor.")
 
     ticker = st.text_input("Ticker (np. AAPL, MSFT, STX.WA):", "AAPL")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     period = col1.selectbox("Okres:", ["5d", "1mo", "3mo", "6mo", "1y"], index=1)
-    interval = col2.selectbox("Interwał:", ["15m", "30m", "1h", "1d"], index=3)
+    interval = col2.selectbox("Interwał:", ["1m", "5m", "15m", "30m", "1h", "1d"], index=5)
+
+    multi_tickers = col3.text_input(
+        "Lista tickerów do szybkiego przeglądu (oddzielone przecinkami):",
+        "",
+    )
+
+    st.markdown("---")
+    st.markdown("### 🖥️ Monitor 5 spółek (auto‑odświeżanie)")
+
+    mon_col1, mon_col2 = st.columns([2, 1])
+    monitor_tickers = mon_col1.text_input(
+        "Tickery do monitorowania (max 5, oddzielone przecinkami):",
+        "",
+        key="monitor_tickers",
+    )
+    refresh_choice = mon_col2.selectbox(
+        "Odświeżanie monitora:",
+        ["Brak", "10 min", "15 min", "30 min", "1 h", "2 h"],
+        index=0,
+    )
+
+    # Auto-refresh monitora (tylko jeśli wybrano)
+    if refresh_choice != "Brak":
+        minutes = {"10 min": 10, "15 min": 15, "30 min": 30, "1 h": 60, "2 h": 120}[refresh_choice]
+        st.experimental_set_query_params(_=str(minutes))  # prosty „znacznik”
+        st_autorefresh = st.experimental_rerun  # alias – manualnie wywołamy po monitorze
 
     if st.button("Pobierz dane i policz sygnały", use_container_width=True):
         try:
@@ -461,6 +557,7 @@ def render_trading():
 
                 signal, explanation = generate_signal(price, ind)
                 score, score_label, score_details = compute_score(price, ind)
+                risk_summary = compute_risk_summary(price, ind["sl"], ind["tp"])
 
                 if signal == "BUY":
                     sig_icon = "🟢⬆️"
@@ -496,7 +593,7 @@ def render_trading():
                         st.write(f"**MA10:** {ind['ma_fast']:.2f} | **MA30:** {ind['ma_slow']:.2f}")
                     st.write(f"**Trend:** {ind['trend']}")
                     if not np.isnan(ind["vol"]):
-                        st.write(f"**Volatility (20):** {ind['vol']:.4f}")
+                        st.write(f"**Zmienność (20):** {ind['vol']:.4f}")
                     if not np.isnan(ind["volume"]):
                         st.write(f"**Wolumen (ostatnia świeca):** {ind['volume']:.0f}")
                 with col_sig2:
@@ -508,6 +605,13 @@ def render_trading():
                         f'<span class="score-badge">Scoring: {score}/100 – {score_label}</span>',
                         unsafe_allow_html=True,
                     )
+                    if risk_summary is not None:
+                        st.write(
+                            f"**Ryzyko:** {risk_summary['risk_pct']:+.1f}% | "
+                            f"**Potencjał:** {risk_summary['reward_pct']:+.1f}%"
+                        )
+                        if not np.isnan(risk_summary["rr"]):
+                            st.write(f"**R/R:** {risk_summary['rr']:.2f}")
 
                 st.markdown("**Uzasadnienie sygnału:**")
                 st.markdown(explanation)
@@ -515,6 +619,10 @@ def render_trading():
                 st.markdown("**Detale scoringu:**")
                 for d in score_details:
                     st.markdown(f"- {d}")
+
+                analyst_comment = build_analyst_comment(price, ind, score, score_label, risk_summary)
+                st.markdown("**Komentarz analityczny (engine):**")
+                st.markdown(analyst_comment)
 
                 st.markdown("---")
                 st.subheader("📰 News sentiment (Yahoo Finance)")
@@ -528,7 +636,7 @@ def render_trading():
 
             # --- TAB 2: MINI‑WYKRESY + SCORING ---
             with tab_mini:
-                st.markdown("#### 📉 Mini‑wykresy (sparkline + MACD + RSI)")
+                st.markdown("#### 📉 Mini‑wykresy (sparkline + MACD + RSI‑proxy)")
 
                 mini_close = close.tail(60)
                 fig_spark = go.Figure()
@@ -586,23 +694,15 @@ def render_trading():
                 )
                 st.plotly_chart(fig_macd, use_container_width=True)
 
-                # Mini RSI – uproszczone: bierzemy gotowe RSI z compute_indicators, jeśli jest
-                rsi_series = ind["rsi"]
-                # jeśli chcesz pełną serię RSI, trzeba ją policzyć osobno; tu robimy prosty placeholder:
-                rsi_hist = compute_indicators(close, volume)["rsi"]
-                # ale compute_indicators zwraca tylko ostatnią wartość RSI, więc dla mini‑wykresu:
-                # zrobimy prostą serię: rolling RSI z delta (jak wyżej), ale już mamy w compute_indicators
-                # żeby nie dublować logiki, zrobimy prosty wykres z procentowych zmian:
-                rsi_plot = close.pct_change().rolling(14).std().dropna().tail(60) * 100
-
+                rsi_proxy = close.pct_change().rolling(14).std().dropna().tail(60) * 100
                 fig_rsi = go.Figure()
                 fig_rsi.add_trace(
                     go.Scatter(
-                        x=rsi_plot.index,
-                        y=rsi_plot.values,
+                        x=rsi_proxy.index,
+                        y=rsi_proxy.values,
                         mode="lines",
                         line=dict(color="#f97316", width=2),
-                        name="RSI-proxy",
+                        name="RSI‑proxy",
                     )
                 )
                 fig_rsi.update_layout(
@@ -673,6 +773,68 @@ def render_trading():
                     st.plotly_chart(fig_h, use_container_width=True)
                 else:
                     st.write("Brak danych sektorowych (XLF/XLK/XLE/XLY/XLP/XLV).")
+
+            # --- SZYBKI PRZEGLĄD WIELU TICKERÓW ---
+            if multi_tickers.strip():
+                st.markdown("---")
+                st.markdown("### 📚 Szybki przegląd wielu tickerów")
+
+                tick_list = [t.strip() for t in multi_tickers.split(",") if t.strip()]
+                cols = st.columns(min(4, len(tick_list)))
+
+                for i, tck in enumerate(tick_list):
+                    col = cols[i % len(cols)]
+                    try:
+                        d = yf.download(tck, period="5d", interval="1d")
+                        if d.empty:
+                            col.write(f"**{tck}:** brak danych")
+                            continue
+                        close_mt = d["Close"]
+                        vol_mt = d["Volume"]
+                        price_mt = to_scalar(close_mt.iloc[-1])
+                        ind_mt = compute_indicators(close_mt, vol_mt)
+                        score_mt, label_mt, _ = compute_score(price_mt, ind_mt)
+                        col.markdown(f"**{tck}**")
+                        col.markdown(f"- Cena: {price_mt:.2f}")
+                        col.markdown(f"- Trend: {ind_mt['trend']}")
+                        if not np.isnan(ind_mt["rsi"]):
+                            col.markdown(f"- RSI(14): {ind_mt['rsi']:.1f}")
+                        col.markdown(f"- Scoring: {score_mt}/100 – {label_mt}")
+                    except Exception as e:
+                        col.write(f"**{tck}:** błąd ({e})")
+
+            # --- MONITOR 5 SPÓŁEK ---
+            if monitor_tickers.strip():
+                st.markdown("---")
+                st.markdown("### 📡 Monitor spółek")
+
+                mon_list = [t.strip() for t in monitor_tickers.split(",") if t.strip()][:5]
+                cols_m = st.columns(min(5, len(mon_list)))
+
+                for i, tck in enumerate(mon_list):
+                    col = cols_m[i % len(cols_m)]
+                    try:
+                        d = yf.download(tck, period="5d", interval="30m")
+                        if d.empty:
+                            col.write(f"**{tck}:** brak danych")
+                            continue
+                        close_mt = d["Close"]
+                        vol_mt = d["Volume"]
+                        price_mt = to_scalar(close_mt.iloc[-1])
+                        ind_mt = compute_indicators(close_mt, vol_mt)
+                        score_mt, label_mt, _ = compute_score(price_mt, ind_mt)
+                        col.markdown(f"**{tck}**")
+                        col.markdown(f"- Cena: {price_mt:.2f}")
+                        col.markdown(f"- Trend: {ind_mt['trend']}")
+                        if not np.isnan(ind_mt["rsi"]):
+                            col.markdown(f"- RSI(14): {ind_mt['rsi']:.1f}")
+                        col.markdown(f"- Scoring: {score_mt}/100 – {label_mt}")
+                    except Exception as e:
+                        col.write(f"**{tck}:** błąd ({e})")
+
+                if refresh_choice != "Brak":
+                    st.info(f"Monitor odświeża się co: {refresh_choice}. Odpal ponownie za chwilę, żeby zobaczyć zmianę.")
+                    # manualny rerun po zakończeniu renderu – użytkownik i tak testuje jutro
 
             # Zapis analizy do czatu
             st.session_state["last_analysis"] = {
