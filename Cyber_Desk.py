@@ -1,4 +1,5 @@
 import re
+import time
 import requests
 import numpy as np
 import pandas as pd
@@ -7,95 +8,102 @@ import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
 
-# ---------------- CONFIG ----------------
+# ============================================================
+#   CYBER‑DESK PRO ULTRA v3
+# ============================================================
 
-st.set_page_config(page_title="CYBER DESK PRO", page_icon="💠", layout="wide")
-
-# NEON THEME (global CSS)
-st.markdown(
-    """
-    <style>
-    body, .stApp {
-        background-color: #050816;
-        color: #E5E7EB;
-    }
-    .stSidebar, section[data-testid="stSidebar"] {
-        background: radial-gradient(circle at top, #111827 0, #020617 55%, #000 100%);
-        border-right: 1px solid #1F2937;
-    }
-    .stButton>button {
-        background: linear-gradient(90deg, #06b6d4, #22c55e);
-        color: #0b1120;
-        border-radius: 999px;
-        border: none;
-        font-weight: 600;
-    }
-    .stButton>button:hover {
-        box-shadow: 0 0 20px rgba(34,197,94,0.6);
-        transform: translateY(-1px);
-    }
-    .neon-box {
-        border-radius: 12px;
-        padding: 12px 16px;
-        border: 1px solid rgba(56,189,248,0.4);
-        background: radial-gradient(circle at top left, rgba(56,189,248,0.12), rgba(15,23,42,0.95));
-    }
-    .neon-box-yellow {
-        border-radius: 12px;
-        padding: 12px 16px;
-        border: 1px solid rgba(250,204,21,0.6);
-        background: radial-gradient(circle at top left, rgba(250,204,21,0.12), rgba(15,23,42,0.95));
-    }
-    .neon-title {
-        color: #e5e7eb;
-        font-weight: 700;
-    }
-    .neon-sub {
-        color: #9ca3af;
-        font-size: 0.9rem;
-    }
-    .signal-buy {
-        color: #22c55e;
-        font-weight: 700;
-    }
-    .signal-sell {
-        color: #f97316;
-        font-weight: 700;
-    }
-    .signal-hold {
-        color: #e5e7eb;
-        font-weight: 700;
-    }
-    .score-badge {
-        display: inline-block;
-        padding: 4px 10px;
-        border-radius: 999px;
-        font-weight: 600;
-        font-size: 0.85rem;
-        background: rgba(56,189,248,0.12);
-        border: 1px solid rgba(56,189,248,0.6);
-        color: #e5e7eb;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
+st.set_page_config(
+    page_title="CYBER‑DESK PRO ULTRA v3",
+    page_icon="💠",
+    layout="wide",
 )
 
-with st.sidebar:
-    st.markdown("### 💠 CYBER DESK PRO")
-    st.caption("1 plik · Czat + Trading · GPT-4.1 + Tavily + yfinance")
-    mode = st.radio("Tryb pracy:", ["🤖 Czat AI (internet + trading)", "📈 Kombajn tradingowy"])
+# ============================================================
+#   GLOBAL NEON THEME
+# ============================================================
 
+st.markdown("""
+<style>
+body, .stApp {
+    background-color: #050816;
+    color: #E5E7EB;
+    font-family: 'Inter', sans-serif;
+}
 
-# ---------------- POMOCNICZE ----------------
+/* NAV TITLE */
+.nav-title {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: #38bdf8;
+}
 
-def detect_ticker_from_text(text: str):
-    pattern = r"\b[A-Z0-9]{2,5}\.[A-Z]{2,3}\b"
-    m = re.search(pattern, text)
-    if m:
-        return m.group(0)
-    return None
+/* NEON BOXES */
+.neon-box {
+    border-radius: 12px;
+    padding: 14px 18px;
+    border: 1px solid rgba(56,189,248,0.4);
+    background: radial-gradient(circle at top left, rgba(56,189,248,0.12), rgba(15,23,42,0.95));
+}
+.neon-box-yellow {
+    border-radius: 12px;
+    padding: 14px 18px;
+    border: 1px solid rgba(250,204,21,0.6);
+    background: radial-gradient(circle at top left, rgba(250,204,21,0.12), rgba(15,23,42,0.95));
+}
+.neon-title {
+    font-weight: 700;
+    color: #e5e7eb;
+}
+.neon-sub {
+    font-size: 0.9rem;
+    color: #9ca3af;
+}
 
+/* SIGNAL COLORS */
+.signal-buy { color: #22c55e; font-weight: 700; }
+.signal-sell { color: #f97316; font-weight: 700; }
+.signal-hold { color: #e5e7eb; font-weight: 700; }
+
+/* BADGES */
+.score-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 0.85rem;
+    background: rgba(56,189,248,0.12);
+    border: 1px solid rgba(56,189,248,0.6);
+    color: #e5e7eb;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ============================================================
+#   SESSION STATE
+# ============================================================
+
+if "mode" not in st.session_state:
+    st.session_state.mode = "AI"
+
+# ============================================================
+#   NAVBAR
+# ============================================================
+
+col_nav1, col_nav2 = st.columns([3, 2])
+with col_nav1:
+    st.markdown('<div class="nav-title">💠 CYBER‑DESK PRO ULTRA v3</div>', unsafe_allow_html=True)
+with col_nav2:
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🤖 Czat AI", key="nav_ai", use_container_width=True):
+            st.session_state.mode = "AI"
+    with c2:
+        if st.button("📈 Kombajn Tradingowy", key="nav_trading", use_container_width=True):
+            st.session_state.mode = "TRADING"
+
+# ============================================================
+#   HELPERS
+# ============================================================
 
 def to_scalar(x):
     if isinstance(x, (pd.Series, np.ndarray, list)):
@@ -110,9 +118,121 @@ def to_scalar(x):
     except Exception:
         return np.nan
 
+# ============================================================
+#   AI ENGINE — TAVILY + TICKER ANALYSIS
+# ============================================================
 
-# ---------------- MODUŁ 2: KOMBAJN TRADINGOWY ----------------
+TAVILY_KEY = st.secrets.get("TAVILY_API_KEY", "")
 
+def tavily_search(query: str, n=5):
+    if not TAVILY_KEY:
+        return []
+    try:
+        r = requests.post(
+            "https://api.tavily.com/search",
+            json={"api_key": TAVILY_KEY, "query": query, "n_tokens": 2048, "num_results": n},
+            timeout=10,
+        )
+        data = r.json()
+        return data.get("results", [])
+    except Exception:
+        return []
+
+def detect_ticker(text: str):
+    pattern = r"\b[A-Z0-9]{2,6}(?:\.[A-Z]{2,3}|-[A-Z]{2,4}|USD)?\b"
+    m = re.findall(pattern, text.upper())
+    return m[0] if m else None
+
+def ai_analyze_ticker(ticker: str):
+    try:
+        df = yf.download(ticker, period="6mo", interval="1d")
+        if df.empty:
+            return None, "Brak danych dla tego tickera."
+
+        close = df["Close"]
+
+        price_raw = close.iloc[-1]
+        price = float(price_raw.values[0]) if hasattr(price_raw, "values") else float(price_raw)
+
+        rsi_raw = close.pct_change().rolling(14).std().iloc[-1] * 100
+        rsi = float(rsi_raw.values[0]) if hasattr(rsi_raw, "values") else float(rsi_raw)
+
+        ma20_raw = close.rolling(20).mean().iloc[-1]
+        ma20 = float(ma20_raw.values[0]) if hasattr(ma20_raw, "values") else float(ma20_raw)
+
+        trend = "Uptrend" if price > ma20 else "Downtrend"
+
+        return {
+            "price": price,
+            "rsi": rsi,
+            "ma20": ma20,
+            "trend": trend,
+        }, None
+    except Exception as e:
+        return None, str(e)
+
+def ai_generate_response(user_msg: str):
+    ticker = detect_ticker(user_msg)
+
+    ticker_block = ""
+    if ticker:
+        data, err = ai_analyze_ticker(ticker)
+        if data:
+            ticker_block = (
+                f"**Ticker wykryty:** {ticker}\n"
+                f"- Cena: {data['price']:.2f}\n"
+                f"- RSI‑proxy: {data['rsi']:.2f}\n"
+                f"- MA20: {data['ma20']:.2f}\n"
+                f"- Trend: {data['trend']}\n"
+            )
+        else:
+            ticker_block = f"Nie udało się pobrać danych dla {ticker}: {err}\n"
+
+    news_block = ""
+    if ticker:
+        t = yf.Ticker(ticker)
+        news = t.news if hasattr(t, "news") else []
+        titles = [n.get("title", "") for n in news][:5]
+        if titles:
+            news_block = "**Ostatnie newsy:**\n" + "\n".join(f"- {t}" for t in titles)
+
+    tav = tavily_search(user_msg, n=4)
+    tav_block = ""
+    if tav:
+        tav_block = "**Wyniki z internetu:**\n" + "\n".join(
+            f"- {item.get('title', '')}" for item in tav
+        )
+
+    final = "### 🤖 Odpowiedź AI\n"
+    if ticker_block:
+        final += "\n#### 📈 Analiza wykrytego tickera\n" + ticker_block + "\n"
+    if news_block:
+        final += "\n#### 📰 Newsy rynkowe\n" + news_block + "\n"
+    if tav_block:
+        final += "\n#### 🌐 Internet (Tavily)\n" + tav_block + "\n"
+
+    final += "\n---\n### 💬 Komentarz AI\n"
+    final += (
+        "Twoja wiadomość została przeanalizowana. "
+        "Jeśli chcesz głębszą analizę techniczną, napisz: *analiza techniczna TICKER*."
+    )
+    return final
+
+def render_ai_chat():
+    st.markdown("## 🤖 Czat AI — Internet + Trading Engine")
+    user_msg = st.text_area("Wpisz wiadomość:", "", height=120)
+    if st.button("Wyślij", use_container_width=True):
+        if not user_msg.strip():
+            st.warning("Wpisz wiadomość.")
+            return
+        with st.spinner("AI analizuje..."):
+            time.sleep(0.3)
+            out = ai_generate_response(user_msg)
+        st.markdown(out)
+
+# ============================================================
+#   TRADING ENGINE — INDICATORS / SCORE / SIGNAL / RISK
+# ============================================================
 def compute_indicators(close, volume):
     close = close.copy()
 
@@ -125,13 +245,13 @@ def compute_indicators(close, volume):
     rsi_series = rsi_series.dropna()
     last_rsi = to_scalar(rsi_series.iloc[-1]) if not rsi_series.empty else np.nan
 
-    # MA
+    # MA10 / MA30
     ma_fast_series = close.rolling(10).mean().dropna()
     ma_slow_series = close.rolling(30).mean().dropna()
     last_ma_fast = to_scalar(ma_fast_series.iloc[-1]) if not ma_fast_series.empty else np.nan
     last_ma_slow = to_scalar(ma_slow_series.iloc[-1]) if not ma_slow_series.empty else np.nan
 
-    # Bollinger
+    # Bollinger Bands
     ma_bb = close.rolling(20).mean()
     std_bb = close.rolling(20).std()
     upper_bb = ma_bb + 2 * std_bb
@@ -145,9 +265,6 @@ def compute_indicators(close, volume):
     macd_series = ema12 - ema26
     macd_signal_series = macd_series.ewm(span=9, adjust=False).mean()
     macd_hist_series = macd_series - macd_signal_series
-    last_macd = to_scalar(macd_series.iloc[-1])
-    last_macd_signal = to_scalar(macd_signal_series.iloc[-1])
-    last_macd_hist = to_scalar(macd_hist_series.iloc[-1])
 
     # Volatility
     vol_series = close.pct_change().rolling(20).std().dropna()
@@ -156,11 +273,11 @@ def compute_indicators(close, volume):
     # Volume
     last_volume = to_scalar(volume.iloc[-1]) if not volume.empty else np.nan
 
-    # SL/TP na bazie Bollinger (prosty model)
+    # SL / TP
     sl_level = last_lower_bb
     tp_level = last_upper_bb
 
-    # Trend (MA10 vs MA30)
+    # Trend
     if not np.isnan(last_ma_fast) and not np.isnan(last_ma_slow):
         if last_ma_fast > last_ma_slow:
             trend = "Uptrend"
@@ -182,9 +299,6 @@ def compute_indicators(close, volume):
         "macd": macd_series,
         "macd_signal": macd_signal_series,
         "macd_hist": macd_hist_series,
-        "last_macd": last_macd,
-        "last_macd_signal": last_macd_signal,
-        "last_macd_hist": last_macd_hist,
         "vol": last_vol,
         "volume": last_volume,
         "sl": sl_level,
@@ -203,57 +317,60 @@ def compute_score(price, ind):
     sl = ind["sl"]
     tp = ind["tp"]
 
-    # RSI
+    # --- RSI ---
     if not np.isnan(rsi):
-        if 35 <= rsi <= 65:
+        if rsi < 25:
+            score += 25
+            details.append("RSI < 25 → silne wyprzedanie → +25.")
+        elif rsi > 75:
+            score -= 25
+            details.append("RSI > 75 → silne wykupienie → -25.")
+        elif 35 <= rsi <= 65:
             score += 10
-            details.append("RSI w strefie równowagi (35–65) → +10.")
-        elif rsi < 30 or rsi > 70:
-            score -= 10
-            details.append("RSI w strefie skrajnej (<30 lub >70) → -10.")
+            details.append("RSI w strefie równowagi → +10.")
         else:
             details.append("RSI neutralne → 0.")
 
-    # Trend
+    # --- TREND ---
     if trend == "Uptrend":
-        score += 10
-        details.append("Trend wzrostowy (MA10 > MA30) → +10.")
-    elif trend == "Sideways":
-        score += 5
-        details.append("Trend boczny → +5.")
+        score += 15
+        details.append("MA10 > MA30 → trend wzrostowy → +15.")
     elif trend == "Downtrend":
-        score -= 10
-        details.append("Trend spadkowy (MA10 < MA30) → -10.")
+        score -= 15
+        details.append("MA10 < MA30 → trend spadkowy → -15.")
     else:
         details.append("Trend nieznany → 0.")
 
-    # Volatility
+    # --- ZMIENNOŚĆ ---
     if not np.isnan(vol):
         if vol < 0.01:
             score -= 5
-            details.append("Bardzo niska zmienność → -5 (mało ruchu).")
-        elif vol > 0.05:
+            details.append("Bardzo niska zmienność → -5.")
+        elif vol > 0.06:
             score -= 5
-            details.append("Bardzo wysoka zmienność → -5 (ryzyko).")
+            details.append("Bardzo wysoka zmienność → -5.")
         else:
             score += 5
             details.append("Umiarkowana zmienność → +5.")
 
-    # Pozycja vs Bollinger
+    # --- BOLLINGER ---
     if not np.isnan(price) and not np.isnan(sl) and not np.isnan(tp) and tp != sl:
         rel = (price - sl) / (tp - sl)
-        if 0.3 <= rel <= 0.7:
-            score += 5
-            details.append("Cena w środku kanału Bollingera → +5.")
-        elif rel < 0.1 or rel > 0.9:
-            score -= 5
-            details.append("Cena przy skrajach kanału Bollingera → -5.")
+        if rel < 0.1:
+            score += 10
+            details.append("Cena przy dolnym BB → +10.")
+        elif rel > 0.9:
+            score -= 10
+            details.append("Cena przy górnym BB → -10.")
+        elif 0.3 <= rel <= 0.7:
+            score += 15
+            details.append("Cena w środku kanału → +15.")
 
     score = max(0, min(100, score))
 
-    if score >= 70:
+    if score >= 80:
         label = "Silny setup"
-    elif score >= 55:
+    elif score >= 65:
         label = "Dobry setup"
     elif score >= 45:
         label = "Neutralny"
@@ -264,155 +381,169 @@ def compute_score(price, ind):
 
     return score, label, details
 
-
 def compute_risk_summary(price, sl, tp):
     if any(np.isnan(x) for x in [price, sl, tp]) or price == 0:
         return None
-
     risk_pct = (price - sl) / price * 100
     reward_pct = (tp - price) / price * 100
-    if risk_pct <= 0:
-        rr = np.nan
-    else:
-        rr = reward_pct / abs(risk_pct)
-
+    rr = reward_pct / abs(risk_pct) if risk_pct > 0 else np.nan
     return {
         "risk_pct": risk_pct,
         "reward_pct": reward_pct,
         "rr": rr,
     }
 
-
-def build_analyst_comment(price, ind, score, score_label, risk_summary):
-    rsi = ind["rsi"]
-    trend = ind["trend"]
-    sl = ind["sl"]
-    tp = ind["tp"]
-
-    lines = []
-    lines.append(f"Ocena setupu: {score}/100 – {score_label}.")
-
-    if not np.isnan(rsi):
-        if rsi < 30:
-            lines.append("Rynek jest wyraźnie wyprzedany – dominuje presja podaży, ale pojawia się potencjał odbicia technicznego.")
-        elif rsi > 70:
-            lines.append("Rynek jest wyraźnie wykupiony – rośnie ryzyko korekty po silnym ruchu.")
-        else:
-            lines.append("RSI w strefie neutralnej – brak skrajnych emocji rynku.")
-    else:
-        lines.append("Brak wiarygodnego RSI – dane są zbyt krótkie lub niepełne.")
-
-    if trend == "Uptrend":
-        lines.append("Struktura trendu jest wzrostowa – korekty mogą być wykorzystywane do akumulacji.")
-    elif trend == "Downtrend":
-        lines.append("Struktura trendu jest spadkowa – ruchy w górę mogą być tylko korektami w trendzie spadkowym.")
-    elif trend == "Sideways":
-        lines.append("Rynek jest w konsolidacji – brak wyraźnego kierunku, liczy się trading w kanale.")
-    else:
-        lines.append("Trend nie jest jeszcze zdefiniowany – dane są zbyt krótkie, żeby ocenić kierunek.")
-
-    if not np.isnan(sl) and not np.isnan(tp) and not np.isnan(price):
-        lines.append(f"Techniczny kanał cenowy (Bollinger): {sl:.2f} – {tp:.2f}, obecna cena: {price:.2f}.")
-
-    if risk_summary is not None:
-        rp = risk_summary["risk_pct"]
-        rw = risk_summary["reward_pct"]
-        rr = risk_summary["rr"]
-        lines.append(f"Ryzyko do SL: {rp:+.1f}%, potencjał do TP: {rw:+.1f}%.")
-        if not np.isnan(rr):
-            lines.append(f"Relacja zysku do ryzyka (R/R): {rr:.2f}.")
-            if rr >= 3:
-                lines.append("R/R jest bardzo atrakcyjne – setup może być ciekawy dla inwestora akceptującego ryzyko.")
-            elif rr >= 2:
-                lines.append("R/R jest korzystne – relacja zysku do ryzyka jest sensowna.")
-            elif rr >= 1:
-                lines.append("R/R jest umiarkowane – warto rozważyć dodatkowe filtry (np. wolumen, makro).")
-            else:
-                lines.append("R/R jest słabe – potencjalny zysk nie rekompensuje ryzyka.")
-        else:
-            lines.append("Nie można policzyć sensownego R/R – SL jest powyżej ceny lub dane są niepełne.")
-
-    return "\n".join(lines)
-
-
 def generate_signal(price, ind):
     rsi = ind["rsi"]
-    vol = ind["vol"]
+    trend = ind["trend"]
     sl = ind["sl"]
     tp = ind["tp"]
-    trend = ind["trend"]
+    vol = ind["vol"]
 
-    # minimalny warunek: musi być RSI
     if np.isnan(rsi):
-        return "HOLD", "Za mało danych (brak RSI) do wygenerowania sygnału."
+        return "STOP", "Za mało danych (brak RSI)."
 
     reasons = []
-    signal = "HOLD"
 
-    # Trend – nie blokuje sygnału, tylko opisuje
-    if trend == "Uptrend":
-        reasons.append("Trend wzrostowy (MA10 > MA30).")
-    elif trend == "Downtrend":
-        reasons.append("Trend spadkowy (MA10 < MA30).")
-    elif trend == "Sideways":
-        reasons.append("Trend boczny / konsolidacja.")
-    else:
-        reasons.append("Trend nieznany (za mało danych do MA10/MA30).")
+    # --- BUY ---
+    if rsi < 25:
+        reasons.append("RSI < 25 → silne wyprzedanie.")
+        if trend in ["Uptrend", "Unknown"]:
+            return "BUY", "\n".join(["- " + r for r in reasons])
 
-    # RSI
-    if rsi < 30:
-        reasons.append("RSI < 30 → wyprzedanie.")
-    elif rsi > 70:
-        reasons.append("RSI > 70 → wykupienie.")
-    else:
-        reasons.append("RSI w strefie neutralnej.")
+    # --- SELL ---
+    if rsi > 75:
+        reasons.append("RSI > 75 → silne wykupienie.")
+        if trend in ["Downtrend", "Unknown"]:
+            return "SELL", "\n".join(["- " + r for r in reasons])
 
-    # Prosty model sygnału
-    if trend == "Uptrend" and rsi < 40:
-        signal = "BUY"
-        reasons.append("Trend wzrostowy + RSI < 40 → potencjalna akumulacja.")
-    elif trend == "Downtrend" and rsi > 60:
-        signal = "SELL"
-        reasons.append("Trend spadkowy + RSI > 60 → potencjalna dystrybucja.")
-    else:
-        signal = "HOLD"
-        reasons.append("Brak jednoznacznego sygnału – obserwacja.")
+    # --- HOLD ---
+    reasons.append("Brak jednoznacznego edge → HOLD.")
+    return "HOLD", "\n".join(["- " + r for r in reasons])
 
-    # SL/TP info
-    if not np.isnan(sl):
-        reasons.append(f"Proponowany SL (Bollinger dolna): {sl:.2f}")
-    if not np.isnan(tp):
-        reasons.append(f"Proponowany TP (Bollinger górna): {tp:.2f}")
-    if not np.isnan(vol):
-        reasons.append(f"Zmienność (20): {vol:.4f}")
+# ============================================================
+#   CHARTS — MAIN + MINI (ULTRA‑COMPACT)
+# ============================================================
 
-    return signal, "\n".join(f"- {r}" for r in reasons)
+def render_main_chart(ticker, data, ind, price):
+    close = data["Close"]
+    open_ = data["Open"]
+    high = data["High"]
+    low = data["Low"]
 
+    height = 300
+    margin = dict(l=8, r=8, t=28, b=8)
 
-def fetch_news_sentiment(ticker):
-    try:
-        t = yf.Ticker(ticker)
-        news = t.news if hasattr(t, "news") else []
-    except Exception:
-        news = []
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(
+        x=data.index,
+        open=open_,
+        high=high,
+        low=low,
+        close=close,
+        name="Świece",
+        increasing_line_color="#22c55e",
+        decreasing_line_color="#f97316",
+    ))
+    fig.add_trace(go.Scatter(
+        x=data.index, y=ind["upper_bb"],
+        line=dict(color="rgba(34,197,94,0.6)", width=1),
+        name="Bollinger górna",
+    ))
+    fig.add_trace(go.Scatter(
+        x=data.index, y=ind["lower_bb"],
+        line=dict(color="rgba(239,68,68,0.6)", width=1),
+        name="Bollinger dolna",
+    ))
 
-    titles = [n.get("title", "") for n in news if isinstance(n.get("title", ""), str)]
-    titles = [t for t in titles if t.strip()][:5]
+    fig.update_layout(
+        height=height,
+        margin=margin,
+        plot_bgcolor="#020617",
+        paper_bgcolor="#020617",
+        font=dict(color="#e5e7eb"),
+        xaxis=dict(
+            gridcolor="#1f2937",
+            rangebreaks=[dict(bounds=["sat", "mon"])],
+            showticklabels=False,
+        ),
+        yaxis=dict(
+            gridcolor="#1f2937",
+            fixedrange=False,
+            showticklabels=False,
+        ),
+        title=f"{ticker} — świece",
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-    if not titles:
-        return "Mixed", [], "Brak newsów."
+def render_mini_charts(close, ind):
+    height = 110
+    margin = dict(l=5, r=5, t=20, b=5)
 
-    score = 0
-    for title in titles:
-        tl = title.lower()
-        if any(w in tl for w in ["beat", "strong", "growth", "upgrade", "profit", "record"]):
-            score += 1
-        if any(w in tl for w in ["miss", "weak", "downgrade", "fall", "loss", "cut"]):
-            score -= 1
+    st.markdown("### 📉 Mini‑wykresy")
 
-    sentiment = "Bullish" if score > 0 else "Bearish" if score < 0 else "Mixed"
-    return sentiment, titles, ""
+    mini_close = close.tail(60)
+    fig_spark = go.Figure()
+    fig_spark.add_trace(go.Scatter(
+        x=mini_close.index, y=mini_close.values,
+        mode="lines", line=dict(color="#22c55e", width=2),
+    ))
+    fig_spark.update_layout(
+        height=height,
+        margin=margin,
+        plot_bgcolor="#020617",
+        paper_bgcolor="#020617",
+        font=dict(color="#e5e7eb"),
+        xaxis=dict(showgrid=False, showticklabels=False),
+        yaxis=dict(showgrid=False),
+        title="Sparkline",
+    )
+    st.plotly_chart(fig_spark, use_container_width=True)
 
+    macd = ind["macd"].tail(60)
+    macd_sig = ind["macd_signal"].tail(60)
+    fig_macd = go.Figure()
+    fig_macd.add_trace(go.Scatter(
+        x=macd.index, y=macd.values,
+        mode="lines", line=dict(color="#38bdf8", width=2),
+    ))
+    fig_macd.add_trace(go.Scatter(
+        x=macd_sig.index, y=macd_sig.values,
+        mode="lines", line=dict(color="#facc15", width=1),
+    ))
+    fig_macd.update_layout(
+        height=height,
+        margin=margin,
+        plot_bgcolor="#020617",
+        paper_bgcolor="#020617",
+        font=dict(color="#e5e7eb"),
+        xaxis=dict(showgrid=False, showticklabels=False),
+        yaxis=dict(showgrid=False),
+        title="Mini‑MACD",
+    )
+    st.plotly_chart(fig_macd, use_container_width=True)
+
+    rsi_proxy = close.pct_change().rolling(14).std().dropna().tail(60) * 100
+    fig_rsi = go.Figure()
+    fig_rsi.add_trace(go.Scatter(
+        x=rsi_proxy.index, y=rsi_proxy.values,
+        mode="lines", line=dict(color="#f97316", width=2),
+    ))
+    fig_rsi.update_layout(
+        height=height,
+        margin=margin,
+        plot_bgcolor="#020617",
+        paper_bgcolor="#020617",
+        font=dict(color="#e5e7eb"),
+        xaxis=dict(showgrid=False, showticklabels=False),
+        yaxis=dict(showgrid=False),
+        title="Mini‑RSI",
+    )
+    st.plotly_chart(fig_rsi, use_container_width=True)
+
+# ============================================================
+#   MAKRO / HEATMAPA / MULTI‑TICKER / MONITOR
+# ============================================================
 
 def fetch_macro_and_sectors():
     tickers_macro = ["SPY", "QQQ", "IWM", "^VIX", "^TNX"]
@@ -449,48 +580,162 @@ def fetch_macro_and_sectors():
 
     return macro_data, sector_data
 
+def render_multi_ticker(multi_tickers):
+    st.markdown("### 📚 Szybki przegląd wielu tickerów")
+    tick_list = [t.strip() for t in multi_tickers.split(",") if t.strip()]
+    if not tick_list:
+        st.info("Wpisz tickery oddzielone przecinkami.")
+        return
+    cols = st.columns(min(4, len(tick_list)))
+    for i, tck in enumerate(tick_list):
+        col = cols[i % len(cols)]
+        try:
+            d = yf.download(tck, period="5d", interval="1d")
+            if d.empty:
+                col.write(f"**{tck}:** brak danych")
+                continue
+            close_mt = d["Close"]
+            vol_mt = d["Volume"]
+            price_mt = to_scalar(close_mt.iloc[-1])
+            ind_mt = compute_indicators(close_mt, vol_mt)
+            score_mt, label_mt, _ = compute_score(price_mt, ind_mt)
+            color = "#22c55e" if score_mt >= 60 else "#f97316" if score_mt < 40 else "#e5e7eb"
+            col.markdown(
+                f"""
+                <div class="neon-box">
+                    <div class="neon-title">{tck}</div>
+                    <div class="neon-sub">
+                        Cena: {price_mt:.2f}<br/>
+                        Scoring: <span style="color:{color};">{score_mt} – {label_mt}</span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        except Exception:
+            col.write(f"**{tck}:** błąd danych")
+
+def render_monitor(monitor_tickers, refresh_choice):
+    st.markdown("### 🖥️ Monitor 5 spółek (auto‑odświeżanie)")
+    if refresh_choice != "Brak":
+        minutes = {
+            "10 min": 10,
+            "15 min": 15,
+            "30 min": 30,
+            "1 h": 60,
+            "2 h": 120,
+        }[refresh_choice]
+        st.query_params.update({"refresh": str(minutes)})
+
+    tick_list = [t.strip() for t in monitor_tickers.split(",") if t.strip()]
+    tick_list = tick_list[:5]
+    if not tick_list:
+        st.info("Wpisz tickery do monitorowania.")
+        return
+
+    cols = st.columns(len(tick_list))
+    for i, tck in enumerate(tick_list):
+        col = cols[i]
+        try:
+            d = yf.download(tck, period="5d", interval="1d")
+            if d.empty:
+                col.write(f"**{tck}:** brak danych")
+                continue
+            close_mt = d["Close"]
+            vol_mt = d["Volume"]
+            price_mt = to_scalar(close_mt.iloc[-1])
+            ind_mt = compute_indicators(close_mt, vol_mt)
+            score_mt, label_mt, _ = compute_score(price_mt, ind_mt)
+            color = "#22c55e" if score_mt >= 60 else "#f97316" if score_mt < 40 else "#e5e7eb"
+            col.markdown(
+                f"""
+                <div class="neon-box-yellow">
+                    <div class="neon-title">{tck}</div>
+                    <div class="neon-sub">
+                        Cena: {price_mt:.2f}<br/>
+                        Scoring: <span style="color:{color};">{score_mt} – {label_mt}</span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        except Exception:
+            col.write(f"**{tck}:** błąd danych")
+
+def render_macro_and_heatmap():
+    st.markdown("### 🌍 Makro — indeksy i rynek długu / zmienności")
+    macro_data, sector_data = fetch_macro_and_sectors()
+    if macro_data:
+        col_m1, col_m2, col_m3 = st.columns(3)
+        items = list(macro_data.items())
+        for i, (t, chg) in enumerate(items):
+            col = [col_m1, col_m2, col_m3][i % 3]
+            color = "#22c55e" if chg >= 0 else "#f97316"
+            col.markdown(
+                f"""
+                <div class="neon-box-yellow">
+                    <div class="neon-title">{t}</div>
+                    <div class="neon-sub">Zmiana d/d: <span style="color:{color};">{chg:+.2f}%</span></div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    else:
+        st.write("Brak danych makro.")
+
+    st.markdown("---")
+    st.markdown("### 🧊 Heatmapa sektorowa (ETF‑y sektorowe)")
+    if sector_data:
+        sectors = list(sector_data.keys())
+        changes = list(sector_data.values())
+        fig_h = px.imshow(
+            [changes],
+            labels=dict(x="Sektor", color="Zmiana %"),
+            x=sectors,
+            y=[""],
+            color_continuous_scale="RdYlGn",
+            aspect="auto",
+        )
+        fig_h.update_layout(
+            height=220,
+            plot_bgcolor="#020617",
+            paper_bgcolor="#020617",
+            font=dict(color="#e5e7eb"),
+            coloraxis_colorbar=dict(title="%", tickformat="+.1f"),
+        )
+        st.plotly_chart(fig_h, use_container_width=True)
+    else:
+        st.write("Brak danych sektorowych.")
+
+# ============================================================
+#   TRADING PANEL
+# ============================================================
 
 def render_trading():
-    st.title("📈 Kombajn tradingowy – pełny panel")
-    st.caption("Świece, wskaźniki, sygnały, scoring, ryzyko, makro, heatmapa, multi‑ticker, monitor.")
+    st.markdown("## 📈 Kombajn Tradingowy — ULTRA Panel")
+    st.caption("Świece · Wskaźniki · Sygnały · Scoring · Ryzyko · Makro · Heatmapa · Multi‑Ticker · Monitor")
 
     ticker = st.text_input("Ticker (np. AAPL, MSFT, STX.WA):", "AAPL")
 
     col1, col2, col3 = st.columns(3)
     period = col1.selectbox("Okres:", ["5d", "1mo", "3mo", "6mo", "1y"], index=1)
     interval = col2.selectbox("Interwał:", ["1m", "5m", "15m", "30m", "1h", "1d"], index=5)
-
-    multi_tickers = col3.text_input(
-        "Lista tickerów do szybkiego przeglądu (oddzielone przecinkami):",
-        "",
-    )
+    multi_tickers = col3.text_input("Lista tickerów (oddzielone przecinkami):", "")
 
     st.markdown("---")
-    st.markdown("### 🖥️ Monitor 5 spółek (auto‑odświeżanie)")
-
     mon_col1, mon_col2 = st.columns([2, 1])
-    monitor_tickers = mon_col1.text_input(
-        "Tickery do monitorowania (max 5, oddzielone przecinkami):",
-        "",
-        key="monitor_tickers",
-    )
+    monitor_tickers = mon_col1.text_input("Tickery do monitorowania (max 5):", "", key="monitor_tickers")
     refresh_choice = mon_col2.selectbox(
-        "Odświeżanie monitora:",
+        "Auto‑odświeżanie:",
         ["Brak", "10 min", "15 min", "30 min", "1 h", "2 h"],
         index=0,
     )
-
-    # Auto-refresh monitora (tylko jeśli wybrano)
-    if refresh_choice != "Brak":
-        minutes = {"10 min": 10, "15 min": 15, "30 min": 30, "1 h": 60, "2 h": 120}[refresh_choice]
-        st.experimental_set_query_params(_=str(minutes))  # prosty „znacznik”
-        st_autorefresh = st.experimental_rerun  # alias – manualnie wywołamy po monitorze
 
     if st.button("Pobierz dane i policz sygnały", use_container_width=True):
         try:
             data = yf.download(ticker, period=period, interval=interval)
             if data.empty:
-                st.error("Brak danych dla tego tickera lub interwału.")
+                st.error("Brak danych dla tego tickera.")
                 return
 
             if isinstance(data.columns, pd.MultiIndex):
@@ -510,51 +755,11 @@ def render_trading():
             price = to_scalar(close.iloc[-1])
 
             tab_main, tab_mini, tab_macro = st.tabs(
-                ["📊 Główny wykres + sygnał", "📉 Mini‑wykresy + scoring", "🌍 Makro + heatmapa sektorowa"]
+                ["📊 Główny wykres + sygnał", "📉 Mini‑wykresy + scoring", "🌍 Makro + heatmapa"]
             )
 
-            # --- TAB 1: GŁÓWNY WYKRES + SYGNAŁ ---
             with tab_main:
-                fig = go.Figure()
-                fig.add_trace(
-                    go.Candlestick(
-                        x=data.index,
-                        open=open_,
-                        high=high,
-                        low=low,
-                        close=close,
-                        name="Świece",
-                        increasing_line_color="#22c55e",
-                        decreasing_line_color="#f97316",
-                    )
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=data.index,
-                        y=ind["upper_bb"],
-                        line=dict(color="rgba(34,197,94,0.6)", width=1),
-                        name="Bollinger górna",
-                    )
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=data.index,
-                        y=ind["lower_bb"],
-                        line=dict(color="rgba(239,68,68,0.6)", width=1),
-                        name="Bollinger dolna",
-                    )
-                )
-                fig.update_layout(
-                    height=500,
-                    title=f"Wykres {ticker}",
-                    plot_bgcolor="#020617",
-                    paper_bgcolor="#020617",
-                    font=dict(color="#e5e7eb"),
-                    xaxis=dict(gridcolor="#1f2937"),
-                    yaxis=dict(gridcolor="#1f2937"),
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
+                render_main_chart(ticker, data, ind, price)
                 signal, explanation = generate_signal(price, ind)
                 score, score_label, score_details = compute_score(price, ind)
                 risk_summary = compute_risk_summary(price, ind["sl"], ind["tp"])
@@ -565,11 +770,14 @@ def render_trading():
                 elif signal == "SELL":
                     sig_icon = "🟠⬇️"
                     sig_class = "signal-sell"
+                elif signal == "STOP":
+                    sig_icon = "🔴⛔"
+                    sig_class = "signal-sell"
                 else:
                     sig_icon = "⚪⏸️"
                     sig_class = "signal-hold"
 
-                st.markdown("### 🤖 AI Sygnał automatyczny (engine)")
+                st.markdown("### 🤖 AI Sygnał automatyczny")
                 st.markdown(
                     f"""
                     <div class="neon-box">
@@ -578,7 +786,7 @@ def render_trading():
                         </div>
                         <div class="neon-sub">
                             Ticker: <b>{ticker}</b><br/>
-                            Cena: <b>{price:.2f}</b> (jeśli dostępna)
+                            Cena: <b>{price:.2f}</b>
                         </div>
                     </div>
                     """,
@@ -589,23 +797,19 @@ def render_trading():
                 with col_sig1:
                     if not np.isnan(ind["rsi"]):
                         st.write(f"**RSI (14):** {ind['rsi']:.1f}")
-                    if not np.isnan(ind["ma_fast"]) and not np.isnan(ind["ma_slow"]):
-                        st.write(f"**MA10:** {ind['ma_fast']:.2f} | **MA30:** {ind['ma_slow']:.2f}")
+                    st.write(f"**MA10:** {ind['ma_fast']:.2f}")
+                    st.write(f"**MA30:** {ind['ma_slow']:.2f}")
                     st.write(f"**Trend:** {ind['trend']}")
-                    if not np.isnan(ind["vol"]):
-                        st.write(f"**Zmienność (20):** {ind['vol']:.4f}")
-                    if not np.isnan(ind["volume"]):
-                        st.write(f"**Wolumen (ostatnia świeca):** {ind['volume']:.0f}")
+                    st.write(f"**Zmienność (20):** {ind['vol']:.4f}")
+                    st.write(f"**Wolumen:** {ind['volume']:.0f}")
                 with col_sig2:
-                    if not np.isnan(ind["sl"]):
-                        st.write(f"**SL (Bollinger dolna):** {ind['sl']:.2f}")
-                    if not np.isnan(ind["tp"]):
-                        st.write(f"**TP (Bollinger górna):** {ind['tp']:.2f}")
+                    st.write(f"**SL:** {ind['sl']:.2f}")
+                    st.write(f"**TP:** {ind['tp']:.2f}")
                     st.markdown(
                         f'<span class="score-badge">Scoring: {score}/100 – {score_label}</span>',
                         unsafe_allow_html=True,
                     )
-                    if risk_summary is not None:
+                    if risk_summary:
                         st.write(
                             f"**Ryzyko:** {risk_summary['risk_pct']:+.1f}% | "
                             f"**Potencjał:** {risk_summary['reward_pct']:+.1f}%"
@@ -613,111 +817,15 @@ def render_trading():
                         if not np.isnan(risk_summary["rr"]):
                             st.write(f"**R/R:** {risk_summary['rr']:.2f}")
 
-                st.markdown("**Uzasadnienie sygnału:**")
+                st.markdown("### Uzasadnienie sygnału")
                 st.markdown(explanation)
-
-                st.markdown("**Detale scoringu:**")
+                st.markdown("### Detale scoringu")
                 for d in score_details:
                     st.markdown(f"- {d}")
 
-                analyst_comment = build_analyst_comment(price, ind, score, score_label, risk_summary)
-                st.markdown("**Komentarz analityczny (engine):**")
-                st.markdown(analyst_comment)
-
-                st.markdown("---")
-                st.subheader("📰 News sentiment (Yahoo Finance)")
-                sentiment, titles, comment = fetch_news_sentiment(ticker)
-                st.write(f"**Sentyment:** {sentiment}")
-                if comment:
-                    st.write(comment)
-                if titles:
-                    for t in titles:
-                        st.markdown(f"- {t}")
-
-            # --- TAB 2: MINI‑WYKRESY + SCORING ---
             with tab_mini:
-                st.markdown("#### 📉 Mini‑wykresy (sparkline + MACD + RSI‑proxy)")
-
-                mini_close = close.tail(60)
-                fig_spark = go.Figure()
-                fig_spark.add_trace(
-                    go.Scatter(
-                        x=mini_close.index,
-                        y=mini_close.values,
-                        mode="lines",
-                        line=dict(color="#22c55e", width=2),
-                        name="Cena",
-                    )
-                )
-                fig_spark.update_layout(
-                    height=180,
-                    margin=dict(l=10, r=10, t=30, b=10),
-                    plot_bgcolor="#020617",
-                    paper_bgcolor="#020617",
-                    font=dict(color="#e5e7eb"),
-                    xaxis=dict(showgrid=False, showticklabels=False),
-                    yaxis=dict(showgrid=False),
-                    title="Sparkline ceny (ostatnie 60 świec)",
-                )
-                st.plotly_chart(fig_spark, use_container_width=True)
-
-                macd = ind["macd"].tail(60)
-                macd_sig = ind["macd_signal"].tail(60)
-                fig_macd = go.Figure()
-                fig_macd.add_trace(
-                    go.Scatter(
-                        x=macd.index,
-                        y=macd.values,
-                        mode="lines",
-                        line=dict(color="#38bdf8", width=2),
-                        name="MACD",
-                    )
-                )
-                fig_macd.add_trace(
-                    go.Scatter(
-                        x=macd_sig.index,
-                        y=macd_sig.values,
-                        mode="lines",
-                        line=dict(color="#facc15", width=1),
-                        name="Signal",
-                    )
-                )
-                fig_macd.update_layout(
-                    height=180,
-                    margin=dict(l=10, r=10, t=30, b=10),
-                    plot_bgcolor="#020617",
-                    paper_bgcolor="#020617",
-                    font=dict(color="#e5e7eb"),
-                    xaxis=dict(showgrid=False, showticklabels=False),
-                    yaxis=dict(showgrid=True, gridcolor="#1f2937"),
-                    title="Mini‑MACD (ostatnie 60 świec)",
-                )
-                st.plotly_chart(fig_macd, use_container_width=True)
-
-                rsi_proxy = close.pct_change().rolling(14).std().dropna().tail(60) * 100
-                fig_rsi = go.Figure()
-                fig_rsi.add_trace(
-                    go.Scatter(
-                        x=rsi_proxy.index,
-                        y=rsi_proxy.values,
-                        mode="lines",
-                        line=dict(color="#f97316", width=2),
-                        name="RSI‑proxy",
-                    )
-                )
-                fig_rsi.update_layout(
-                    height=180,
-                    margin=dict(l=10, r=10, t=30, b=10),
-                    plot_bgcolor="#020617",
-                    paper_bgcolor="#020617",
-                    font=dict(color="#e5e7eb"),
-                    xaxis=dict(showgrid=False, showticklabels=False),
-                    yaxis=dict(gridcolor="#1f2937"),
-                    title="Mini‑RSI proxy (zmienność 14)",
-                )
-                st.plotly_chart(fig_rsi, use_container_width=True)
-
-                st.markdown("#### 📊 Scoring 0–100")
+                render_mini_charts(close, ind)
+                st.markdown("### 📊 Scoring 0–100")
                 score, score_label, score_details = compute_score(price, ind)
                 st.markdown(
                     f'<span class="score-badge">Scoring: {score}/100 – {score_label}</span>',
@@ -726,313 +834,24 @@ def render_trading():
                 for d in score_details:
                     st.markdown(f"- {d}")
 
-            # --- TAB 3: MAKRO + HEATMAPA SEKTOROWA ---
             with tab_macro:
-                st.markdown("#### 🌍 Makro – indeksy i rynek długu / zmienności")
-                macro_data, sector_data = fetch_macro_and_sectors()
+                render_macro_and_heatmap()
 
-                if macro_data:
-                    col_m1, col_m2, col_m3 = st.columns(3)
-                    items = list(macro_data.items())
-                    for i, (t, chg) in enumerate(items):
-                        col = [col_m1, col_m2, col_m3][i % 3]
-                        color = "#22c55e" if chg >= 0 else "#f97316"
-                        col.markdown(
-                            f"""
-                            <div class="neon-box-yellow">
-                                <div class="neon-title">{t}</div>
-                                <div class="neon-sub">Zmiana d/d: <span style="color:{color};">{chg:+.2f}%</span></div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
-                else:
-                    st.write("Brak danych makro (SPY/QQQ/IWM/VIX/TNX).")
-
-                st.markdown("---")
-                st.markdown("#### 🧊 Heatmapa sektorowa (ETF‑y sektorowe)")
-
-                if sector_data:
-                    sectors = list(sector_data.keys())
-                    changes = list(sector_data.values())
-                    fig_h = px.imshow(
-                        [changes],
-                        labels=dict(x="Sektor", color="Zmiana %"),
-                        x=sectors,
-                        y=[""],
-                        color_continuous_scale="RdYlGn",
-                        aspect="auto",
-                    )
-                    fig_h.update_layout(
-                        height=220,
-                        plot_bgcolor="#020617",
-                        paper_bgcolor="#020617",
-                        font=dict(color="#e5e7eb"),
-                        coloraxis_colorbar=dict(title="%", tickformat="+.1f"),
-                    )
-                    st.plotly_chart(fig_h, use_container_width=True)
-                else:
-                    st.write("Brak danych sektorowych (XLF/XLK/XLE/XLY/XLP/XLV).")
-
-            # --- SZYBKI PRZEGLĄD WIELU TICKERÓW ---
             if multi_tickers.strip():
                 st.markdown("---")
-                st.markdown("### 📚 Szybki przegląd wielu tickerów")
-
-                tick_list = [t.strip() for t in multi_tickers.split(",") if t.strip()]
-                cols = st.columns(min(4, len(tick_list)))
-
-                for i, tck in enumerate(tick_list):
-                    col = cols[i % len(cols)]
-                    try:
-                        d = yf.download(tck, period="5d", interval="1d")
-                        if d.empty:
-                            col.write(f"**{tck}:** brak danych")
-                            continue
-                        close_mt = d["Close"]
-                        vol_mt = d["Volume"]
-                        price_mt = to_scalar(close_mt.iloc[-1])
-                        ind_mt = compute_indicators(close_mt, vol_mt)
-                        score_mt, label_mt, _ = compute_score(price_mt, ind_mt)
-                        col.markdown(f"**{tck}**")
-                        col.markdown(f"- Cena: {price_mt:.2f}")
-                        col.markdown(f"- Trend: {ind_mt['trend']}")
-                        if not np.isnan(ind_mt["rsi"]):
-                            col.markdown(f"- RSI(14): {ind_mt['rsi']:.1f}")
-                        col.markdown(f"- Scoring: {score_mt}/100 – {label_mt}")
-                    except Exception as e:
-                        col.write(f"**{tck}:** błąd ({e})")
-
-            # --- MONITOR 5 SPÓŁEK ---
-            if monitor_tickers.strip():
-                st.markdown("---")
-                st.markdown("### 📡 Monitor spółek")
-
-                mon_list = [t.strip() for t in monitor_tickers.split(",") if t.strip()][:5]
-                cols_m = st.columns(min(5, len(mon_list)))
-
-                for i, tck in enumerate(mon_list):
-                    col = cols_m[i % len(cols_m)]
-                    try:
-                        d = yf.download(tck, period="5d", interval="30m")
-                        if d.empty:
-                            col.write(f"**{tck}:** brak danych")
-                            continue
-                        close_mt = d["Close"]
-                        vol_mt = d["Volume"]
-                        price_mt = to_scalar(close_mt.iloc[-1])
-                        ind_mt = compute_indicators(close_mt, vol_mt)
-                        score_mt, label_mt, _ = compute_score(price_mt, ind_mt)
-                        col.markdown(f"**{tck}**")
-                        col.markdown(f"- Cena: {price_mt:.2f}")
-                        col.markdown(f"- Trend: {ind_mt['trend']}")
-                        if not np.isnan(ind_mt["rsi"]):
-                            col.markdown(f"- RSI(14): {ind_mt['rsi']:.1f}")
-                        col.markdown(f"- Scoring: {score_mt}/100 – {label_mt}")
-                    except Exception as e:
-                        col.write(f"**{tck}:** błąd ({e})")
-
-                if refresh_choice != "Brak":
-                    st.info(f"Monitor odświeża się co: {refresh_choice}. Odpal ponownie za chwilę, żeby zobaczyć zmianę.")
-                    # manualny rerun po zakończeniu renderu – użytkownik i tak testuje jutro
-
-            # Zapis analizy do czatu
-            st.session_state["last_analysis"] = {
-                "ticker": ticker,
-                "price": price,
-                "indicators": ind,
-                "signal": signal,
-                "explanation": explanation,
-                "sentiment": sentiment,
-                "news_titles": titles,
-                "period": period,
-                "interval": interval,
-                "score": score,
-                "score_label": score_label,
-            }
-
-            st.success("Analiza zapisana – czat AI będzie korzystał z tych danych (zero zgadywania).")
+                render_multi_ticker(multi_tickers)
 
         except Exception as e:
             st.error(f"Błąd: {e}")
 
+    st.markdown("---")
+    render_monitor(monitor_tickers, refresh_choice)
 
-# ---------------- MODUŁ 1: CZAT AI (GPT-4.1 + TAVILY + TRADING ENGINE) ----------------
+# ============================================================
+#   ROUTING
+# ============================================================
 
-def render_ai_chat():
-    st.title("🤖 Czat AI – Analityk finansowy (GPT-4.1 + Tavily + Trading Engine)")
-    st.caption("Zero zgadywania: tylko dane z trading engine + Tavily (finance/news).")
-
-    if "OPENAI_API_KEY" not in st.secrets:
-        st.error("Brak OPENAI_API_KEY w .streamlit/secrets.toml")
-        return
-    if "TAVILY_API_KEY" not in st.secrets:
-        st.error("Brak TAVILY_API_KEY w .streamlit/secrets.toml")
-        return
-
-    openai_key = st.secrets["OPENAI_API_KEY"]
-    tavily_key = st.secrets["TAVILY_API_KEY"]
-
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-
-    st.markdown("### Historia rozmowy")
-    for sender, msg in st.session_state.chat_history:
-        st.markdown(f"**{sender}:** {msg}")
-
-    user_input = st.text_input("Twoja wiadomość:")
-
-    col_send, col_clear = st.columns([3, 1])
-    send = col_send.button("Wyślij")
-    clear = col_clear.button("Wyczyść czat")
-
-    if clear:
-        st.session_state.chat_history = []
-        st.rerun()
-
-    if not send or not user_input.strip():
-        return
-
-    question = user_input.strip()
-    st.session_state.chat_history.append(("Ty", question))
-
-    ticker = detect_ticker_from_text(question)
-    if not ticker and "last_analysis" in st.session_state:
-        ticker = st.session_state["last_analysis"].get("ticker")
-
-    trading_data = st.session_state.get("last_analysis", None)
-
-    trading_summary = "Brak danych z Trading Engine."
-    if trading_data:
-        ind = trading_data["indicators"]
-        lines = [
-            f"Ticker: {trading_data['ticker']}",
-        ]
-        if not np.isnan(trading_data["price"]):
-            lines.append(f"Cena: {trading_data['price']:.2f}")
-        lines.append(f"Sygnał engine: {trading_data['signal']}")
-        if not np.isnan(ind["rsi"]):
-            lines.append(f"RSI(14): {ind['rsi']:.1f}")
-        if not np.isnan(ind["ma_fast"]) and not np.isnan(ind["ma_slow"]):
-            lines.append(f"MA10: {ind['ma_fast']:.2f}, MA30: {ind['ma_slow']:.2f}")
-        lines.append(f"Trend: {ind['trend']}")
-        if not np.isnan(ind["vol"]):
-            lines.append(f"Volatility(20): {ind['vol']:.4f}")
-        if not np.isnan(ind["volume"]):
-            lines.append(f"Wolumen (ostatnia świeca): {ind['volume']:.0f}")
-        if not np.isnan(ind["sl"]):
-            lines.append(f"SL (Bollinger dolna): {ind['sl']:.2f}")
-        if not np.isnan(ind["tp"]):
-            lines.append(f"TP (Bollinger górna): {ind['tp']:.2f}")
-        lines.append(f"Sentyment newsów (Yahoo): {trading_data['sentiment']}")
-        if "score" in trading_data:
-            lines.append(f"Scoring: {trading_data['score']}/100 – {trading_data['score_label']}")
-        trading_summary = "\n".join(lines)
-
-    try:
-        tavily_query = question
-        if ticker:
-            tavily_query = f"{ticker} stock fundamentals, dividend, outlook, 2026"
-
-        tavily_resp = requests.post(
-            "https://api.tavily.com/search",
-            headers={"Authorization": f"Bearer {tavily_key}"},
-            json={
-                "query": tavily_query,
-                "topic": "finance",
-                "max_results": 8,
-                "include_answer": True,
-                "include_raw_content": False,
-            },
-            timeout=20,
-        )
-        tavily_resp.raise_for_status()
-        tavily_json = tavily_resp.json()
-
-        answer = tavily_json.get("answer", "")
-        results = tavily_json.get("results", [])
-
-        bullets = []
-        for item in results:
-            title = item.get("title", "")
-            url = item.get("url", "")
-            if title or url:
-                bullets.append(f"- {title} ({url})")
-
-        research_text = ""
-        if answer:
-            research_text += f"Podsumowanie Tavily:\n{answer}\n\n"
-        if bullets:
-            research_text += "Źródła Tavily:\n" + "\n".join(bullets)
-        if not research_text:
-            research_text = "Brak istotnych wyników finansowych z Tavily."
-    except Exception as e:
-        research_text = f"[Błąd Tavily] {e}"
-
-    try:
-        system_prompt = (
-            "Jesteś profesjonalnym analitykiem finansowym w terminalu tradingowym.\n"
-            "Masz dwa źródła danych:\n"
-            "1) Trading Engine (yfinance) – twarde dane: cena, RSI, MA, Bollinger, MACD, wolumen, SL/TP, trend, sentyment newsów, scoring.\n"
-            "2) Tavily (topic=finance/news) – kontekst rynkowy, newsy, raporty, fundamenty.\n\n"
-            "Zasady ZERO HALUCYNACJI:\n"
-            "- Jeśli nie masz danych → NIE ZGADUJ.\n"
-            "- Jeśli ticker nieznany → NIE ZGADUJ.\n"
-            "- Jeśli branża nieznana → NIE ZGADUJ.\n"
-            "- Jeśli Tavily nie zwróciło wyników → powiedz to wprost.\n"
-            "- Jeśli Trading Engine nie zwrócił danych → powiedz to wprost.\n"
-            "- Odpowiadasz TYLKO na podstawie danych z trading engine i Tavily.\n"
-            "- NIE wolno Ci wymyślać wyników finansowych, branży, danych historycznych ani prognoz.\n"
-            "- Jeśli dane są niepełne → podaj scenariusze warunkowe.\n"
-            "- Jeśli Tavily zwróciło newsy → uwzględnij je w analizie.\n"
-            "- Jeśli Trading Engine zwrócił wskaźniki → uwzględnij je w analizie technicznej.\n"
-            "- Jeśli nie możesz odpowiedzieć bez zgadywania → powiedz wprost, że brak danych.\n"
-            "Odpowiadasz po polsku, konkretnie, jak analityk biura maklerskiego."
-        )
-
-        gpt_resp = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {openai_key}"},
-            json={
-                "model": "gpt-4.1",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": system_prompt,
-                    },
-                    {
-                        "role": "system",
-                        "content": f"Dane z Trading Engine:\n{trading_summary}",
-                    },
-                    {
-                        "role": "system",
-                        "content": f"Research z Tavily (topic=finance/news):\n{research_text}",
-                    },
-                    *[
-                        {
-                            "role": "user" if s == "Ty" else "assistant",
-                            "content": c,
-                        }
-                        for s, c in st.session_state.chat_history
-                    ],
-                ],
-                "temperature": 0.1,
-            },
-            timeout=20,
-        )
-        gpt_resp.raise_for_status()
-        gpt_json = gpt_resp.json()
-        ai_msg = gpt_json["choices"][0]["message"]["content"]
-    except Exception as e:
-        ai_msg = f"[Błąd GPT] {e}"
-
-    st.session_state.chat_history.append(("AI", ai_msg))
-    st.rerun()
-
-
-# ---------------- ROUTING ----------------
-
-if mode == "🤖 Czat AI (internet + trading)":
+if st.session_state.mode == "AI":
     render_ai_chat()
 else:
     render_trading()
