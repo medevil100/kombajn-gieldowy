@@ -572,7 +572,7 @@ def render_trading():
             if not np.isnan(ind["last_lower_bb"]):
                 st.write(f"**SL (Bollinger dolna):** {ind['last_lower_bb']:.2f}")
             if not np.isnan(ind["last_upper_bb"]):
-                st.write(f"**TP (Bollinger górna):** {ind['last_upper_bb"]:.2f}")
+            st.write(f"**TP (Bollinger górna):** {ind['last_upper_bb"]:.2f}")
             st.write(f"**Sygnał (z newsami): {signal}**")
             st.write(f"**Scoring PRO (0–100): {scoring}**")
             st.markdown("**Uzasadnienie:**")
