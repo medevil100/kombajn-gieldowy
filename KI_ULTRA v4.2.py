@@ -382,28 +382,93 @@ def generate_signal(price, ind):
 
 
 def fetch_news_sentiment(ticker):
+    """
+    NEWS SENTIMENT PRO:
+    1) Tavily – precyzyjne newsy finansowe
+    2) Yahoo Finance – fallback
+    3) Filtr clickbaitów, duplikatów i niepowiązanych newsów
+    4) Sentyment oparty na słowach kluczowych
+    """
+
+    # -----------------------------
+    # 1) TAVILY — główne źródło
+    # -----------------------------
+    headlines = []
     try:
-        t = yf.Ticker(ticker)
-        news = t.news if hasattr(t, "news") else []
+        tavily_key = st.secrets.get("TAVILY_API_KEY", None)
+        if tavily_key:
+            resp = requests.post(
+                "https://api.tavily.com/search",
+                headers={"Authorization": f"Bearer {tavily_key}"},
+                json={
+                    "query": f"{ticker} stock news finance",
+                    "topic": "finance",
+                    "max_results": 8,
+                    "include_answer": False,
+                    "include_raw_content": False,
+                },
+                timeout=12,
+            )
+            resp.raise_for_status()
+            j = resp.json()
+            results = j.get("results", [])
+        else:
+            results = []
     except Exception:
-        news = []
+        results = []
 
-    titles = [n.get("title", "") for n in news if isinstance(n.get("title", ""), str)]
-    titles = [t for t in titles if t.strip()][:5]
+    # filtracja wyników Tavily
+    for r in results:
+        title = r.get("title", "")
+        if not title:
+            continue
 
-    if not titles:
-        return "Mixed", [], "Brak newsów."
+        # filtr clickbaitów
+        bad = ["shocking", "insane", "crazy", "must see", "you won't believe"]
+        if any(b in title.lower() for b in bad):
+            continue
 
+        # filtr niepowiązanych
+        if ticker.upper() not in title.upper():
+            continue
+
+        headlines.append(title.strip())
+
+    # -----------------------------
+    # 2) FALLBACK — Yahoo Finance
+    # -----------------------------
+    if not headlines:
+        try:
+            t = yf.Ticker(ticker)
+            news = t.news if hasattr(t, "news") else []
+            for n in news:
+                title = n.get("title", "")
+                if title and ticker.upper() in title.upper():
+                    headlines.append(title.strip())
+        except Exception:
+            pass
+
+    # -----------------------------
+    # 3) Jeśli nadal brak newsów
+    # -----------------------------
+    if not headlines:
+        return "Mixed", [], "Brak newsów dla tego tickera."
+
+    # -----------------------------
+    # 4) Sentyment
+    # -----------------------------
     score = 0
-    for title in titles:
+    for title in headlines:
         tl = title.lower()
-        if any(w in tl for w in ["beat", "strong", "growth", "upgrade", "profit", "record"]):
+        if any(w in tl for w in ["beat", "strong", "growth", "upgrade", "profit", "record", "surge"]):
             score += 1
-        if any(w in tl for w in ["miss", "weak", "downgrade", "fall", "loss", "cut"]):
+        if any(w in tl for w in ["miss", "weak", "downgrade", "fall", "loss", "cut", "plunge"]):
             score -= 1
 
     sentiment = "Bullish" if score > 0 else "Bearish" if score < 0 else "Mixed"
-    return sentiment, titles, ""
+
+    return sentiment, headlines[:5], ""
+
 
 
 def render_trading():
