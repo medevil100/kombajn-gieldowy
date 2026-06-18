@@ -552,7 +552,7 @@ def render_trading():
                 st.write(f"**RSI (14):** {ind['rsi']:.1f}")
             if not np.isnan(ind["ma_fast"]) and not np.isnan(ind["ma_slow"]):
                 st.write(f"**MA10:** {ind['ma_fast']:.2f} | **MA30:** {ind['ma_slow']:.2f}")
-            st.write(f"**Trend:** {ind['trend']}")
+                st.write(f"**Trend:** {ind['trend']}")
             if not np.isnan(ind["adx"]):
                 st.write(f"**ADX (14):** {ind['adx']:.1f}")
             if not np.isnan(ind["atr"]):
