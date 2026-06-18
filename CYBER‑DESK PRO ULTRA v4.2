@@ -13,7 +13,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="CYBER‑DESK PRO ULTRA v4",
+    page_title="CYBER‑DESK PRO ULTRA v4.2",
     page_icon="💠",
     layout="wide",
 )
@@ -78,11 +78,57 @@ def safe_last(series):
     except:
         return np.nan
 
+def detect_market(ticker: str) -> str:
+    """
+    AUTO-DETECT rynku na podstawie sufiksu tickera.
+    Zwraca: 'GPW', 'LSE', 'XETRA', 'USA', 'OTHER'
+    """
+    t = ticker.upper()
+    if t.endswith(".WA"):
+        return "GPW"
+    if t.endswith(".L"):
+        return "LSE"
+    if t.endswith(".DE"):
+        return "XETRA"
+    # proste heurystyki ETF / indeksów
+    if t.startswith("^"):
+        return "INDEX"
+    return "USA"
+
+def normalize_ohlcv(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """
+    Ujednolicenie danych OHLCV:
+    - obsługa MultiIndex (GPW/ETF/indeksy)
+    - dropna na Close
+    - fillna(0) na Volume
+    """
+    if df.empty:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+
+    if isinstance(df.columns, pd.MultiIndex):
+        # zakładamy pierwszy instrument
+        close = df["Close"].iloc[:, 0].dropna()
+        vol = df["Volume"].iloc[:, 0].fillna(0)
+    else:
+        close = df["Close"].dropna()
+        vol = df["Volume"].fillna(0)
+
+    return close, vol
+
+def fetch_data(ticker: str, period: str, interval: str) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
+    """
+    Pobiera dane z yfinance + stosuje normalize_ohlcv.
+    Zwraca: (df, close, volume)
+    """
+    df = yf.download(ticker, period=period, interval=interval)
+    close, vol = normalize_ohlcv(df)
+    return df, close, vol
+
 # ============================================================
-#   INDICATORS — ENGINE 3.1 (zero NaN)
+#   INDICATORS — ENGINE 3.2 (zero NaN, stabilny)
 # ============================================================
 
-def compute_indicators(close, volume):
+def compute_indicators(close: pd.Series, volume: pd.Series):
     close = close.copy()
 
     # RSI
@@ -114,8 +160,11 @@ def compute_indicators(close, volume):
     # Volatility
     vol = safe_last(close.pct_change().rolling(20).std())
 
-    # Volume
-    vol_last = safe_last(volume)
+    # Volume + fallback
+    if volume is None or len(volume) == 0:
+        vol_last = 0.0
+    else:
+        vol_last = safe_last(volume)
 
     # Trend
     if not np.isnan(ma_fast) and not np.isnan(ma_slow):
@@ -141,7 +190,7 @@ def compute_indicators(close, volume):
     }
 
 # ============================================================
-#   SCORING ENGINE 3.1
+#   SCORING ENGINE 3.2
 # ============================================================
 
 def compute_score(price, ind):
@@ -243,7 +292,6 @@ def compute_risk_summary(price, sl, tp):
     reward = (tp - price) / price * 100
     rr = reward / abs(risk) if risk > 0 else np.nan
     return {"risk": risk, "reward": reward, "rr": rr}
-
 # ============================================================
 #   MAIN CHART — COMPACT‑MINI (260px)
 # ============================================================
@@ -292,7 +340,6 @@ def render_main_chart(ticker, data, ind):
 def render_mini_charts(close, ind):
     st.markdown("### 📉 Mini‑wykresy")
 
-    # Sparkline
     mini = close.tail(60)
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -312,7 +359,7 @@ def render_mini_charts(close, ind):
     st.plotly_chart(fig, use_container_width=True)
 
 # ============================================================
-#   MONITOR — RIGHT PANEL (auto‑height)
+#   MONITOR — RIGHT PANEL (AUTO‑HEIGHT, v4.2)
 # ============================================================
 
 def render_monitor(monitor_tickers, refresh_choice):
@@ -327,22 +374,10 @@ def render_monitor(monitor_tickers, refresh_choice):
 
     for tck in tick_list:
         try:
-            d = yf.download(tck, period="5d", interval="1d")
+            df, close, vol = fetch_data(tck, "5d", "1d")
 
-            if d.empty:
+            if df.empty or close.empty:
                 st.write(f"**{tck}:** brak danych")
-                continue
-
-            # Obsługa MultiIndex (np. GPW, ETF-y, indeksy)
-            if isinstance(d.columns, pd.MultiIndex):
-                close = d["Close"].iloc[:, 0].dropna()
-                vol = d["Volume"].iloc[:, 0].fillna(0)
-            else:
-                close = d["Close"].dropna()
-                vol = d["Volume"].fillna(0)
-
-            if close.empty:
-                st.write(f"**{tck}:** brak świec")
                 continue
 
             price = to_scalar(close.iloc[-1])
@@ -366,30 +401,31 @@ def render_monitor(monitor_tickers, refresh_choice):
 
         except Exception as e:
             st.write(f"**{tck}:** błąd danych ({e})")
-
-
 # ============================================================
-#   TRADING PANEL — LEFT + RIGHT COLUMNS
+#   TRADING PANEL — LEFT + RIGHT COLUMNS (v4.2)
 # ============================================================
 
 def render_trading():
-    st.markdown("## 📈 Kombajn Tradingowy — ULTRA Panel v4 (COMPACT‑MINI)")
+    st.markdown("## 📈 Kombajn Tradingowy — ULTRA Panel v4.2 (COMPACT‑MINI)")
 
     left, right = st.columns([0.7, 0.3])
 
+    # ------------------------------------------------------------
+    #   LEWA KOLUMNA — GŁÓWNY TICKER
+    # ------------------------------------------------------------
     with left:
         ticker = st.text_input("Ticker:", "AAPL")
         period = st.selectbox("Okres:", ["5d", "1mo", "3mo", "6mo", "1y"], index=1)
         interval = st.selectbox("Interwał:", ["1m", "5m", "15m", "30m", "1h", "1d"], index=5)
 
         if st.button("Pobierz dane i policz sygnały", use_container_width=True):
-            data = yf.download(ticker, period=period, interval=interval)
-            if data.empty:
-                st.error("Brak danych.")
+
+            df, close, vol = fetch_data(ticker, period, interval)
+
+            if df.empty or close.empty:
+                st.error("Brak danych dla wybranego tickera.")
                 return
 
-            close = data["Close"]
-            vol = data["Volume"]
             price = to_scalar(close.iloc[-1])
 
             ind = compute_indicators(close, vol)
@@ -397,8 +433,12 @@ def render_trading():
             signal, explanation = generate_signal(price, ind)
             risk = compute_risk_summary(price, ind["sl"], ind["tp"])
 
-            render_main_chart(ticker, data, ind)
+            # Wykres główny
+            render_main_chart(ticker, df, ind)
 
+            # ------------------------------------------------------------
+            #   SYGNAŁ AI
+            # ------------------------------------------------------------
             st.markdown("### 🤖 Sygnał AI")
             st.write(f"**Sygnał:** {signal}")
             st.write(f"**Cena:** {price:.2f}")
@@ -409,7 +449,10 @@ def render_trading():
             st.write(f"**SL:** {sl:.2f}" if not np.isnan(sl) else "**SL:** brak danych")
             st.write(f"**TP:** {tp:.2f}" if not np.isnan(tp) else "**TP:** brak danych")
 
-            st.markdown(f'<span class="score-badge">Scoring: {score}/100 – {score_label}</span>', unsafe_allow_html=True)
+            st.markdown(
+                f'<span class="score-badge">Scoring: {score}/100 – {score_label}</span>',
+                unsafe_allow_html=True
+            )
 
             st.markdown("### Uzasadnienie")
             st.write(explanation)
@@ -421,6 +464,9 @@ def render_trading():
             st.markdown("---")
             render_mini_charts(close, ind)
 
+    # ------------------------------------------------------------
+    #   PRAWA KOLUMNA — MONITOR
+    # ------------------------------------------------------------
     with right:
         monitor_tickers = st.text_input("Monitor (max 5):", "AAPL, MSFT, NVDA")
         refresh_choice = st.selectbox("Auto‑refresh:", ["Brak", "10 min", "15 min", "30 min"])
