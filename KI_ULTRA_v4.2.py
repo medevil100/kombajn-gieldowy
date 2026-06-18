@@ -11,7 +11,6 @@ import streamlit as st
 
 st.set_page_config(page_title="CYBER DESK PRO — KI_ULTRA v4.2", page_icon="💠", layout="wide")
 
-# Dark / neon style (prosty CSS)
 st.markdown(
     """
     <style>
@@ -187,7 +186,7 @@ def compute_indicators(close, volume):
     rvol_series = volume / (avg_vol_20 + 1e-9)
     last_rvol = to_scalar(rvol_series.iloc[-1]) if not rvol_series.dropna().empty else np.nan
 
-    # Trend (na podstawie MA10/MA30)
+    # Trend
     if not np.isnan(last_ma_fast) and not np.isnan(last_ma_slow):
         if last_ma_fast > last_ma_slow:
             trend = "Uptrend"
@@ -229,13 +228,11 @@ def compute_indicators(close, volume):
 def compute_scoring_pro(ind, sentiment: str | None = None):
     score = 0
 
-    # Trend
     if ind["trend"] == "Uptrend":
         score += 20
     elif ind["trend"] == "Sideways":
         score += 10
 
-    # ADX
     adx = ind.get("adx", np.nan)
     if not np.isnan(adx):
         if adx > 40:
@@ -243,7 +240,6 @@ def compute_scoring_pro(ind, sentiment: str | None = None):
         elif adx > 20:
             score += 10
 
-    # RSI
     rsi = ind.get("rsi", np.nan)
     if not np.isnan(rsi):
         if 30 <= rsi <= 50:
@@ -253,7 +249,6 @@ def compute_scoring_pro(ind, sentiment: str | None = None):
         elif 50 < rsi <= 70:
             score += 10
 
-    # Stochastic
     k = ind.get("stoch_k", np.nan)
     d = ind.get("stoch_d", np.nan)
     if not np.isnan(k) and not np.isnan(d):
@@ -264,7 +259,6 @@ def compute_scoring_pro(ind, sentiment: str | None = None):
         else:
             score += 5
 
-    # RVOL
     rvol = ind.get("rvol", np.nan)
     if not np.isnan(rvol):
         if rvol > 1.5:
@@ -272,21 +266,17 @@ def compute_scoring_pro(ind, sentiment: str | None = None):
         elif rvol > 1.0:
             score += 10
 
-    # MACD
     if ind.get("last_macd", np.nan) > ind.get("last_macd_signal", np.nan):
         score += 10
 
-    # Bollinger
     if not np.isnan(ind.get("last_lower_bb", np.nan)):
         score += 5
     if not np.isnan(ind.get("last_upper_bb", np.nan)):
         score += 5
 
-    # ATR
     if not np.isnan(ind.get("atr", np.nan)):
         score += 5
 
-    # NEWS SENTIMENT
     if sentiment == "Bullish":
         score += 15
     elif sentiment == "Bearish":
@@ -314,7 +304,6 @@ def generate_signal(price, ind, sentiment: str | None = None):
     reasons = []
     signal = "HOLD"
 
-    # Trend
     if trend == "Uptrend":
         reasons.append("Trend wzrostowy (MA10 > MA30).")
     elif trend == "Downtrend":
@@ -322,7 +311,6 @@ def generate_signal(price, ind, sentiment: str | None = None):
     else:
         reasons.append("Trend boczny / niejednoznaczny.")
 
-    # ADX
     if not np.isnan(adx):
         if adx < 20:
             reasons.append(f"ADX {adx:.1f} → słaby trend.")
@@ -331,7 +319,6 @@ def generate_signal(price, ind, sentiment: str | None = None):
         else:
             reasons.append(f"ADX {adx:.1f} → silny trend.")
 
-    # RSI
     if rsi < 30:
         reasons.append("RSI < 30 → wyprzedanie.")
     elif rsi > 70:
@@ -339,21 +326,18 @@ def generate_signal(price, ind, sentiment: str | None = None):
     else:
         reasons.append("RSI neutralne.")
 
-    # Stochastic
     if not np.isnan(stoch_k) and not np.isnan(stoch_d):
         if stoch_k < 20 and stoch_d < 20:
             reasons.append("Stochastic <20 → wyprzedanie.")
         elif stoch_k > 80 and stoch_d > 80:
             reasons.append("Stochastic >80 → wykupienie.")
 
-    # RVOL
     if not np.isnan(rvol):
         if rvol > 1.5:
             reasons.append(f"RVOL {rvol:.2f} → wysoka aktywność.")
         elif rvol < 0.7:
             reasons.append(f"RVOL {rvol:.2f} → niska aktywność.")
 
-    # Model bazowy
     if trend == "Uptrend" and rsi < 40:
         signal = "BUY"
         reasons.append("Trend wzrostowy + RSI < 40 → akumulacja.")
@@ -364,7 +348,6 @@ def generate_signal(price, ind, sentiment: str | None = None):
         signal = "HOLD"
         reasons.append("Brak jednoznacznego sygnału.")
 
-    # NEWS SENTIMENT
     if sentiment == "Bullish" and signal == "HOLD":
         signal = "BUY"
         reasons.append("News sentiment Bullish → wzmocnienie sygnału kupna.")
@@ -372,7 +355,6 @@ def generate_signal(price, ind, sentiment: str | None = None):
         signal = "SELL"
         reasons.append("News sentiment Bearish → wzmocnienie sygnału sprzedaży.")
 
-    # SL/TP
     if not np.isnan(sl):
         reasons.append(f"SL (Bollinger dolna): {sl:.2f}")
     if not np.isnan(tp):
@@ -384,15 +366,8 @@ def generate_signal(price, ind, sentiment: str | None = None):
 
 
 def fetch_news_sentiment(ticker):
-    """
-    NEWS SENTIMENT PRO:
-    1) Tavily – główne źródło newsów finansowych
-    2) Yahoo Finance – fallback
-    3) Filtr clickbaitów i niepowiązanych newsów
-    """
     headlines = []
 
-    # Tavily
     try:
         tavily_key = st.secrets.get("TAVILY_API_KEY", None)
         if tavily_key:
@@ -427,7 +402,6 @@ def fetch_news_sentiment(ticker):
             continue
         headlines.append(title.strip())
 
-    # Yahoo fallback
     if not headlines:
         try:
             t = yf.Ticker(ticker)
@@ -464,13 +438,25 @@ def render_trading():
 
     if st.button("Pobierz dane i policz sygnały", use_container_width=True):
         try:
-            data = yf.download(ticker, period=period, interval=interval)
+            data = yf.download(
+                tickers=ticker,
+                period=period,
+                interval=interval,
+                auto_adjust=True,
+                group_by="ticker",
+            )
             if data.empty:
                 st.error("Brak danych dla tego tickera lub interwału.")
                 return
 
             if len(data) < 60:
-                data = yf.download(ticker, period="6mo", interval="1d")
+                data = yf.download(
+                    tickers=ticker,
+                    period="6mo",
+                    interval="1d",
+                    auto_adjust=True,
+                    group_by="ticker",
+                )
                 if data.empty:
                     st.error("Brak wystarczających danych historycznych (nawet po fallbacku 6m).")
                     return
@@ -487,6 +473,32 @@ def render_trading():
                 high = data["High"]
                 low = data["Low"]
                 volume = data["Volume"]
+
+            # prosty filtr na dane opcyjne (bardzo niska cena przy znanym dużym tickerze)
+            if close.mean() < 5 and ticker.upper() in ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL"]:
+                st.warning("Wykryto podejrzanie niskie ceny (możliwe dane opcyjne) – wymuszam pobranie danych akcji (6m, 1d).")
+                data = yf.download(
+                    tickers=ticker,
+                    period="6mo",
+                    interval="1d",
+                    auto_adjust=True,
+                    group_by="ticker",
+                )
+                if data.empty:
+                    st.error("Brak poprawnych danych akcyjnych po wymuszeniu.")
+                    return
+                if isinstance(data.columns, pd.MultiIndex):
+                    close = data["Close"].iloc[:, 0]
+                    open_ = data["Open"].iloc[:, 0]
+                    high = data["High"].iloc[:, 0]
+                    low = data["Low"].iloc[:, 0]
+                    volume = data["Volume"].iloc[:, 0]
+                else:
+                    close = data["Close"]
+                    open_ = data["Open"]
+                    high = data["High"]
+                    low = data["Low"]
+                    volume = data["Volume"]
 
             ind = compute_indicators(close, volume)
             price = to_scalar(close.iloc[-1])
@@ -560,7 +572,7 @@ def render_trading():
             if not np.isnan(ind["last_lower_bb"]):
                 st.write(f"**SL (Bollinger dolna):** {ind['last_lower_bb']:.2f}")
             if not np.isnan(ind["last_upper_bb"]):
-                st.write(f"**TP (Bollinger górna):** {ind['last_upper_bb']:.2f}")
+                st.write(f"**TP (Bollinger górna):** {ind['last_upper_bb"]:.2f}")
             st.write(f"**Sygnał (z newsami): {signal}**")
             st.write(f"**Scoring PRO (0–100): {scoring}**")
             st.markdown("**Uzasadnienie:**")
@@ -594,8 +606,6 @@ def render_trading():
             st.error(f"Błąd: {e}")
 
 
-# ---------------- MODUŁ: SKANER SPÓŁEK (50 → TOP 10) ----------------
-
 def render_scanner():
     st.title("🧪 Skaner spółek – 50 tickerów → TOP 10 (Scoring PRO + NEWS)")
     st.caption("Wklej listę tickerów (np. 50), skrypt policzy scoring PRO (z newsami) i wybierze TOP 10.")
@@ -626,7 +636,13 @@ def render_scanner():
             status.write(f"Skanuję: {ticker} ({i+1}/{len(tickers)})")
 
             try:
-                data = yf.download(ticker, period="6mo", interval="1d")
+                data = yf.download(
+                    tickers=ticker,
+                    period="6mo",
+                    interval="1d",
+                    auto_adjust=True,
+                    group_by="ticker",
+                )
                 if data.empty or len(data) < 60:
                     continue
 
@@ -712,8 +728,6 @@ def render_scanner():
         st.markdown(
             "_Scoring PRO łączy trend, ADX, RSI, Stochastic, RVOL, MACD, Bollinger, ATR oraz sentyment newsów._"
         )
-# ---------------- MODUŁ 1: CZAT AI (GPT-4.1 + TAVILY + TRADING ENGINE) ----------------
-
 def tavily_research(tavily_key, ticker, question):
     base_queries = [question]
     if ticker:
