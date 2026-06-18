@@ -607,7 +607,8 @@ def render_trading():
 
 
 def render_scanner():
-    st.title("🧪 Skaner spółek – 50 tickerów → TOP 10 (Scoring PRO + NEWS)")
+    st.title("🧪 Skaner spółek – 50 tickerów → TOP 10 — Scoring PRO + NEWS")
+
     st.caption("Wklej listę tickerów (np. 50), skrypt policzy scoring PRO (z newsami) i wybierze TOP 10.")
 
     tickers_text = st.text_area(
