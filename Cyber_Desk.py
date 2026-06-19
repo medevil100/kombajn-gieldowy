@@ -8,7 +8,7 @@ import streamlit as st
 # ================== CONFIG & NEON UI ==================
 
 st.set_page_config(
-    page_title="CYBER DESK PRO - KI_ULTRA v5.2 NEWS PRO",
+    page_title="CYBER DESK PRO - KI_ULTRA v5.3 NEWS SUMMARY",
     page_icon="⚡",
     layout="wide"
 )
@@ -29,8 +29,8 @@ st.markdown(
 )
 
 with st.sidebar:
-    st.markdown("### ⚡ CYBER DESK PRO - KI_ULTRA v5.2")
-    st.caption("Trading + GPT‑4.1 + Tavily News Scanner")
+    st.markdown("### ⚡ CYBER DESK PRO - KI_ULTRA v5.3")
+    st.caption("Trading + GPT‑4.1 + Tavily + podsumowanie newsów")
     app_mode = st.selectbox(
         "Tryb pracy:",
         ["📈 Trading", "📰 Skaner wiadomości"]
@@ -191,9 +191,9 @@ def compute_scoring_pro(ind, sentiment):
 
     return max(0, min(score, 100))
 
-# ================== TAVILY NEWS SENTIMENT ==================
+# ================== TAVILY NEWS ==================
 
-def tavily_news(ticker_or_query: str, max_results: int = 10):
+def tavily_news(query: str, max_results: int = 10):
     key = st.secrets.get("TAVILY_API_KEY", None)
     if not key:
         return []
@@ -203,7 +203,7 @@ def tavily_news(ticker_or_query: str, max_results: int = 10):
             "https://api.tavily.com/search",
             headers={"Authorization": f"Bearer {key}"},
             json={
-                "query": ticker_or_query,
+                "query": query,
                 "max_results": max_results
             },
             timeout=10
@@ -216,14 +216,12 @@ def tavily_news(ticker_or_query: str, max_results: int = 10):
 def fetch_news_sentiment(ticker: str):
     headlines = []
 
-    # 1) Tavily – szeroko, nie tylko finanse
-    tavily_results = tavily_news(ticker, max_results=12)
+    tavily_results = tavily_news(ticker, max_results=15)
     for item in tavily_results:
         title = item.get("title", "")
         if title:
             headlines.append(title)
 
-    # 2) Yahoo Finance – jako uzupełnienie
     try:
         news = yf.Ticker(ticker).news
         for n in news:
@@ -233,7 +231,6 @@ def fetch_news_sentiment(ticker: str):
     except Exception:
         pass
 
-    # deduplikacja
     seen = set()
     uniq = []
     for h in headlines:
@@ -256,14 +253,60 @@ def fetch_news_sentiment(ticker: str):
     sentiment = "Bullish" if score > 0 else "Bearish" if score < 0 else "Mixed"
     return sentiment, headlines[:15], ""
 
-# ================== GPT‑4.1 AI SIGNAL ==================
+# ================== GPT‑4.1 NEWS SUMMARY ==================
 
-def gpt41_signal(price, ind, sentiment, ticker):
+def summarize_news_with_gpt(titles, ticker):
+    if not titles:
+        return "Brak newsów do podsumowania."
+
+    key = st.secrets["OPENAI_API_KEY"]
+    joined = "\n".join(titles)
+
+    prompt = f"""
+Masz listę nagłówków newsów dotyczących {ticker}:
+
+{joined}
+
+Zrób:
+- krótkie podsumowanie (3-4 zdania) po polsku,
+- oceń ogólny wydźwięk: pozytywny / neutralny / negatywny.
+
+Zwróć czysty tekst, bez JSON.
+"""
+
+    r = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "gpt-4.1",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3
+        },
+        timeout=20
+    )
+
+    try:
+        return r.json()["choices"][0]["message"]["content"]
+    except Exception:
+        return "Błąd przy podsumowaniu newsów."
+
+# ================== GPT‑4.1 AI SIGNAL (ZAOSTRZONE ZASADY) ==================
+
+def gpt41_signal(price, ind, sentiment, ticker, scoring):
     key = st.secrets["OPENAI_API_KEY"]
 
     prompt = f"""
-Jesteś profesjonalnym analitykiem tradingowym. Na podstawie danych wygeneruj sygnał BUY/SELL/HOLD.
+Jesteś profesjonalnym analitykiem tradingowym. Masz twarde zasady:
 
+- RSI < 30 = wyprzedanie (możliwy BUY, ale tylko przy sensownym trendzie).
+- 30 <= RSI <= 50 = strefa neutralna (brak mocnego sygnału).
+- RSI > 70 = wykupienie (możliwy SELL, ale tylko przy sensownym trendzie).
+- Jeśli trend = 'Unknown' lub ADX jest pusty/nan → NIE WOLNO dawać mocnego sygnału BUY/SELL, tylko HOLD lub bardzo ostrożny komentarz.
+- Jeśli Scoring PRO < 60 → sygnał ma być ostrożny, preferuj HOLD lub słaby sygnał z komentarzem o ryzyku.
+
+Na podstawie danych wygeneruj sygnał BUY/SELL/HOLD, ale respektuj powyższe zasady.
+
+Dane:
 Ticker: {ticker}
 Cena: {price}
 RSI: {ind['rsi']}
@@ -276,11 +319,12 @@ RVOL: {ind['rvol']}
 SL (BB Low): {ind['last_lower_bb']}
 TP (BB High): {ind['last_upper_bb']}
 Sentiment news: {sentiment}
+Scoring PRO: {scoring}
 
 Zwróć JSON:
 {{
 "signal": "BUY/SELL/HOLD",
-"reason": "krótkie, konkretne uzasadnienie po polsku",
+"reason": "krótkie, konkretne uzasadnienie po polsku, bez ogólników",
 "quality": "low/medium/high"
 }}
 """
@@ -333,7 +377,6 @@ def render_trading():
         ind = compute_indicators(close, volume, high, low)
         price = to_scalar(close.iloc[-1])
 
-        # Wykres
         fig = go.Figure()
         fig.add_trace(go.Candlestick(
             x=data.index, open=open_, high=high, low=low, close=close, name="Cena"
@@ -343,14 +386,9 @@ def render_trading():
         fig.update_layout(height=500, paper_bgcolor="#020617", plot_bgcolor="#020617")
         st.plotly_chart(fig, use_container_width=True)
 
-        # News + sentyment
         sentiment, titles, _ = fetch_news_sentiment(ticker)
-
-        # GPT‑4.1 sygnał
-        ai_signal, ai_reason, ai_quality = gpt41_signal(price, ind, sentiment, ticker)
-
-        # Scoring PRO
         scoring = compute_scoring_pro(ind, sentiment)
+        ai_signal, ai_reason, ai_quality = gpt41_signal(price, ind, sentiment, ticker, scoring)
 
         st.subheader("🤖 Sygnał AI (GPT‑4.1)")
         st.write("**Sygnał:**", ai_signal)
@@ -373,8 +411,11 @@ def render_trading():
 
         st.subheader("📰 NEWS RADAR (Tavily + Yahoo)")
         if titles:
-            for t in titles:
+            for t in titles[:5]:
                 st.write("- ", t)
+            st.write("**Podsumowanie newsów (GPT‑4.1):**")
+            summary = summarize_news_with_gpt(titles[:10], ticker)
+            st.code(summary)
         else:
             st.write("Brak newsów.")
 
@@ -397,16 +438,24 @@ def render_news_scanner():
             st.warning("Brak wyników z Tavily.")
             return
 
+        titles = []
         for item in results:
             title = item.get("title", "")
             url = item.get("url", "")
             snippet = item.get("content", "") or item.get("snippet", "")
+            if title:
+                titles.append(title)
             st.markdown(f"**{title}**")
             if snippet:
                 st.write(snippet[:400] + ("..." if len(snippet) > 400 else ""))
             if url:
                 st.write(url)
             st.markdown("---")
+
+        if titles:
+            st.subheader("Podsumowanie newsów (GPT‑4.1)")
+            summary = summarize_news_with_gpt(titles[:10], query)
+            st.code(summary)
 
 # ================== MAIN ==================
 
