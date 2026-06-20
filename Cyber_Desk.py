@@ -4,11 +4,12 @@ import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 import streamlit as st
+from openbb import obb  # OPENBB INTEGRACJA
 
 # ================== CONFIG & NEON UI ==================
 
 st.set_page_config(
-    page_title="CYBER DESK PRO - KI_ULTRA v5.3 NEWS SUMMARY",
+    page_title="CYBER DESK PRO - KI_ULTRA v5.4 OPENBB",
     page_icon="⚡",
     layout="wide"
 )
@@ -29,11 +30,11 @@ st.markdown(
 )
 
 with st.sidebar:
-    st.markdown("### ⚡ CYBER DESK PRO - KI_ULTRA v5.3")
-    st.caption("Trading + GPT‑4.1 + Tavily + podsumowanie newsów")
+    st.markdown("### ⚡ CYBER DESK PRO - KI_ULTRA v5.4")
+    st.caption("Trading + GPT‑4.1 + Tavily + OpenBB (price/fund/macro/charts)")
     app_mode = st.selectbox(
         "Tryb pracy:",
-        ["📈 Trading", "📰 Skaner wiadomości"]
+        ["📈 Trading", "📰 Skaner wiadomości", "📊 OpenBB Fundamentals", "🌍 OpenBB Macro"]
     )
 
 # ================== HELPERS ==================
@@ -191,7 +192,7 @@ def compute_scoring_pro(ind, sentiment):
 
     return max(0, min(score, 100))
 
-# ================== TAVILY NEWS ==================
+# ================== TAVILY NEWS (ZOSTAJE) ==================
 
 def tavily_news(query: str, max_results: int = 10):
     key = st.secrets.get("TAVILY_API_KEY", None)
@@ -348,13 +349,129 @@ Zwróć JSON:
     except Exception:
         return "HOLD", "Błąd GPT‑4.1 lub niepoprawny JSON.", "low"
 
-# ================== TRADING PANEL ==================
+# ================== OPENBB PRICE ENGINE ==================
+
+def openbb_load_price(ticker: str, interval: str = "1d", period: str = "1mo") -> pd.DataFrame:
+    """
+    Używa OpenBB do pobrania danych cenowych zamiast yfinance.
+    """
+    try:
+        # mapowanie period na start_date (prosto, bez filozofii)
+        from datetime import datetime, timedelta
+
+        now = datetime.utcnow()
+        if period == "5d":
+            start = now - timedelta(days=5)
+        elif period == "1mo":
+            start = now - timedelta(days=30)
+        elif period == "3mo":
+            start = now - timedelta(days=90)
+        elif period == "6mo":
+            start = now - timedelta(days=180)
+        elif period == "1y":
+            start = now - timedelta(days=365)
+        else:
+            start = now - timedelta(days=60)
+
+        start_str = start.strftime("%Y-%m-%d")
+        end_str = now.strftime("%Y-%m-%d")
+
+        data = obb.equity.price.historical(
+            ticker,
+            start_date=start_str,
+            end_date=end_str,
+            provider="yfinance"  # dalej yfinance, ale przez OpenBB
+        )
+        df = data.to_dataframe()
+
+        # Upewniamy się, że mamy kolumny jak w starym kodzie
+        # OpenBB zwykle zwraca: open, high, low, close, volume, dividend, ...
+        rename_map = {
+            "open": "Open",
+            "high": "High",
+            "low": "Low",
+            "close": "Close",
+            "volume": "Volume"
+        }
+        for k, v in rename_map.items():
+            if k in df.columns and v not in df.columns:
+                df[v] = df[k]
+
+        # sortowanie po dacie
+        df = df.sort_index()
+
+        return df
+    except Exception as e:
+        st.error(f"Błąd OpenBB price: {e}")
+        return pd.DataFrame()
+
+# ================== OPENBB FUNDAMENTALS ==================
+
+def openbb_load_fundamentals(ticker: str) -> pd.DataFrame:
+    try:
+        data = obb.equity.fundamentals.overview(
+            ticker,
+            provider="yfinance"
+        )
+        df = data.to_dataframe()
+        return df.T if df.index.name == "metric" else df
+    except Exception as e:
+        st.error(f"Błąd OpenBB fundamentals: {e}")
+        return pd.DataFrame()
+
+# ================== OPENBB MACRO ==================
+
+def openbb_load_macro(series: str = "CPI") -> pd.DataFrame:
+    """
+    Przykład: CPI, GDP, UNRATE, FEDFUNDS itd. (FRED / inne providery).
+    """
+    try:
+        data = obb.economy.macro(series)
+        df = data.to_dataframe()
+        return df
+    except Exception as e:
+        st.error(f"Błąd OpenBB macro: {e}")
+        return pd.DataFrame()
+
+# ================== OPENBB CHARTS (CANDLE) ==================
+
+def openbb_candlestick_figure(df: pd.DataFrame, ticker: str):
+    if df.empty:
+        return go.Figure()
+
+    close = df["Close"]
+    high = df["High"]
+    low = df["Low"]
+    open_ = df["Open"]
+
+    ind = compute_indicators(close, df["Volume"], high, low)
+
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(
+        x=df.index,
+        open=open_,
+        high=high,
+        low=low,
+        close=close,
+        name="Cena"
+    ))
+    fig.add_trace(go.Scatter(x=df.index, y=ind["upper_bb"], line=dict(color="green"), name="BB Upper"))
+    fig.add_trace(go.Scatter(x=df.index, y=ind["lower_bb"], line=dict(color="red"), name="BB Lower"))
+    fig.update_layout(
+        title=f"{ticker} — OpenBB Candlestick",
+        height=500,
+        paper_bgcolor="#020617",
+        plot_bgcolor="#020617"
+    )
+    return fig, ind, to_scalar(close.iloc[-1])
+
+# ================== TRADING PANEL (OPENBB PRICE + NEWS + AI) ==================
 
 def render_trading():
-    st.title("📈 Trading + AI + News")
+    st.title("📈 Trading + AI + News (OpenBB price)")
 
     ticker = st.text_input("Ticker (np. NVG.WA, STX.WA, AAPL):", "")
-    interval = st.selectbox("Interwał:", ["15m", "30m", "1h", "1d"], index=3)
+    interval = st.selectbox("Interwał (wizualny):", ["15m", "30m", "1h", "1d"], index=3)
     period = st.selectbox("Okres:", ["5d", "1mo", "3mo", "6mo", "1y"], index=1)
 
     if st.button("Analizuj", use_container_width=True):
@@ -362,10 +479,11 @@ def render_trading():
             st.error("Podaj ticker.")
             return
 
-        data = yf.download(ticker, period=period, interval=interval, auto_adjust=True)
+        # TERAZ: dane z OpenBB
+        data = openbb_load_price(ticker, interval=interval, period=period)
 
         if data.empty:
-            st.error("Brak danych dla tego tickera / interwału.")
+            st.error("Brak danych dla tego tickera / interwału (OpenBB).")
             return
 
         close = data["Close"]
@@ -419,7 +537,7 @@ def render_trading():
         else:
             st.write("Brak newsów.")
 
-# ================== SKANER WIADOMOŚCI ==================
+# ================== SKANER WIADOMOŚCI (TAVILY) ==================
 
 def render_news_scanner():
     st.title("📰 Skaner wiadomości (Tavily)")
@@ -457,6 +575,51 @@ def render_news_scanner():
             summary = summarize_news_with_gpt(titles[:10], query)
             st.code(summary)
 
+# ================== OPENBB FUNDAMENTALS PANEL ==================
+
+def render_openbb_fundamentals():
+    st.title("📊 OpenBB Fundamentals")
+
+    ticker = st.text_input("Ticker (np. AAPL, MSFT, NVDA):", "")
+    if st.button("Pobierz fundamenty", use_container_width=True):
+        if not ticker.strip():
+            st.error("Podaj ticker.")
+            return
+
+        df = openbb_load_fundamentals(ticker)
+        if df.empty:
+            st.warning("Brak danych fundamentalnych (OpenBB).")
+            return
+
+        st.subheader(f"Fundamenty: {ticker}")
+        st.dataframe(df)
+
+# ================== OPENBB MACRO PANEL ==================
+
+def render_openbb_macro():
+    st.title("🌍 OpenBB Macro")
+
+    series = st.text_input("Seria makro (np. CPI, GDP, UNRATE, FEDFUNDS):", "CPI")
+    if st.button("Pobierz dane makro", use_container_width=True):
+        df = openbb_load_macro(series)
+        if df.empty:
+            st.warning("Brak danych makro (OpenBB).")
+            return
+
+        st.subheader(f"Seria makro: {series}")
+        st.dataframe(df)
+
+        if "value" in df.columns:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=df.index, y=df["value"], mode="lines+markers", name=series))
+            fig.update_layout(
+                title=f"{series} (OpenBB Macro)",
+                height=400,
+                paper_bgcolor="#020617",
+                plot_bgcolor="#020617"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
 # ================== MAIN ==================
 
 def main():
@@ -464,6 +627,10 @@ def main():
         render_trading()
     elif app_mode == "📰 Skaner wiadomości":
         render_news_scanner()
+    elif app_mode == "📊 OpenBB Fundamentals":
+        render_openbb_fundamentals()
+    elif app_mode == "🌍 OpenBB Macro":
+        render_openbb_macro()
 
 if __name__ == "__main__":
     main()
