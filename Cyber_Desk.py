@@ -4,12 +4,12 @@ import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 import streamlit as st
-from openbb import obb  # OPENBB INTEGRACJA
+from openbb import obb  # OPENBB
 
 # ================== CONFIG & NEON UI ==================
 
 st.set_page_config(
-    page_title="CYBER DESK PRO - KI_ULTRA v5.4 OPENBB",
+    page_title="CYBER DESK PRO - KI_ULTRA v5.4.3 OPENBB",
     page_icon="⚡",
     layout="wide"
 )
@@ -30,8 +30,8 @@ st.markdown(
 )
 
 with st.sidebar:
-    st.markdown("### ⚡ CYBER DESK PRO - KI_ULTRA v5.4")
-    st.caption("Trading + GPT‑4.1 + Tavily + OpenBB (price/fund/macro/charts)")
+    st.markdown("### ⚡ CYBER DESK PRO - KI_ULTRA v5.4.3")
+    st.caption("Trading + GPT‑4.1 + Tavily + OpenBB (price/fund/macro)")
     app_mode = st.selectbox(
         "Tryb pracy:",
         ["📈 Trading", "📰 Skaner wiadomości", "📊 OpenBB Fundamentals", "🌍 OpenBB Macro"]
@@ -47,9 +47,26 @@ def to_scalar(x):
     except Exception:
         return np.nan
 
+def safe_last(series):
+    if series is None:
+        return np.nan
+    series = series.dropna()
+    return series.iloc[-1] if len(series) else np.nan
+
 # ================== INDICATORS ENGINE ==================
 
 def compute_indicators(close, volume, high=None, low=None):
+    if close is None or len(close.dropna()) == 0:
+        return {
+            "rsi": np.nan, "ma_fast": np.nan, "ma_slow": np.nan,
+            "upper_bb": None, "lower_bb": None,
+            "last_upper_bb": np.nan, "last_lower_bb": np.nan,
+            "last_macd": np.nan, "last_macd_signal": np.nan,
+            "vol": np.nan, "volume": np.nan,
+            "atr": np.nan, "adx": np.nan, "rvol": np.nan,
+            "trend": "Unknown"
+        }
+
     close = close.copy()
     volume = volume.copy()
 
@@ -63,34 +80,34 @@ def compute_indicators(close, volume, high=None, low=None):
     gain = delta.where(delta > 0, 0).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / (loss + 1e-9)
-    rsi_series = 100 - (100 / (1 + rs))
-    rsi = to_scalar(rsi_series.dropna().iloc[-1]) if not rsi_series.dropna().empty else np.nan
+    rsi = to_scalar(safe_last(100 - (100 / (1 + rs))))
 
     # MA 10/30
-    ma_fast = to_scalar(close.rolling(10).mean().dropna().iloc[-1]) if len(close) >= 10 else np.nan
-    ma_slow = to_scalar(close.rolling(30).mean().dropna().iloc[-1]) if len(close) >= 30 else np.nan
+    ma_fast = to_scalar(safe_last(close.rolling(10).mean()))
+    ma_slow = to_scalar(safe_last(close.rolling(30).mean()))
 
     # Bollinger Bands 20
     ma_bb = close.rolling(20).mean()
     std_bb = close.rolling(20).std()
     upper_bb = ma_bb + 2 * std_bb
     lower_bb = ma_bb - 2 * std_bb
-    last_upper_bb = to_scalar(upper_bb.dropna().iloc[-1]) if not upper_bb.dropna().empty else np.nan
-    last_lower_bb = to_scalar(lower_bb.dropna().iloc[-1]) if not lower_bb.dropna().empty else np.nan
+    last_upper_bb = to_scalar(safe_last(upper_bb))
+    last_lower_bb = to_scalar(safe_last(lower_bb))
 
     # MACD 12/26/9
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     macd = ema12 - ema26
     macd_signal = macd.ewm(span=9, adjust=False).mean()
-    last_macd = to_scalar(macd.iloc[-1])
-    last_macd_signal = to_scalar(macd_signal.iloc[-1])
+    last_macd = to_scalar(safe_last(macd))
+    last_macd_signal = to_scalar(safe_last(macd_signal))
 
     # Volatility
-    vol = to_scalar(close.pct_change().rolling(20).std().dropna().iloc[-1]) if len(close) >= 20 else np.nan
+    vol_series = close.pct_change().rolling(20).std()
+    vol = to_scalar(safe_last(vol_series))
 
     # Volume
-    last_volume = to_scalar(volume.iloc[-1]) if len(volume) else np.nan
+    last_volume = to_scalar(safe_last(volume))
 
     # ATR 14
     tr = pd.concat([
@@ -98,7 +115,7 @@ def compute_indicators(close, volume, high=None, low=None):
         (high - close.shift(1)).abs(),
         (low - close.shift(1)).abs()
     ], axis=1).max(axis=1)
-    atr = to_scalar(tr.rolling(14).mean().dropna().iloc[-1]) if len(tr) >= 14 else np.nan
+    atr = to_scalar(safe_last(tr.rolling(14).mean()))
 
     # ADX 14
     plus_dm = high.diff()
@@ -108,12 +125,12 @@ def compute_indicators(close, volume, high=None, low=None):
     atr_adx = tr.rolling(14).mean()
     plus_di = 100 * (plus_dm.rolling(14).mean() / (atr_adx + 1e-9))
     minus_di = 100 * (minus_dm.rolling(14).mean() / (atr_adx + 1e-9))
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)) * 100
-    adx = to_scalar(dx.rolling(14).mean().dropna().iloc[-1]) if len(dx.dropna()) else np.nan
+    dx_series = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)) * 100
+    adx = to_scalar(safe_last(dx_series.rolling(14).mean()))
 
     # RVOL
     avg_vol_20 = volume.rolling(20).mean()
-    rvol = to_scalar((volume / (avg_vol_20 + 1e-9)).dropna().iloc[-1]) if len(volume) >= 20 else np.nan
+    rvol = to_scalar(safe_last(volume / (avg_vol_20 + 1e-9)))
 
     # Trend
     if not np.isnan(ma_fast) and not np.isnan(ma_slow):
@@ -192,7 +209,7 @@ def compute_scoring_pro(ind, sentiment):
 
     return max(0, min(score, 100))
 
-# ================== TAVILY NEWS (ZOSTAJE) ==================
+# ================== TAVILY NEWS ==================
 
 def tavily_news(query: str, max_results: int = 10):
     key = st.secrets.get("TAVILY_API_KEY", None)
@@ -291,72 +308,72 @@ Zwróć czysty tekst, bez JSON.
     except Exception:
         return "Błąd przy podsumowaniu newsów."
 
-# ================== GPT‑4.1 AI SIGNAL (ZAOSTRZONE ZASADY) ==================
+# ================== GPT‑4.1 AI SIGNAL (BEZ JSON) ==================
 
 def gpt41_signal(price, ind, sentiment, ticker, scoring):
     key = st.secrets["OPENAI_API_KEY"]
 
     prompt = f"""
-Jesteś profesjonalnym analitykiem tradingowym. Masz twarde zasady:
+Jesteś profesjonalnym analitykiem tradingowym.
 
-- RSI < 30 = wyprzedanie (możliwy BUY, ale tylko przy sensownym trendzie).
-- 30 <= RSI <= 50 = strefa neutralna (brak mocnego sygnału).
-- RSI > 70 = wykupienie (możliwy SELL, ale tylko przy sensownym trendzie).
-- Jeśli trend = 'Unknown' lub ADX jest pusty/nan → NIE WOLNO dawać mocnego sygnału BUY/SELL, tylko HOLD lub bardzo ostrożny komentarz.
-- Jeśli Scoring PRO < 60 → sygnał ma być ostrożny, preferuj HOLD lub słaby sygnał z komentarzem o ryzyku.
-
-Na podstawie danych wygeneruj sygnał BUY/SELL/HOLD, ale respektuj powyższe zasady.
-
-Dane:
+Masz dane:
 Ticker: {ticker}
 Cena: {price}
-RSI: {ind['rsi']}
-Trend: {ind['trend']}
-MACD: {ind['last_macd']}
-MACD Signal: {ind['last_macd_signal']}
-ADX: {ind['adx']}
-ATR: {ind['atr']}
-RVOL: {ind['rvol']}
-SL (BB Low): {ind['last_lower_bb']}
-TP (BB High): {ind['last_upper_bb']}
+RSI: {ind.get('rsi')}
+Trend: {ind.get('trend')}
+MACD: {ind.get('last_macd')}
+MACD Signal: {ind.get('last_macd_signal')}
+ADX: {ind.get('adx')}
+ATR: {ind.get('atr')}
+RVOL: {ind.get('rvol')}
+SL (BB Low): {ind.get('last_lower_bb')}
+TP (BB High): {ind.get('last_upper_bb')}
 Sentiment news: {sentiment}
 Scoring PRO: {scoring}
 
-Zwróć JSON:
-{{
-"signal": "BUY/SELL/HOLD",
-"reason": "krótkie, konkretne uzasadnienie po polsku, bez ogólników",
-"quality": "low/medium/high"
-}}
+Zasady:
+- Bądź konkretny, zero lania wody.
+- Uwzględnij RSI, trend, ADX, RVOL, Scoring PRO i newsy.
+- Jeśli dane są słabe lub niejednoznaczne → preferuj HOLD.
+- Odpowiedź po polsku, maks 5–6 zdań.
+- Na początku pierwszej linijki podaj tylko jedno słowo: BUY, SELL lub HOLD, potem myślnik i reszta uzasadnienia.
+
+Przykład:
+BUY - Krótkie, konkretne uzasadnienie...
+
+Zwróć tylko tekst, bez JSON, bez formatowania.
 """
 
-    r = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {key}"},
-        json={
-            "model": "gpt-4.1",
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2
-        },
-        timeout=20
-    )
-
     try:
-        txt = r.json()["choices"][0]["message"]["content"]
-        import json
-        j = json.loads(txt)
-        return j.get("signal", "HOLD"), j.get("reason", "Brak uzasadnienia."), j.get("quality", "low")
+        r = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}"},
+            json={
+                "model": "gpt-4.1",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.2
+            },
+            timeout=20
+        )
+        txt = r.json()["choices"][0]["message"]["content"].strip()
     except Exception:
-        return "HOLD", "Błąd GPT‑4.1 lub niepoprawny JSON.", "low"
+        return "HOLD", "Błąd GPT‑4.1 przy generowaniu sygnału.", "low"
+
+    first_line = txt.splitlines()[0].strip()
+    first_token = first_line.split()[0].upper() if first_line else "HOLD"
+    if first_token not in ["BUY", "SELL", "HOLD"]:
+        signal = "HOLD"
+    else:
+        signal = first_token
+
+    reason = txt
+    quality = "medium"
+    return signal, reason, quality
 
 # ================== OPENBB PRICE ENGINE ==================
 
 def openbb_load_price(ticker: str, interval: str = "1d", period: str = "1mo") -> pd.DataFrame:
-    """
-    Używa OpenBB do pobrania danych cenowych zamiast yfinance.
-    """
     try:
-        # mapowanie period na start_date (prosto, bez filozofii)
         from datetime import datetime, timedelta
 
         now = datetime.utcnow()
@@ -380,12 +397,10 @@ def openbb_load_price(ticker: str, interval: str = "1d", period: str = "1mo") ->
             ticker,
             start_date=start_str,
             end_date=end_str,
-            provider="yfinance"  # dalej yfinance, ale przez OpenBB
+            provider="yfinance"
         )
         df = data.to_dataframe()
 
-        # Upewniamy się, że mamy kolumny jak w starym kodzie
-        # OpenBB zwykle zwraca: open, high, low, close, volume, dividend, ...
         rename_map = {
             "open": "Open",
             "high": "High",
@@ -397,9 +412,7 @@ def openbb_load_price(ticker: str, interval: str = "1d", period: str = "1mo") ->
             if k in df.columns and v not in df.columns:
                 df[v] = df[k]
 
-        # sortowanie po dacie
         df = df.sort_index()
-
         return df
     except Exception as e:
         st.error(f"Błąd OpenBB price: {e}")
@@ -407,24 +420,40 @@ def openbb_load_price(ticker: str, interval: str = "1d", period: str = "1mo") ->
 
 # ================== OPENBB FUNDAMENTALS ==================
 
-def openbb_load_fundamentals(ticker: str) -> pd.DataFrame:
+def openbb_load_fundamentals(ticker: str):
     try:
-        data = obb.equity.fundamentals.overview(
-            ticker,
-            provider="yfinance"
-        )
-        df = data.to_dataframe()
-        return df.T if df.index.name == "metric" else df
+        sections = {
+            "Income Statement": getattr(obb.equity.fundamentals, "income", None),
+            "Balance Sheet": getattr(obb.equity.fundamentals, "balance", None),
+            "Cash Flow": getattr(obb.equity.fundamentals, "cash", None),
+            "Key Metrics": getattr(obb.equity.fundamentals, "key_metrics", None),
+        }
     except Exception as e:
-        st.error(f"Błąd OpenBB fundamentals: {e}")
-        return pd.DataFrame()
+        st.error(f"Błąd OpenBB fundamentals (brak modułu fundamentals): {e}")
+        return {}
+
+    out = {}
+    for name, func in sections.items():
+        if func is None:
+            out[name] = pd.DataFrame()
+            continue
+        try:
+            raw = func(ticker)
+            if hasattr(raw, "to_dataframe"):
+                df = raw.to_dataframe()
+            elif hasattr(raw, "results"):
+                df = pd.DataFrame(raw.results)
+            else:
+                df = pd.DataFrame()
+            out[name] = df
+        except Exception:
+            out[name] = pd.DataFrame()
+
+    return out
 
 # ================== OPENBB MACRO ==================
 
 def openbb_load_macro(series: str = "CPI") -> pd.DataFrame:
-    """
-    Przykład: CPI, GDP, UNRATE, FEDFUNDS itd. (FRED / inne providery).
-    """
     try:
         data = obb.economy.macro(series)
         df = data.to_dataframe()
@@ -433,39 +462,7 @@ def openbb_load_macro(series: str = "CPI") -> pd.DataFrame:
         st.error(f"Błąd OpenBB macro: {e}")
         return pd.DataFrame()
 
-# ================== OPENBB CHARTS (CANDLE) ==================
-
-def openbb_candlestick_figure(df: pd.DataFrame, ticker: str):
-    if df.empty:
-        return go.Figure()
-
-    close = df["Close"]
-    high = df["High"]
-    low = df["Low"]
-    open_ = df["Open"]
-
-    ind = compute_indicators(close, df["Volume"], high, low)
-
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=df.index,
-        open=open_,
-        high=high,
-        low=low,
-        close=close,
-        name="Cena"
-    ))
-    fig.add_trace(go.Scatter(x=df.index, y=ind["upper_bb"], line=dict(color="green"), name="BB Upper"))
-    fig.add_trace(go.Scatter(x=df.index, y=ind["lower_bb"], line=dict(color="red"), name="BB Lower"))
-    fig.update_layout(
-        title=f"{ticker} — OpenBB Candlestick",
-        height=500,
-        paper_bgcolor="#020617",
-        plot_bgcolor="#020617"
-    )
-    return fig, ind, to_scalar(close.iloc[-1])
-
-# ================== TRADING PANEL (OPENBB PRICE + NEWS + AI) ==================
+# ================== TRADING PANEL ==================
 
 def render_trading():
     st.title("📈 Trading + AI + News (OpenBB price)")
@@ -479,21 +476,32 @@ def render_trading():
             st.error("Podaj ticker.")
             return
 
-        # TERAZ: dane z OpenBB
         data = openbb_load_price(ticker, interval=interval, period=period)
 
-        if data.empty:
-            st.error("Brak danych dla tego tickera / interwału (OpenBB).")
+        if data is None or data.empty:
+            st.error("OpenBB zwrócił pusty DataFrame.")
             return
 
-        close = data["Close"]
-        volume = data["Volume"]
-        high = data["High"]
-        low = data["Low"]
-        open_ = data["Open"]
+        required_cols = ["Open", "High", "Low", "Close", "Volume"]
+        missing = [c for c in required_cols if c not in data.columns]
+        if missing:
+            st.error(f"Brak kolumn w danych: {missing}")
+            st.dataframe(data.head())
+            return
+
+        close = data["Close"].dropna()
+        volume = data["Volume"].dropna()
+        high = data["High"].dropna()
+        low = data["Low"].dropna()
+        open_ = data["Open"].dropna()
+
+        if close.empty:
+            st.error("Brak danych cenowych (Close jest puste).")
+            st.dataframe(data.tail())
+            return
 
         ind = compute_indicators(close, volume, high, low)
-        price = to_scalar(close.iloc[-1])
+        price = to_scalar(safe_last(close))
 
         fig = go.Figure()
         fig.add_trace(go.Candlestick(
@@ -537,7 +545,7 @@ def render_trading():
         else:
             st.write("Brak newsów.")
 
-# ================== SKANER WIADOMOŚCI (TAVILY) ==================
+# ================== SKANER WIADOMOŚCI ==================
 
 def render_news_scanner():
     st.title("📰 Skaner wiadomości (Tavily)")
@@ -586,13 +594,17 @@ def render_openbb_fundamentals():
             st.error("Podaj ticker.")
             return
 
-        df = openbb_load_fundamentals(ticker)
-        if df.empty:
+        data = openbb_load_fundamentals(ticker)
+        if not data:
             st.warning("Brak danych fundamentalnych (OpenBB).")
             return
 
-        st.subheader(f"Fundamenty: {ticker}")
-        st.dataframe(df)
+        for name, df in data.items():
+            st.subheader(name)
+            if df is None or df.empty:
+                st.write("Brak danych w tej sekcji.")
+            else:
+                st.dataframe(df)
 
 # ================== OPENBB MACRO PANEL ==================
 
@@ -609,9 +621,15 @@ def render_openbb_macro():
         st.subheader(f"Seria makro: {series}")
         st.dataframe(df)
 
-        if "value" in df.columns:
+        value_col = None
+        for c in df.columns:
+            if pd.api.types.is_numeric_dtype(df[c]):
+                value_col = c
+                break
+
+        if value_col:
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df.index, y=df["value"], mode="lines+markers", name=series))
+            fig.add_trace(go.Scatter(x=df.index, y=df[value_col], mode="lines+markers", name=series))
             fig.update_layout(
                 title=f"{series} (OpenBB Macro)",
                 height=400,
