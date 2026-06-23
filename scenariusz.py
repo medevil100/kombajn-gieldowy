@@ -10,7 +10,7 @@ import cloudscraper
 from tavily import TavilyClient
 
 # ==========================================
-# 0. ROZWIĄZANIE PROBLEMU Z BLOKADĄ IP (Yahoo Rate Limit)
+# 0. BEZPIECZNA SESJA ODPORNA NA LIMITOWANIE
 # ==========================================
 scraper_session = cloudscraper.create_scraper()
 scraper_session.headers.update({
@@ -20,56 +20,43 @@ scraper_session.headers.update({
 })
 
 # ==========================================
-# 1. KONFIGURACJA STRONY I AUTOMATYCZNYCH KLUCZY
+# 1. KONFIGURACJA STRONY
 # ==========================================
 st.set_page_config(
-    page_title="AI Monte Carlo Predictor", layout="wide", initial_sidebar_state="expanded"
+    page_title="AI Monte Carlo Advanced Predictor", layout="wide", initial_sidebar_state="expanded"
 )
-st.title("📈 AI Monte Carlo 52-Week Predictor & News Analyst")
+st.title("📈 Zaawansowany Predyktor Monte Carlo 52-Tygodnie & Deep AI Analyst")
 
-# Samoczynne pobieranie kluczy ze środowiska Streamlit Cloud
 OPENAI_KEY = st.secrets.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY"))
 TAVILY_KEY = st.secrets.get("TAVILY_API_KEY", os.environ.get("TAVILY_API_KEY"))
 
-# Przypisanie klucza OpenAI
 if OPENAI_KEY:
     openai.api_key = OPENAI_KEY
 
-# Panel boczny
-ticker = st.sidebar.text_input(
-    "Wpisz Ticker Spółki (np. AAPL, TSLA, MSFT)", "AAPL"
-).upper()
-liczba_symulacji = st.sidebar.slider(
-    "Liczba symulacji Monte Carlo", 1000, 10000, 5000, step=1000
-)
-generuj = st.sidebar.button("Uruchom analizę")
+ticker = st.sidebar.text_input("Wpisz Ticker Spółki (np. AAPL, TSLA, MSFT)", "AAPL").upper()
+liczba_symulacji = st.sidebar.slider("Liczba symulacji Monte Carlo", 1000, 10000, 5000, step=1000)
+generuj = st.sidebar.button("Uruchom głęboką analizę")
 
-
-# Funkcja do przeszukiwania sieci przez bezpośredniego klienta Tavily
 def pobierz_newsy_tavily(query):
     try:
         tavily = TavilyClient(api_key=TAVILY_KEY)
-        wyniki = tavily.search(query=query, max_results=4)
-        
+        wyniki = tavily.search(query=query, max_results=5, search_depth="advanced")
         tekst_newsow = ""
         for i, res in enumerate(wyniki.get('results', [])):
-            tekst_newsow += f"\n[{i+1}] {res['title']}: {res['content']}\nURL: {res['url']}\n"
+            tekst_newsow += f"\n[{i+1}] {res['title']}\nTreść: {res['content']}\nŹródło: {res['url']}\n"
         return tekst_newsow
     except Exception as e:
-        return f"Brak możliwości pobrania newsów. Sprawdź klucz Tavily. Błąd: {e}"
-
+        return f"Błąd Tavily: {e}"
 
 # ==========================================
-# 2. LOGIKA MATEMATYCZNA (MONTE CARLO)
+# 2. LOGIKA MATEMATYCZNA I OBLICZANIE WSKAŹNIKÓW
 # ==========================================
 if generuj:
     if not OPENAI_KEY or not TAVILY_KEY:
-        st.error(
-            "❌ Błąd: Nie wykryto kluczy OPENAI_API_KEY lub TAVILY_API_KEY w panelu Streamlit Secrets."
-        )
+        st.error("❌ Brak kluczy API w konfiguracji Streamlit Secrets.")
         st.stop()
 
-    with st.spinner("Pobieranie danych rynkowych i obliczanie Monte Carlo..."):
+    with st.spinner("Pobieranie danych rynkowych i finansowych spółki..."):
         koniec = datetime.date.today()
         start = koniec - datetime.timedelta(days=3 * 365)
         
@@ -78,60 +65,73 @@ if generuj:
         try:
             dane = spolka.history(start=start, end=koniec)
         except Exception as e:
-            st.error("❌ Yahoo Finance odrzuciło zapytanie z powodu limitu serwera Streamlit. Spróbuj kliknąć ponownie za chwilę.")
+            st.error("❌ Problem z pobraniem historii cen z Yahoo Finance.")
             st.stop()
 
         if dane.empty:
-            st.error(f"Nie znaleziono danych dla tickera lub Yahoo zablokowało ruch: {ticker}. Spróbuj ponownie.")
+            st.error(f"Brak danych dla {ticker}.")
             st.stop()
 
-        # BEZPIECZNE PROSTOWANIE KOLUMN (MultiIndex)
         if isinstance(dane.columns, pd.MultiIndex):
             dane.columns = dane.columns.get_level_values(0)
 
-        # Wyciągnięcie cen zamknięcia
         ceny_zamkniecia = dane["Close"].dropna()
         ostatnia_cena = float(ceny_zamkniecia.iloc[-1])
-        dni_handlowe = 52 * 5  # 52 tygodnie prognozy
+        dni_handlowe = 252 # Dokładnie rok giełdowy
 
-        # Pobieranie danych fundamentalnych (Target Price oraz P/E Ratio)
+        # --- REWOLUCJA: SAMODZIELNE OBLICZANIE P/E ZAMIAST ZAUFANIA .INFO ---
+        pe_obliczone = "Brak danych (Błąd raportu)"
+        eps_ttm = "Brak danych"
         try:
-            spolka_info = spolka.info
-            target_mean = spolka_info.get("targetMeanPrice")
-            pe_ratio = spolka_info.get("trailingPE")
+            # Pobieramy kwartalne sprawozdanie zysków i strat
+            kwartaly = spolka.quarterly_income_stmt
+            if not kwartaly.empty:
+                # Szukamy wiersza Net Income (Zysk netto) - bierzemy sumę z ostatnich 4 kwartałów (TTM)
+                zysk_netto_ttm = kwartaly.loc['Net Income'].iloc[0:4].sum()
+                
+                # Pobieramy liczbę akcji w obiegu z bilansu
+                bilans = spolka.quarterly_balance_sheet
+                shares = None
+                if 'Share Capital' in bilans.index:
+                    shares = bilans.loc['Share Capital'].iloc[0]
+                elif 'Ordinary Shares Number' in bilans.index:
+                    shares = bilans.loc['Ordinary Shares Number'].iloc[0]
+                
+                if zysk_netto_ttm and shares and shares > 0:
+                    eps_ttm = zysk_netto_ttm / shares
+                    pe_calc_val = ostatnia_cena / eps_ttm
+                    pe_obliczone = f"{pe_calc_val:.2f}"
+                    eps_ttm = f"{eps_ttm:.2f} USD"
+        except Exception as e:
+            pass
+
+        # Pobieranie ceny docelowej analityków (zostaje jako uzupełnienie)
+        try:
+            target_mean = spolka.info.get("targetMeanPrice")
         except:
             target_mean = None
-            pe_ratio = None
 
         if target_mean and target_mean > 0:
             dzienny_zwrot_analitykow = ((target_mean - ostatnia_cena) / ostatnia_cena) / 252
         else:
             dzienny_zwrot_analitykow = None
 
-        # Statystyka historyczna
+        # Obliczenia Monte Carlo
         zwroty_hist = ceny_zamkniecia.pct_change().dropna()
         sredni_zwrot_hist = zwroty_hist.mean()
         zmiennosc_hist = zwroty_hist.std()
 
-        oczekiwany_dryf = (
-            (sredni_zwrot_hist + dzienny_zwrot_analitykow) / 2
-            if dzienny_zwrot_analitykow
-            else sredni_zwrot_hist
-        )
+        oczekiwany_dryf = (sredni_zwrot_hist + dzienny_zwrot_analitykow) / 2 if dzienny_zwrot_analitykow else sredni_zwrot_hist
         v = oczekiwany_dryf - (0.5 * zmiennosc_hist**2)
 
-        # Generowanie losowych ścieżek cenowych
         losowe_szoki = np.random.normal(0, zmiennosc_hist, (dni_handlowe, liczba_symulacji))
         codzienne_zwroty = np.exp(v + losowe_szoki)
 
-        # Inicjalizacja macierzy
         macierz_cen = np.zeros((dni_handlowe + 1, liczba_symulacji))
         macierz_cen[0, :] = ostatnia_cena
-        
         for t in range(1, dni_handlowe + 1):
             macierz_cen[t, :] = macierz_cen[t - 1, :] * codzienne_zwroty[t - 1, :]
 
-        # Wyciąganie percentyli
         scenariusz_bear = np.percentile(macierz_cen, 10, axis=1)
         scenariusz_hold = np.percentile(macierz_cen, 50, axis=1)
         scenariusz_bull = np.percentile(macierz_cen, 90, axis=1)
@@ -141,116 +141,58 @@ if generuj:
     # ==========================================
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Aktualna Cena", f"{ostatnia_cena:.2f} USD")
-    col2.metric("BEAR (10. pct)", f"{scenariusz_bear[-1]:.2f} USD")
-    col3.metric("HOLD (50. pct)", f"{scenariusz_hold[-1]:.2f} USD")
-    col4.metric("BULL (90. pct)", f"{scenariusz_bull[-1]:.2f} USD")
+    col2.metric("BEAR (10% pr.)", f"{scenariusz_bear[-1]:.2f} USD")
+    col3.metric("HOLD (Mediana)", f"{scenariusz_hold[-1]:.2f} USD")
+    col4.metric("BULL (90% pr.)", f"{scenariusz_bull[-1]:.2f} USD")
 
-    # Przygotowanie osi czasu dla wykresu
-    ceny_hist = ceny_zamkniecia.tail(100).values
+    ceny_hist = ceny_zamkniecia.tail(120).values
     os_historii = np.arange(-len(ceny_hist) + 1, 1)
     os_prognozy = np.arange(0, dni_handlowe + 1)
 
-    # Tworzenie wykresu Plotly
     fig = go.Figure()
+    fig.add_trace(go.Scatter(x=os_historii, y=ceny_hist, mode="lines", name="Historia (Ostatnie pół roku)", line=dict(color="black", width=2)))
+    fig.add_trace(go.Scatter(x=os_prognozy, y=scenariusz_bull, mode="lines", name=f"BULL (90%): {scenariusz_bull[-1]:.2f} USD", line=dict(color="green", width=2.5)))
+    fig.add_trace(go.Scatter(x=os_prognozy, y=scenariusz_hold, mode="lines", name=f"HOLD (50%): {scenariusz_hold[-1]:.2f} USD", line=dict(color="blue", width=2, dash="dash")))
+    fig.add_trace(go.Scatter(x=os_prognozy, y=scenariusz_bear, mode="lines", name=f"BEAR (10%): {scenariusz_bear[-1]:.2f} USD", line=dict(color="red", width=2.5)))
 
-    # Linia historii
-    fig.add_trace(
-        go.Scatter(
-            x=os_historii,
-            y=ceny_hist,
-            mode="lines",
-            name="Historia (100 dni)",
-            line=dict(color="black", width=2),
-        )
-    )
-
-    # Linia BULL
-    fig.add_trace(
-        go.Scatter(
-            x=os_prognozy,
-            y=scenariusz_bull,
-            mode="lines",
-            name=f"BULL (90%): {scenariusz_bull[-1]:.2f} USD",
-            line=dict(color="green", width=2),
-        )
-    )
-
-    # Linia HOLD
-    fig.add_trace(
-        go.Scatter(
-            x=os_prognozy,
-            y=scenariusz_hold,
-            mode="lines",
-            name=f"HOLD (50%): {scenariusz_hold[-1]:.2f} USD",
-            line=dict(color="blue", width=2, dash="dash"),
-        )
-    )
-
-    # Linia BEAR
-    fig.add_trace(
-        go.Scatter(
-            x=os_prognozy,
-            y=scenariusz_bear,
-            mode="lines",
-            name=f"BEAR (10%): {scenariusz_bear[-1]:.2f} USD",
-            line=dict(color="red", width=2),
-        )
-    )
-
-    # Stylizacja wykresu Plotly
     fig.update_layout(
-        title=f"Interaktywna prognoza 52 tygodnie dla {ticker}",
-        xaxis_title="Dni giełdowe (0 = Dzisiaj)",
-        yaxis_title="Cena akcji (USD)",
-        template="plotly_white",
-        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
-        hovermode="x unified",
+        title=f"Zaawansowana prognoza 52 tygodnie dla {ticker}",
+        xaxis_title="Dni giełdowe (0 = Dzisiaj)", yaxis_title="Cena akcji (USD)",
+        template="plotly_white", hovermode="x unified"
     )
-
     fig.add_vline(x=0, line_width=1.5, line_dash="dot", line_color="purple")
     st.plotly_chart(fig, use_container_width=True)
 
     # ==========================================
-    # 4. GENEROWANIE RAPORTU PRZEZ AI
+    # 4. GŁĘBOKI RAPORT INWESTYCYJNY AI (OPENAI + TAVILY ADVANCED)
     # ==========================================
-    st.subheader("🤖 Analiza Fundamentalna i Sentymentu przez AI")
-    with st.spinner("Przeszukiwanie internetu za pomocą Tavily i analiza GPT-4o..."):
+    st.subheader("🔬 Profesjonalna Analiza Fundamentalno-Sentymentowa AI")
+    with st.spinner("Przeszukiwanie bazy Tavily (Deep Search) i generowanie zaawansowanego raportu..."):
+        
+        # Agresywnie ukierunkowane wyszukiwanie na najnowsze, konkretne wydarzenia
         newsy = pobierz_newsy_tavily(
-            f"latest stock market news financial health catalysts {ticker}"
+            f"{ticker} stock financial catalysts earnings supply chain growth risks {datetime.date.today().year}"
         )
-
-        pe_tekst = f"{pe_ratio:.2f}" if pe_ratio else "Brak danych"
-        target_tekst = f"{target_mean:.2f} USD" if target_mean else "Brak danych"
 
         prompt_ai = f"""
-        Jesteś starszym analitykiem finansowym z Wall Street. 
-        Przeanalizuj spółkę o tickerze: {ticker}.
-        Aktualna cena na rynku: {ostatnia_cena:.2f} USD.
-        Wskaźnik P/E (Cena/Zysk): {pe_tekst}.
-        Średnia cena docelowa analityków (Target Price): {target_tekst}.
+        Jesteś dyrektorem ds. analiz w funduszu hedgingowym na Wall Street. Napisz mięsisty, głęboki, profesjonalny i pozbawiony lania wody raport inwestycyjny dla spółki {ticker}.
 
-        Model statystyczny Monte Carlo na 52 tygodnie wygenerował poziomy:
-        - Scenariusz optymistyczny Bull (90%): {scenariusz_bull[-1]:.2f} USD
-        - Scenariusz neutralny Hold (50%): {scenariusz_hold[-1]:.2f} USD
-        - Scenariusz pesymistyczny Bear (10%): {scenariusz_bear[-1]:.2f} USD
-        
-        Oto najnowsze wiadomości z internetu pobrane dla tej spółki:
+        DANE FUNDAMENTALNE I RYNKOWE (OSTATNIE RAPORTY KWARTALNE):
+        - Aktualna cena rynkowa: {ostatnia_cena:.2f} USD
+        - Wyliczony wskaźnik P/E TTM: {pe_obliczone}
+        - Wyliczony zysk na akcję EPS TTM: {eps_ttm}
+        - Konsensus analityków (Target Price): {target_mean if target_mean else 'Brak stabilnych danych internetowych'} USD
+
+        PROGNOZA STATYSTYCZNA MONTE CARLO (HORYZONT 52 TYGODNIE):
+        - Scenariusz BULL (90. percentyl): {scenariusz_bull[-1]:.2f} USD
+        - Scenariusz HOLD (50. percentyl): {scenariusz_hold[-1]:.2f} USD
+        - Scenariusz BEAR (10. percentyl): {scenariusz_bear[-1]:.2f} USD
+
+        NAJNOWSZE FAKTY, NEWSY I WYDARZENIA RYNKOWE Z BAZY TAVILY:
         {newsy}
-        
-        Napisz krótki, konkretny komentarz giełdowy (w języku polskim). 
-        Uzasadnij na podstawie wskaźnika P/E oraz newsów, co może zepchnąć kurs do poziomu BEAR, a co da paliwo do poziomu BULL. 
-        Odpowiedź sformatuj w krótkie, czytelne punkty.
-        """
 
-        client = openai.OpenAI(api_key=OPENAI_KEY)
-        odpowiedz = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "Jesteś ekspertem giełdowym."},
-                {"role": "user", "content": prompt_ai},
-            ],
-            temperature=0.7,
-        )
-
-        # POPRAWIONA SKŁADNIA PARSOWANIA ODPOWIEDZI (Naprawa błędu AttributeError)
-        st.write(odpowiedz.choices[0].message.content)
+        WYMAGANIA DOTYCZĄCE RAPORTU (BĄDŹ BEZWZGLĘDNIE RESTRYKCYJNY):
+        1. Kategorycznie unikaj ogólnych zdań typu 'Spółka staje przed poważnymi wyzwaniami' lub 'Innowacje mogą napędzać wzrost'. Każde stwierdzenie MUSI opierać się na konkretnym fakcie (np. konkretny model produktu, konkretna fabryka, rezygnacja z projektu, precyzyjne koszty chipów, dane o marżach, konkretny konkurent).
+        2. Oceń wyliczony wskaźnik P/E. Czy przy obecnej cenie spółka jest przewartościowana, czy niedowartościowana w stosunku do swojej historii i sektora? Co to oznacza dla scenariusza HOLD?
+        3. W sekcji SCENARIUSZ BEAR rozbij na czynniki pierwsze twarde ryzyka biznesowe (np. cła, zerwane łańcuchy dostaw, spadek marż, konkretne słabości raportowane w mediach). Jak te wydarzenia doprowadzą cenę do poziomu {scenariusz_bear[-1]:.2f} USD.
+        4. W sekcji SCENARIUSZ BULL podaj konkretne, namacalne katalizatory (nowe linie przychodów, AI, konkretne produkty, ekspansja na nowe rynki). Jak te czynniki wystrzelą kurs do poziomu {scenariusz_bull[-1]:.2f} USD.
