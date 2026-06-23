@@ -164,7 +164,7 @@ if generuj:
     st.plotly_chart(fig, use_container_width=True)
 
     # ==========================================
-    # 4. GŁĘBOKI RAPORT INWESTYCYJNY AI
+    # 4. GŁĘBOKI RAPORT INWESTYCYJNY AI (ZABEZPIECZONY)
     # ==========================================
     st.subheader("🔬 Profesjonalna Analiza Fundamentalno-Sentymentowa AI")
     with st.spinner("Przeszukiwanie bazy Tavily (Deep Search) i generowanie zaawansowanego raportu..."):
@@ -172,31 +172,32 @@ if generuj:
         akt_rok = datetime.date.today().year
         newsy = pobierz_newsy_tavily(f"{ticker} stock financial catalysts earnings supply chain growth risks {akt_rok}")
 
-        # PRZYGOTOWANIE PROSTYCH ZMIENNYCH LICZBOWYCH (CAŁKOWITE ROZWIĄZANIE SYNTAX ERROR)
+        # Konwersja danych na proste ciągi tekstowe
+        ost_cena_str = f"{ostatnia_cena:.2f}"
         target_tekst = f"{target_mean:.2f}" if target_mean else "Brak danych internetowych"
         bear_cena = f"{scenariusz_bear[-1]:.2f}"
         hold_cena = f"{scenariusz_hold[-1]:.2f}"
         bull_cena = f"{scenariusz_bull[-1]:.2f}"
 
-        prompt_ai = f"""
-        Jesteś dyrektorem ds. analiz w funduszu hedgingowym na Wall Street. Napisz mięsisty, głęboki, profesjonalny i pozbawiony lania wody raport inwestycyjny dla spółki {ticker}.
+        # REWOLUCJA: USUNIĘTO LITERE 'f' PRZED TRIPLE-QUOTE. BRAK ZNAKÓW KLAMROWYCH DLA INTERPRETERA.
+        szablon_promptu = """
+        Jesteś dyrektorem ds. analiz w funduszu hedgingowym na Wall Street. Napisz mięsisty, głęboki, profesjonalny i pozbawiony lania wody raport inwestycyjny dla spółki SZUKAJ_TICKER.
 
         DANE FUNDAMENTALNE I RYNKOWE (OSTATNIE RAPORTY KWARTALNE):
-        - Aktualna cena rynkowa: {ostatnia_cena:.2f} USD
-        - Wyliczony wskaźnik P/E TTM: {pe_obliczone}
-        - Wyliczony zysk na akcję EPS TTM: {eps_ttm}
-        - Konsensus analityków (Target Price): {target_tekst} USD
+        - Aktualna cena rynkowa: SZUKAJ_CENA USD
+        - Wyliczony wskaźnik P/E TTM: SZUKAJ_PE
+        - Wyliczony zysk na akcję EPS TTM: SZUKAJ_EPS
+        - Konsensus analityków (Target Price): SZUKAJ_TARGET USD
 
         PROGNOZA STATYSTYCZNA MONTE CARLO (HORYZONT 52 TYGODNIE):
-        - Scenariusz BULL (90. percentyl): {bull_cena} USD
-        - Scenariusz HOLD (50. percentyl): {hold_cena} USD
-        - Scenariusz BEAR (10. percentyl): {bear_cena} USD
+        - Scenariusz BULL (90. percentyl): SZUKAJ_BULL_CENA USD
+        - Scenariusz HOLD (50. percentyl): SZUKAJ_HOLD_CENA USD
+        - Scenariusz BEAR (10. percentyl): SZUKAJ_BEAR_CENA USD
 
         NAJNOWSZE FAKTY, NEWSY I WYDARZENIA RYNKOWE Z BAZY TAVILY:
-        {newsy}
+        SZUKAJ_NEWSY
 
         WYMAGANIA DOTYCZĄCE RAPORTU (BĄDŹ BEZWZGLĘDNIE RESTRYKCYJNY):
         1. Kategorycznie unikaj ogólnych zdań typu 'Spółka staje przed poważnymi wyzwaniami' lub 'Innowacje mogą napędzać wzrost'. Każde stwierdzenie MUSI opierać się na konkretnym fakcie (np. konkretny model produktu, konkretna fabryka, rezygnacja z projektu, precyzyjne koszty chipów, dane o marżach, konkretny konkurent).
         2. Oceń wyliczony wskaźnik P/E. Czy przy obecnej cenie spółka jest przewartościowana, czy niedowartościowana w stosunku do swojej historii i sektora? Co to oznacza dla scenariusza HOLD?
-        3. W sekcji SCENARIUSZ BEAR rozbij na czynniki pierwsze twarde ryzyka biznesowe (np. cła, zerwane łańcuchy dostaw, spadek marż, konkretne słabości raportowane w mediach). Jak te wydarzenia doprowadzą cenę do poziomu {bear_cena} USD.
-        4. W sekcji SCENARIUSZ BULL podaj konkretne, namacalne katalizatory (nowe linie przychodów, AI, konkretne produkty, ekspansja na nowe rynki). Jak te czynniki wystrzelą kurs do poziomu {bull_cena} USD.
+        3. W sekcji SCENARIUSZ BEAR rozbij na czynniki pierwsze twarde ryzyka biznesowe (np. cła, zerwane łańcuchy dostaw, spadek marż, konkretne słabości raportowane w mediach). Jak te wydarzenia doprowadzą cenę do poziomu SZUKAJ_BEAR_CENA USD.
