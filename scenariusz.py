@@ -172,7 +172,11 @@ if generuj:
         akt_rok = datetime.date.today().year
         newsy = pobierz_newsy_tavily(f"{ticker} stock financial catalysts earnings supply chain growth risks {akt_rok}")
 
+        # PRZYGOTOWANIE PROSTYCH ZMIENNYCH LICZBOWYCH (CAŁKOWITE ROZWIĄZANIE SYNTAX ERROR)
         target_tekst = f"{target_mean:.2f}" if target_mean else "Brak danych internetowych"
+        bear_cena = f"{scenariusz_bear[-1]:.2f}"
+        hold_cena = f"{scenariusz_hold[-1]:.2f}"
+        bull_cena = f"{scenariusz_bull[-1]:.2f}"
 
         prompt_ai = f"""
         Jesteś dyrektorem ds. analiz w funduszu hedgingowym na Wall Street. Napisz mięsisty, głęboki, profesjonalny i pozbawiony lania wody raport inwestycyjny dla spółki {ticker}.
@@ -184,9 +188,9 @@ if generuj:
         - Konsensus analityków (Target Price): {target_tekst} USD
 
         PROGNOZA STATYSTYCZNA MONTE CARLO (HORYZONT 52 TYGODNIE):
-        - Scenariusz BULL (90. percentyl): {scenariusz_bull[-1]:.2f} USD
-        - Scenariusz HOLD (50. percentyl): {scenariusz_hold[-1]:.2f} USD
-        - Scenariusz BEAR (10. percentyl): {scenariusz_bear[-1]:.2f} USD
+        - Scenariusz BULL (90. percentyl): {bull_cena} USD
+        - Scenariusz HOLD (50. percentyl): {hold_cena} USD
+        - Scenariusz BEAR (10. percentyl): {bear_cena} USD
 
         NAJNOWSZE FAKTY, NEWSY I WYDARZENIA RYNKOWE Z BAZY TAVILY:
         {newsy}
@@ -194,7 +198,5 @@ if generuj:
         WYMAGANIA DOTYCZĄCE RAPORTU (BĄDŹ BEZWZGLĘDNIE RESTRYKCYJNY):
         1. Kategorycznie unikaj ogólnych zdań typu 'Spółka staje przed poważnymi wyzwaniami' lub 'Innowacje mogą napędzać wzrost'. Każde stwierdzenie MUSI opierać się na konkretnym fakcie (np. konkretny model produktu, konkretna fabryka, rezygnacja z projektu, precyzyjne koszty chipów, dane o marżach, konkretny konkurent).
         2. Oceń wyliczony wskaźnik P/E. Czy przy obecnej cenie spółka jest przewartościowana, czy niedowartościowana w stosunku do swojej historii i sektora? Co to oznacza dla scenariusza HOLD?
-        3. W sekcji SCENARIUSZ BEAR rozbij na czynniki pierwsze twarde ryzyka biznesowe (np. cła, zerwane łańcuchy dostaw, spadek marż, konkretne słabości raportowane w mediach). Jak te wydarzenia doprowadzą cenę do poziomu {scenariusz_bear[-1]:.2f} USD.
-        4. W sekcji SCENARIUSZ BULL podaj konkretne, namacalne katalizatory (nowe linie przychodów, AI, konkretne produkty, ekspansja na nowe rynki). Jak te czynniki wystrzelą kurs do poziomu {scenariusz_bull[-1]:.2f} USD.
-        5. Podsumowanie: wydaj krótką rekomendację strategiczną opartą na relacji ryzyka do zysku (Risk/Reward Ratio).
-
+        3. W sekcji SCENARIUSZ BEAR rozbij na czynniki pierwsze twarde ryzyka biznesowe (np. cła, zerwane łańcuchy dostaw, spadek marż, konkretne słabości raportowane w mediach). Jak te wydarzenia doprowadzą cenę do poziomu {bear_cena} USD.
+        4. W sekcji SCENARIUSZ BULL podaj konkretne, namacalne katalizatory (nowe linie przychodów, AI, konkretne produkty, ekspansja na nowe rynki). Jak te czynniki wystrzelą kurs do poziomu {bull_cena} USD.
