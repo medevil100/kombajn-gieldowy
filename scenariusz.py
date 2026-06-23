@@ -1,8 +1,9 @@
 import datetime
 import os
-import matplotlib.pyplot as plt
 import numpy as np
 import openai
+import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 from langchain_community.utilities import TavilySearchAPIWrapper
@@ -10,10 +11,12 @@ from langchain_community.utilities import TavilySearchAPIWrapper
 # ==========================================
 # 1. KONFIGURACJA STRONY I AUTOMATYCZNYCH KLUCZY
 # ==========================================
-st.set_page_config(page_title="AI Monte Carlo Predictor", layout="wide")
+st.set_page_config(
+    page_title="AI Monte Carlo Predictor", layout="wide", initial_sidebar_state="expanded"
+)
 st.title("📈 AI Monte Carlo 52-Week Predictor & News Analyst")
 
-# Samoczynne pobieranie kluczy (najpierw szuka w Streamlit Cloud Secrets, potem w systemie)
+# Samoczynne pobieranie kluczy ze środowiska Streamlit Cloud
 OPENAI_KEY = st.secrets.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY"))
 TAVILY_KEY = st.secrets.get("TAVILY_API_KEY", os.environ.get("TAVILY_API_KEY"))
 
@@ -23,9 +26,9 @@ if OPENAI_KEY:
 if TAVILY_KEY:
     os.environ["TAVILY_API_KEY"] = TAVILY_KEY
 
-# Panel boczny sterowania (bez pól na klucze)
+# Panel boczny
 ticker = st.sidebar.text_input(
-    "Wpisz Ticker Spółki (np. AAPL, TSLA)", "AAPL"
+    "Wpisz Ticker Spółki (np. AAPL, TSLA, MSFT)", "AAPL"
 ).upper()
 liczba_symulacji = st.sidebar.slider(
     "Liczba symulacji Monte Carlo", 1000, 10000, 5000, step=1000
@@ -50,10 +53,9 @@ def pobierz_newsy_tavily(query):
 # 2. LOGIKA MATEMATYCZNA (MONTE CARLO)
 # ==========================================
 if generuj:
-    # Weryfikacja obecności kluczy w tle
     if not OPENAI_KEY or not TAVILY_KEY:
         st.error(
-            "❌ Błąd: Nie wykryto kluczy OpenAI lub Tavily w systemie. Aplikacja nie może ruszyć."
+            "❌ Błąd: Nie wykryto kluczy OPENAI_API_KEY lub TAVILY_API_KEY w panelu Streamlit Secrets."
         )
         st.stop()
 
@@ -82,7 +84,7 @@ if generuj:
         else:
             dzienny_zwrot_analitykow = None
 
-        # Statystyka i dryf geometrycznego ruchu Browna
+        # Statystyka historyczna
         zwroty_hist = dane["Close"].pct_change().dropna()
         sredni_zwrot_hist = zwroty_hist.mean()
         zmiennosc_hist = zwroty_hist.std()
@@ -105,66 +107,93 @@ if generuj:
         for t in range(1, dni_handlowe + 1):
             macierz_cen[t] = macierz_cen[t - 1] * codzienne_zwroty[t - 1]
 
-        # Wyciąganie percentyli (Scenariusze 90%, 50%, 10%)
+        # Wyciąganie percentyli
         scenariusz_bear = np.percentile(macierz_cen, 10, axis=1)
         scenariusz_hold = np.percentile(macierz_cen, 50, axis=1)
         scenariusz_bull = np.percentile(macierz_cen, 90, axis=1)
 
     # ==========================================
-    # 3. INTERFEJS I WYKRES
+    # 3. INTERFEJS I INTERAKTYWNY WYKRES PLOTLY
     # ==========================================
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Aktualna Cena", f"{ostatnia_cena:.2f} USD")
-    col2.metric("BEAR (10%)", f"{scenariusz_bear[-1]:.2f} USD")
-    col3.metric("HOLD (50%)", f"{scenariusz_hold[-1]:.2f} USD")
-    col4.metric("BULL (90%)", f"{scenariusz_bull[-1]:.2f} USD")
+    col2.metric("BEAR (10. pct)", f"{scenariusz_bear[-1]:.2f} USD")
+    col3.metric("HOLD (50. pct)", f"{scenariusz_hold[-1]:.2f} USD")
+    col4.metric("BULL (90. pct)", f"{scenariusz_bull[-1]:.2f} USD")
 
-    fig, ax = plt.subplots(figsize=(12, 5))
+    # Przygotowanie osi czasu dla wykresu
     ceny_hist = dane["Close"].tail(100).values
     os_historii = np.arange(-len(ceny_hist) + 1, 1)
-
-    ax.plot(os_historii, ceny_hist, label="Historia (100 dni)", color="black")
     os_prognozy = np.arange(0, dni_handlowe + 1)
-    ax.plot(
-        os_prognozy,
-        scenariusz_bull,
-        label=f"BULL: {scenariusz_bull[-1]:.2f} USD",
-        color="green",
-    )
-    ax.plot(
-        os_prognozy,
-        scenariusz_hold,
-        label=f"HOLD: {scenariusz_hold[-1]:.2f} USD",
-        color="blue",
-        linestyle="--",
-    )
-    ax.plot(
-        os_prognozy,
-        scenariusz_bear,
-        label=f"BEAR: {scenariusz_bear[-1]:.2f} USD",
-        color="red",
-    )
-    ax.fill_between(
-        os_prognozy,
-        scenariusz_bear,
-        scenariusz_bull,
-        color="gray",
-        alpha=0.15,
-        label="Obszar 80% prawdopodobieństwa",
-    )
-    ax.set_title(f"Prognoza 52 tygodnie dla {ticker}")
-    ax.set_xlabel("Dni giełdowe")
-    ax.set_ylabel("Cena (USD)")
-    ax.legend(loc="upper left")
-    ax.grid(True, alpha=0.3)
 
-    st.pyplot(fig)
+    # Tworzenie wykresu Plotly
+    fig = go.Figure()
+
+    # Linia historii
+    fig.add_trace(
+        go.Scatter(
+            x=os_historii,
+            y=ceny_hist,
+            mode="lines",
+            name="Historia (100 dni)",
+            line=dict(color="black", width=2),
+        )
+    )
+
+    # Linia BULL
+    fig.add_trace(
+        go.Scatter(
+            x=os_prognozy,
+            y=scenariusz_bull,
+            mode="lines",
+            name=f"BULL (90%): {scenariusz_bull[-1]:.2f} USD",
+            line=dict(color="green", width=2),
+        )
+    )
+
+    # Linia HOLD
+    fig.add_trace(
+        go.Scatter(
+            x=os_prognozy,
+            y=scenariusz_hold,
+            mode="lines",
+            name=f"HOLD (50%): {scenariusz_hold[-1]:.2f} USD",
+            line=dict(color="blue", width=2, dash="dash"),
+        )
+    )
+
+    # Linia BEAR
+    fig.add_trace(
+        go.Scatter(
+            x=os_prognozy,
+            y=scenariusz_bear,
+            mode="lines",
+            name=f"BEAR (10%): {scenariusz_bear[-1]:.2f} USD",
+            line=dict(color="red", width=2),
+        )
+    )
+
+    # Stylizacja wykresu Plotly
+    fig.update_layout(
+        title=f"Interaktywna prognoza 52 tygodnie dla {ticker}",
+        xaxis_title="Dni giełdowe (0 = Dzisiaj)",
+        yaxis_title="Cena akcji (USD)",
+        template="plotly_white",
+        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+        hovermode="x unified",
+    )
+
+    # Dodanie pionowej linii oddzielającej historię od prognozy
+    fig.add_vline(x=0, line_width=1.5, line_dash="dot", line_color="purple")
+
+    # Renderowanie wykresu Plotly w Streamlit
+    st.plotly_chart(fig, use_container_width=True)
 
     # ==========================================
     # 4. GENEROWANIE RAPORTU PRZEZ AI
     # ==========================================
     st.subheader("🤖 Analiza Fundamentalna i Sentymentu przez AI")
-    with st.spinner("Przeszukiwanie internetu i generowanie analizy..."):
+    with st.spinner("Przeszukiwanie internetu za pomocą Tavily i analiza GPT-4o..."):
         newsy = pobierz_newsy_tavily(
             f"latest stock market news financial health catalysts {ticker}"
         )
