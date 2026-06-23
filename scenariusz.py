@@ -12,7 +12,6 @@ from tavily import TavilyClient
 # ==========================================
 # 0. ROZWIĄZANIE PROBLEMU Z BLOKADĄ IP (Yahoo Rate Limit)
 # ==========================================
-# Wykorzystujemy cloudscraper i niestandardową sesję, aby udawać prawdziwą przeglądarkę
 scraper_session = cloudscraper.create_scraper()
 scraper_session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -32,7 +31,7 @@ st.title("📈 AI Monte Carlo 52-Week Predictor & News Analyst")
 OPENAI_KEY = st.secrets.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY"))
 TAVILY_KEY = st.secrets.get("TAVILY_API_KEY", os.environ.get("TAVILY_API_KEY"))
 
-# Przypisanie kluczy do bibliotek
+# Przypisanie klucza OpenAI
 if OPENAI_KEY:
     openai.api_key = OPENAI_KEY
 
@@ -74,20 +73,25 @@ if generuj:
         koniec = datetime.date.today()
         start = koniec - datetime.timedelta(days=3 * 365)
         
-        # Przekazujemy naszą bezpieczną sesję odporną na limity do yfinance
         spolka = yf.Ticker(ticker, session=scraper_session)
         
         try:
             dane = spolka.history(start=start, end=koniec)
         except Exception as e:
-            st.error("❌ Yahoo Finance odrzuciło zapytanie z powodu limitu serwera Streamlit. Spróbuj kliknąć przycisk ponownie za chwilę.")
+            st.error("❌ Yahoo Finance odrzuciło zapytanie z powodu limitu serwera Streamlit. Spróbuj kliknąć ponownie za chwilę.")
             st.stop()
 
         if dane.empty:
             st.error(f"Nie znaleziono danych dla tickera lub Yahoo zablokowało ruch: {ticker}. Spróbuj ponownie.")
             st.stop()
 
-        ostatnia_cena = dane["Close"].iloc[-1]
+        # BEZPIECZNE PROSTOWANIE KOLUMN (Na wypadek struktur MultiIndex w nowych wersjach yfinance)
+        if isinstance(dane.columns, pd.MultiIndex):
+            dane.columns = dane.columns.get_level_values(0)
+
+        # Wyciągnięcie cen zamknięcia
+        ceny_zamkniecia = dane["Close"].dropna()
+        ostatnia_cena = float(ceny_zamkniecia.iloc[-1])
         dni_handlowe = 52 * 5  # 52 tygodnie prognozy
 
         try:
@@ -96,14 +100,12 @@ if generuj:
             target_mean = None
 
         if target_mean and target_mean > 0:
-            dzienny_zwrot_analitykow = (
-                (target_mean - ostatnia_cena) / ostatnia_cena
-            ) / 252
+            dzienny_zwrot_analitykow = ((target_mean - ostatnia_cena) / ostatnia_cena) / 252
         else:
             dzienny_zwrot_analitykow = None
 
         # Statystyka historyczna
-        zwroty_hist = dane["Close"].pct_change().dropna()
+        zwroty_hist = ceny_zamkniecia.pct_change().dropna()
         sredni_zwrot_hist = zwroty_hist.mean()
         zmiennosc_hist = zwroty_hist.std()
 
@@ -115,15 +117,15 @@ if generuj:
         v = oczekiwany_dryf - (0.5 * zmiennosc_hist**2)
 
         # Generowanie losowych ścieżek cenowych
-        losowe_szoki = np.random.normal(
-            0, zmiennosc_hist, (dni_handlowe, liczba_symulacji)
-        )
+        losowe_szoki = np.random.normal(0, zmiennosc_hist, (dni_handlowe, liczba_symulacji))
         codzienne_zwroty = np.exp(v + losowe_szoki)
 
+        # POPRAWNA INICJALIZACJA MACIERZY (Naprawa błędu IndexError)
         macierz_cen = np.zeros((dni_handlowe + 1, liczba_symulacji))
-        macierz_cen = ostatnia_cena
+        macierz_cen[0, :] = ostatnia_cena  # Wypełnienie wyłącznie pierwszego wiersza wartością początkową
+        
         for t in range(1, dni_handlowe + 1):
-            macierz_cen[t] = macierz_cen[t - 1] * codzienne_zwroty[t - 1]
+            macierz_cen[t, :] = macierz_cen[t - 1, :] * codzienne_zwroty[t - 1, :]
 
         # Wyciąganie percentyli
         scenariusz_bear = np.percentile(macierz_cen, 10, axis=1)
@@ -140,7 +142,7 @@ if generuj:
     col4.metric("BULL (90. pct)", f"{scenariusz_bull[-1]:.2f} USD")
 
     # Przygotowanie osi czasu dla wykresu
-    ceny_hist = dane["Close"].tail(100).values
+    ceny_hist = ceny_zamkniecia.tail(100).values
     os_historii = np.arange(-len(ceny_hist) + 1, 1)
     os_prognozy = np.arange(0, dni_handlowe + 1)
 
