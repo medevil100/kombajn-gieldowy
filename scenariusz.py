@@ -6,7 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
-from langchain_community.utilities import TavilySearchAPIWrapper
+from tavily import TavilyClient
 
 # ==========================================
 # 1. KONFIGURACJA STRONY I AUTOMATYCZNYCH KLUCZY
@@ -23,8 +23,6 @@ TAVILY_KEY = st.secrets.get("TAVILY_API_KEY", os.environ.get("TAVILY_API_KEY"))
 # Przypisanie kluczy do bibliotek
 if OPENAI_KEY:
     openai.api_key = OPENAI_KEY
-if TAVILY_KEY:
-    os.environ["TAVILY_API_KEY"] = TAVILY_KEY
 
 # Panel boczny
 ticker = st.sidebar.text_input(
@@ -36,14 +34,16 @@ liczba_symulacji = st.sidebar.slider(
 generuj = st.sidebar.button("Uruchom analizę")
 
 
-# Funkcja do przeszukiwania sieci przez Tavily
+# Funkcja do przeszukiwania sieci przez bezpośredniego klienta Tavily
 def pobierz_newsy_tavily(query):
     try:
-        search = TavilySearchAPIWrapper()
-        wyniki = search.results(query, max_results=4)
+        # Użycie oficjalnego, lekkiego klienta tavily-python
+        tavily = TavilyClient(api_key=TAVILY_KEY)
+        wyniki = tavily.search(query=query, max_results=4)
+        
         tekst_newsow = ""
-        for i, res in enumerate(wyniki):
-            tekst_newsow += f"\n[{i+1}] {res['title']}: {res['snippet']}\nURL: {res['url']}\n"
+        for i, res in enumerate(wyniki.get('results', [])):
+            tekst_newsow += f"\n[{i+1}] {res['title']}: {res['content']}\nURL: {res['url']}\n"
         return tekst_newsow
     except Exception as e:
         return f"Brak możliwości pobrania newsów. Sprawdź klucz Tavily. Błąd: {e}"
