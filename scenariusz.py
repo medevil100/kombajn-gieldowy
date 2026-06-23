@@ -32,26 +32,38 @@ K_TP = 3.5
 
 
 # ============================
-#   BEZPIECZNE POBIERANIE DANYCH Z YAHOO
+#   POPRAWIONE POBIERANIE DANYCH Z YAHOO
 # ============================
 
 def safe_load_yahoo(ticker: str) -> pd.DataFrame | None:
-    df = yf.download(ticker, period="2y", interval="1d", auto_adjust=True)
+    df = yf.download(
+        ticker,
+        period="2y",
+        interval="1d",
+        auto_adjust=True,
+        progress=False
+    )
 
     if df is None or df.empty:
         return None
 
-    # Spłaszcz MultiIndex, jeśli występuje
+    # Obsługa MultiIndex
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[-1] for c in df.columns]
+        # Jeśli poziom 1 zawiera ticker → wybierz go
+        if ticker.upper() in df.columns.get_level_values(-1):
+            df = df.xs(ticker.upper(), axis=1, level=-1)
+        else:
+            # W przeciwnym razie użyj poziomu 0 (Open, High, Low, Close)
+            df.columns = df.columns.get_level_values(0)
 
-    # Ujednolicenie nazw kolumn
+    # Normalizacja nazw kolumn
     df.columns = [str(c).strip().capitalize() for c in df.columns]
 
-    if "Close" not in df.columns:
+    required_cols = {"Close", "High", "Low"}
+    if not required_cols.issubset(df.columns):
         return None
 
-    df = df.dropna(subset=["Close"])
+    df = df.dropna(subset=["Close", "High", "Low"])
 
     if df.empty:
         return None
@@ -66,9 +78,6 @@ def safe_load_yahoo(ticker: str) -> pd.DataFrame | None:
 @st.cache_data(show_spinner=False, ttl=3600)
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-
-    if not {"Close", "High", "Low"}.issubset(df.columns):
-        return pd.DataFrame()
 
     df[f"SMA{SMA_FAST}"] = df["Close"].rolling(SMA_FAST).mean()
     df[f"SMA{SMA_SLOW}"] = df["Close"].rolling(SMA_SLOW).mean()
@@ -87,7 +96,7 @@ def detect_trend(row: pd.Series) -> str:
         sma_fast = float(row.get(f"SMA{SMA_FAST}", np.nan))
         sma_slow = float(row.get(f"SMA{SMA_SLOW}", np.nan))
         price = float(row.get("Close", np.nan))
-    except Exception:
+    except:
         return "Unknown"
 
     if np.isnan(sma_fast) or np.isnan(sma_slow) or np.isnan(price):
@@ -110,11 +119,17 @@ def sl_tp(price: float, atr: float, side: str = "long"):
         return price + K_SL * atr, price - K_TP * atr
 
 
+# ============================
+#   POPRAWIONE SCENARIUSZE LICZBOWE
+# ============================
+
 @st.cache_data(show_spinner=False, ttl=3600)
 def scenarios_numeric(price: float, df: pd.DataFrame, horizon_days: int = 30) -> pd.DataFrame:
     returns = np.log(df["Close"] / df["Close"].shift(1)).dropna()
+
+    days = np.arange(1, horizon_days + 1)
+
     if returns.empty:
-        days = np.arange(1, horizon_days + 1)
         return pd.DataFrame(
             {"Bull": price, "Hold": price, "Bear": price},
             index=days
@@ -123,13 +138,19 @@ def scenarios_numeric(price: float, df: pd.DataFrame, horizon_days: int = 30) ->
     mu = returns.mean()
     sigma = returns.std()
 
-    days = np.arange(1, horizon_days + 1)
+    if np.isnan(mu):
+        mu = 0.0
+    if np.isnan(sigma):
+        sigma = 0.0
 
     bull = np.exp(np.log(price) + (mu + sigma) * days)
     base = np.exp(np.log(price) + mu * days)
     bear = np.exp(np.log(price) + (mu - sigma) * days)
 
-    return pd.DataFrame({"Bull": bull, "Hold": base, "Bear": bear}, index=days)
+    return pd.DataFrame(
+        {"Bull": bull, "Hold": base, "Bear": bear},
+        index=days
+    )
 
 
 # ============================
@@ -146,7 +167,7 @@ def fetch_news_summary(ticker: str, horizon_days: int = 30) -> str:
             query=f"Najważniejsze wiadomości o spółce {ticker} z ostatnich {horizon_days} dni.",
             max_results=5
         )
-    except Exception:
+    except:
         return "Błąd pobierania newsów."
 
     items = res.get("results", [])
@@ -168,23 +189,12 @@ def fetch_news_summary(ticker: str, horizon_days: int = 30) -> str:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def ai_analysis_pl(
-    ticker: str,
-    trend: str,
-    price: float,
-    atr: float,
-    sl: float,
-    tp: float,
-    scen_df: pd.DataFrame,
-    news_summary: str,
-    horizon_days: int
-) -> str:
+    ticker, trend, price, atr, sl, tp, scen_df, news_summary, horizon_days
+):
     if client is None:
         return "Brak klucza OpenAI."
 
     scen_last = scen_df.iloc[-1]
-    bull_target = scen_last["Bull"]
-    base_target = scen_last["Hold"]
-    bear_target = scen_last["Bear"]
 
     prompt = f"""
 Jesteś analitykiem rynkowym piszącym po polsku.
@@ -193,43 +203,33 @@ Dane:
 - Ticker: {ticker}
 - Cena: {price:.2f}
 - Trend: {trend}
-- ATR({ATR_WINDOW}): {atr:.2f}
+- ATR: {atr:.2f}
 - SL: {sl:.2f}
 - TP: {tp:.2f}
-- Horyzont: {horizon_days} dni
 
 Scenariusze liczbowe:
-- Bull: {bull_target:.2f}
-- Bazowy: {base_target:.2f}
-- Bear: {bear_target:.2f}
+- Bull: {scen_last['Bull']:.2f}
+- Bazowy: {scen_last['Hold']:.2f}
+- Bear: {scen_last['Bear']:.2f}
 
 News summary:
 {news_summary}
 
 Zadania:
-1. Podaj SENTYMENT (jedno słowo: byczy / neutralny / niedźwiedzi).
-2. Napisz krótki komentarz rynkowy (2–3 akapity).
-3. Opisz 3 scenariusze na najbliższy miesiąc:
-   - Bull case
-   - Base case
-   - Bear case
-   Każdy z orientacyjną ceną, ryzykami i narracją.
-
-Pisz po polsku, konkretnie.
+1. Podaj sentyment (byczy / neutralny / niedźwiedzi).
+2. Napisz komentarz rynkowy.
+3. Opisz 3 scenariusze (Bull, Base, Bear).
 """
 
     try:
-        response = client.chat.completions.create(
+        r = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Jesteś analitykiem rynkowym."},
-                {"role": "user", "content": prompt}
-            ],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.4,
             max_tokens=900
         )
-        return response.choices[0].message.content.strip()
-    except Exception:
+        return r.choices[0].message.content.strip()
+    except:
         return "Błąd generowania odpowiedzi AI."
 
 
@@ -238,90 +238,43 @@ Pisz po polsku, konkretnie.
 # ============================
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def ai_alerts_pl(
-    ticker: str,
-    last_row: pd.Series,
-    prev_row: pd.Series | None,
-    trend: str,
-    horizon_days: int
-) -> str:
+def ai_alerts_pl(ticker, last, prev, trend, horizon_days):
     if client is None:
         return "Brak klucza OpenAI."
 
-    try:
-        price = float(last_row.get("Close", np.nan))
-        sma_fast = float(last_row.get(f"SMA{SMA_FAST}", np.nan))
-        sma_slow = float(last_row.get(f"SMA{SMA_SLOW}", np.nan))
-        atr = float(last_row.get(f"ATR{ATR_WINDOW}", np.nan))
-    except Exception:
-        price = np.nan
-        sma_fast = np.nan
-        sma_slow = np.nan
-        atr = np.nan
-
-    prev_trend = "Unknown"
-    prev_price = np.nan
-    prev_sma_fast = np.nan
-    prev_sma_slow = np.nan
-
-    if prev_row is not None:
-        try:
-            prev_price = float(prev_row.get("Close", np.nan))
-            prev_sma_fast = float(prev_row.get(f"SMA{SMA_FAST}", np.nan))
-            prev_sma_slow = float(prev_row.get(f"SMA{SMA_SLOW}", np.nan))
-            prev_trend = detect_trend(prev_row)
-        except Exception:
-            prev_trend = "Unknown"
-
     prompt = f"""
-Jesteś systemem alertów rynkowych piszącym po polsku.
+Jesteś systemem alertów technicznych.
 
-Dane bieżące:
-- Ticker: {ticker}
-- Cena: {price:.2f}
-- SMA{SMA_FAST}: {sma_fast:.2f}
-- SMA{SMA_SLOW}: {sma_slow:.2f}
-- ATR({ATR_WINDOW}): {atr:.2f}
-- Trend bieżący: {trend}
+Dane:
+Cena: {last['Close']:.2f}
+SMA50: {last.get(f"SMA{SMA_FAST}", np.nan):.2f}
+SMA200: {last.get(f"SMA{SMA_SLOW}", np.nan):.2f}
+Trend: {trend}
 
-Dane poprzednie (poprzednia sesja):
-- Cena poprzednia: {prev_price:.2f}
-- SMA{SMA_FAST} poprzednie: {prev_sma_fast:.2f}
-- SMA{SMA_SLOW} poprzednie: {prev_sma_slow:.2f}
-- Trend poprzedni: {prev_trend}
+Poprzednia sesja:
+Cena: {prev['Close']:.2f if prev is not None else 'brak'}
 
 Zadanie:
-1. Wykryj potencjalne ALERTY techniczne na najbliższy okres (ok. {horizon_days} dni), np.:
-   - zmiana trendu (Bull/Neutral/Bear),
-   - wybicie powyżej/poniżej SMA50/SMA200,
-   - wzrost/spadek zmienności (ATR),
-   - nietypowy ruch ceny.
-2. Zwróć listę krótkich alertów w formie wypunktowanej (max 5 punktów).
-3. Każdy alert ma być konkretny, po polsku, bez żargonu algorytmicznego.
-
-Jeśli nie ma istotnych alertów, napisz: "- Brak istotnych alertów technicznych."
+Wypisz maksymalnie 5 alertów technicznych (zmiana trendu, wybicia SMA, zmienność).
 """
 
     try:
-        response = client.chat.completions.create(
+        r = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Jesteś systemem alertów rynkowych."},
-                {"role": "user", "content": prompt}
-            ],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             max_tokens=500
         )
-        return response.choices[0].message.content.strip()
-    except Exception:
+        return r.choices[0].message.content.strip()
+    except:
         return "- Błąd generowania alertów AI."
 
 
 # ============================
-#   WYKRES PLOTLY
+#   POPRAWIONY WYKRES PLOTLY
 # ============================
 
-def plot_scenarios_plotly(scen: pd.DataFrame, price: float, sl: float, tp: float):
+def plot_scenarios_plotly(scen, price, sl, tp):
     fig = go.Figure()
 
     fig.add_trace(go.Scatter(x=scen.index, y=scen["Bull"], mode="lines",
@@ -331,9 +284,14 @@ def plot_scenarios_plotly(scen: pd.DataFrame, price: float, sl: float, tp: float
     fig.add_trace(go.Scatter(x=scen.index, y=scen["Bear"], mode="lines",
                              name="Bear", line=dict(color="red")))
 
-    fig.add_hline(y=price, line_dash="dash", line_color="gray", annotation_text="Cena")
-    fig.add_hline(y=sl, line_dash="dash", line_color="orange", annotation_text="SL")
-    fig.add_hline(y=tp, line_dash="dash", line_color="purple", annotation_text="TP")
+    if not np.isnan(price):
+        fig.add_hline(y=price, line_dash="dash", line_color="gray", annotation_text="Cena")
+
+    if not np.isnan(sl):
+        fig.add_hline(y=sl, line_dash="dash", line_color="orange", annotation_text="SL")
+
+    if not np.isnan(tp):
+        fig.add_hline(y=tp, line_dash="dash", line_color="purple", annotation_text="TP")
 
     fig.update_layout(
         title="Scenariusze Bull / Bazowy / Bear",
@@ -349,7 +307,7 @@ def plot_scenarios_plotly(scen: pd.DataFrame, price: float, sl: float, tp: float
 #   STREAMLIT UI
 # ============================
 
-st.title("📈 AI Scenariusze Rynkowe – Wersja PRO + AI Alerty (PL)")
+st.title("📈 AI Scenariusze Rynkowe – Wersja PRO + AI Alerty (FINAL)")
 
 ticker = st.text_input("Ticker:", "AAPL").upper()
 side = st.selectbox("Strona pozycji:", ["long", "short"])
@@ -362,33 +320,14 @@ if st.button("Analizuj"):
         st.error("Yahoo Finance nie zwrócił poprawnych danych dla tego tickera.")
         st.stop()
 
-    if len(df) < SMA_SLOW + 5:
-        st.error("Za mało danych, aby policzyć SMA200 i scenariusze.")
-        st.stop()
-
     df = compute_indicators(df)
-    if df.empty:
-        st.error("Błąd wyliczania wskaźników.")
-        st.stop()
 
-    try:
-        last_two = df.tail(2).reset_index(drop=True)
-        last = last_two.iloc[-1]
-        prev = last_two.iloc[-2] if len(last_two) == 2 else None
-    except Exception:
-        st.error("Błąd pobierania ostatnich danych.")
-        st.stop()
+    last_two = df.tail(2).reset_index(drop=True)
+    last = last_two.iloc[-1]
+    prev = last_two.iloc[-2] if len(last_two) == 2 else None
 
-    try:
-        price = float(last["Close"])
-    except Exception:
-        st.error("Błąd: wartość Close nie jest liczbą.")
-        st.stop()
-
-    try:
-        atr = float(last.get(f"ATR{ATR_WINDOW}", np.nan))
-    except Exception:
-        atr = np.nan
+    price = float(last["Close"])
+    atr = float(last.get(f"ATR{ATR_WINDOW}", np.nan))
 
     tr = detect_trend(last)
     sl, tp = sl_tp(price, atr, side)
@@ -397,24 +336,19 @@ if st.button("Analizuj"):
     st.subheader("📌 Dane techniczne")
     st.write(f"**Trend:** {tr}")
     st.write(f"**Cena:** {round(price, 2)}")
-    st.write(f"**ATR({ATR_WINDOW}):** {round(atr, 2) if not np.isnan(atr) else 'brak'}")
+    st.write(f"**ATR:** {round(atr, 2) if not np.isnan(atr) else 'brak'}")
     st.write(f"**SL:** {round(sl, 2) if not np.isnan(sl) else 'brak'}")
     st.write(f"**TP:** {round(tp, 2) if not np.isnan(tp) else 'brak'}")
 
     st.subheader("📊 Scenariusze liczbowe")
-    fig = plot_scenarios_plotly(scen, price, sl, tp)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(plot_scenarios_plotly(scen, price, sl, tp), use_container_width=True)
 
     st.subheader("🚨 AI-alerty techniczne")
-    alerts_text = ai_alerts_pl(ticker, last, prev, tr, horizon)
-    st.markdown(alerts_text)
+    st.markdown(ai_alerts_pl(ticker, last, prev, tr, horizon))
 
     st.subheader("📰 News summary (Tavily)")
     news_summary = fetch_news_summary(ticker, horizon)
     st.text(news_summary)
 
     st.subheader("🤖 AI-komentarz i scenariusze")
-    ai_text = ai_analysis_pl(
-        ticker, tr, price, atr, sl, tp, scen, news_summary, horizon
-    )
-    st.markdown(ai_text)
+    st.markdown(ai_analysis_pl(ticker, tr, price, atr, sl, tp, scen, news_summary, horizon))
