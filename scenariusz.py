@@ -85,7 +85,7 @@ if generuj:
             st.error(f"Nie znaleziono danych dla tickera lub Yahoo zablokowało ruch: {ticker}. Spróbuj ponownie.")
             st.stop()
 
-        # BEZPIECZNE PROSTOWANIE KOLUMN (Na wypadek struktur MultiIndex w nowych wersjach yfinance)
+        # BEZPIECZNE PROSTOWANIE KOLUMN (MultiIndex)
         if isinstance(dane.columns, pd.MultiIndex):
             dane.columns = dane.columns.get_level_values(0)
 
@@ -94,10 +94,14 @@ if generuj:
         ostatnia_cena = float(ceny_zamkniecia.iloc[-1])
         dni_handlowe = 52 * 5  # 52 tygodnie prognozy
 
+        # Pobieranie danych fundamentalnych (Target Price oraz P/E Ratio)
         try:
-            target_mean = spolka.info.get("targetMeanPrice")
+            spolka_info = spolka.info
+            target_mean = spolka_info.get("targetMeanPrice")
+            pe_ratio = spolka_info.get("trailingPE")
         except:
             target_mean = None
+            pe_ratio = None
 
         if target_mean and target_mean > 0:
             dzienny_zwrot_analitykow = ((target_mean - ostatnia_cena) / ostatnia_cena) / 252
@@ -120,9 +124,9 @@ if generuj:
         losowe_szoki = np.random.normal(0, zmiennosc_hist, (dni_handlowe, liczba_symulacji))
         codzienne_zwroty = np.exp(v + losowe_szoki)
 
-        # POPRAWNA INICJALIZACJA MACIERZY (Naprawa błędu IndexError)
+        # Inicjalizacja macierzy
         macierz_cen = np.zeros((dni_handlowe + 1, liczba_symulacji))
-        macierz_cen[0, :] = ostatnia_cena  # Wypełnienie wyłącznie pierwszego wiersza wartością początkową
+        macierz_cen[0, :] = ostatnia_cena
         
         for t in range(1, dni_handlowe + 1):
             macierz_cen[t, :] = macierz_cen[t - 1, :] * codzienne_zwroty[t - 1, :]
@@ -215,10 +219,16 @@ if generuj:
             f"latest stock market news financial health catalysts {ticker}"
         )
 
+        pe_tekst = f"{pe_ratio:.2f}" if pe_ratio else "Brak danych"
+        target_tekst = f"{target_mean:.2f} USD" if target_mean else "Brak danych"
+
         prompt_ai = f"""
         Jesteś starszym analitykiem finansowym z Wall Street. 
         Przeanalizuj spółkę o tickerze: {ticker}.
         Aktualna cena na rynku: {ostatnia_cena:.2f} USD.
+        Wskaźnik P/E (Cena/Zysk): {pe_tekst}.
+        Średnia cena docelowa analityków (Target Price): {target_tekst}.
+
         Model statystyczny Monte Carlo na 52 tygodnie wygenerował poziomy:
         - Scenariusz optymistyczny Bull (90%): {scenariusz_bull[-1]:.2f} USD
         - Scenariusz neutralny Hold (50%): {scenariusz_hold[-1]:.2f} USD
@@ -228,7 +238,7 @@ if generuj:
         {newsy}
         
         Napisz krótki, konkretny komentarz giełdowy (w języku polskim). 
-        Uzasadnij na podstawie newsów, co może zepchnąć kurs do poziomu BEAR, a co da paliwo do poziomu BULL. 
+        Uzasadnij na podstawie wskaźnika P/E oraz newsów, co może zepchnąć kurs do poziomu BEAR, a co da paliwo do poziomu BULL. 
         Odpowiedź sformatuj w krótkie, czytelne punkty.
         """
 
@@ -242,4 +252,5 @@ if generuj:
             temperature=0.7,
         )
 
-        st.write(odpowiedz.choices.message.content)
+        # POPRAWIONA SKŁADNIA PARSOWANIA ODPOWIEDZI (Naprawa błędu AttributeError)
+        st.write(odpowiedz.choices[0].message.content)
