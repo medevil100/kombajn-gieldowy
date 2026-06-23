@@ -1,8 +1,8 @@
 import os
+import numpy as np
+import pandas as pd
 import streamlit as st
 import yfinance as yf
-import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
 
 from openai import OpenAI
@@ -32,15 +32,19 @@ K_TP = 3.5
 
 
 # ============================
-#   FUNKCJE TECHNICZNE
+#   CACHE — wersja PRO
 # ============================
 
+@st.cache_data(show_spinner=False, ttl=3600)
 def load_data(ticker):
-    return yf.download(ticker, period="2y", interval="1d", auto_adjust=True)
+    df = yf.download(ticker, period="2y", interval="1d", auto_adjust=True)
+    return df
 
 
-def indicators(df):
+@st.cache_data(show_spinner=False, ttl=3600)
+def compute_indicators(df):
     df = df.copy()
+
     df[f"SMA{SMA_FAST}"] = df["Close"].rolling(SMA_FAST).mean()
     df[f"SMA{SMA_SLOW}"] = df["Close"].rolling(SMA_SLOW).mean()
 
@@ -54,9 +58,15 @@ def indicators(df):
 
 
 def detect_trend(row):
-    sma_fast = row[f"SMA{SMA_FAST}"]
-    sma_slow = row[f"SMA{SMA_SLOW}"]
-    price = row["Close"]
+    try:
+        sma_fast = float(row.get(f"SMA{SMA_FAST}", np.nan))
+        sma_slow = float(row.get(f"SMA{SMA_SLOW}", np.nan))
+        price = float(row.get("Close", np.nan))
+    except:
+        return "Unknown"
+
+    if np.isnan(sma_fast) or np.isnan(sma_slow) or np.isnan(price):
+        return "Unknown"
 
     if sma_fast > sma_slow and price > sma_fast:
         return "Bull"
@@ -72,6 +82,7 @@ def sl_tp(price, atr, side="long"):
         return price + K_SL * atr, price - K_TP * atr
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
 def scenarios_numeric(price, df, horizon_days=30):
     returns = np.log(df["Close"] / df["Close"].shift(1)).dropna()
     mu = returns.mean()
@@ -87,15 +98,21 @@ def scenarios_numeric(price, df, horizon_days=30):
 
 
 # ============================
-#   NEWSY TAVILY
+#   NEWSY TAVILY (cache)
 # ============================
 
+@st.cache_data(show_spinner=False, ttl=3600)
 def fetch_news_summary(ticker, horizon_days=30):
     if tavily_client is None:
         return "Brak klucza Tavily."
 
-    query = f"Najważniejsze wiadomości dotyczące spółki {ticker} z ostatnich {horizon_days} dni."
-    res = tavily_client.search(query=query, max_results=5)
+    try:
+        res = tavily_client.search(
+            query=f"Najważniejsze wiadomości o spółce {ticker} z ostatnich {horizon_days} dni.",
+            max_results=5
+        )
+    except:
+        return "Błąd pobierania newsów."
 
     items = res.get("results", [])
     if not items:
@@ -111,9 +128,10 @@ def fetch_news_summary(ticker, horizon_days=30):
 
 
 # ============================
-#   AI – KOMENTARZ / SCENARIUSZE / SENTYMENT
+#   AI — komentarz, scenariusze, sentyment (cache)
 # ============================
 
+@st.cache_data(show_spinner=False, ttl=3600)
 def ai_analysis_pl(ticker, trend, price, atr, sl, tp, scen_df, news_summary, horizon_days):
     if client is None:
         return "Brak klucza OpenAI."
@@ -155,17 +173,19 @@ Zadania:
 Pisz po polsku, konkretnie.
 """
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "Jesteś analitykiem rynkowym."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.4,
-        max_tokens=900
-    )
-
-    return response.choices[0].message.content.strip()
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Jesteś analitykiem rynkowym."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.4,
+            max_tokens=900
+        )
+        return response.choices[0].message.content.strip()
+    except:
+        return "Błąd generowania odpowiedzi AI."
 
 
 # ============================
@@ -200,7 +220,7 @@ def plot_scenarios_plotly(scen, price, sl, tp):
 #   STREAMLIT UI
 # ============================
 
-st.title("📈 AI Scenariusze Rynkowe – 1 Ticker (PL)")
+st.title("📈 AI Scenariusze Rynkowe – Wersja PRO (PL)")
 
 ticker = st.text_input("Ticker:", "AAPL").upper()
 side = st.selectbox("Strona pozycji:", ["long", "short"])
@@ -208,15 +228,16 @@ horizon = st.slider("Horyzont (dni):", 20, 60, 30)
 
 if st.button("Analizuj"):
     df = load_data(ticker)
-    if df.empty:
-        st.error("Brak danych.")
+
+    if df.empty or len(df) < SMA_SLOW + 5:
+        st.error("Za mało danych dla tego tickera.")
         st.stop()
 
-    df = indicators(df)
+    df = compute_indicators(df)
     last = df.iloc[-1]
 
-    price = last["Close"]
-    atr = last[f"ATR{ATR_WINDOW}"]
+    price = float(last["Close"])
+    atr = float(last[f"ATR{ATR_WINDOW}"])
     tr = detect_trend(last)
     sl, tp = sl_tp(price, atr, side)
     scen = scenarios_numeric(price, df, horizon)
