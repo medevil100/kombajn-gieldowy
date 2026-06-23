@@ -6,7 +6,19 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
+import cloudscraper
 from tavily import TavilyClient
+
+# ==========================================
+# 0. ROZWIĄZANIE PROBLEMU Z BLOKADĄ IP (Yahoo Rate Limit)
+# ==========================================
+# Wykorzystujemy cloudscraper i niestandardową sesję, aby udawać prawdziwą przeglądarkę
+scraper_session = cloudscraper.create_scraper()
+scraper_session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'pl,en-US;q=0.7,en;q=0.3'
+})
 
 # ==========================================
 # 1. KONFIGURACJA STRONY I AUTOMATYCZNYCH KLUCZY
@@ -37,7 +49,6 @@ generuj = st.sidebar.button("Uruchom analizę")
 # Funkcja do przeszukiwania sieci przez bezpośredniego klienta Tavily
 def pobierz_newsy_tavily(query):
     try:
-        # Użycie oficjalnego, lekkiego klienta tavily-python
         tavily = TavilyClient(api_key=TAVILY_KEY)
         wyniki = tavily.search(query=query, max_results=4)
         
@@ -62,11 +73,18 @@ if generuj:
     with st.spinner("Pobieranie danych rynkowych i obliczanie Monte Carlo..."):
         koniec = datetime.date.today()
         start = koniec - datetime.timedelta(days=3 * 365)
-        spolka = yf.Ticker(ticker)
-        dane = spolka.history(start=start, end=koniec)
+        
+        # Przekazujemy naszą bezpieczną sesję odporną na limity do yfinance
+        spolka = yf.Ticker(ticker, session=scraper_session)
+        
+        try:
+            dane = spolka.history(start=start, end=koniec)
+        except Exception as e:
+            st.error("❌ Yahoo Finance odrzuciło zapytanie z powodu limitu serwera Streamlit. Spróbuj kliknąć przycisk ponownie za chwilę.")
+            st.stop()
 
         if dane.empty:
-            st.error(f"Nie znaleziono danych dla tickera: {ticker}")
+            st.error(f"Nie znaleziono danych dla tickera lub Yahoo zablokowało ruch: {ticker}. Spróbuj ponownie.")
             st.stop()
 
         ostatnia_cena = dane["Close"].iloc[-1]
@@ -183,10 +201,7 @@ if generuj:
         hovermode="x unified",
     )
 
-    # Dodanie pionowej linii oddzielającej historię od prognozy
     fig.add_vline(x=0, line_width=1.5, line_dash="dot", line_color="purple")
-
-    # Renderowanie wykresu Plotly w Streamlit
     st.plotly_chart(fig, use_container_width=True)
 
     # ==========================================
