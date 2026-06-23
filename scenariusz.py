@@ -77,35 +77,35 @@ if generuj:
 
         ceny_zamkniecia = dane["Close"].dropna()
         ostatnia_cena = float(ceny_zamkniecia.iloc[-1])
-        dni_handlowe = 252 # Dokładnie rok giełdowy
+        dni_handlowe = 252 
 
-        # --- REWOLUCJA: SAMODZIELNE OBLICZANIE P/E ZAMIAST ZAUFANIA .INFO ---
-        pe_obliczone = "Brak danych (Błąd raportu)"
-        eps_ttm = "Brak danych"
+        # --- SAMODZIELNE OBLICZANIE P/E ZAMIAST ZAUFANIA .INFO ---
+        pe_obliczone = "Brak stabilnych danych finansowych"
+        eps_ttm = "Brak stabilnych danych finansowych"
         try:
-            # Pobieramy kwartalne sprawozdanie zysków i strat
             kwartaly = spolka.quarterly_income_stmt
             if not kwartaly.empty:
-                # Szukamy wiersza Net Income (Zysk netto) - bierzemy sumę z ostatnich 4 kwartałów (TTM)
-                zysk_netto_ttm = kwartaly.loc['Net Income'].iloc[0:4].sum()
-                
-                # Pobieramy liczbę akcji w obiegu z bilansu
-                bilans = spolka.quarterly_balance_sheet
-                shares = None
-                if 'Share Capital' in bilans.index:
-                    shares = bilans.loc['Share Capital'].iloc[0]
-                elif 'Ordinary Shares Number' in bilans.index:
-                    shares = bilans.loc['Ordinary Shares Number'].iloc[0]
-                
-                if zysk_netto_ttm and shares and shares > 0:
-                    eps_ttm = zysk_netto_ttm / shares
-                    pe_calc_val = ostatnia_cena / eps_ttm
-                    pe_obliczone = f"{pe_calc_val:.2f}"
-                    eps_ttm = f"{eps_ttm:.2f} USD"
+                wiersz_net_income = kwartaly.filter(like='Net Income', axis=0)
+                if not wiersz_net_income.empty:
+                    zysk_netto_ttm = wiersz_net_income.iloc[0, 0:4].sum()
+                    
+                    bilans = spolka.quarterly_balance_sheet
+                    shares = None
+                    for col_name in ['Ordinary Shares Number', 'Share Capital', 'Shareholders Equity']:
+                        wiersz_shares = bilans.filter(like=col_name, axis=0)
+                        if not wiersz_shares.empty:
+                            shares = wiersz_shares.iloc[0, 0]
+                            break
+                    
+                    if zysk_netto_ttm and shares and shares > 0:
+                        eps_val = zysk_netto_ttm / shares
+                        pe_calc_val = ostatnia_cena / eps_val
+                        pe_obliczone = f"{pe_calc_val:.2f}"
+                        eps_ttm = f"{eps_val:.2f} USD"
         except Exception as e:
             pass
 
-        # Pobieranie ceny docelowej analityków (zostaje jako uzupełnienie)
+        # Pobieranie ceny docelowej analityków
         try:
             target_mean = spolka.info.get("targetMeanPrice")
         except:
@@ -164,15 +164,15 @@ if generuj:
     st.plotly_chart(fig, use_container_width=True)
 
     # ==========================================
-    # 4. GŁĘBOKI RAPORT INWESTYCYJNY AI (OPENAI + TAVILY ADVANCED)
+    # 4. GŁĘBOKI RAPORT INWESTYCYJNY AI
     # ==========================================
     st.subheader("🔬 Profesjonalna Analiza Fundamentalno-Sentymentowa AI")
     with st.spinner("Przeszukiwanie bazy Tavily (Deep Search) i generowanie zaawansowanego raportu..."):
         
-        # Agresywnie ukierunkowane wyszukiwanie na najnowsze, konkretne wydarzenia
-        newsy = pobierz_newsy_tavily(
-            f"{ticker} stock financial catalysts earnings supply chain growth risks {datetime.date.today().year}"
-        )
+        akt_rok = datetime.date.today().year
+        newsy = pobierz_newsy_tavily(f"{ticker} stock financial catalysts earnings supply chain growth risks {akt_rok}")
+
+        target_tekst = f"{target_mean:.2f}" if target_mean else "Brak danych internetowych"
 
         prompt_ai = f"""
         Jesteś dyrektorem ds. analiz w funduszu hedgingowym na Wall Street. Napisz mięsisty, głęboki, profesjonalny i pozbawiony lania wody raport inwestycyjny dla spółki {ticker}.
@@ -181,7 +181,7 @@ if generuj:
         - Aktualna cena rynkowa: {ostatnia_cena:.2f} USD
         - Wyliczony wskaźnik P/E TTM: {pe_obliczone}
         - Wyliczony zysk na akcję EPS TTM: {eps_ttm}
-        - Konsensus analityków (Target Price): {target_mean if target_mean else 'Brak stabilnych danych internetowych'} USD
+        - Konsensus analityków (Target Price): {target_tekst} USD
 
         PROGNOZA STATYSTYCZNA MONTE CARLO (HORYZONT 52 TYGODNIE):
         - Scenariusz BULL (90. percentyl): {scenariusz_bull[-1]:.2f} USD
@@ -196,3 +196,5 @@ if generuj:
         2. Oceń wyliczony wskaźnik P/E. Czy przy obecnej cenie spółka jest przewartościowana, czy niedowartościowana w stosunku do swojej historii i sektora? Co to oznacza dla scenariusza HOLD?
         3. W sekcji SCENARIUSZ BEAR rozbij na czynniki pierwsze twarde ryzyka biznesowe (np. cła, zerwane łańcuchy dostaw, spadek marż, konkretne słabości raportowane w mediach). Jak te wydarzenia doprowadzą cenę do poziomu {scenariusz_bear[-1]:.2f} USD.
         4. W sekcji SCENARIUSZ BULL podaj konkretne, namacalne katalizatory (nowe linie przychodów, AI, konkretne produkty, ekspansja na nowe rynki). Jak te czynniki wystrzelą kurs do poziomu {scenariusz_bull[-1]:.2f} USD.
+        5. Podsumowanie: wydaj krótką rekomendację strategiczną opartą na relacji ryzyka do zysku (Risk/Reward Ratio).
+
