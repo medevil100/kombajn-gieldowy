@@ -32,28 +32,42 @@ K_TP = 3.5
 
 
 # ============================
-#   CACHE – DANE I WSKAŹNIKI
+#   BEZPIECZNE POBIERANIE DANYCH Z YAHOO
 # ============================
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_data(ticker: str) -> pd.DataFrame:
+def safe_load_yahoo(ticker: str) -> pd.DataFrame | None:
     df = yf.download(ticker, period="2y", interval="1d", auto_adjust=True)
 
-    if df.empty:
-        return df
+    if df is None or df.empty:
+        return None
 
     # Spłaszcz MultiIndex, jeśli występuje
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(-1)
+        df.columns = [c[-1] for c in df.columns]
+
+    # Ujednolicenie nazw kolumn
+    df.columns = [str(c).strip().capitalize() for c in df.columns]
+
+    if "Close" not in df.columns:
+        return None
+
+    df = df.dropna(subset=["Close"])
+
+    if df.empty:
+        return None
 
     return df
 
+
+# ============================
+#   WSKAŹNIKI
+# ============================
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    if "Close" not in df.columns or "High" not in df.columns or "Low" not in df.columns:
+    if not {"Close", "High", "Low"}.issubset(df.columns):
         return pd.DataFrame()
 
     df[f"SMA{SMA_FAST}"] = df["Close"].rolling(SMA_FAST).mean()
@@ -119,7 +133,7 @@ def scenarios_numeric(price: float, df: pd.DataFrame, horizon_days: int = 30) ->
 
 
 # ============================
-#   NEWSY TAVILY (cache)
+#   NEWSY TAVILY
 # ============================
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -149,7 +163,7 @@ def fetch_news_summary(ticker: str, horizon_days: int = 30) -> str:
 
 
 # ============================
-#   AI – KOMENTARZ / SCENARIUSZE / SENTYMENT (cache)
+#   AI – KOMENTARZ / SCENARIUSZE
 # ============================
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -220,7 +234,7 @@ Pisz po polsku, konkretnie.
 
 
 # ============================
-#   AI – ALERTY (zmiana trendu, SMA, zmienność) – D
+#   AI – ALERTY TECHNICZNE
 # ============================
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -342,14 +356,10 @@ side = st.selectbox("Strona pozycji:", ["long", "short"])
 horizon = st.slider("Horyzont (dni):", 20, 60, 30)
 
 if st.button("Analizuj"):
-    df = load_data(ticker)
+    df = safe_load_yahoo(ticker)
 
-    if df.empty:
-        st.error("Brak danych dla tego tickera.")
-        st.stop()
-
-    if "Close" not in df.columns:
-        st.error("Brak kolumny 'Close' w danych z Yahoo Finance.")
+    if df is None:
+        st.error("Yahoo Finance nie zwrócił poprawnych danych dla tego tickera.")
         st.stop()
 
     if len(df) < SMA_SLOW + 5:
@@ -361,7 +371,6 @@ if st.button("Analizuj"):
         st.error("Błąd wyliczania wskaźników.")
         st.stop()
 
-    # Bezpieczne pobranie ostatniego i poprzedniego wiersza
     try:
         last_two = df.tail(2).reset_index(drop=True)
         last = last_two.iloc[-1]
