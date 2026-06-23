@@ -43,10 +43,12 @@ def pobierz_newsy_tavily(query):
         wyniki = tavily.search(query=query, max_results=5, search_depth="advanced")
         tekst_newsow = ""
         for i, res in enumerate(wyniki.get('results', [])):
-            tekst_newsow += f"\n[{i+1}] {res['title']}\nTreść: {res['content']}\nŹródło: {res['url']}\n"
+            clean_title = str(res.get('title', ''))
+            clean_content = str(res.get('content', ''))
+            tekst_newsow += f" Artykul {i+1}: {clean_title}. Tresc: {clean_content} "
         return tekst_newsow
-    except Exception as e:
-        return f"Błąd Tavily: {e}"
+    except Exception:
+        return "Brak mozliwosci pobrania newsow."
 
 # ==========================================
 # 2. LOGIKA MATEMATYCZNA I OBLICZANIE WSKAŹNIKÓW
@@ -64,7 +66,7 @@ if generuj:
         
         try:
             dane = spolka.history(start=start, end=koniec)
-        except Exception as e:
+        except Exception:
             st.error("❌ Problem z pobraniem historii cen z Yahoo Finance.")
             st.stop()
 
@@ -94,7 +96,7 @@ if generuj:
                     for col_name in ['Ordinary Shares Number', 'Share Capital', 'Shareholders Equity']:
                         wiersz_shares = bilans.filter(like=col_name, axis=0)
                         if not wiersz_shares.empty:
-                            shares = wiersz_shares.iloc
+                            shares = wiersz_shares.iloc[0, 0]
                             break
                     
                     if zysk_netto_ttm and shares and shares > 0:
@@ -102,18 +104,19 @@ if generuj:
                         pe_calc_val = ostatnia_cena / eps_val
                         pe_obliczone = f"{pe_calc_val:.2f}"
                         eps_ttm = f"{eps_val:.2f} USD"
-        except Exception as e:
+        except Exception:
             pass
 
-        # Pobieranie ceny docelowej analityków
+        # Pobieranie ceny docelowej analityków z bezpieczną obsługą błędów
+        target_tekst = "Brak danych internetowych"
         try:
             target_mean = spolka.info.get("targetMeanPrice")
-        except:
-            target_mean = None
-
-        if target_mean and target_mean > 0:
-            dzienny_zwrot_analitykow = ((target_mean - ostatnia_cena) / ostatnia_cena) / 252
-        else:
+            if target_mean and target_mean > 0:
+                target_tekst = f"{target_mean:.2f}"
+                dzienny_zwrot_analitykow = ((target_mean - ostatnia_cena) / ostatnia_cena) / 252
+            else:
+                dzienny_zwrot_analitykow = None
+        except Exception:
             dzienny_zwrot_analitykow = None
 
         # Obliczenia Monte Carlo
@@ -164,7 +167,7 @@ if generuj:
     st.plotly_chart(fig, use_container_width=True)
 
     # ==========================================
-    # 4. GŁĘBOKI RAPORT INWESTYCYJNY AI (CAŁKOWICIE ZABEZPIECZONY)
+    # 4. GŁĘBOKI RAPORT INWESTYCYJNY AI (ZABEZPIECZONY RAPORT TEKSTOWY)
     # ==========================================
     st.subheader("🔬 Profesjonalna Analiza Fundamentalno-Sentymentowa AI")
     with st.spinner("Przeszukiwanie bazy Tavily (Deep Search) i generowanie zaawansowanego raportu..."):
@@ -173,29 +176,23 @@ if generuj:
         newsy = pobierz_newsy_tavily(f"{ticker} stock financial catalysts earnings supply chain growth risks {akt_rok}")
 
         ost_cena_str = f"{ostatnia_cena:.2f}"
-        target_tekst = f"{target_mean:.2f}" if target_mean else "Brak danych internetowych"
         bear_cena = f"{scenariusz_bear[-1]:.2f}"
         hold_cena = f"{scenariusz_hold[-1]:.2f}"
         bull_cena = f"{scenariusz_bull[-1]:.2f}"
 
-        # ABSOLUTNE BEZPIECZEŃSTWO: Budowanie promptu z tablicy linii pojedynczych cudzysłowów. Zero triple-quotes.
-        linie_promptu = [
-            "Jesteś dyrektorem ds. analiz w funduszu hedgingowym na Wall Street. Napisz mięsisty, głęboki, profesjonalny i pozbawiony lania wody raport inwestycyjny dla spółki " + ticker + ".",
-            "",
-            "DANE FUNDAMENTALNE I RYNKOWE (OSTATNIE RAPORTY KWARTALNE):",
-            "- Aktualna cena rynkowa: " + ost_cena_str + " USD",
-            "- Wyliczony wskaźnik P/E TTM: " + pe_obliczone,
-            "- Wyliczony zysk na akcję EPS TTM: " + eps_ttm,
-            "- Konsensus analityków (Target Price): " + target_tekst + " USD",
-            "",
-            "PROGNOZA STATYSTYCZNA MONTE CARLO (HORYZONT 52 TYGODNIE):",
-            "- Scenariusz BULL (90. percentyl): " + bull_cena + " USD",
-            "- Scenariusz HOLD (50. percentyl): " + hold_cena + " USD",
-            "- Scenariusz BEAR (10. percentyl): " + bear_cena + " USD",
-            "",
-            "NAJNOWSZE FAKTY, NEWSY I WYDARZENIA RYNKOWE Z BAZY TAVILY:",
-            newsy,
-            "",
-            "WYMAGANIA DOTYCZĄCE RAPORTU (BĄDŹ BEZWZGLĘDNIE RESTRYKCYJNY):",
-            "1. Kategorycznie unikaj ogólnych zdań typu 'Spółka staje przed poważnymi wyzwaniami' lub 'Innowacje mogą napędzać wzrost'. Każde stwierdzenie MUSI opierać się na konkretnym fakcie (np. konkretny model produktu, konkretna fabryka, rezygnacja z projektu, precyzyjne koszty chipów, dane o marżach, konkretny konkurent).",
-            "2. Oceń wyliczony wskaźnik P/E. Czy przy obecnej cenie spółka jest przewartościowana, czy niedowartościowana w stosunku do swojej historii i sektora? Co to oznacza dla scenariusza HOLD?",
+        # Standardowy block instrukcji dla LLM, przekazany w 100% poprawnie
+        prompt_ai = (
+            "Jesteś dyrektorem ds. analiz w funduszu hedgingowym na Wall Street. Napisz mięsisty, głęboki, profesjonalny i pozbawiony lania wody raport inwestycyjny dla spółki " + ticker + ".\n\n"
+            "DANE FUNDAMENTALNE I RYNKOWE (OSTATNIE RAPORTY KWARTALNE):\n"
+            "- Aktualna cena rynkowa: " + ost_cena_str + " USD\n"
+            "- Wyliczony wskaźnik P/E TTM: " + pe_obliczone + "\n"
+            "- Wyliczony zysk na akcję EPS TTM: " + eps_ttm + "\n"
+            "- Konsensus analityków (Target Price): " + target_tekst + " USD\n\n"
+            "PROGNOZA STATYSTYCZNA MONTE CARLO (HORYZONT 52 TYGODNIE):\n"
+            "- Scenariusz BULL (90. percentyl): " + bull_cena + " USD\n"
+            "- Scenariusz HOLD (50. percentyl): " + hold_cena + " USD\n"
+            "- Scenariusz BEAR (10. percentyl): " + bear_cena + " USD\n\n"
+            "NAJNOWSZE FAKTY, NEWSY I WYDARZENIA RYNKOWE Z BAZY TAVILY:\n" + newsy + "\n\n"
+            "WYMAGANIA DOTYCZĄCE RAPORTU (BĄDŹ BEZWZGLĘDNIE RESTRYKCYJNY):\n"
+            "1. Kategorycznie unikaj ogólnych zdań typu 'Spółka staje przed poważnymi wyzwaniami' lub 'Innowacje mogą napędzać wzrost'. Każde stwierdzenie MUSI opierać się na konkretnym fakcie z podanych newsów (np. konkretny model produktu, konkretna fabryka, rezygnacja z projektu, precyzyjne koszty chipów, dane o marżach, konkretny konkurent).\n"
+            "2. Oceń wyliczony wskaźnik P/E. Czy przy obecnej cenie spółka jest przewartościowana, czy niedowartościowana w stosunku do swojej historii i sektora? Co to oznacza dla scenariusza HOLD?\n"
