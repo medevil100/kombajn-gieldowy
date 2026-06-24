@@ -1,5 +1,4 @@
 import os
-
 # KROK 1: Blokada automatycznego przebudowywania pakietu (kluczowe dla Streamlit Cloud)
 os.environ["OPENBB_AUTO_BUILD"] = "False"
 os.environ["OPENBB_USER_SETTINGS_DIRECTORY"] = "/tmp/.openbb"
