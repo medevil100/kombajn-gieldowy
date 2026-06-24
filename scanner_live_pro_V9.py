@@ -316,112 +316,405 @@ def format_indicator_value(v):
 
 
 # ============================
-# TAVILY NEWS
+# TAVILY NEWS — LEPSZE FILTROWANIE
 # ============================
 
-def build_news_query(ticker: str) -> str:
+BAD_NEWS_DOMAINS = [
+    "tradingview.com/news/reuters.com",
+    "tradingview.com/news/",
+    "marketscreener.com/news/latest",
+    "marketscreener.com/quote/stock",
+    "simplywall.st",
+    "stocktitan.net/news/",
+]
+
+GOOD_US_DOMAINS = [
+    "reuters.com",
+    "globenewswire.com",
+    "prnewswire.com",
+    "businesswire.com",
+    "sec.gov",
+    "nasdaq.com",
+    "marketwatch.com",
+    "investing.com",
+    "finance.yahoo.com",
+]
+
+GOOD_PL_DOMAINS = [
+    "bankier.pl",
+    "stooq.pl",
+    "biznes.pap.pl",
+    "pap.pl",
+    "gpw.pl",
+    "money.pl",
+    "parkiet.com",
+    "stockwatch.pl",
+]
+
+
+def clean_company_name(name: str) -> str:
+    if not name:
+        return ""
+
+    remove_words = [
+        "Inc.", "Inc", "Corporation", "Corp.", "Corp",
+        "Company", "Co.", "Co", "Ltd.", "Ltd",
+        "Limited", "PLC", "S.A.", "SA", "S.A",
+        "Spółka Akcyjna", "Group", "Holdings",
+        "Holding", "Common Stock"
+    ]
+
+    cleaned = name.strip()
+
+    for w in remove_words:
+        cleaned = cleaned.replace(w, "")
+
+    return " ".join(cleaned.split()).strip()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_company_name_from_yahoo(ticker: str) -> str:
+    """
+    Pobiera nazwę spółki z Yahoo Finance.
+    Cache 24h, bo nazwa spółki rzadko się zmienia.
+    """
     ticker = normalize_ticker(ticker)
 
-    if ticker.endswith(".WA"):
-        base = ticker.replace(".WA", "")
-        return (
-            f"{base} GPW akcje najnowsze informacje wyniki ESPI PAP Biznes "
-            f"komunikat spółki kurs akcji inwestorzy"
+    try:
+        info = yf.Ticker(ticker).info
+
+        name = (
+            info.get("longName")
+            or info.get("shortName")
+            or info.get("displayName")
+            or ""
         )
 
-    return (
-        f"{ticker} stock latest important news earnings guidance SEC filing "
-        f"analyst rating price moving event"
-    )
+        return clean_company_name(name)
+
+    except Exception:
+        return ""
+
+
+def get_ticker_variants(ticker: str) -> list[str]:
+    ticker = normalize_ticker(ticker)
+
+    variants = [ticker]
+
+    if ticker.endswith(".WA"):
+        variants.append(ticker.replace(".WA", ""))
+
+    # usuń duplikaty
+    return list(dict.fromkeys([v for v in variants if v]))
+
+
+def build_news_queries(ticker: str, company_name: str) -> list[str]:
+    ticker = normalize_ticker(ticker)
+    variants = get_ticker_variants(ticker)
+
+    base_ticker = variants[-1] if variants else ticker
+
+    queries = []
+
+    if ticker.endswith(".WA"):
+        if company_name:
+            queries.append(
+                f'"{company_name}" GPW akcje najnowsze informacje ESPI EBI PAP Biznes wyniki umowa raport'
+            )
+            queries.append(
+                f'"{company_name}" site:bankier.pl OR site:stooq.pl OR site:biznes.pap.pl OR site:gpw.pl'
+            )
+
+        queries.append(
+            f'"{base_ticker}" GPW akcje ESPI EBI raport bieżący wyniki PAP Biznes'
+        )
+        queries.append(
+            f'"{base_ticker}" site:bankier.pl OR site:stooq.pl OR site:biznes.pap.pl OR site:gpw.pl'
+        )
+
+    else:
+        if company_name:
+            queries.append(
+                f'"{company_name}" "{base_ticker}" stock latest news earnings guidance FDA SEC merger contract'
+            )
+            queries.append(
+                f'"{company_name}" latest news stock earnings guidance SEC filing'
+            )
+
+        queries.append(
+            f'"{base_ticker}" stock latest news earnings guidance SEC filing analyst rating'
+        )
+        queries.append(
+            f'"{base_ticker}" site:reuters.com OR site:globenewswire.com OR site:prnewswire.com OR site:businesswire.com OR site:sec.gov'
+        )
+
+    return queries
+
+
+def is_bad_news_url(url: str) -> bool:
+    if not url:
+        return False
+
+    u = url.lower()
+
+    for bad in BAD_NEWS_DOMAINS:
+        if bad.lower() in u:
+            return True
+
+    return False
+
+
+def text_contains_company_or_ticker(text: str, ticker: str, company_name: str) -> bool:
+    """
+    Sprawdza, czy wynik naprawdę dotyczy spółki.
+    """
+    if not text:
+        return False
+
+    text_l = text.lower()
+
+    variants = get_ticker_variants(ticker)
+    variants_l = [v.lower() for v in variants]
+
+    # ticker
+    for v in variants_l:
+        if v and v in text_l:
+            return True
+
+    # nazwa spółki
+    if company_name:
+        company_l = company_name.lower()
+
+        if company_l in text_l:
+            return True
+
+        # jeśli pełna nazwa nie weszła, sprawdzamy istotne tokeny
+        tokens = [
+            x for x in company_l.replace(",", " ").replace(".", " ").split()
+            if len(x) >= 4
+        ]
+
+        if tokens:
+            hits = sum(1 for token in tokens if token in text_l)
+
+            # dla nazw 1-wyrazowych wystarczy 1 trafienie
+            if len(tokens) == 1 and hits >= 1:
+                return True
+
+            # dla dłuższych nazw wymagamy minimum 2 trafień
+            if len(tokens) >= 2 and hits >= 2:
+                return True
+
+    return False
+
+
+def news_relevance_score(item: dict, ticker: str, company_name: str) -> int:
+    title = item.get("title", "") or ""
+    content = item.get("content", "") or ""
+    url = item.get("url", "") or ""
+
+    text = f"{title} {content} {url}".lower()
+
+    score = 0
+
+    variants = get_ticker_variants(ticker)
+    for v in variants:
+        if v.lower() in text:
+            score += 5
+
+    if company_name:
+        company_l = company_name.lower()
+        if company_l in text:
+            score += 7
+
+        tokens = [
+            x for x in company_l.replace(",", " ").replace(".", " ").split()
+            if len(x) >= 4
+        ]
+        for token in tokens:
+            if token in text:
+                score += 1
+
+    price_moving_words = [
+        "earnings", "revenue", "profit", "loss", "guidance",
+        "fda", "approval", "trial", "phase", "sec", "filing",
+        "merger", "acquisition", "contract", "partnership",
+        "offering", "bankruptcy", "delisting", "dividend",
+        "buyback", "analyst", "rating", "target",
+        "wyniki", "przychody", "zysk", "strata", "umowa",
+        "kontrakt", "espi", "ebi", "raport", "dywidenda",
+        "emisja", "wezwanie", "rekomendacja"
+    ]
+
+    for word in price_moving_words:
+        if word in text:
+            score += 1
+
+    # bonus za lepsze domeny
+    url_l = url.lower()
+
+    if ticker.endswith(".WA"):
+        for d in GOOD_PL_DOMAINS:
+            if d in url_l:
+                score += 3
+    else:
+        for d in GOOD_US_DOMAINS:
+            if d in url_l:
+                score += 3
+
+    # kara za złe domeny
+    if is_bad_news_url(url):
+        score -= 20
+
+    return score
+
+
+def deduplicate_news(items: list[dict]) -> list[dict]:
+    seen_urls = set()
+    seen_titles = set()
+    output = []
+
+    for it in items:
+        url = (it.get("url") or "").strip()
+        title = (it.get("title") or "").strip().lower()
+
+        if url and url in seen_urls:
+            continue
+
+        if title and title in seen_titles:
+            continue
+
+        if url:
+            seen_urls.add(url)
+
+        if title:
+            seen_titles.add(title)
+
+        output.append(it)
+
+    return output
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def tavily_news_for_ticker_cached(ticker: str, max_results: int = 6) -> str:
     """
-    Tavily: możliwie świeże informacje.
-    Cache 10 minut, bo newsy nie muszą być pobierane przy każdym rerunie.
+    Lepsze newsy Tavily:
+    - wiele zapytań,
+    - filtrowanie po nazwie/tickerze,
+    - odrzucanie agregatorów,
+    - scoring trafności,
+    - bez ślepego Tavily answer.
     """
     ticker = normalize_ticker(ticker)
 
     if not ticker:
         return "Brak tickera — nie można pobrać newsów."
 
-    query = build_news_query(ticker)
+    company_name = get_company_name_from_yahoo(ticker)
+    queries = build_news_queries(ticker, company_name)
 
-    try:
-        # Pierwsza próba: tryb news z ostatnich 7 dni.
+    all_items = []
+
+    for q in queries:
         try:
-            res = tavily_client.search(
-                query=query,
-                search_depth="advanced",
-                topic="news",
-                days=7,
-                max_results=max_results,
-                include_answer=True,
-                include_raw_content=False
-            )
-        except TypeError:
-            # Fallback dla starszej wersji tavily-python, gdy topic/days nie są obsługiwane.
-            res = tavily_client.search(
-                query=query,
-                search_depth="advanced",
-                max_results=max_results,
-                include_answer=True
-            )
+            try:
+                res = tavily_client.search(
+                    query=q,
+                    search_depth="advanced",
+                    topic="news",
+                    days=14,
+                    max_results=8,
+                    include_answer=False,
+                    include_raw_content=False
+                )
+            except TypeError:
+                # fallback dla starszej wersji tavily-python
+                res = tavily_client.search(
+                    query=q,
+                    search_depth="advanced",
+                    max_results=8,
+                    include_answer=False
+                )
 
-        items = res.get("results", []) if isinstance(res, dict) else []
-        answer = res.get("answer", "") if isinstance(res, dict) else ""
-
-        # Druga próba: jeśli news mode nic nie zwróci, robimy zwykły advanced search.
-        if not items:
-            res = tavily_client.search(
-                query=query,
-                search_depth="advanced",
-                max_results=max_results,
-                include_answer=True,
-                include_raw_content=False
-            )
             items = res.get("results", []) if isinstance(res, dict) else []
-            answer = res.get("answer", "") if isinstance(res, dict) else ""
 
-        if not items:
-            return "Brak świeżych newsów z Tavily dla tego tickera."
+            for it in items:
+                url = it.get("url", "") or ""
+                title = it.get("title", "") or ""
+                content = it.get("content", "") or ""
 
-        lines = []
+                full_text = f"{title} {content} {url}"
 
-        if answer:
-            lines.append(f"**Podsumowanie Tavily:** {answer}")
-            lines.append("")
+                if is_bad_news_url(url):
+                    continue
 
-        lines.append("**Najnowsze znalezione informacje:**")
+                if not text_contains_company_or_ticker(full_text, ticker, company_name):
+                    continue
 
-        for it in items:
-            title = it.get("title", "Bez tytułu")
-            url = it.get("url", "")
-            content = it.get("content", "") or ""
-            published = (
-                it.get("published_date")
-                or it.get("publishedDate")
-                or it.get("date")
-                or ""
-            )
+                score = news_relevance_score(it, ticker, company_name)
 
-            snippet = content[:260].replace("\n", " ").strip()
+                # minimum trafności
+                if score < 5:
+                    continue
 
-            if published:
-                line = f"- **{title}** ({published}) — {snippet}"
-            else:
-                line = f"- **{title}** — {snippet}"
+                it["_score"] = score
+                all_items.append(it)
 
-            if url:
-                line += f"  \n  Źródło: {url}"
+        except Exception:
+            continue
 
-            lines.append(line)
+    all_items = deduplicate_news(all_items)
 
-        return "\n\n".join(lines)
+    if not all_items:
+        company_info = f" / {company_name}" if company_name else ""
+        return (
+            f"Nie znaleziono wiarygodnych świeżych newsów bezpośrednio dotyczących "
+            f"`{ticker}{company_info}`. To lepsze niż pokazanie losowych newsów o innych spółkach."
+        )
 
-    except Exception as e:
-        return f"Błąd Tavily: {str(e)}"
+    all_items = sorted(
+        all_items,
+        key=lambda x: x.get("_score", 0),
+        reverse=True
+    )
+
+    selected = all_items[:max_results]
+
+    lines = []
+
+    if company_name:
+        lines.append(f"**Spółka z Yahoo:** `{company_name}`")
+    else:
+        lines.append("**Spółka z Yahoo:** brak nazwy — filtrowanie głównie po tickerze.")
+
+    lines.append("")
+    lines.append("**Najtrafniejsze świeże informacje:**")
+
+    for it in selected:
+        title = it.get("title", "Bez tytułu")
+        url = it.get("url", "")
+        content = it.get("content", "") or ""
+        published = (
+            it.get("published_date")
+            or it.get("publishedDate")
+            or it.get("date")
+            or ""
+        )
+        score = it.get("_score", 0)
+
+        snippet = content[:320].replace("\n", " ").strip()
+
+        if published:
+            line = f"- **{title}** ({published})  \n  Trafność: `{score}`  \n  {snippet}"
+        else:
+            line = f"- **{title}**  \n  Trafność: `{score}`  \n  {snippet}"
+
+        if url:
+            line += f"  \n  Źródło: {url}"
+
+        lines.append(line)
+
+    return "\n\n".join(lines)
 
 
 def tavily_news_for_ticker(ticker: str, max_results: int = 6) -> str:
