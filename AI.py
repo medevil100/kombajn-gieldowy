@@ -88,6 +88,26 @@ def fetch_openbb_fundamentals(ticker: str) -> dict:
     provider = "yfinance"
 
     # Pobieranie poszczególnych wskaźników finansowych
+def fetch_openbb_fundamentals(ticker: str) -> dict:
+    if not OPENBB_OK or obb is None:
+        return {
+            "_errors": [
+                f"OpenBB nie jest dostępny: {OPENBB_ERROR}"
+            ]
+        }
+
+    results = {
+        "metrics": None,
+        "profile": None,
+        "price_target": None,
+        "income": None,
+        "balance": None,
+        "cash": None,
+        "_errors": []
+    }
+
+    provider = "yfinance"
+
     try:
         res = obb.equity.fundamental.metrics(symbol=ticker, provider=provider)
         results["metrics"] = [r.model_dump() for r in res.results] if hasattr(res, "results") else str(res)
