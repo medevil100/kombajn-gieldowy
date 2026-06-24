@@ -6,9 +6,6 @@ yfinance>=0.2.36
 requests>=2.31
 openai>=1.0
 tavily-python
-openbb
-openbb-equity
-openbb-yfinance
 ta
 python-dateutil
 pytz
