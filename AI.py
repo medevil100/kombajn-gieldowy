@@ -1,11 +1,5 @@
 import os
 import sys
-
-os.environ["OPENBB_AUTO_BUILD"] = "false"
-os.environ["OPENBB_USER_SETTINGS_DIRECTORY"] = "/tmp/.openbb"
-os.environ["OPENBB_APP_SETTINGS_DIRECTORY"] = "/tmp/.openbb"
-os.makedirs("/tmp/.openbb", exist_ok=True)
-
 import json
 import requests
 import numpy as np
@@ -15,6 +9,10 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from plotly.subplots import make_subplots
+
+# ============================================================
+# OPCJONALNE BIBLIOTEKI AI / SEARCH
+# ============================================================
 
 try:
     from openai import OpenAI
@@ -26,49 +24,21 @@ try:
 except Exception:
     TavilyClient = None
 
-obb = None
-OPENBB_OK = False
-OPENBB_ERROR = ""
 
-try:
-    from openbb import obb as _obb
+# ============================================================
+# YFINANCE FUNDAMENTALS
+# Zastępuje wcześniejszą funkcję OpenBB.
+# Nazwa zostaje fetch_openbb_fundamentals, żeby nie zmieniać reszty aplikacji.
+# ============================================================
 
-    obb = _obb
-
-    if hasattr(obb, "equity"):
-        OPENBB_OK = True
-        OPENBB_ERROR = ""
-    else:
-        OPENBB_OK = False
-        OPENBB_ERROR = (
-            "OpenBB został zaimportowany, ale nie znaleziono modułu obb.equity. "
-            "Sprawdź requirements.txt: openbb, openbb-equity, openbb-yfinance."
-        )
-
-except PermissionError as e:
-    obb = None
-    OPENBB_OK = False
-    OPENBB_ERROR = f"Brak uprawnień OpenBB: {str(e)}"
-
-except Exception as e:
-    obb = None
-    OPENBB_OK = False
-    OPENBB_ERROR = str(e)
-
-
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_openbb_fundamentals(ticker: str) -> dict:
-    if not OPENBB_OK or obb is None:
-        return {
-            "metrics": None,
-            "profile": None,
-            "price_target": None,
-            "income": None,
-            "balance": None,
-            "cash": None,
-            "_errors": [
-                f"OpenBB nie jest dostępny: {OPENBB_ERROR}"
-            ]
-        }
+    """
+    Pobiera dane fundamentalne bezpośrednio z Yahoo Finance przez yfinance.
+    Funkcja zastępuje OpenBB, ale zachowuje podobną strukturę wyniku.
+    """
+
+    ticker = str(ticker).strip().upper()
 
     results = {
         "metrics": None,
@@ -80,48 +50,167 @@ def fetch_openbb_fundamentals(ticker: str) -> dict:
         "_errors": []
     }
 
-    provider = "yfinance"
+    if not ticker:
+        results["_errors"].append("Brak tickera.")
+        return results
 
     try:
-        res = obb.equity.fundamental.metrics(symbol=ticker, provider=provider)
-        results["metrics"] = [r.model_dump() for r in res.results] if hasattr(res, "results") else str(res)
-    except Exception as e:
-        results["_errors"].append(f"metrics: {str(e)}")
+        stock = yf.Ticker(ticker)
 
-    try:
-        res = obb.equity.profile(symbol=ticker, provider=provider)
-        results["profile"] = [r.model_dump() for r in res.results] if hasattr(res, "results") else str(res)
-    except Exception as e:
-        results["_errors"].append(f"profile: {str(e)}")
+        # ------------------------------------------------------------
+        # INFO / PROFILE / METRICS
+        # ------------------------------------------------------------
+        try:
+            info = stock.info
 
-    try:
-        res = obb.equity.price_target(symbol=ticker, provider=provider)
-        results["price_target"] = [r.model_dump() for r in res.results] if hasattr(res, "results") else str(res)
-    except Exception as e:
-        results["_errors"].append(f"price_target: {str(e)}")
+            if not isinstance(info, dict):
+                info = {}
 
-    try:
-        res = obb.equity.fundamental.income(symbol=ticker, provider=provider)
-        results["income"] = [r.model_dump() for r in res.results] if hasattr(res, "results") else str(res)
-    except Exception as e:
-        results["_errors"].append(f"income: {str(e)}")
+        except Exception as e:
+            info = {}
+            results["_errors"].append(f"info: {str(e)}")
 
-    try:
-        res = obb.equity.fundamental.balance(symbol=ticker, provider=provider)
-        results["balance"] = [r.model_dump() for r in res.results] if hasattr(res, "results") else str(res)
-    except Exception as e:
-        results["_errors"].append(f"balance: {str(e)}")
+        # Profil spółki
+        results["profile"] = {
+            "symbol": ticker,
+            "longName": info.get("longName"),
+            "shortName": info.get("shortName"),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+            "country": info.get("country"),
+            "city": info.get("city"),
+            "state": info.get("state"),
+            "website": info.get("website"),
+            "longBusinessSummary": info.get("longBusinessSummary"),
+            "fullTimeEmployees": info.get("fullTimeEmployees"),
+            "currency": info.get("currency"),
+            "exchange": info.get("exchange"),
+            "quoteType": info.get("quoteType"),
+            "market": info.get("market"),
+        }
 
-    try:
-        res = obb.equity.fundamental.cash(symbol=ticker, provider=provider)
-        results["cash"] = [r.model_dump() for r in res.results] if hasattr(res, "results") else str(res)
+        # Podstawowe wskaźniki fundamentalne
+        results["metrics"] = {
+            "symbol": ticker,
+            "marketCap": info.get("marketCap"),
+            "enterpriseValue": info.get("enterpriseValue"),
+            "trailingPE": info.get("trailingPE"),
+            "forwardPE": info.get("forwardPE"),
+            "pegRatio": info.get("pegRatio"),
+            "priceToBook": info.get("priceToBook"),
+            "bookValue": info.get("bookValue"),
+            "priceToSalesTrailing12Months": info.get("priceToSalesTrailing12Months"),
+            "enterpriseToRevenue": info.get("enterpriseToRevenue"),
+            "enterpriseToEbitda": info.get("enterpriseToEbitda"),
+            "profitMargins": info.get("profitMargins"),
+            "operatingMargins": info.get("operatingMargins"),
+            "grossMargins": info.get("grossMargins"),
+            "ebitdaMargins": info.get("ebitdaMargins"),
+            "returnOnAssets": info.get("returnOnAssets"),
+            "returnOnEquity": info.get("returnOnEquity"),
+            "revenueGrowth": info.get("revenueGrowth"),
+            "earningsGrowth": info.get("earningsGrowth"),
+            "grossProfits": info.get("grossProfits"),
+            "totalRevenue": info.get("totalRevenue"),
+            "ebitda": info.get("ebitda"),
+            "netIncomeToCommon": info.get("netIncomeToCommon"),
+            "totalCash": info.get("totalCash"),
+            "totalDebt": info.get("totalDebt"),
+            "debtToEquity": info.get("debtToEquity"),
+            "currentRatio": info.get("currentRatio"),
+            "quickRatio": info.get("quickRatio"),
+            "freeCashflow": info.get("freeCashflow"),
+            "operatingCashflow": info.get("operatingCashflow"),
+            "dividendRate": info.get("dividendRate"),
+            "dividendYield": info.get("dividendYield"),
+            "payoutRatio": info.get("payoutRatio"),
+            "beta": info.get("beta"),
+            "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh"),
+            "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow"),
+            "fiftyDayAverage": info.get("fiftyDayAverage"),
+            "twoHundredDayAverage": info.get("twoHundredDayAverage"),
+            "sharesOutstanding": info.get("sharesOutstanding"),
+            "floatShares": info.get("floatShares"),
+            "heldPercentInsiders": info.get("heldPercentInsiders"),
+            "heldPercentInstitutions": info.get("heldPercentInstitutions"),
+        }
+
+        # Price target / rekomendacje analityków
+        results["price_target"] = {
+            "symbol": ticker,
+            "currentPrice": info.get("currentPrice"),
+            "targetHighPrice": info.get("targetHighPrice"),
+            "targetLowPrice": info.get("targetLowPrice"),
+            "targetMeanPrice": info.get("targetMeanPrice"),
+            "targetMedianPrice": info.get("targetMedianPrice"),
+            "recommendationMean": info.get("recommendationMean"),
+            "recommendationKey": info.get("recommendationKey"),
+            "numberOfAnalystOpinions": info.get("numberOfAnalystOpinions"),
+        }
+
+        # ------------------------------------------------------------
+        # INCOME STATEMENT
+        # ------------------------------------------------------------
+        try:
+            income = stock.financials
+
+            if income is not None and not income.empty:
+                results["income"] = income.to_dict()
+            else:
+                results["income"] = None
+                results["_errors"].append("income: brak danych z Yahoo Finance.")
+
+        except Exception as e:
+            results["income"] = None
+            results["_errors"].append(f"income: {str(e)}")
+
+        # ------------------------------------------------------------
+        # BALANCE SHEET
+        # ------------------------------------------------------------
+        try:
+            balance = stock.balance_sheet
+
+            if balance is not None and not balance.empty:
+                results["balance"] = balance.to_dict()
+            else:
+                results["balance"] = None
+                results["_errors"].append("balance: brak danych z Yahoo Finance.")
+
+        except Exception as e:
+            results["balance"] = None
+            results["_errors"].append(f"balance: {str(e)}")
+
+        # ------------------------------------------------------------
+        # CASH FLOW
+        # ------------------------------------------------------------
+        try:
+            cash = stock.cashflow
+
+            if cash is not None and not cash.empty:
+                results["cash"] = cash.to_dict()
+            else:
+                results["cash"] = None
+                results["_errors"].append("cash: brak danych z Yahoo Finance.")
+
+        except Exception as e:
+            results["cash"] = None
+            results["_errors"].append(f"cash: {str(e)}")
+
     except Exception as e:
-        results["_errors"].append(f"cash: {str(e)}")
+        results["_errors"].append(f"yfinance general error: {str(e)}")
 
     return results
 
 
+# ============================================================
+# FUNKCJA DO CZYSZCZENIA POD st.json
+# ============================================================
+
 def clean_for_json(data):
+    """
+    Zamienia nietypowe typy danych, np. Timestamp, NaN, numpy types,
+    na format bezpieczny dla st.json.
+    """
     return json.loads(json.dumps(data, default=str))
 
 
