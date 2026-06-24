@@ -1520,8 +1520,7 @@ elif app_mode == "📊 OpenBB Fundamentals (4.x)":
             st.session_state.fundamental_ticker = ticker_f
 
     if st.session_state.fundamental_data is not None:
-        fund_data = st.session_state.fundamental_data
-
+    fund_data = fetch_yfinance_fundamentals(ticker_f)
         st.subheader(f"Fundamenty: {st.session_state.fundamental_ticker}")
 
         errors = fund_data.get("_errors", [])
