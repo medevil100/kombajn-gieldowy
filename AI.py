@@ -9,7 +9,12 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from plotly.subplots import make_subplots
-
+import streamlit as st
+from plotly.subplots import make_subplots
+# AWARYJNE ZMIENNE PO USUNIĘCIU OPENBB
+OPENBB_OK = False
+OPENBB_ERROR = "OpenBB usunięty. Używany jest yfinance."
+obb = None
 # ============================================================
 # OPCJONALNE BIBLIOTEKI AI / SEARCH
 # ============================================================
