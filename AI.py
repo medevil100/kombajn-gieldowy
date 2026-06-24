@@ -1460,11 +1460,6 @@ def fetch_yfinance_fundamentals(ticker: str) -> dict:
 
     except Exception as e:
         results["_errors"].append(f"yfinance general error: {str(e)}")
-
-    return results
-elif app_mode == "📰 Skaner wiadomości":
-    st.title("📰 Skaner wiadomości")
-
     ticker_n = st.text_input("Ticker do newsów:", "AAPL").upper().strip()
 
     if st.button("Pobierz newsy"):
@@ -1478,6 +1473,11 @@ elif app_mode == "📰 Skaner wiadomości":
                 st.write("- " + h)
         else:
             st.info(msg or "Brak newsów.")
+    return results
+elif app_mode == "📰 Skaner wiadomości":
+    st.title("📰 Skaner wiadomości")
+
+
 
 
 # =========================================================
