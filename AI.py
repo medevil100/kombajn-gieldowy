@@ -1,6 +1,7 @@
 import os
 
-# KROK 1: Wymuszenie zapisu plików OpenBB w katalogu /tmp (zanim nastąpi import)
+# KROK 1: Blokada automatycznego przebudowywania pakietu (kluczowe dla Streamlit Cloud)
+os.environ["OPENBB_AUTO_BUILD"] = "False"
 os.environ["OPENBB_USER_SETTINGS_DIRECTORY"] = "/tmp/.openbb"
 os.environ["OPENBB_APP_SETTINGS_DIRECTORY"] = "/tmp/.openbb"
 
@@ -34,6 +35,7 @@ except Exception as e:
     obb = None
     OPENBB_OK = False
     OPENBB_ERROR = str(e)
+
 
 
 # =========================================================
