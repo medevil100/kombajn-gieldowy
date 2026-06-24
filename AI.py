@@ -993,7 +993,7 @@ with st.sidebar:
         st.write("OpenAI:", "✅ klucz wykryty" if openai_key else "❌ brak klucza")
         st.write("Tavily:", "✅ klucz wykryty" if tavily_key else "❌ brak klucza")
         st.write("Tavily package:", "✅ OK" if TavilyClient is not None else "⚠️ brak tavily-python")
-        st.write("OpenBB:", "✅ OK" if OPENBB_OK else f"❌ {OPENBB_ERROR[:120]}")
+        st.write("Źródło danych:", "✅ Yahoo Finance / yfinance")
 
 
 # =========================================================
