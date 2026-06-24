@@ -1280,7 +1280,188 @@ if app_mode == "📈 Trading":
 # =========================================================
 # MODE: NEWS SCANNER
 # =========================================================
+def _df_to_jsonable_dict(df):
+    if df is None or df.empty:
+        return None
 
+    df2 = df.copy()
+    df2.index = df2.index.map(str)
+    df2.columns = df2.columns.map(str)
+
+    return df2.to_dict()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_yfinance_fundamentals(ticker: str) -> dict:
+    """
+    Pobiera dane fundamentalne bez OpenBB, bezpośrednio przez yfinance.
+    """
+
+    ticker = str(ticker).strip().upper()
+
+    results = {
+        "metrics": None,
+        "profile": None,
+        "price_target": None,
+        "income": None,
+        "balance": None,
+        "cash": None,
+        "_errors": []
+    }
+
+    if not ticker:
+        results["_errors"].append("Brak tickera.")
+        return results
+
+    try:
+        stock = yf.Ticker(ticker)
+
+        info = {}
+        fast_info = {}
+
+        try:
+            info = stock.get_info()
+            if not isinstance(info, dict):
+                info = {}
+        except Exception as e:
+            results["_errors"].append(f"info: {str(e)}")
+            info = {}
+
+        try:
+            fi = stock.fast_info
+            if fi:
+                fast_info = dict(fi)
+        except Exception as e:
+            results["_errors"].append(f"fast_info: {str(e)}")
+            fast_info = {}
+
+        current_price = (
+            info.get("currentPrice")
+            or info.get("regularMarketPrice")
+            or fast_info.get("lastPrice")
+        )
+
+        market_cap = (
+            info.get("marketCap")
+            or fast_info.get("marketCap")
+        )
+
+        currency = (
+            info.get("currency")
+            or fast_info.get("currency")
+        )
+
+        results["profile"] = {
+            "symbol": ticker,
+            "longName": info.get("longName") or info.get("shortName") or ticker,
+            "shortName": info.get("shortName"),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+            "country": info.get("country"),
+            "city": info.get("city"),
+            "website": info.get("website"),
+            "longBusinessSummary": info.get("longBusinessSummary"),
+            "fullTimeEmployees": info.get("fullTimeEmployees"),
+            "currency": currency,
+            "exchange": info.get("exchange") or info.get("fullExchangeName"),
+            "quoteType": info.get("quoteType"),
+            "market": info.get("market"),
+        }
+
+        results["metrics"] = {
+            "symbol": ticker,
+            "currentPrice": current_price,
+            "currency": currency,
+            "previousClose": info.get("previousClose") or fast_info.get("previousClose"),
+            "open": info.get("open") or fast_info.get("open"),
+            "dayHigh": info.get("dayHigh") or fast_info.get("dayHigh"),
+            "dayLow": info.get("dayLow") or fast_info.get("dayLow"),
+            "marketCap": market_cap,
+            "enterpriseValue": info.get("enterpriseValue"),
+            "trailingPE": info.get("trailingPE"),
+            "forwardPE": info.get("forwardPE"),
+            "pegRatio": info.get("pegRatio"),
+            "priceToBook": info.get("priceToBook"),
+            "bookValue": info.get("bookValue"),
+            "priceToSalesTrailing12Months": info.get("priceToSalesTrailing12Months"),
+            "enterpriseToRevenue": info.get("enterpriseToRevenue"),
+            "enterpriseToEbitda": info.get("enterpriseToEbitda"),
+            "profitMargins": info.get("profitMargins"),
+            "operatingMargins": info.get("operatingMargins"),
+            "grossMargins": info.get("grossMargins"),
+            "ebitdaMargins": info.get("ebitdaMargins"),
+            "returnOnAssets": info.get("returnOnAssets"),
+            "returnOnEquity": info.get("returnOnEquity"),
+            "revenueGrowth": info.get("revenueGrowth"),
+            "earningsGrowth": info.get("earningsGrowth"),
+            "totalRevenue": info.get("totalRevenue"),
+            "grossProfits": info.get("grossProfits"),
+            "ebitda": info.get("ebitda"),
+            "netIncomeToCommon": info.get("netIncomeToCommon"),
+            "totalCash": info.get("totalCash"),
+            "totalDebt": info.get("totalDebt"),
+            "debtToEquity": info.get("debtToEquity"),
+            "currentRatio": info.get("currentRatio"),
+            "quickRatio": info.get("quickRatio"),
+            "freeCashflow": info.get("freeCashflow"),
+            "operatingCashflow": info.get("operatingCashflow"),
+            "dividendRate": info.get("dividendRate"),
+            "dividendYield": info.get("dividendYield"),
+            "payoutRatio": info.get("payoutRatio"),
+            "beta": info.get("beta"),
+            "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh") or fast_info.get("yearHigh"),
+            "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow") or fast_info.get("yearLow"),
+            "fiftyDayAverage": info.get("fiftyDayAverage") or fast_info.get("fiftyDayAverage"),
+            "twoHundredDayAverage": info.get("twoHundredDayAverage") or fast_info.get("twoHundredDayAverage"),
+            "sharesOutstanding": info.get("sharesOutstanding") or fast_info.get("shares"),
+            "floatShares": info.get("floatShares"),
+            "heldPercentInsiders": info.get("heldPercentInsiders"),
+            "heldPercentInstitutions": info.get("heldPercentInstitutions"),
+        }
+
+        results["price_target"] = {
+            "symbol": ticker,
+            "currentPrice": current_price,
+            "targetHighPrice": info.get("targetHighPrice"),
+            "targetLowPrice": info.get("targetLowPrice"),
+            "targetMeanPrice": info.get("targetMeanPrice"),
+            "targetMedianPrice": info.get("targetMedianPrice"),
+            "recommendationMean": info.get("recommendationMean"),
+            "recommendationKey": info.get("recommendationKey"),
+            "numberOfAnalystOpinions": info.get("numberOfAnalystOpinions"),
+        }
+
+        try:
+            income = stock.financials
+            results["income"] = _df_to_jsonable_dict(income)
+            if results["income"] is None:
+                results["_errors"].append("income: brak danych z Yahoo Finance.")
+        except Exception as e:
+            results["income"] = None
+            results["_errors"].append(f"income: {str(e)}")
+
+        try:
+            balance = stock.balance_sheet
+            results["balance"] = _df_to_jsonable_dict(balance)
+            if results["balance"] is None:
+                results["_errors"].append("balance: brak danych z Yahoo Finance.")
+        except Exception as e:
+            results["balance"] = None
+            results["_errors"].append(f"balance: {str(e)}")
+
+        try:
+            cash = stock.cashflow
+            results["cash"] = _df_to_jsonable_dict(cash)
+            if results["cash"] is None:
+                results["_errors"].append("cash: brak danych z Yahoo Finance.")
+        except Exception as e:
+            results["cash"] = None
+            results["_errors"].append(f"cash: {str(e)}")
+
+    except Exception as e:
+        results["_errors"].append(f"yfinance general error: {str(e)}")
+
+    return results
 elif app_mode == "📰 Skaner wiadomości":
     st.title("📰 Skaner wiadomości")
 
