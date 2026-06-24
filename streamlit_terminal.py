@@ -6,7 +6,6 @@ import numpy as np
 from openai import OpenAI
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-
 try:
     from tavily import TavilyClient
 except Exception:
