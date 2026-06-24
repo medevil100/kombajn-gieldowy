@@ -1426,82 +1426,83 @@ elif app_mode == "📊 OpenBB Fundamentals (4.x)":
     )
 
     ticker_f = st.text_input(
-        "Wpisz ticker do fundamentów:",
-        "AAPL",
-        key="fundamental_ticker_input"
-    ).upper().strip()
+    "Wpisz ticker do fundamentów:",
+    "AAPL",
+    key="fundamental_ticker_input"
+).upper().strip()
 
-    if "fundamental_data" not in st.session_state:
-        st.session_state.fundamental_data = None
+if "fundamental_data" not in st.session_state:
+    st.session_state.fundamental_data = None
 
-    if "fundamental_ticker" not in st.session_state:
-        st.session_state.fundamental_ticker = None
+if "fundamental_ticker" not in st.session_state:
+    st.session_state.fundamental_ticker = None
 
-    if st.button("Pobierz fundamenty", key="fetch_fundamentals_button"):
-        if not ticker_f:
-            st.error("Wpisz poprawny ticker.")
-        else:
-            with st.spinner("Pobieranie danych fundamentalnych z Yahoo Finance..."):
-                fund_data = fetch_openbb_fundamentals(ticker_f)
+if st.button("Pobierz Fundamenty", key="fetch_fundamentals_button"):
+    if not ticker_f:
+        st.error("Wpisz poprawny ticker.")
+    else:
+        with st.spinner("Pobieranie danych fundamentalnych z Yahoo Finance..."):
+            fund_data = fetch_yfinance_fundamentals(ticker_f)
 
-            st.session_state.fundamental_data = fund_data
-            st.session_state.fundamental_ticker = ticker_f
+        st.session_state.fundamental_data = fund_data
+        st.session_state.fundamental_ticker = ticker_f
+
 if st.session_state.fundamental_data is not None:
-  if st.session_state.fundamental_data is not None:
     fund_data = st.session_state.fundamental_data
-    st.subheader(f"Fundamenty: {st.session_state.fundamental_ticker}") 
 
-        errors = fund_data.get("_errors", [])
+    st.subheader(f"Fundamenty: {st.session_state.fundamental_ticker}")
 
-        if errors:
-            with st.expander("Ostrzeżenia / braki danych"):
-                for err in errors:
-                    st.warning(err)
+    errors = fund_data.get("_errors", [])
 
-        col1, col2, col3 = st.columns(3)
+    if errors:
+        with st.expander("Ostrzeżenia / braki danych"):
+            for err in errors:
+                st.warning(str(err))
 
-        metrics = fund_data.get("metrics") or {}
-        profile = fund_data.get("profile") or {}
-        price_target = fund_data.get("price_target") or {}
+    metrics = fund_data.get("metrics") or {}
+    profile = fund_data.get("profile") or {}
+    price_target = fund_data.get("price_target") or {}
 
-        with col1:
-            st.metric(
-                "Cena",
-                metrics.get("currentPrice") or "brak"
-            )
+    col1, col2, col3 = st.columns(3)
 
-        with col2:
-            st.metric(
-                "Market Cap",
-                metrics.get("marketCap") or "brak"
-            )
+    with col1:
+        st.metric(
+            "Cena",
+            metrics.get("currentPrice") if metrics.get("currentPrice") is not None else "brak"
+        )
 
-        with col3:
-            st.metric(
-                "P/E",
-                metrics.get("trailingPE") or "brak"
-            )
+    with col2:
+        st.metric(
+            "Market Cap",
+            metrics.get("marketCap") if metrics.get("marketCap") is not None else "brak"
+        )
 
-        st.write("### Profil spółki")
-        st.json(clean_for_json(profile))
+    with col3:
+        st.metric(
+            "P/E",
+            metrics.get("trailingPE") if metrics.get("trailingPE") is not None else "brak"
+        )
 
-        st.write("### Wskaźniki")
-        st.json(clean_for_json(metrics))
+    st.write("### Profil spółki")
+    st.json(clean_for_json(profile))
 
-        st.write("### Price Target / Analitycy")
-        st.json(clean_for_json(price_target))
+    st.write("### Wskaźniki")
+    st.json(clean_for_json(metrics))
 
-        with st.expander("Rachunek zysków i strat"):
-            st.json(clean_for_json(fund_data.get("income")))
+    st.write("### Price Target / Analitycy")
+    st.json(clean_for_json(price_target))
 
-        with st.expander("Bilans"):
-            st.json(clean_for_json(fund_data.get("balance")))
+    with st.expander("Rachunek zysków i strat"):
+        st.json(clean_for_json(fund_data.get("income")))
 
-        with st.expander("Cash Flow"):
-            st.json(clean_for_json(fund_data.get("cash")))
+    with st.expander("Bilans"):
+        st.json(clean_for_json(fund_data.get("balance")))
 
-        with st.expander("Pełne dane JSON"):
-            st.json(clean_for_json(fund_data))
+    with st.expander("Cash Flow"):
+        st.json(clean_for_json(fund_data.get("cash")))
+
+    with st.expander("Pełne dane JSON"):
+        st.json(clean_for_json(fund_data))
 # =========================================================
 # MODE: MACRO
 # =========================================================
