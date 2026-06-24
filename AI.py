@@ -1,10 +1,45 @@
 import os
 import sys
 
-# KROK 1: Blokada automatycznego przebudowywania pakietu i ustawienie ścieżek tymczasowych
-os.environ["OPENBB_AUTO_BUILD"] = "False"
 os.environ["OPENBB_USER_SETTINGS_DIRECTORY"] = "/tmp/.openbb"
 os.environ["OPENBB_APP_SETTINGS_DIRECTORY"] = "/tmp/.openbb"
+os.makedirs("/tmp/.openbb", exist_ok=True)
+
+import requests
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import plotly.graph_objects as go
+import streamlit as st
+from plotly.subplots import make_subplots
+
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
+
+try:
+    from tavily import TavilyClient
+except Exception:
+    TavilyClient = None
+
+try:
+    from openbb import obb
+
+    if not hasattr(obb, "equity"):
+        OPENBB_OK = False
+        OPENBB_ERROR = (
+            "OpenBB działa, ale nie znaleziono obb.equity. "
+            "Prawdopodobnie brakuje rozszerzenia openbb-equity lub openbb-yfinance."
+        )
+    else:
+        OPENBB_OK = True
+        OPENBB_ERROR = ""
+
+except Exception as e:
+    obb = None
+    OPENBB_OK = False
+    OPENBB_ERROR = str(e)
 
 # KROK 2: Import pozostałych standardowych bibliotek
 import requests
