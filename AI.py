@@ -1,10 +1,12 @@
 import os
-# KROK 1: Blokada automatycznego przebudowywania pakietu (kluczowe dla Streamlit Cloud)
+import sys
+
+# KROK 1: Wyłączenie automatycznej kompilacji i ustawienie bezpiecznych ścieżek
 os.environ["OPENBB_AUTO_BUILD"] = "False"
 os.environ["OPENBB_USER_SETTINGS_DIRECTORY"] = "/tmp/.openbb"
 os.environ["OPENBB_APP_SETTINGS_DIRECTORY"] = "/tmp/.openbb"
 
-# KROK 2: Import pozostałych standardowych bibliotek
+# KROK 2: Standardowe importy
 import requests
 import numpy as np
 import pandas as pd
@@ -13,29 +15,31 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-# Optional OpenAI
+# Opcjonalne biblioteki AI/Search
 try:
     from openai import OpenAI
 except Exception:
     OpenAI = None
 
-# Optional Tavily
 try:
     from tavily import TavilyClient
 except Exception:
     TavilyClient = None
 
-# Optional OpenBB
+# KROK 3: Poprawny import OpenBB z wymuszonym odświeżeniem rozszerzeń
 try:
     from openbb import obb
+    
+    # Wymuszenie załadowania dostawców w środowisku bez uprawnień administratora
+    if not hasattr(obb, "equity"):
+        obb.reference.build(modules=["equity"])
+        
     OPENBB_OK = True
     OPENBB_ERROR = ""
 except Exception as e:
     obb = None
     OPENBB_OK = False
     OPENBB_ERROR = str(e)
-
-
 
 # =========================================================
 # CONFIG & NEON UI
