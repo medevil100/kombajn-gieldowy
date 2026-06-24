@@ -1300,31 +1300,100 @@ elif app_mode == "📰 Skaner wiadomości":
 
 
 # =========================================================
-# MODE: OPENBB FUNDAMENTALS
+# MODE: YFINANCE FUNDAMENTALS
 # =========================================================
 
 elif app_mode == "📊 OpenBB Fundamentals (4.x)":
-    st.title("📊 Dane fundamentalne z OpenBB Platform v4")
+    st.title("📊 Dane fundamentalne z Yahoo Finance")
 
     st.info(
-        "Ten moduł korzysta z OpenBB. Jeśli OpenBB albo provider nie działa, aplikacja pokaże błąd zamiast się wywalić."
+        "Ten moduł korzysta bezpośrednio z Yahoo Finance przez bibliotekę yfinance. "
+        "OpenBB został usunięty dla większej stabilności na Streamlit Cloud."
+    )
+
+    st.caption(
+        "Przykłady tickerów: AAPL, MSFT, NVDA, TSLA, BTC-USD. "
+        "Dla GPW używaj sufiksu .WA, np. CDR.WA, PKO.WA, KGH.WA."
     )
 
     ticker_f = st.text_input(
         "Wpisz ticker do fundamentów:",
-        "AAPL"
+        "AAPL",
+        key="fundamental_ticker_input"
     ).upper().strip()
 
-    if st.button("Pobierz Fundamenty"):
-        with st.spinner("Pobieranie danych fundamentalnych z OpenBB..."):
-            fund_data = fetch_openbb_fundamentals(ticker_f)
+    if "fundamental_data" not in st.session_state:
+        st.session_state.fundamental_data = None
 
-        if fund_data:
-            st.json(clean_for_json(fund_data))
+    if "fundamental_ticker" not in st.session_state:
+        st.session_state.fundamental_ticker = None
+
+    if st.button("Pobierz fundamenty", key="fetch_fundamentals_button"):
+        if not ticker_f:
+            st.error("Wpisz poprawny ticker.")
         else:
-            st.error("Nie udało się pobrać danych fundamentalnych.")
+            with st.spinner("Pobieranie danych fundamentalnych z Yahoo Finance..."):
+                fund_data = fetch_openbb_fundamentals(ticker_f)
 
+            st.session_state.fundamental_data = fund_data
+            st.session_state.fundamental_ticker = ticker_f
 
+    if st.session_state.fundamental_data is not None:
+        fund_data = st.session_state.fundamental_data
+
+        st.subheader(f"Fundamenty: {st.session_state.fundamental_ticker}")
+
+        errors = fund_data.get("_errors", [])
+
+        if errors:
+            with st.expander("Ostrzeżenia / braki danych"):
+                for err in errors:
+                    st.warning(err)
+
+        col1, col2, col3 = st.columns(3)
+
+        metrics = fund_data.get("metrics") or {}
+        profile = fund_data.get("profile") or {}
+        price_target = fund_data.get("price_target") or {}
+
+        with col1:
+            st.metric(
+                "Cena",
+                metrics.get("currentPrice") or "brak"
+            )
+
+        with col2:
+            st.metric(
+                "Market Cap",
+                metrics.get("marketCap") or "brak"
+            )
+
+        with col3:
+            st.metric(
+                "P/E",
+                metrics.get("trailingPE") or "brak"
+            )
+
+        st.write("### Profil spółki")
+        st.json(clean_for_json(profile))
+
+        st.write("### Wskaźniki")
+        st.json(clean_for_json(metrics))
+
+        st.write("### Price Target / Analitycy")
+        st.json(clean_for_json(price_target))
+
+        with st.expander("Rachunek zysków i strat"):
+            st.json(clean_for_json(fund_data.get("income")))
+
+        with st.expander("Bilans"):
+            st.json(clean_for_json(fund_data.get("balance")))
+
+        with st.expander("Cash Flow"):
+            st.json(clean_for_json(fund_data.get("cash")))
+
+        with st.expander("Pełne dane JSON"):
+            st.json(clean_for_json(fund_data))
 # =========================================================
 # MODE: MACRO
 # =========================================================
