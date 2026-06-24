@@ -1280,209 +1280,137 @@ if app_mode == "📈 Trading":
 # =========================================================
 # MODE: NEWS SCANNER
 # =========================================================
-def _df_to_jsonable_dict(df):
-    if df is None or df.empty:
-        return None
 
-    df2 = df.copy()
-    df2.index = df2.index.map(str)
-    df2.columns = df2.columns.map(str)
-
-    return df2.to_dict()
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_yfinance_fundamentals(ticker: str) -> dict:
-    """
-    Pobiera dane fundamentalne bez OpenBB, bezpośrednio przez yfinance.
-    """
-
-    ticker = str(ticker).strip().upper()
-
-    results = {
-        "metrics": None,
-        "profile": None,
-        "price_target": None,
-        "income": None,
-        "balance": None,
-        "cash": None,
-        "_errors": []
-    }
-
-    if not ticker:
-        results["_errors"].append("Brak tickera.")
-        return results
-
-    try:
-        stock = yf.Ticker(ticker)
-
-        info = {}
-        fast_info = {}
-
-        try:
-            info = stock.get_info()
-            if not isinstance(info, dict):
-                info = {}
-        except Exception as e:
-            results["_errors"].append(f"info: {str(e)}")
-            info = {}
-
-        try:
-            fi = stock.fast_info
-            if fi:
-                fast_info = dict(fi)
-        except Exception as e:
-            results["_errors"].append(f"fast_info: {str(e)}")
-            fast_info = {}
-
-        current_price = (
-            info.get("currentPrice")
-            or info.get("regularMarketPrice")
-            or fast_info.get("lastPrice")
-        )
-
-        market_cap = (
-            info.get("marketCap")
-            or fast_info.get("marketCap")
-        )
-
-        currency = (
-            info.get("currency")
-            or fast_info.get("currency")
-        )
-
-        results["profile"] = {
-            "symbol": ticker,
-            "longName": info.get("longName") or info.get("shortName") or ticker,
-            "shortName": info.get("shortName"),
-            "sector": info.get("sector"),
-            "industry": info.get("industry"),
-            "country": info.get("country"),
-            "city": info.get("city"),
-            "website": info.get("website"),
-            "longBusinessSummary": info.get("longBusinessSummary"),
-            "fullTimeEmployees": info.get("fullTimeEmployees"),
-            "currency": currency,
-            "exchange": info.get("exchange") or info.get("fullExchangeName"),
-            "quoteType": info.get("quoteType"),
-            "market": info.get("market"),
-        }
-
-        results["metrics"] = {
-            "symbol": ticker,
-            "currentPrice": current_price,
-            "currency": currency,
-            "previousClose": info.get("previousClose") or fast_info.get("previousClose"),
-            "open": info.get("open") or fast_info.get("open"),
-            "dayHigh": info.get("dayHigh") or fast_info.get("dayHigh"),
-            "dayLow": info.get("dayLow") or fast_info.get("dayLow"),
-            "marketCap": market_cap,
-            "enterpriseValue": info.get("enterpriseValue"),
-            "trailingPE": info.get("trailingPE"),
-            "forwardPE": info.get("forwardPE"),
-            "pegRatio": info.get("pegRatio"),
-            "priceToBook": info.get("priceToBook"),
-            "bookValue": info.get("bookValue"),
-            "priceToSalesTrailing12Months": info.get("priceToSalesTrailing12Months"),
-            "enterpriseToRevenue": info.get("enterpriseToRevenue"),
-            "enterpriseToEbitda": info.get("enterpriseToEbitda"),
-            "profitMargins": info.get("profitMargins"),
-            "operatingMargins": info.get("operatingMargins"),
-            "grossMargins": info.get("grossMargins"),
-            "ebitdaMargins": info.get("ebitdaMargins"),
-            "returnOnAssets": info.get("returnOnAssets"),
-            "returnOnEquity": info.get("returnOnEquity"),
-            "revenueGrowth": info.get("revenueGrowth"),
-            "earningsGrowth": info.get("earningsGrowth"),
-            "totalRevenue": info.get("totalRevenue"),
-            "grossProfits": info.get("grossProfits"),
-            "ebitda": info.get("ebitda"),
-            "netIncomeToCommon": info.get("netIncomeToCommon"),
-            "totalCash": info.get("totalCash"),
-            "totalDebt": info.get("totalDebt"),
-            "debtToEquity": info.get("debtToEquity"),
-            "currentRatio": info.get("currentRatio"),
-            "quickRatio": info.get("quickRatio"),
-            "freeCashflow": info.get("freeCashflow"),
-            "operatingCashflow": info.get("operatingCashflow"),
-            "dividendRate": info.get("dividendRate"),
-            "dividendYield": info.get("dividendYield"),
-            "payoutRatio": info.get("payoutRatio"),
-            "beta": info.get("beta"),
-            "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh") or fast_info.get("yearHigh"),
-            "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow") or fast_info.get("yearLow"),
-            "fiftyDayAverage": info.get("fiftyDayAverage") or fast_info.get("fiftyDayAverage"),
-            "twoHundredDayAverage": info.get("twoHundredDayAverage") or fast_info.get("twoHundredDayAverage"),
-            "sharesOutstanding": info.get("sharesOutstanding") or fast_info.get("shares"),
-            "floatShares": info.get("floatShares"),
-            "heldPercentInsiders": info.get("heldPercentInsiders"),
-            "heldPercentInstitutions": info.get("heldPercentInstitutions"),
-        }
-
-        results["price_target"] = {
-            "symbol": ticker,
-            "currentPrice": current_price,
-            "targetHighPrice": info.get("targetHighPrice"),
-            "targetLowPrice": info.get("targetLowPrice"),
-            "targetMeanPrice": info.get("targetMeanPrice"),
-            "targetMedianPrice": info.get("targetMedianPrice"),
-            "recommendationMean": info.get("recommendationMean"),
-            "recommendationKey": info.get("recommendationKey"),
-            "numberOfAnalystOpinions": info.get("numberOfAnalystOpinions"),
-        }
-
-        try:
-            income = stock.financials
-            results["income"] = _df_to_jsonable_dict(income)
-            if results["income"] is None:
-                results["_errors"].append("income: brak danych z Yahoo Finance.")
-        except Exception as e:
-            results["income"] = None
-            results["_errors"].append(f"income: {str(e)}")
-
-        try:
-            balance = stock.balance_sheet
-            results["balance"] = _df_to_jsonable_dict(balance)
-            if results["balance"] is None:
-                results["_errors"].append("balance: brak danych z Yahoo Finance.")
-        except Exception as e:
-            results["balance"] = None
-            results["_errors"].append(f"balance: {str(e)}")
-
-        try:
-            cash = stock.cashflow
-            results["cash"] = _df_to_jsonable_dict(cash)
-            if results["cash"] is None:
-                results["_errors"].append("cash: brak danych z Yahoo Finance.")
-        except Exception as e:
-            results["cash"] = None
-            results["_errors"].append(f"cash: {str(e)}")
-
-    except Exception as e:
-        results["_errors"].append(f"yfinance general error: {str(e)}")
-    ticker_n = st.text_input("Ticker do newsów:", "AAPL").upper().strip()
-
-    if st.button("Pobierz newsy"):
-        with st.spinner("Pobieranie newsów..."):
-            sentiment, headlines, msg = fetch_news_sentiment(ticker_n)
-
-        st.metric("Sentyment", sentiment)
-
-        if headlines:
-            for h in headlines:
-                st.write("- " + h)
-        else:
-            st.info(msg or "Brak newsów.")
-    return results
 elif app_mode == "📰 Skaner wiadomości":
     st.title("📰 Skaner wiadomości")
 
+    ticker_n = st.text_input(
+        "Ticker do newsów:",
+        "AAPL",
+        key="news_ticker_input"
+    ).upper().strip()
 
+    if st.button("Pobierz newsy", key="fetch_news_button"):
+        if not ticker_n:
+            st.error("Wpisz poprawny ticker.")
+        else:
+            with st.spinner("Pobieranie newsów..."):
+                try:
+                    sentiment, headlines, msg = fetch_news_sentiment(ticker_n)
+
+                    st.metric("Sentyment", sentiment)
+
+                    if headlines:
+                        for h in headlines:
+                            st.write("- " + str(h))
+                    else:
+                        st.info(msg or "Brak newsów.")
+
+                except Exception as e:
+                    st.error(f"Błąd pobierania newsów: {e}")
 
 
 # =========================================================
 # MODE: YFINANCE FUNDAMENTALS
 # =========================================================
+
+elif app_mode in ["📊 Yahoo Finance Fundamentals", "📊 OpenBB Fundamentals (4.x)"]:
+    st.title("📊 Dane fundamentalne z Yahoo Finance")
+
+    st.info(
+        "Ten moduł korzysta bezpośrednio z Yahoo Finance przez yfinance. "
+        "OpenBB został usunięty dla większej stabilności na Streamlit Cloud."
+    )
+
+    st.caption(
+        "Przykłady tickerów: AAPL, MSFT, NVDA, TSLA, BTC-USD. "
+        "Dla GPW używaj sufiksu .WA, np. CDR.WA, PKO.WA, KGH.WA."
+    )
+
+    ticker_f = st.text_input(
+        "Wpisz ticker do fundamentów:",
+        "AAPL",
+        key="fundamental_ticker_input"
+    ).upper().strip()
+
+    if "fundamental_data" not in st.session_state:
+        st.session_state.fundamental_data = None
+
+    if "fundamental_ticker" not in st.session_state:
+        st.session_state.fundamental_ticker = None
+
+    if st.button("Pobierz Fundamenty", key="fetch_fundamentals_button"):
+        if not ticker_f:
+            st.error("Wpisz poprawny ticker.")
+        else:
+            with st.spinner("Pobieranie danych fundamentalnych z Yahoo Finance..."):
+                try:
+                    fund_data = fetch_yfinance_fundamentals(ticker_f)
+
+                    st.session_state.fundamental_data = fund_data
+                    st.session_state.fundamental_ticker = ticker_f
+
+                except Exception as e:
+                    st.session_state.fundamental_data = None
+                    st.session_state.fundamental_ticker = None
+                    st.error(f"Błąd pobierania fundamentów: {e}")
+
+    if st.session_state.fundamental_data is not None:
+        fund_data = st.session_state.fundamental_data
+
+        st.subheader(f"Fundamenty: {st.session_state.fundamental_ticker}")
+
+        errors = fund_data.get("_errors", [])
+
+        if errors:
+            with st.expander("Ostrzeżenia / braki danych"):
+                for err in errors:
+                    st.warning(str(err))
+
+        metrics = fund_data.get("metrics") or {}
+        profile = fund_data.get("profile") or {}
+        price_target = fund_data.get("price_target") or {}
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.metric(
+                "Cena",
+                metrics.get("currentPrice") if metrics.get("currentPrice") is not None else "brak"
+            )
+
+        with col2:
+            st.metric(
+                "Market Cap",
+                metrics.get("marketCap") if metrics.get("marketCap") is not None else "brak"
+            )
+
+        with col3:
+            st.metric(
+                "P/E",
+                metrics.get("trailingPE") if metrics.get("trailingPE") is not None else "brak"
+            )
+
+        st.write("### Profil spółki")
+        st.json(clean_for_json(profile))
+
+        st.write("### Wskaźniki")
+        st.json(clean_for_json(metrics))
+
+        st.write("### Price Target / Analitycy")
+        st.json(clean_for_json(price_target))
+
+        with st.expander("Rachunek zysków i strat"):
+            st.json(clean_for_json(fund_data.get("income")))
+
+        with st.expander("Bilans"):
+            st.json(clean_for_json(fund_data.get("balance")))
+
+        with st.expander("Cash Flow"):
+            st.json(clean_for_json(fund_data.get("cash")))
+
+        with st.expander("Pełne dane JSON"):
+            st.json(clean_for_json(fund_data))
 
 elif app_mode == "📊 OpenBB Fundamentals (4.x)":
     st.title("📊 Dane fundamentalne z Yahoo Finance")
