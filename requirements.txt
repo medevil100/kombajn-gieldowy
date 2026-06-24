@@ -18,4 +18,3 @@ scikit-learn
 streamlit-autorefresh
 websocket-client
 cloudscraper
-python-3.11
