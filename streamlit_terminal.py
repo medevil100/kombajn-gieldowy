@@ -1,5 +1,4 @@
 import os
-
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -1060,4 +1059,5 @@ To narzędzie edukacyjne i analityczne. Nie stanowi rekomendacji inwestycyjnej.
 """,
     unsafe_allow_html=True
 )
+
 
