@@ -1,16 +1,19 @@
 import os
 import sys
 
+os.environ["OPENBB_AUTO_BUILD"] = "false"
 os.environ["OPENBB_USER_SETTINGS_DIRECTORY"] = "/tmp/.openbb"
 os.environ["OPENBB_APP_SETTINGS_DIRECTORY"] = "/tmp/.openbb"
 os.makedirs("/tmp/.openbb", exist_ok=True)
 
+import json
 import requests
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 import streamlit as st
+
 from plotly.subplots import make_subplots
 
 try:
@@ -23,74 +26,45 @@ try:
 except Exception:
     TavilyClient = None
 
-try:
-    from openbb import obb
+obb = None
+OPENBB_OK = False
+OPENBB_ERROR = ""
 
-    if not hasattr(obb, "equity"):
-        OPENBB_OK = False
-        OPENBB_ERROR = (
-            "OpenBB działa, ale nie znaleziono obb.equity. "
-            "Prawdopodobnie brakuje rozszerzenia openbb-equity lub openbb-yfinance."
-        )
-    else:
+try:
+    from openbb import obb as _obb
+
+    obb = _obb
+
+    if hasattr(obb, "equity"):
         OPENBB_OK = True
         OPENBB_ERROR = ""
+    else:
+        OPENBB_OK = False
+        OPENBB_ERROR = (
+            "OpenBB został zaimportowany, ale nie znaleziono modułu obb.equity. "
+            "Sprawdź requirements.txt: openbb, openbb-equity, openbb-yfinance."
+        )
+
+except PermissionError as e:
+    obb = None
+    OPENBB_OK = False
+    OPENBB_ERROR = f"Brak uprawnień OpenBB: {str(e)}"
 
 except Exception as e:
     obb = None
     OPENBB_OK = False
     OPENBB_ERROR = str(e)
 
-# KROK 2: Import pozostałych standardowych bibliotek
-import requests
-import numpy as np
-import pandas as pd
-import yfinance as yf
-import plotly.graph_objects as go
-import streamlit as st
-from plotly.subplots import make_subplots
 
-# Opcjonalne biblioteki AI/Search
-try:
-    from openai import OpenAI
-except Exception:
-    OpenAI = None
-
-try:
-    from tavily import TavilyClient
-except Exception:
-    TavilyClient = None
-
-# KROK 3: Bezpieczny import OpenBB dostosowany do chmury Streamlit
-try:
-    from openbb import obb
-    
-    # Sprawdzenie dostępności modułu equity. Jeśli brak, wymuszamy kompilację wewnętrzną
-    if not hasattr(obb, "equity"):
-        from openbb_core.app.static.assets import assets
-        assets.build()
-        
-    OPENBB_OK = True
-    OPENBB_ERROR = ""
-except Exception as e:
-    obb = None
-    OPENBB_OK = False
-    OPENBB_ERROR = str(e)
-def fetch_openbb_fundamentals(ticker: str) -> dict:
-    """Pobiera dane fundamentalne z darmowego dostawcy yfinance w OpenBB v4."""
-    if not OPENBB_OK or obb is None:
-        return {"_errors": [f"OpenBB nie jest dostępny/import się nie udał: {OPENBB_ERROR}"]}
-
-    results = {
-        "metrics": None, "profile": None, "price_target": None,
-        "income": None, "balance": None, "cash": None, "_errors": []
-    }
-    provider = "yfinance"
-
-    # Pobieranie poszczególnych wskaźników finansowych
 def fetch_openbb_fundamentals(ticker: str) -> dict:
     if not OPENBB_OK or obb is None:
         return {
+            "metrics": None,
+            "profile": None,
+            "price_target": None,
+            "income": None,
+            "balance": None,
+            "cash": None,
             "_errors": [
                 f"OpenBB nie jest dostępny: {OPENBB_ERROR}"
             ]
@@ -146,9 +120,8 @@ def fetch_openbb_fundamentals(ticker: str) -> dict:
 
     return results
 
+
 def clean_for_json(data):
-    """Zapewnia poprawny format typów danych dla kontrolki st.json."""
-    import json
     return json.loads(json.dumps(data, default=str))
 
 
