@@ -1,5 +1,10 @@
-
 import os
+
+# KROK 1: Wymuszenie zapisu plików OpenBB w katalogu /tmp (zanim nastąpi import)
+os.environ["OPENBB_USER_SETTINGS_DIRECTORY"] = "/tmp/.openbb"
+os.environ["OPENBB_APP_SETTINGS_DIRECTORY"] = "/tmp/.openbb"
+
+# KROK 2: Import pozostałych standardowych bibliotek
 import requests
 import numpy as np
 import pandas as pd
