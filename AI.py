@@ -1,12 +1,12 @@
 import os
 import sys
 
-# KROK 1: Wyłączenie automatycznej kompilacji i ustawienie bezpiecznych ścieżek
+# KROK 1: Blokada automatycznego przebudowywania pakietu i ustawienie ścieżek tymczasowych
 os.environ["OPENBB_AUTO_BUILD"] = "False"
 os.environ["OPENBB_USER_SETTINGS_DIRECTORY"] = "/tmp/.openbb"
 os.environ["OPENBB_APP_SETTINGS_DIRECTORY"] = "/tmp/.openbb"
 
-# KROK 2: Standardowe importy
+# KROK 2: Import pozostałych standardowych bibliotek
 import requests
 import numpy as np
 import pandas as pd
@@ -26,13 +26,14 @@ try:
 except Exception:
     TavilyClient = None
 
-# KROK 3: Poprawny import OpenBB z wymuszonym odświeżeniem rozszerzeń
+# KROK 3: Bezpieczny import OpenBB dostosowany do chmury Streamlit
 try:
     from openbb import obb
     
-    # Wymuszenie załadowania dostawców w środowisku bez uprawnień administratora
+    # Sprawdzenie dostępności modułu equity. Jeśli brak, wymuszamy kompilację wewnętrzną
     if not hasattr(obb, "equity"):
-        obb.reference.build(modules=["equity"])
+        from openbb_core.app.static.assets import assets
+        assets.build()
         
     OPENBB_OK = True
     OPENBB_ERROR = ""
@@ -40,6 +41,61 @@ except Exception as e:
     obb = None
     OPENBB_OK = False
     OPENBB_ERROR = str(e)
+def fetch_openbb_fundamentals(ticker: str) -> dict:
+    """Pobiera dane fundamentalne z darmowego dostawcy yfinance w OpenBB v4."""
+    if not OPENBB_OK or obb is None:
+        return {"_errors": [f"OpenBB nie jest dostępny/import się nie udał: {OPENBB_ERROR}"]}
+
+    results = {
+        "metrics": None, "profile": None, "price_target": None,
+        "income": None, "balance": None, "cash": None, "_errors": []
+    }
+    provider = "yfinance"
+
+    # Pobieranie poszczególnych wskaźników finansowych
+    try:
+        res = obb.equity.fundamental.metrics(symbol=ticker, provider=provider)
+        results["metrics"] = [r.model_dump() for r in res.results] if hasattr(res, "results") else str(res)
+    except Exception as e:
+        results["_errors"].append(f"metrics: {str(e)}")
+
+    try:
+        res = obb.equity.profile(symbol=ticker, provider=provider)
+        results["profile"] = [r.model_dump() for r in res.results] if hasattr(res, "results") else str(res)
+    except Exception as e:
+        results["_errors"].append(f"profile: {str(e)}")
+
+    try:
+        res = obb.equity.price_target(symbol=ticker, provider=provider)
+        results["price_target"] = [r.model_dump() for r in res.results] if hasattr(res, "results") else str(res)
+    except Exception as e:
+        results["_errors"].append(f"price_target: {str(e)}")
+
+    try:
+        res = obb.equity.fundamental.income(symbol=ticker, provider=provider)
+        results["income"] = [r.model_dump() for r in res.results] if hasattr(res, "results") else str(res)
+    except Exception as e:
+        results["_errors"].append(f"income: {str(e)}")
+
+    try:
+        res = obb.equity.fundamental.balance(symbol=ticker, provider=provider)
+        results["balance"] = [r.model_dump() for r in res.results] if hasattr(res, "results") else str(res)
+    except Exception as e:
+        results["_errors"].append(f"balance: {str(e)}")
+
+    try:
+        res = obb.equity.fundamental.cash(symbol=ticker, provider=provider)
+        results["cash"] = [r.model_dump() for r in res.results] if hasattr(res, "results") else str(res)
+    except Exception as e:
+        results["_errors"].append(f"cash: {str(e)}")
+
+    return results
+
+def clean_for_json(data):
+    """Zapewnia poprawny format typów danych dla kontrolki st.json."""
+    import json
+    return json.loads(json.dumps(data, default=str))
+
 
 # =========================================================
 # CONFIG & NEON UI
