@@ -7,6 +7,7 @@ requests
 openai
 tavily-python
 openbb
+openbb-equity
 openbb-yfinance
 ta
 python-dateutil
@@ -17,4 +18,3 @@ scikit-learn
 streamlit-autorefresh
 websocket-client
 cloudscraper
-
