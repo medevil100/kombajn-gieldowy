@@ -1060,4 +1060,4 @@ To narzędzie edukacyjne i analityczne. Nie stanowi rekomendacji inwestycyjnej.
 """,
     unsafe_allow_html=True
 )
-```
+
