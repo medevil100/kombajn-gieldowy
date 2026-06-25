@@ -1,4 +1,3 @@
-
 import json
 import traceback
 from urllib.parse import urlparse
@@ -22,6 +21,137 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------
+# TŁUMACZENIA POLSKIE DLA JSON
+# ---------------------------------------------------------
+
+PL_LABELS = {
+    # profil
+    "symbol": "Symbol",
+    "longName": "Pełna nazwa",
+    "shortName": "Krótka nazwa",
+    "sector": "Sektor",
+    "industry": "Branża",
+    "country": "Kraj",
+    "website": "Strona internetowa",
+    "longBusinessSummary": "Opis działalności",
+    "currency": "Waluta",
+    "exchange": "Giełda",
+    "quoteType": "Typ instrumentu",
+
+    # metryki
+    "currentPrice": "Aktualna cena",
+    "regularMarketPrice": "Cena rynkowa",
+    "marketCap": "Kapitalizacja rynkowa",
+    "enterpriseValue": "Wartość przedsiębiorstwa",
+    "trailingPE": "P/E historyczne",
+    "forwardPE": "P/E prognozowane",
+    "priceToBook": "Cena / wartość księgowa",
+    "priceToSalesTrailing12Months": "Cena / sprzedaż TTM",
+    "profitMargins": "Marża netto",
+    "operatingMargins": "Marża operacyjna",
+    "grossMargins": "Marża brutto",
+    "returnOnAssets": "ROA - zwrot z aktywów",
+    "returnOnEquity": "ROE - zwrot z kapitału własnego",
+    "revenueGrowth": "Wzrost przychodów",
+    "earningsGrowth": "Wzrost zysków",
+    "totalRevenue": "Przychody całkowite",
+    "totalDebt": "Dług całkowity",
+    "totalCash": "Gotówka całkowita",
+    "freeCashflow": "Wolne przepływy pieniężne",
+    "operatingCashflow": "Operacyjne przepływy pieniężne",
+    "dividendYield": "Stopa dywidendy",
+    "dividendYieldPercent": "Stopa dywidendy w %",
+    "beta": "Beta",
+    "fiftyTwoWeekHigh": "Maksimum z 52 tygodni",
+    "fiftyTwoWeekLow": "Minimum z 52 tygodni",
+
+    # price target
+    "targetHighPrice": "Najwyższa cena docelowa",
+    "targetLowPrice": "Najniższa cena docelowa",
+    "targetMeanPrice": "Średnia cena docelowa",
+    "targetMedianPrice": "Mediana ceny docelowej",
+    "recommendationMean": "Średnia rekomendacja",
+    "recommendationKey": "Rekomendacja",
+    "numberOfAnalystOpinions": "Liczba opinii analityków",
+
+    # newsy
+    "title": "Tytuł",
+    "publisher": "Wydawca",
+    "link": "Link",
+    "providerPublishTime": "Czas publikacji",
+    "type": "Typ",
+    "content": "Treść",
+
+    # techniczne / systemowe
+    "_errors": "Błędy",
+    "profile": "Profil",
+    "metrics": "Wskaźniki",
+    "price_target": "Cele cenowe",
+    "income": "Rachunek zysków i strat",
+    "balance": "Bilans",
+    "cash": "Przepływy pieniężne",
+}
+
+FINANCIAL_LABELS = {
+    # Income statement
+    "Total Revenue": "Przychody całkowite",
+    "Operating Revenue": "Przychody operacyjne",
+    "Cost Of Revenue": "Koszt przychodów",
+    "Gross Profit": "Zysk brutto",
+    "Operating Expense": "Koszty operacyjne",
+    "Operating Income": "Zysk operacyjny",
+    "Net Income": "Zysk netto",
+    "Net Income Common Stockholders": "Zysk netto dla akcjonariuszy zwykłych",
+    "Diluted NI Availto Com Stockholders": "Rozwodniony zysk netto dla akcjonariuszy",
+    "Basic EPS": "Podstawowy EPS",
+    "Diluted EPS": "Rozwodniony EPS",
+    "Basic Average Shares": "Średnia liczba akcji podstawowa",
+    "Diluted Average Shares": "Średnia liczba akcji rozwodniona",
+    "EBIT": "EBIT",
+    "EBITDA": "EBITDA",
+    "Interest Expense": "Koszty odsetkowe",
+    "Interest Income": "Przychody odsetkowe",
+    "Pretax Income": "Zysk przed opodatkowaniem",
+    "Tax Provision": "Podatek dochodowy",
+    "Research And Development": "Badania i rozwój",
+    "Selling General And Administration": "Koszty sprzedaży i administracji",
+
+    # Balance sheet
+    "Total Assets": "Aktywa całkowite",
+    "Current Assets": "Aktywa obrotowe",
+    "Cash Cash Equivalents And Short Term Investments": "Gotówka i inwestycje krótkoterminowe",
+    "Cash And Cash Equivalents": "Gotówka i ekwiwalenty",
+    "Receivables": "Należności",
+    "Inventory": "Zapasy",
+    "Total Liabilities Net Minority Interest": "Zobowiązania całkowite",
+    "Current Liabilities": "Zobowiązania krótkoterminowe",
+    "Total Debt": "Dług całkowity",
+    "Net Debt": "Dług netto",
+    "Long Term Debt": "Dług długoterminowy",
+    "Stockholders Equity": "Kapitał własny akcjonariuszy",
+    "Retained Earnings": "Zyski zatrzymane",
+    "Common Stock": "Akcje zwykłe",
+    "Treasury Stock": "Akcje własne",
+    "Working Capital": "Kapitał obrotowy",
+    "Net Tangible Assets": "Aktywa materialne netto",
+
+    # Cash flow
+    "Operating Cash Flow": "Przepływy pieniężne z działalności operacyjnej",
+    "Investing Cash Flow": "Przepływy pieniężne z działalności inwestycyjnej",
+    "Financing Cash Flow": "Przepływy pieniężne z działalności finansowej",
+    "Free Cash Flow": "Wolne przepływy pieniężne",
+    "Capital Expenditure": "Nakłady inwestycyjne",
+    "Repurchase Of Capital Stock": "Skup akcji własnych",
+    "Repayment Of Debt": "Spłata długu",
+    "Issuance Of Debt": "Emisja długu",
+    "Dividends Paid": "Wypłacone dywidendy",
+    "End Cash Position": "Stan gotówki na koniec okresu",
+    "Beginning Cash Position": "Stan gotówki na początek okresu",
+    "Changes In Cash": "Zmiana stanu gotówki",
+}
+
+
+# ---------------------------------------------------------
 # FUNKCJE POMOCNICZE
 # ---------------------------------------------------------
 
@@ -36,12 +166,41 @@ def safe_secret_get(key: str, default=None):
         return default
 
 
+def translate_key_to_polish(key):
+    key_str = str(key)
+
+    if key_str in PL_LABELS:
+        return PL_LABELS[key_str]
+
+    if key_str in FINANCIAL_LABELS:
+        return FINANCIAL_LABELS[key_str]
+
+    return key_str
+
+
+def translate_json_keys_to_polish(data):
+    """
+    Tłumaczy klucze słownika JSON na język polski.
+    Działa rekurencyjnie, czyli także w zagnieżdżonych danych finansowych.
+    """
+    if isinstance(data, dict):
+        return {
+            translate_key_to_polish(k): translate_json_keys_to_polish(v)
+            for k, v in data.items()
+        }
+
+    if isinstance(data, list):
+        return [translate_json_keys_to_polish(v) for v in data]
+
+    return data
+
+
 def clean_for_json(data):
     """
-    Czyści dane pod st.json:
-    - usuwa NaN/inf
-    - konwertuje daty, numpy typy i obiekty pandas
-    - zamienia klucze na stringi
+    Czyści dane do pokazania przez st.json:
+    - usuwa NaN / inf
+    - konwertuje daty, numpy typy i pandas typy
+    - zamienia obiekty nieobsługiwane przez JSON na tekst
     """
     if isinstance(data, dict):
         return {str(k): clean_for_json(v) for k, v in data.items()}
@@ -52,13 +211,13 @@ def clean_for_json(data):
     if isinstance(data, tuple):
         return [clean_for_json(v) for v in data]
 
-    if isinstance(data, (pd.Timestamp,)):
+    if isinstance(data, pd.Timestamp):
         return data.isoformat()
 
-    if isinstance(data, (np.integer,)):
+    if isinstance(data, np.integer):
         return int(data)
 
-    if isinstance(data, (np.floating,)):
+    if isinstance(data, np.floating):
         if np.isnan(data) or np.isinf(data):
             return None
         return float(data)
@@ -68,14 +227,29 @@ def clean_for_json(data):
             return None
         return data
 
-    if pd.isna(data) if not isinstance(data, (dict, list, tuple)) else False:
-        return None
+    try:
+        if data is None:
+            return None
+
+        if not isinstance(data, (dict, list, tuple, str)):
+            if pd.isna(data):
+                return None
+    except Exception:
+        pass
 
     try:
         json.dumps(data)
         return data
     except Exception:
         return str(data)
+
+
+def polish_json(data):
+    """
+    Funkcja do wyświetlania JSON po polsku.
+    Najpierw czyści dane, potem tłumaczy klucze.
+    """
+    return translate_json_keys_to_polish(clean_for_json(data))
 
 
 def convert_keys_to_str(d):
@@ -103,6 +277,7 @@ def safe_float(value):
 
 def format_number(value):
     value = safe_float(value)
+
     if value is None:
         return "brak"
 
@@ -110,10 +285,13 @@ def format_number(value):
 
     if abs_value >= 1_000_000_000_000:
         return f"{value / 1_000_000_000_000:.2f} bln"
+
     if abs_value >= 1_000_000_000:
         return f"{value / 1_000_000_000:.2f} mld"
+
     if abs_value >= 1_000_000:
         return f"{value / 1_000_000:.2f} mln"
+
     if abs_value >= 1_000:
         return f"{value:,.0f}".replace(",", " ")
 
@@ -122,6 +300,7 @@ def format_number(value):
 
 def format_percent(value):
     value = safe_float(value)
+
     if value is None:
         return "brak"
 
@@ -132,10 +311,6 @@ def format_percent(value):
 
 
 def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """
-    RSI liczone stabilniej niż przez zwykłe rolling mean.
-    Obsługuje przypadki dzielenia przez zero.
-    """
     series = pd.to_numeric(series, errors="coerce")
 
     delta = series.diff()
@@ -257,7 +432,6 @@ def fetch_prices(ticker: str, period: str = "1y", interval: str = "1d") -> pd.Da
         if df is None or df.empty:
             return pd.DataFrame()
 
-        # Naprawa MultiIndex, który czasem pojawia się w yfinance.
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
 
@@ -277,7 +451,7 @@ def fetch_prices(ticker: str, period: str = "1y", interval: str = "1d") -> pd.Da
 
 
 # ---------------------------------------------------------
-# INDIKATORY / WSKAŹNIKI TECHNICZNE
+# WSKAŹNIKI TECHNICZNE
 # ---------------------------------------------------------
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -285,7 +459,10 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = df.copy()
-    df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df["SMA20"] = df["Close"].rolling(20, min_periods=1).mean()
     df["SMA50"] = df["Close"].rolling(50, min_periods=1).mean()
@@ -502,14 +679,12 @@ def fetch_yfinance_news(ticker: str):
         cleaned = []
 
         for item in news[:10]:
-            # Starszy format yfinance.
             title = item.get("title")
             publisher = item.get("publisher")
             link = item.get("link")
             publish_time = item.get("providerPublishTime")
             news_type = item.get("type")
 
-            # Nowszy format yfinance.
             content = item.get("content") or {}
 
             if not title:
@@ -629,6 +804,7 @@ def simple_signal(df: pd.DataFrame) -> dict:
         result["signal"] = "NEUTRALNY"
 
     result["comment"] = " ".join(comments)
+
     return result
 
 
@@ -673,7 +849,7 @@ if app_mode == "🏠 Strona główna":
         """
     )
 
-    st.success("Aplikacja działa w trybie czystym i jest gotowa do analizy.")
+    st.success("Aplikacja działa i jest gotowa do analizy.")
 
     st.info(
         "To narzędzie ma charakter edukacyjny i informacyjny. "
@@ -833,10 +1009,10 @@ elif app_mode == "📊 Fundamenty spółki":
                 c4.metric("Dywidenda", format_percent(metrics.get("dividendYield")))
 
                 st.write("### Profil spółki")
-                st.json(clean_for_json(profile))
+                st.json(polish_json(profile))
 
                 st.write("### Wskaźniki finansowe")
-                st.json(clean_for_json(metrics))
+                st.json(polish_json(metrics))
 
                 # ---------------------------------------------------------
                 # PODSUMOWANIE FUNDAMENTALNE
@@ -912,8 +1088,10 @@ elif app_mode == "📊 Fundamenty spółki":
                 if cash is not None and debt is not None:
                     if cash > debt:
                         summary.append("• **Więcej gotówki niż długu.** Struktura finansowa wygląda bezpiecznie.")
-                    elif debt > cash * 3 if cash > 0 else True:
+                    elif cash > 0 and debt > cash * 3:
                         summary.append("• **Dług znacząco przewyższa gotówkę.** Warto sprawdzić zadłużenie i płynność.")
+                    elif cash <= 0 and debt > 0:
+                        summary.append("• **Spółka ma dług i bardzo mało gotówki.** Warto dokładnie sprawdzić płynność.")
                     else:
                         summary.append("• **Dług przewyższa gotówkę, ale nie skrajnie.** Wymaga dalszej analizy.")
 
@@ -963,7 +1141,7 @@ elif app_mode == "📊 Fundamenty spółki":
                     cpt2.metric("Najniższy cel", format_number(pt.get("targetLowPrice")))
                     cpt3.metric("Najwyższy cel", format_number(pt.get("targetHighPrice")))
 
-                    st.json(clean_for_json(pt))
+                    st.json(polish_json(pt))
 
                 # ---------------------------------------------------------
                 # SPRAWOZDANIA FINANSOWE
@@ -972,21 +1150,21 @@ elif app_mode == "📊 Fundamenty spółki":
                 with st.expander("Rachunek zysków i strat"):
                     income_data = fund_data.get("income")
                     if income_data:
-                        st.json(clean_for_json(income_data))
+                        st.json(polish_json(income_data))
                     else:
                         st.info("Brak danych.")
 
                 with st.expander("Bilans"):
                     balance_data = fund_data.get("balance")
                     if balance_data:
-                        st.json(clean_for_json(balance_data))
+                        st.json(polish_json(balance_data))
                     else:
                         st.info("Brak danych.")
 
                 with st.expander("Przepływy pieniężne"):
                     cash_data = fund_data.get("cash")
                     if cash_data:
-                        st.json(clean_for_json(cash_data))
+                        st.json(polish_json(cash_data))
                     else:
                         st.info("Brak danych.")
 
@@ -1042,6 +1220,9 @@ elif app_mode == "📰 Wiadomości rynkowe":
                                 st.markdown(f"[Otwórz artykuł]({link})")
 
                             st.divider()
+
+                        with st.expander("Dane newsów Tavily jako JSON po polsku"):
+                            st.json(polish_json(tav_news))
                     else:
                         st.info("Brak wyników z Tavily albo brak klucza API `TAVILY_API_KEY`.")
 
@@ -1065,6 +1246,9 @@ elif app_mode == "📰 Wiadomości rynkowe":
                             st.markdown(f"[Otwórz artykuł]({link})")
 
                         st.divider()
+
+                    with st.expander("Dane newsów Yahoo Finance jako JSON po polsku"):
+                        st.json(polish_json(yahoo_news))
 
         except Exception:
             st.error("Nie udało się pobrać newsów.")
