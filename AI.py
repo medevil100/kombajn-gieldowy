@@ -1,31 +1,28 @@
 import json
 import traceback
-
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
-
+import requests
 
 # ---------------------------------------------------------
 # KONFIGURACJA STRONY
 # ---------------------------------------------------------
 
 st.set_page_config(
-    page_title="AI",
+    page_title="Kombajn Giełdowy",
     page_icon="📈",
     layout="wide"
 )
 
-
 # ---------------------------------------------------------
-# POMOCNICZE FUNKCJE
+# FUNKCJE POMOCNICZE
 # ---------------------------------------------------------
 
 def clean_for_json(data):
     return json.loads(json.dumps(data, default=str))
-
 
 def convert_keys_to_str(d):
     if isinstance(d, dict):
@@ -35,24 +32,63 @@ def convert_keys_to_str(d):
     else:
         return d
 
-
 def normalize_ticker(ticker: str) -> str:
     return str(ticker).strip().upper()
-
 
 def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-
     avg_gain = gain.rolling(period).mean()
     avg_loss = loss.rolling(period).mean()
-
     rs = avg_gain / (avg_loss.replace(0, pd.NA))
     rsi = 100 - (100 / (1 + rs))
-
     return rsi
 
+# ---------------------------------------------------------
+# TAVILY NEWS API
+# ---------------------------------------------------------
+
+def fetch_tavily_news(query: str):
+    api_key = st.secrets.get("TAVILY_API_KEY")
+    if not api_key:
+        return []
+
+    try:
+        headers = {"Authorization": f"Bearer {api_key}"}
+        payload = {
+            "query": query,
+            "search_depth": "basic",
+            "include_answer": False,
+            "max_results": 10,
+        }
+
+        r = requests.post(
+            "https://api.tavily.com/search",
+            json=payload,
+            headers=headers,
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        results = data.get("results", []) or []
+
+        cleaned = []
+        for item in results:
+            cleaned.append({
+                "title": item.get("title"),
+                "publisher": item.get("source"),
+                "link": item.get("url"),
+            })
+
+        return cleaned
+
+    except Exception:
+        return []
+
+# ---------------------------------------------------------
+# POBIERANIE CEN
+# ---------------------------------------------------------
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_prices(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
@@ -60,7 +96,6 @@ def fetch_prices(ticker: str, period: str = "1y", interval: str = "1d") -> pd.Da
     if not ticker:
         return pd.DataFrame()
 
-    # Ograniczenia Yahoo dla intraday
     if interval == "1m" and period not in ["1d", "5d", "7d"]:
         period = "7d"
     if interval in ["2m", "5m", "15m", "30m", "60m", "90m", "1h"] and period in ["1y", "2y", "5y", "10y", "max"]:
@@ -92,6 +127,9 @@ def fetch_prices(ticker: str, period: str = "1y", interval: str = "1d") -> pd.Da
     except Exception:
         return pd.DataFrame()
 
+# ---------------------------------------------------------
+# INDIKATORY
+# ---------------------------------------------------------
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty or "Close" not in df.columns:
@@ -105,6 +143,9 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+# ---------------------------------------------------------
+# WYKRES
+# ---------------------------------------------------------
 
 def make_price_chart(df: pd.DataFrame, ticker: str):
     fig = make_subplots(
@@ -159,11 +200,14 @@ def make_price_chart(df: pd.DataFrame, ticker: str):
     fig.update_layout(
         height=750,
         xaxis_rangeslider_visible=False,
-        template="plotly_dark"  # ciemne wykresy, jasny UI Streamlit
+        template="plotly_dark"
     )
 
     return fig
 
+# ---------------------------------------------------------
+# FUNDAMENTY – POBIERANIE
+# ---------------------------------------------------------
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_yfinance_fundamentals(ticker: str) -> dict:
@@ -235,17 +279,6 @@ def fetch_yfinance_fundamentals(ticker: str) -> dict:
             "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow"),
         }
 
-        results["price_target"] = {
-            "symbol": ticker,
-            "targetHighPrice": info.get("targetHighPrice"),
-            "targetLowPrice": info.get("targetLowPrice"),
-            "targetMeanPrice": info.get("targetMeanPrice"),
-            "targetMedianPrice": info.get("targetMedianPrice"),
-            "recommendationMean": info.get("recommendationMean"),
-            "recommendationKey": info.get("recommendationKey"),
-            "numberOfAnalystOpinions": info.get("numberOfAnalystOpinions"),
-        }
-
         try:
             income = stock.financials
             if income is not None and not income.empty:
@@ -271,7 +304,9 @@ def fetch_yfinance_fundamentals(ticker: str) -> dict:
         results["_errors"].append(f"general yfinance error: {e}")
 
     return results
-
+# ---------------------------------------------------------
+# NEWSY YAHOO
+# ---------------------------------------------------------
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_yfinance_news(ticker: str):
@@ -297,6 +332,9 @@ def fetch_yfinance_news(ticker: str):
     except Exception:
         return []
 
+# ---------------------------------------------------------
+# SYGNAŁ TECHNICZNY
+# ---------------------------------------------------------
 
 def simple_signal(df: pd.DataFrame) -> dict:
     result = {
@@ -362,7 +400,6 @@ def simple_signal(df: pd.DataFrame) -> dict:
     result["comment"] = " ".join(comments)
     return result
 
-
 # ---------------------------------------------------------
 # SIDEBAR
 # ---------------------------------------------------------
@@ -379,7 +416,6 @@ app_mode = st.sidebar.selectbox(
     ]
 )
 
-
 # ---------------------------------------------------------
 # STRONA GŁÓWNA
 # ---------------------------------------------------------
@@ -394,7 +430,7 @@ if app_mode == "🏠 Strona główna":
         Źródła danych:
         • ceny: Yahoo Finance (yfinance)
         • fundamenty: Yahoo Finance
-        • wiadomości: Yahoo Finance
+        • wiadomości: Yahoo Finance + Tavily (opcjonalnie)
 
         Przykłady tickerów:
         • USA: AAPL, MSFT, NVDA, TSLA
@@ -404,7 +440,6 @@ if app_mode == "🏠 Strona główna":
     )
 
     st.success("Aplikacja działa w trybie czystym, gotowa do analizy.")
-
 
 # ---------------------------------------------------------
 # ANALIZA TECHNICZNA
@@ -490,7 +525,6 @@ elif app_mode == "📈 Analiza techniczna":
             with st.expander("Szczegóły błędu"):
                 st.code(traceback.format_exc())
 
-
 # ---------------------------------------------------------
 # FUNDAMENTY
 # ---------------------------------------------------------
@@ -516,9 +550,6 @@ elif app_mode == "📊 Fundamenty spółki":
             metrics = fund_data.get("metrics") or {}
             profile = fund_data.get("profile") or {}
 
-            # -------------------------------
-            # NAGŁÓWEK SPÓŁKI
-            # -------------------------------
             st.subheader(profile.get("longName") or profile.get("shortName") or ticker_f)
 
             c1, c2, c3 = st.columns(3)
@@ -526,21 +557,16 @@ elif app_mode == "📊 Fundamenty spółki":
             c2.metric("Kapitalizacja (Market Cap)", metrics.get("marketCap") or "brak")
             c3.metric("P/E (trailing)", metrics.get("trailingPE") or "brak")
 
-            # -------------------------------
-            # PROFIL
-            # -------------------------------
             st.write("### Profil spółki")
             st.json(clean_for_json(profile))
 
-            # -------------------------------
-            # WSKAŹNIKI
-            # -------------------------------
             st.write("### Wskaźniki finansowe")
             st.json(clean_for_json(metrics))
 
-            # -------------------------------
+            # ---------------------------------------------------------
             # PODSUMOWANIE FUNDAMENTALNE
-            # -------------------------------
+            # ---------------------------------------------------------
+
             st.write("### Podsumowanie fundamentalne")
 
             summary = []
@@ -556,7 +582,6 @@ elif app_mode == "📊 Fundamenty spółki":
             beta = metrics.get("beta")
             dy = metrics.get("dividendYield")
 
-            # --- Wycena ---
             if pb is not None:
                 if pb < 1:
                     summary.append("• **Spółka wyceniana poniżej wartości księgowej (P/B < 1)** – potencjalnie tania.")
@@ -573,7 +598,6 @@ elif app_mode == "📊 Fundamenty spółki":
                 else:
                     summary.append("• **Wysokie P/E** – ryzyko przewartościowania.")
 
-            # --- Rentowność ---
             if margin is not None:
                 if margin > 0.2:
                     summary.append("• **Wysokie marże** – biznes bardzo rentowny.")
@@ -590,14 +614,12 @@ elif app_mode == "📊 Fundamenty spółki":
                 else:
                     summary.append("• **Niskie ROE** – słaba efektywność kapitału.")
 
-            # --- Płynność i zadłużenie ---
             if cash is not None and debt is not None:
                 if cash > debt:
                     summary.append("• **Więcej gotówki niż długu** – bardzo bezpieczna struktura finansowa.")
                 else:
                     summary.append("• **Dług przewyższa gotówkę** – zwróć uwagę na płynność.")
 
-            # --- Dywidenda ---
             if dy is not None:
                 if dy > 10:
                     summary.append("• **Ekstremalnie wysoka dywidenda** – może być nie do utrzymania.")
@@ -608,7 +630,6 @@ elif app_mode == "📊 Fundamenty spółki":
                 else:
                     summary.append("• **Brak dywidendy**.")
 
-            # --- Ryzyko (beta) ---
             if beta is not None:
                 if beta < 0.7:
                     summary.append("• **Niska beta** – spółka defensywna, mała zmienność.")
@@ -623,15 +644,22 @@ elif app_mode == "📊 Fundamenty spółki":
             else:
                 st.info("Brak danych do analizy fundamentalnej.")
 
-            # -------------------------------
+            # ---------------------------------------------------------
             # PRICE TARGET
-            # -------------------------------
-            st.write("### Cele cenowe (Price Target)")
-            st.json(clean_for_json(fund_data.get("price_target")))
+            # ---------------------------------------------------------
 
-            # -------------------------------
-            # FINANCIAL STATEMENTS
-            # -------------------------------
+            st.write("### Cele cenowe (Price Target)")
+            pt = fund_data.get("price_target")
+
+            if not pt or all(v is None for v in pt.values()):
+                st.info("Brak prognoz analityków dla tej spółki.")
+            else:
+                st.json(clean_for_json(pt))
+
+            # ---------------------------------------------------------
+            # SPRAWOZDANIA FINANSOWE
+            # ---------------------------------------------------------
+
             with st.expander("Rachunek zysków i strat"):
                 st.json(clean_for_json(fund_data.get("income")))
 
@@ -646,35 +674,62 @@ elif app_mode == "📊 Fundamenty spółki":
             with st.expander("Szczegóły błędu"):
                 st.code(traceback.format_exc())
 
-
 # ---------------------------------------------------------
 # WIADOMOŚCI
 # ---------------------------------------------------------
 
 elif app_mode == "📰 Wiadomości rynkowe":
-    st.title("📰 Wiadomości rynkowe (Yahoo Finance)")
+    st.title("📰 Wiadomości rynkowe")
 
     ticker_n = st.text_input("Ticker do wyszukania wiadomości:", "AAPL").upper().strip()
 
+    col1, col2 = st.columns(2)
+    with col1:
+        use_tavily = st.checkbox("Użyj Tavily (szersze newsy)", value=True)
+    with col2:
+        query_extra = st.text_input("Dodatkowy kontekst (np. 'Poland', 'GPW')", "")
+
     if st.button("Pobierz najnowsze wiadomości"):
         try:
-            with st.spinner("Pobieranie newsów..."):
-                news = fetch_yfinance_news(ticker_n)
+            if use_tavily:
+                q = ticker_n
+                if query_extra:
+                    q += f" {query_extra}"
 
-            if not news:
+                with st.spinner("Pobieranie newsów z Tavily..."):
+                    tav_news = fetch_tavily_news(q)
+
+                if tav_news:
+                    st.subheader("🔎 Tavily – szersze newsy")
+                    for item in tav_news:
+                        title = item.get("title") or "Bez tytułu"
+                        publisher = item.get("publisher") or "Nieznane źródło"
+                        link = item.get("link")
+
+                        st.write(f"### {title}")
+                        st.caption(f"Źródło: {publisher}")
+                        if link:
+                            st.write(link)
+                        st.divider()
+                else:
+                    st.info("Brak wyników z Tavily albo brak klucza API.")
+
+            with st.spinner("Pobieranie newsów z Yahoo Finance..."):
+                yahoo_news = fetch_yfinance_news(ticker_n)
+
+            if not yahoo_news:
                 st.info("Brak newsów z Yahoo Finance dla tego tickera.")
             else:
-                for item in news:
+                st.subheader("📰 Yahoo Finance – wiadomości")
+                for item in yahoo_news:
                     title = item.get("title") or "Bez tytułu"
                     publisher = item.get("publisher") or "Nieznane źródło"
                     link = item.get("link")
 
                     st.write(f"### {title}")
                     st.caption(f"Źródło: {publisher}")
-
                     if link:
                         st.write(link)
-
                     st.divider()
 
         except Exception:
