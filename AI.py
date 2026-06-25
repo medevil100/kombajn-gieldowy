@@ -497,7 +497,6 @@ elif app_mode == "📈 Analiza techniczna":
 
 elif app_mode == "📊 Fundamenty spółki":
     st.title("📊 Fundamenty spółki (Yahoo Finance)")
-elif app_mode == "📊 Fundamenty spółki":
 
     st.caption("Dla GPW używaj sufiksu .WA, np. CDR.WA, PKO.WA, KGH.WA.")
 
@@ -517,6 +516,9 @@ elif app_mode == "📊 Fundamenty spółki":
             metrics = fund_data.get("metrics") or {}
             profile = fund_data.get("profile") or {}
 
+            # -------------------------------
+            # NAGŁÓWEK SPÓŁKI
+            # -------------------------------
             st.subheader(profile.get("longName") or profile.get("shortName") or ticker_f)
 
             c1, c2, c3 = st.columns(3)
@@ -524,15 +526,112 @@ elif app_mode == "📊 Fundamenty spółki":
             c2.metric("Kapitalizacja (Market Cap)", metrics.get("marketCap") or "brak")
             c3.metric("P/E (trailing)", metrics.get("trailingPE") or "brak")
 
+            # -------------------------------
+            # PROFIL
+            # -------------------------------
             st.write("### Profil spółki")
             st.json(clean_for_json(profile))
 
+            # -------------------------------
+            # WSKAŹNIKI
+            # -------------------------------
             st.write("### Wskaźniki finansowe")
             st.json(clean_for_json(metrics))
 
+            # -------------------------------
+            # PODSUMOWANIE FUNDAMENTALNE
+            # -------------------------------
+            st.write("### Podsumowanie fundamentalne")
+
+            summary = []
+
+            price = metrics.get("currentPrice")
+            pb = metrics.get("priceToBook")
+            pe = metrics.get("trailingPE")
+            margin = metrics.get("profitMargins")
+            roe = metrics.get("returnOnEquity")
+            roa = metrics.get("returnOnAssets")
+            cash = metrics.get("totalCash")
+            debt = metrics.get("totalDebt")
+            beta = metrics.get("beta")
+            dy = metrics.get("dividendYield")
+
+            # --- Wycena ---
+            if pb is not None:
+                if pb < 1:
+                    summary.append("• **Spółka wyceniana poniżej wartości księgowej (P/B < 1)** – potencjalnie tania.")
+                elif pb < 2:
+                    summary.append("• **P/B w rozsądnym zakresie** – wycena neutralna.")
+                else:
+                    summary.append("• **P/B wysokie** – spółka może być droga.")
+
+            if pe is not None:
+                if pe < 10:
+                    summary.append("• **Niskie P/E (<10)** – spółka może być niedowartościowana.")
+                elif pe < 20:
+                    summary.append("• **P/E w normie** – wycena neutralna.")
+                else:
+                    summary.append("• **Wysokie P/E** – ryzyko przewartościowania.")
+
+            # --- Rentowność ---
+            if margin is not None:
+                if margin > 0.2:
+                    summary.append("• **Wysokie marże** – biznes bardzo rentowny.")
+                elif margin > 0.1:
+                    summary.append("• **Przyzwoite marże**.")
+                else:
+                    summary.append("• **Niskie marże** – biznes mało rentowny.")
+
+            if roe is not None:
+                if roe > 0.15:
+                    summary.append("• **Wysokie ROE** – efektywne wykorzystanie kapitału.")
+                elif roe > 0.08:
+                    summary.append("• **ROE w normie**.")
+                else:
+                    summary.append("• **Niskie ROE** – słaba efektywność kapitału.")
+
+            # --- Płynność i zadłużenie ---
+            if cash is not None and debt is not None:
+                if cash > debt:
+                    summary.append("• **Więcej gotówki niż długu** – bardzo bezpieczna struktura finansowa.")
+                else:
+                    summary.append("• **Dług przewyższa gotówkę** – zwróć uwagę na płynność.")
+
+            # --- Dywidenda ---
+            if dy is not None:
+                if dy > 10:
+                    summary.append("• **Ekstremalnie wysoka dywidenda** – może być nie do utrzymania.")
+                elif dy > 5:
+                    summary.append("• **Wysoka dywidenda** – atrakcyjna dla inwestorów dochodowych.")
+                elif dy > 0:
+                    summary.append("• **Umiarkowana dywidenda**.")
+                else:
+                    summary.append("• **Brak dywidendy**.")
+
+            # --- Ryzyko (beta) ---
+            if beta is not None:
+                if beta < 0.7:
+                    summary.append("• **Niska beta** – spółka defensywna, mała zmienność.")
+                elif beta < 1.2:
+                    summary.append("• **Beta neutralna** – typowa zmienność rynkowa.")
+                else:
+                    summary.append("• **Wysoka beta** – spółka ryzykowna, duże wahania.")
+
+            if summary:
+                for line in summary:
+                    st.write(line)
+            else:
+                st.info("Brak danych do analizy fundamentalnej.")
+
+            # -------------------------------
+            # PRICE TARGET
+            # -------------------------------
             st.write("### Cele cenowe (Price Target)")
             st.json(clean_for_json(fund_data.get("price_target")))
 
+            # -------------------------------
+            # FINANCIAL STATEMENTS
+            # -------------------------------
             with st.expander("Rachunek zysków i strat"):
                 st.json(clean_for_json(fund_data.get("income")))
 
