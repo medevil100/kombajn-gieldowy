@@ -497,6 +497,7 @@ elif app_mode == "📈 Analiza techniczna":
 
 elif app_mode == "📊 Fundamenty spółki":
     st.title("📊 Fundamenty spółki (Yahoo Finance)")
+elif app_mode == "📊 Fundamenty spółki":
 
     st.caption("Dla GPW używaj sufiksu .WA, np. CDR.WA, PKO.WA, KGH.WA.")
 
