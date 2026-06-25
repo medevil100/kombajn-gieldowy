@@ -19,7 +19,7 @@ import requests
 # ---------------------------------------------------------
 
 st.set_page_config(
-    page_title="Kombajn Giełdowy",
+    page_title="AI",
     page_icon="📈",
     layout="wide"
 )
