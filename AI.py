@@ -14,7 +14,7 @@ from plotly.subplots import make_subplots
 # =========================================================
 
 st.set_page_config(
-    page_title="Kombajn Giełdowy",
+    page_title="AI",
     page_icon="📈",
     layout="wide"
 )
@@ -542,3 +542,42 @@ elif app_mode == "📊 Fundamenty Yahoo Finance":
                 st.json(clean_for_json(fund_data.get("cash")))
 
         except Exception:
+            st.error("Nie udało się pobrać fundamentów.")
+            with st.expander("Szczegóły błędu"):
+                st.code(traceback.format_exc())
+
+
+# =========================================================
+# MODE: NEWS
+# =========================================================
+
+elif app_mode == "📰 Skaner wiadomości":
+    st.title("📰 Skaner wiadomości")
+
+    ticker_n = st.text_input("Ticker do newsów:", "AAPL").upper().strip()
+
+    if st.button("Pobierz newsy"):
+        try:
+            with st.spinner("Pobieranie newsów..."):
+                news = fetch_yfinance_news(ticker_n)
+
+            if not news:
+                st.info("Brak newsów z Yahoo Finance dla tego tickera.")
+            else:
+                for item in news:
+                    title = item.get("title") or "Bez tytułu"
+                    publisher = item.get("publisher") or "Nieznane źródło"
+                    link = item.get("link")
+
+                    st.write(f"### {title}")
+                    st.caption(publisher)
+
+                    if link:
+                        st.write(link)
+
+                    st.divider()
+
+        except Exception:
+            st.error("Nie udało się pobrać newsów.")
+            with st.expander("Szczegóły błędu"):
+                st.code(traceback.format_exc())
