@@ -29,15 +29,18 @@ st.set_page_config(
 # ---------------------------------------------------------
 
 USA_POPULAR = [
-    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AMD", "NFLX", "INTC",
-    "JPM", "BAC", "V", "MA", "KO", "PEP", "WMT", "COST", "DIS", "PYPL",
-    "XOM", "CVX", "JNJ", "PFE", "MRK", "UNH", "HD", "MCD", "NKE", "CRM"
+        "HUMA", "TCRX", "GOSS", "PLRX", "TTOO", "BNOX", "IMUX", "SLS", "DRMA", "BDRX",
+        "MREO", "XLO", "TCON", "VIRI", "ACRS", "AURA", "KTRA", "NRSN", "ANIX",
+        "CRVS", "ADVM", "APM", "SABS", "HILS", "RNAZ", "SLNO", "IMNN", "BCTX", "ATHE",
+        "MNOV", "BOLT", "INFI", "APLT", "CLRB", "ENLV", "EVGN", "GRTS", "HSTO", "IMMP"
+
 ]
 
 GPW_POPULAR = [
-    "PKO.WA", "PEO.WA", "PZU.WA", "KGH.WA", "CDR.WA", "DNP.WA", "LPP.WA", "ALE.WA",
-    "JSW.WA", "CCC.WA", "KTY.WA", "MBK.WA", "OPL.WA", "CPS.WA", "PGE.WA", "TPE.WA",
-    "ENA.WA", "BDX.WA", "XTB.WA", "11B.WA", "ACP.WA", "ING.WA", "MIL.WA", "SPL.WA"
+   "BBT.WA", "BML.WA", "BOS.WA", "BRA.WA", "CNT.WA", "CRB.WA", "DCR.WA", "FON.WA",
+"GEN.WA", "HUG.WA", "IMS.WA", "INC.WA", "KOM.WA", "LTG.WA", "MIR.WA", "MNC.WA",
+"ONC.WA", "PLT.WA", "QRS.WA", "VOX.WA", "STX.WA", "NVG.WA", "KCH.WA", "APS.WA"
+
 ]
 
 # ---------------------------------------------------------
