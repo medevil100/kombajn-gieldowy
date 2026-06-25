@@ -28,6 +28,15 @@ def clean_for_json(data):
     return json.loads(json.dumps(data, default=str))
 
 
+def convert_keys_to_str(d):
+    if isinstance(d, dict):
+        return {str(k): convert_keys_to_str(v) for k, v in d.items()}
+    elif isinstance(d, list):
+        return [convert_keys_to_str(i) for i in d]
+    else:
+        return d
+
+
 def normalize_ticker(ticker: str) -> str:
     return str(ticker).strip().upper()
 
@@ -133,41 +142,18 @@ def make_price_chart(df: pd.DataFrame, ticker: str):
         col=1
     )
 
-    if "SMA20" in df.columns:
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=df["SMA20"],
-                name="SMA20",
-                line=dict(width=1)
-            ),
-            row=1,
-            col=1
-        )
-
-    if "SMA50" in df.columns:
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=df["SMA50"],
-                name="SMA50",
-                line=dict(width=1)
-            ),
-            row=1,
-            col=1
-        )
-
-    if "SMA200" in df.columns:
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=df["SMA200"],
-                name="SMA200",
-                line=dict(width=1)
-            ),
-            row=1,
-            col=1
-        )
+    for col in ["SMA20", "SMA50", "SMA200"]:
+        if col in df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df[col],
+                    name=col,
+                    line=dict(width=1)
+                ),
+                row=1,
+                col=1
+            )
 
     if "RSI14" in df.columns:
         fig.add_trace(
@@ -276,19 +262,19 @@ def fetch_yfinance_fundamentals(ticker: str) -> dict:
 
         try:
             income = stock.financials
-            results["income"] = income.astype(str).to_dict() if income is not None and not income.empty else None
+            results["income"] = convert_keys_to_str(income.astype(str).to_dict()) if income is not None and not income.empty else None
         except Exception as e:
             results["_errors"].append(f"income: {e}")
 
         try:
             balance = stock.balance_sheet
-            results["balance"] = balance.astype(str).to_dict() if balance is not None and not balance.empty else None
+            results["balance"] = convert_keys_to_str(balance.astype(str).to_dict()) if balance is not None and not balance.empty else None
         except Exception as e:
             results["_errors"].append(f"balance: {e}")
 
         try:
             cash = stock.cashflow
-            results["cash"] = cash.astype(str).to_dict() if cash is not None and not cash.empty else None
+            results["cash"] = convert_keys_to_str(cash.astype(str).to_dict()) if cash is not None and not cash.empty else None
         except Exception as e:
             results["_errors"].append(f"cash: {e}")
 
@@ -556,42 +542,3 @@ elif app_mode == "📊 Fundamenty Yahoo Finance":
                 st.json(clean_for_json(fund_data.get("cash")))
 
         except Exception:
-            st.error("Nie udało się pobrać fundamentów.")
-            with st.expander("Szczegóły błędu"):
-                st.code(traceback.format_exc())
-
-
-# =========================================================
-# MODE: NEWS
-# =========================================================
-
-elif app_mode == "📰 Skaner wiadomości":
-    st.title("📰 Skaner wiadomości")
-
-    ticker_n = st.text_input("Ticker do newsów:", "AAPL").upper().strip()
-
-    if st.button("Pobierz newsy"):
-        try:
-            with st.spinner("Pobieranie newsów..."):
-                news = fetch_yfinance_news(ticker_n)
-
-            if not news:
-                st.info("Brak newsów z Yahoo Finance dla tego tickera.")
-            else:
-                for item in news:
-                    title = item.get("title") or "Bez tytułu"
-                    publisher = item.get("publisher") or "Nieznane źródło"
-                    link = item.get("link")
-
-                    st.write(f"### {title}")
-                    st.caption(publisher)
-
-                    if link:
-                        st.write(link)
-
-                    st.divider()
-
-        except Exception:
-            st.error("Nie udało się pobrać newsów.")
-            with st.expander("Szczegóły błędu"):
-                st.code(traceback.format_exc())
