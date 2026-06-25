@@ -1,17 +1,16 @@
 import json
 import traceback
 
-import numpy as np
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
-import streamlit as st
 from plotly.subplots import make_subplots
+import streamlit as st
 
 
-# =========================================================
-# PAGE CONFIG
-# =========================================================
+# ---------------------------------------------------------
+# KONFIGURACJA STRONY
+# ---------------------------------------------------------
 
 st.set_page_config(
     page_title="AI",
@@ -20,9 +19,9 @@ st.set_page_config(
 )
 
 
-# =========================================================
-# HELPERS
-# =========================================================
+# ---------------------------------------------------------
+# POMOCNICZE FUNKCJE
+# ---------------------------------------------------------
 
 def clean_for_json(data):
     return json.loads(json.dumps(data, default=str))
@@ -43,14 +42,13 @@ def normalize_ticker(ticker: str) -> str:
 
 def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
-
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
 
     avg_gain = gain.rolling(period).mean()
     avg_loss = loss.rolling(period).mean()
 
-    rs = avg_gain / avg_loss
+    rs = avg_gain / (avg_loss.replace(0, pd.NA))
     rsi = 100 - (100 / (1 + rs))
 
     return rsi
@@ -59,14 +57,12 @@ def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_prices(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     ticker = normalize_ticker(ticker)
-
     if not ticker:
         return pd.DataFrame()
 
     # Ograniczenia Yahoo dla intraday
     if interval == "1m" and period not in ["1d", "5d", "7d"]:
         period = "7d"
-
     if interval in ["2m", "5m", "15m", "30m", "60m", "90m", "1h"] and period in ["1y", "2y", "5y", "10y", "max"]:
         period = "60d"
 
@@ -82,11 +78,7 @@ def fetch_prices(ticker: str, period: str = "1y", interval: str = "1d") -> pd.Da
 
         if df is None or df.empty:
             stock = yf.Ticker(ticker)
-            df = stock.history(
-                period=period,
-                interval=interval,
-                auto_adjust=False
-            )
+            df = stock.history(period=period, interval=interval, auto_adjust=False)
 
         if df is None or df.empty:
             return pd.DataFrame()
@@ -95,7 +87,6 @@ def fetch_prices(ticker: str, period: str = "1y", interval: str = "1d") -> pd.Da
             df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
 
         df = df.dropna(how="all")
-
         return df
 
     except Exception:
@@ -103,14 +94,10 @@ def fetch_prices(ticker: str, period: str = "1y", interval: str = "1d") -> pd.Da
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
+    if df is None or df.empty or "Close" not in df.columns:
         return pd.DataFrame()
 
     df = df.copy()
-
-    if "Close" not in df.columns:
-        return df
-
     df["SMA20"] = df["Close"].rolling(20).mean()
     df["SMA50"] = df["Close"].rolling(50).mean()
     df["SMA200"] = df["Close"].rolling(200).mean()
@@ -166,14 +153,13 @@ def make_price_chart(df: pd.DataFrame, ticker: str):
             row=2,
             col=1
         )
-
         fig.add_hline(y=70, line_dash="dash", row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", row=2, col=1)
 
     fig.update_layout(
         height=750,
         xaxis_rangeslider_visible=False,
-        template="plotly_dark"
+        template="plotly_dark"  # ciemne wykresy, jasny UI Streamlit
     )
 
     return fig
@@ -262,19 +248,22 @@ def fetch_yfinance_fundamentals(ticker: str) -> dict:
 
         try:
             income = stock.financials
-            results["income"] = convert_keys_to_str(income.astype(str).to_dict()) if income is not None and not income.empty else None
+            if income is not None and not income.empty:
+                results["income"] = convert_keys_to_str(income.to_dict())
         except Exception as e:
             results["_errors"].append(f"income: {e}")
 
         try:
             balance = stock.balance_sheet
-            results["balance"] = convert_keys_to_str(balance.astype(str).to_dict()) if balance is not None and not balance.empty else None
+            if balance is not None and not balance.empty:
+                results["balance"] = convert_keys_to_str(balance.to_dict())
         except Exception as e:
             results["_errors"].append(f"balance: {e}")
 
         try:
             cash = stock.cashflow
-            results["cash"] = convert_keys_to_str(cash.astype(str).to_dict()) if cash is not None and not cash.empty else None
+            if cash is not None and not cash.empty:
+                results["cash"] = convert_keys_to_str(cash.to_dict())
         except Exception as e:
             results["_errors"].append(f"cash: {e}")
 
@@ -287,17 +276,12 @@ def fetch_yfinance_fundamentals(ticker: str) -> dict:
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_yfinance_news(ticker: str):
     ticker = normalize_ticker(ticker)
-
     if not ticker:
         return []
 
     try:
         stock = yf.Ticker(ticker)
-        news = stock.news
-
-        if not news:
-            return []
-
+        news = stock.news or []
         cleaned = []
 
         for item in news[:10]:
@@ -310,7 +294,6 @@ def fetch_yfinance_news(ticker: str):
             })
 
         return cleaned
-
     except Exception:
         return []
 
@@ -330,13 +313,12 @@ def simple_signal(df: pd.DataFrame) -> dict:
         return result
 
     df = add_indicators(df)
-
     last = df.dropna(subset=["Close"]).iloc[-1]
 
     close = float(last["Close"])
-    rsi = float(last["RSI14"]) if not pd.isna(last.get("RSI14")) else None
-    sma20 = float(last["SMA20"]) if not pd.isna(last.get("SMA20")) else None
-    sma50 = float(last["SMA50"]) if not pd.isna(last.get("SMA50")) else None
+    rsi = float(last["RSI14"]) if "RSI14" in last and not pd.isna(last["RSI14"]) else None
+    sma20 = float(last["SMA20"]) if "SMA20" in last and not pd.isna(last["SMA20"]) else None
+    sma50 = float(last["SMA50"]) if "SMA50" in last and not pd.isna(last["SMA50"]) else None
 
     result["last_close"] = close
     result["rsi"] = rsi
@@ -378,56 +360,55 @@ def simple_signal(df: pd.DataFrame) -> dict:
         result["signal"] = "NEUTRALNY"
 
     result["comment"] = " ".join(comments)
-
     return result
 
 
-# =========================================================
+# ---------------------------------------------------------
 # SIDEBAR
-# =========================================================
+# ---------------------------------------------------------
 
 st.sidebar.title("📈 Kombajn Giełdowy")
 
 app_mode = st.sidebar.selectbox(
-    "Wybierz moduł:",
+    "Wybierz moduł aplikacji:",
     [
-        "🏠 Start",
+        "🏠 Strona główna",
         "📈 Analiza techniczna",
-        "📊 Fundamenty Yahoo Finance",
-        "📰 Skaner wiadomości",
+        "📊 Fundamenty spółki",
+        "📰 Wiadomości rynkowe",
     ]
 )
 
 
-# =========================================================
-# MODE: START
-# =========================================================
+# ---------------------------------------------------------
+# STRONA GŁÓWNA
+# ---------------------------------------------------------
 
-if app_mode == "🏠 Start":
+if app_mode == "🏠 Strona główna":
     st.title("📈 Kombajn Giełdowy")
 
     st.write(
         """
-        Czysta wersja aplikacji bez OpenBB.
+        To jest czysta, lekka wersja aplikacji bez OpenBB.
 
-        Źródło danych:
-        - ceny: Yahoo Finance przez `yfinance`,
-        - fundamenty: Yahoo Finance przez `yfinance`,
-        - newsy: Yahoo Finance przez `yfinance`.
+        Źródła danych:
+        • ceny: Yahoo Finance (yfinance)
+        • fundamenty: Yahoo Finance
+        • wiadomości: Yahoo Finance
 
         Przykłady tickerów:
-        - USA: `AAPL`, `MSFT`, `NVDA`, `TSLA`
-        - GPW: `CDR.WA`, `PKO.WA`, `KGH.WA`
-        - krypto: `BTC-USD`, `ETH-USD`
+        • USA: AAPL, MSFT, NVDA, TSLA
+        • GPW: CDR.WA, PKO.WA, KGH.WA
+        • krypto: BTC-USD, ETH-USD
         """
     )
 
-    st.success("Aplikacja działa w trybie czystym bez OpenBB.")
+    st.success("Aplikacja działa w trybie czystym, gotowa do analizy.")
 
 
-# =========================================================
-# MODE: TECHNICAL ANALYSIS
-# =========================================================
+# ---------------------------------------------------------
+# ANALIZA TECHNICZNA
+# ---------------------------------------------------------
 
 elif app_mode == "📈 Analiza techniczna":
     st.title("📈 Analiza techniczna")
@@ -435,51 +416,74 @@ elif app_mode == "📈 Analiza techniczna":
     col_a, col_b, col_c = st.columns(3)
 
     with col_a:
-        ticker = st.text_input("Ticker:", "AAPL").upper().strip()
+        ticker = st.text_input("Wpisz ticker:", "AAPL").upper().strip()
 
     with col_b:
-        period = st.selectbox(
-            "Okres:",
-            ["1d", "5d", "7d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "max"],
+        period_label = st.selectbox(
+            "Zakres danych:",
+            ["1 dzień", "5 dni", "7 dni", "1 miesiąc", "3 miesiące", "6 miesięcy", "1 rok", "2 lata", "5 lat", "maksymalnie"],
             index=6
         )
+        period_map = {
+            "1 dzień": "1d",
+            "5 dni": "5d",
+            "7 dni": "7d",
+            "1 miesiąc": "1mo",
+            "3 miesiące": "3mo",
+            "6 miesięcy": "6mo",
+            "1 rok": "1y",
+            "2 lata": "2y",
+            "5 lat": "5y",
+            "maksymalnie": "max",
+        }
+        period = period_map[period_label]
 
     with col_c:
-        interval = st.selectbox(
-            "Interwał:",
-            ["1m", "5m", "15m", "30m", "1h", "1d", "1wk", "1mo"],
+        interval_label = st.selectbox(
+            "Interwał świec:",
+            ["1 minuta", "5 minut", "15 minut", "30 minut", "1 godzina", "1 dzień", "1 tydzień", "1 miesiąc"],
             index=5
         )
+        interval_map = {
+            "1 minuta": "1m",
+            "5 minut": "5m",
+            "15 minut": "15m",
+            "30 minut": "30m",
+            "1 godzina": "1h",
+            "1 dzień": "1d",
+            "1 tydzień": "1wk",
+            "1 miesiąc": "1mo",
+        }
+        interval = interval_map[interval_label]
 
-    if st.button("Uruchom analizę"):
+    if st.button("Analizuj"):
         try:
             with st.spinner("Pobieranie danych i analiza..."):
                 df = fetch_prices(ticker, period, interval)
 
-                if df.empty:
-                    st.error(
-                        "Brak danych z Yahoo Finance. Sprawdź ticker albo interwał. "
-                        "Dla GPW używaj np. CDR.WA, PKO.WA, KGH.WA."
-                    )
-                else:
-                    df_ind = add_indicators(df)
-                    signal = simple_signal(df_ind)
+            if df.empty:
+                st.error(
+                    "Brak danych z Yahoo Finance. Sprawdź ticker albo interwał.\n"
+                    "Dla GPW używaj np. CDR.WA, PKO.WA, KGH.WA."
+                )
+            else:
+                df_ind = add_indicators(df)
+                signal = simple_signal(df_ind)
 
-                    st.subheader(f"Wynik analizy: {ticker}")
+                st.subheader(f"Wynik analizy: {ticker}")
 
-                    c1, c2, c3 = st.columns(3)
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Sygnał", signal["signal"])
+                c2.metric("Cena", signal["last_close"])
+                c3.metric("RSI", round(signal["rsi"], 2) if signal["rsi"] is not None else "brak")
 
-                    c1.metric("Sygnał", signal["signal"])
-                    c2.metric("Cena", signal["last_close"])
-                    c3.metric("RSI", round(signal["rsi"], 2) if signal["rsi"] is not None else "brak")
+                st.info(signal["comment"])
 
-                    st.info(signal["comment"])
+                fig = make_price_chart(df_ind, ticker)
+                st.plotly_chart(fig, use_container_width=True)
 
-                    fig = make_price_chart(df_ind, ticker)
-                    st.plotly_chart(fig, use_container_width=True)
-
-                    with st.expander("Dane tabelaryczne"):
-                        st.dataframe(df_ind.tail(100))
+                with st.expander("Dane tabelaryczne (ostatnie 100 wierszy)"):
+                    st.dataframe(df_ind.tail(100))
 
         except Exception:
             st.error("Analiza przerwana błędem.")
@@ -487,16 +491,14 @@ elif app_mode == "📈 Analiza techniczna":
                 st.code(traceback.format_exc())
 
 
-# =========================================================
-# MODE: FUNDAMENTALS
-# =========================================================
+# ---------------------------------------------------------
+# FUNDAMENTY
+# ---------------------------------------------------------
 
-elif app_mode == "📊 Fundamenty Yahoo Finance":
-    st.title("📊 Fundamenty Yahoo Finance")
+elif app_mode == "📊 Fundamenty spółki":
+    st.title("📊 Fundamenty spółki (Yahoo Finance)")
 
-    st.caption(
-        "Dla GPW używaj sufiksu `.WA`, np. `CDR.WA`, `PKO.WA`, `KGH.WA`."
-    )
+    st.caption("Dla GPW używaj sufiksu .WA, np. CDR.WA, PKO.WA, KGH.WA.")
 
     ticker_f = st.text_input("Ticker do fundamentów:", "AAPL").upper().strip()
 
@@ -506,9 +508,8 @@ elif app_mode == "📊 Fundamenty Yahoo Finance":
                 fund_data = fetch_yfinance_fundamentals(ticker_f)
 
             errors = fund_data.get("_errors", [])
-
             if errors:
-                with st.expander("Ostrzeżenia"):
+                with st.expander("Ostrzeżenia / log"):
                     for err in errors:
                         st.warning(str(err))
 
@@ -518,27 +519,26 @@ elif app_mode == "📊 Fundamenty Yahoo Finance":
             st.subheader(profile.get("longName") or profile.get("shortName") or ticker_f)
 
             c1, c2, c3 = st.columns(3)
-
             c1.metric("Cena", metrics.get("currentPrice") or "brak")
-            c2.metric("Market Cap", metrics.get("marketCap") or "brak")
-            c3.metric("P/E", metrics.get("trailingPE") or "brak")
+            c2.metric("Kapitalizacja (Market Cap)", metrics.get("marketCap") or "brak")
+            c3.metric("P/E (trailing)", metrics.get("trailingPE") or "brak")
 
-            st.write("### Profil")
+            st.write("### Profil spółki")
             st.json(clean_for_json(profile))
 
-            st.write("### Wskaźniki")
+            st.write("### Wskaźniki finansowe")
             st.json(clean_for_json(metrics))
 
-            st.write("### Price Target")
+            st.write("### Cele cenowe (Price Target)")
             st.json(clean_for_json(fund_data.get("price_target")))
 
-            with st.expander("Income Statement"):
+            with st.expander("Rachunek zysków i strat"):
                 st.json(clean_for_json(fund_data.get("income")))
 
-            with st.expander("Balance Sheet"):
+            with st.expander("Bilans"):
                 st.json(clean_for_json(fund_data.get("balance")))
 
-            with st.expander("Cash Flow"):
+            with st.expander("Przepływy pieniężne"):
                 st.json(clean_for_json(fund_data.get("cash")))
 
         except Exception:
@@ -547,16 +547,16 @@ elif app_mode == "📊 Fundamenty Yahoo Finance":
                 st.code(traceback.format_exc())
 
 
-# =========================================================
-# MODE: NEWS
-# =========================================================
+# ---------------------------------------------------------
+# WIADOMOŚCI
+# ---------------------------------------------------------
 
-elif app_mode == "📰 Skaner wiadomości":
-    st.title("📰 Skaner wiadomości")
+elif app_mode == "📰 Wiadomości rynkowe":
+    st.title("📰 Wiadomości rynkowe (Yahoo Finance)")
 
-    ticker_n = st.text_input("Ticker do newsów:", "AAPL").upper().strip()
+    ticker_n = st.text_input("Ticker do wyszukania wiadomości:", "AAPL").upper().strip()
 
-    if st.button("Pobierz newsy"):
+    if st.button("Pobierz najnowsze wiadomości"):
         try:
             with st.spinner("Pobieranie newsów..."):
                 news = fetch_yfinance_news(ticker_n)
@@ -570,7 +570,7 @@ elif app_mode == "📰 Skaner wiadomości":
                     link = item.get("link")
 
                     st.write(f"### {title}")
-                    st.caption(publisher)
+                    st.caption(f"Źródło: {publisher}")
 
                     if link:
                         st.write(link)
