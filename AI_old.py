@@ -919,9 +919,6 @@ def generate_ai_analysis(ticker, interval, ind, score, sentiment, headlines):
     if client is None:
         return "Brak klienta OpenAI. Sprawdź sekret OPENAI_API_KEY albo sk."
 
-    # POPRAWKA: Formatowanie nagłówków poza f-stringiem zapobiega błędowi składni
-    formatted_headlines = "\n".join([f"- {h}" for h in headlines[:10]])
-
     prompt = f"""
 Jesteś profesjonalnym analitykiem technicznym. Pisz po polsku.
 
@@ -942,7 +939,7 @@ Dane techniczne:
 - Sentyment newsów: {sentiment}
 
 Nagłówki newsów:
-{formatted_headlines}
+{chr(10).join(["- " + h for h in headlines[:10]])}
 
 Przygotuj:
 1. Decyzja: KUP / SPRZEDAJ / TRZYMAJ
@@ -954,26 +951,18 @@ Przygotuj:
 """
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Jesteś profesjonalnym analitykiem rynku. Pisz konkretnie po polsku."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
+        response = client.responses.create(
+            model="gpt-4.1-mini",
+            input=prompt,
             temperature=0.25,
-            max_tokens=1200
+            max_output_tokens=1200
         )
 
-        return response.choices[0].message.content.strip()
+        return response.output_text
 
     except Exception as e:
         return f"Błąd OpenAI: {e}"
+
 
 
 
