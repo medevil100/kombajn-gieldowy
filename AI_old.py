@@ -919,6 +919,9 @@ def generate_ai_analysis(ticker, interval, ind, score, sentiment, headlines):
     if client is None:
         return "Brak klienta OpenAI. Sprawdź sekret OPENAI_API_KEY albo sk."
 
+    # POPRAWKA: Formatowanie nagłówków poza f-stringiem zapobiega błędowi składni
+    formatted_headlines = "\n".join([f"- {h}" for h in headlines[:10]])
+
     prompt = f"""
 Jesteś profesjonalnym analitykiem technicznym. Pisz po polsku.
 
@@ -939,7 +942,7 @@ Dane techniczne:
 - Sentyment newsów: {sentiment}
 
 Nagłówki newsów:
-{chr(10).join(["- " + h for h in headlines[:10]])}
+{formatted_headlines}
 
 Przygotuj:
 1. Decyzja: KUP / SPRZEDAJ / TRZYMAJ
@@ -971,6 +974,7 @@ Przygotuj:
 
     except Exception as e:
         return f"Błąd OpenAI: {e}"
+
 
 
 # =========================================================
