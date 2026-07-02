@@ -1325,7 +1325,6 @@ def calculate_simple_dcf(fund_data, wacc=0.09, growth_rate=0.05, terminal_growth
         "current_price": current_price, "upside": upside
     }
 
-
 elif app_mode in ["📊 Yahoo Finance Fundamentals", "📊 OpenBB Fundamentals (4.x)"]:
     st.title("📊 Dane fundamentalne i Model DCF")
 
@@ -1412,6 +1411,7 @@ elif app_mode in ["📊 Yahoo Finance Fundamentals", "📊 OpenBB Fundamentals (
             
         with st.expander("Przepływy pieniężne (Cash Flow)"):
             st.json(clean_for_json(fund_data.get("cash")))
+
 
 # =========================================================
 # MODE: MACRO
