@@ -1290,7 +1290,7 @@ def calculate_simple_dcf(fund_data, wacc=0.09, growth_rate=0.05, terminal_growth
     if not fcf_history:
         return {"error": "Brak danych o Free Cash Flow w raportach finansowych do wyceny DCF."}
         
-    latest_fcf = fcf_history[0]
+    latest_fcf = fcf_history[0] if isinstance(fcf_history, list) else fcf_history
     
     if latest_fcf <= 0:
         return {"error": f"Najnowszy Free Cash Flow (FCF) jest ujemny ({latest_fcf:,.0f}). Model DCF wymaga dodatnich przepływów."}
@@ -1325,6 +1325,8 @@ def calculate_simple_dcf(fund_data, wacc=0.09, growth_rate=0.05, terminal_growth
         "current_price": current_price, "upside": upside
     }
 
+
+# Upewnij się, że ta linia NIE MA żadnych spacji na początku pliku
 elif app_mode in ["📊 Yahoo Finance Fundamentals", "📊 OpenBB Fundamentals (4.x)"]:
     st.title("📊 Dane fundamentalne i Model DCF")
 
@@ -1332,7 +1334,7 @@ elif app_mode in ["📊 Yahoo Finance Fundamentals", "📊 OpenBB Fundamentals (
 
     ticker_f = st.text_input(
         "Wpisz ticker do fundamentów (np. AAPL, MSFT, CDR.WA):",
-        "STX.WA",
+        "AAPL",
         key="fundamental_ticker_input"
     ).upper().strip()
 
@@ -1411,7 +1413,6 @@ elif app_mode in ["📊 Yahoo Finance Fundamentals", "📊 OpenBB Fundamentals (
             
         with st.expander("Przepływy pieniężne (Cash Flow)"):
             st.json(clean_for_json(fund_data.get("cash")))
-
 
 # =========================================================
 # MODE: MACRO
