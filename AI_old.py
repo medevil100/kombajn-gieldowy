@@ -1211,100 +1211,208 @@ elif app_mode == "📰 Skaner wiadomości":
 
 
 # =========================================================
-# MODE: YFINANCE FUNDAMENTALS
+# MODE: YFINANCE FUNDAMENTALS & DCF MODEL
 # =========================================================
 
+def fetch_yfinance_fundamentals(ticker_str):
+    """Pobiera rozbudowane dane fundamentalne z yfinance."""
+    import yfinance as yf
+    import pandas as pd
+
+    result = {
+        "metrics": {}, "profile": {}, "price_target": {},
+        "income": {}, "balance": {}, "cash": {}, "_errors": []
+    }
+
+    try:
+        ticker_obj = yf.Ticker(ticker_str)
+        info = ticker_obj.info
+        
+        if not info or len(info) <= 1:
+            result["_errors"].append(f"Yahoo Finance nie zwróciło danych dla {ticker_str}.")
+            return result
+
+        result["metrics"] = {
+            "currentPrice": info.get("currentPrice") or info.get("regularMarketPrice"),
+            "marketCap": info.get("marketCap"),
+            "trailingPE": info.get("trailingPE"),
+            "forwardPE": info.get("forwardPE"),
+            "priceToBook": info.get("priceToBook"),
+            "enterpriseToEbitda": info.get("enterpriseToEbitda"),
+            "trailingEps": info.get("trailingEps"),
+            "dividendYield": info.get("dividendYield")
+        }
+
+        result["profile"] = {
+            "longName": info.get("longName"),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+            "longBusinessSummary": info.get("longBusinessSummary")
+        }
+
+        result["price_target"] = {
+            "targetMeanPrice": info.get("targetMeanPrice"),
+            "numberOfAnalystOpinions": info.get("numberOfAnalystOpinions"),
+            "recommendationKey": info.get("recommendationKey")
+        }
+
+        def df_to_dict_safe(df):
+            return df.fillna(0).to_dict() if df is not None and not df.empty else {}
+
+        try: result["income"] = df_to_dict_safe(ticker_obj.financials)
+        except Exception as e: result["_errors"].append(f"Brak rachunku zysków: {str(e)}")
+        try: result["balance"] = df_to_dict_safe(ticker_obj.balance_sheet)
+        except Exception as e: result["_errors"].append(f"Brak bilansu: {str(e)}")
+        try: result["cash"] = df_to_dict_safe(ticker_obj.cashflow)
+        except Exception as e: result["_errors"].append(f"Brak cash flow: {str(e)}")
+
+    except Exception as e:
+        result["_errors"].append(f"Błąd krytyczny pobierania: {str(e)}")
+
+    return result
+
+
+def calculate_simple_dcf(fund_data, wacc=0.09, growth_rate=0.05, terminal_growth_rate=0.02, forecast_years=5):
+    """Oblicza wartość wewnętrzną spółki metodą DCF na podstawie FCF."""
+    cash_df = fund_data.get("cash", {})
+    fcf_history = []
+    
+    for date_key, metrics in cash_df.items():
+        if isinstance(metrics, dict):
+            fcf = metrics.get("Free Cash Flow")
+            if fcf is None:
+                operating = metrics.get("Operating Cash Flow", 0)
+                capex = metrics.get("Capital Expenditure", 0)
+                fcf = operating + capex
+            if fcf and fcf != 0:
+                fcf_history.append(fcf)
+                
+    if not fcf_history:
+        return {"error": "Brak danych o Free Cash Flow w raportach finansowych do wyceny DCF."}
+        
+    latest_fcf = fcf_history[0]
+    
+    if latest_fcf <= 0:
+        return {"error": f"Najnowszy Free Cash Flow (FCF) jest ujemny ({latest_fcf:,.0f}). Model DCF wymaga dodatnich przepływów."}
+
+    projected_fcfs = []
+    discounted_fcfs = []
+    current_fcf = latest_fcf
+    
+    for year in range(1, forecast_years + 1):
+        current_fcf = current_fcf * (1 + growth_rate)
+        projected_fcfs.append(current_fcf)
+        discounted_fcfs.append(current_fcf / ((1 + wacc) ** year))
+        
+    terminal_value = (projected_fcfs[-1] * (1 + terminal_growth_rate)) / (wacc - terminal_growth_rate)
+    discounted_terminal_value = terminal_value / ((1 + wacc) ** forecast_years)
+    
+    enterprise_value = sum(discounted_fcfs) + discounted_terminal_value
+    
+    metrics_dict = fund_data.get("metrics", {})
+    market_cap = metrics_dict.get("marketCap", 0)
+    current_price = metrics_dict.get("currentPrice", 1)
+    
+    if not current_price or current_price == 0 or not market_cap:
+        return {"error": "Brak ceny lub kapitalizacji rynkowej do wyliczenia wartości na akcję."}
+        
+    shares_outstanding = market_cap / current_price
+    intrinsic_value_per_share = enterprise_value / shares_outstanding
+    upside = ((intrinsic_value_per_share / current_price) - 1) * 100
+    
+    return {
+        "latest_fcf": latest_fcf, "intrinsic_value": intrinsic_value_per_share,
+        "current_price": current_price, "upside": upside
+    }
+
+
 elif app_mode in ["📊 Yahoo Finance Fundamentals", "📊 OpenBB Fundamentals (4.x)"]:
-    st.title("📊 Dane fundamentalne z Yahoo Finance")
+    st.title("📊 Dane fundamentalne i Model DCF")
 
-    st.info(
-        "Ten moduł korzysta bezpośrednio z Yahoo Finance przez yfinance. "
-        "OpenBB został usunięty dla stabilności na Streamlit Cloud."
-    )
-
-    st.caption(
-        "Przykłady tickerów: AAPL, MSFT, NVDA, TSLA, BTC-USD. "
-        "Dla GPW używaj sufiksu .WA, np. CDR.WA, PKO.WA, KGH.WA."
-    )
+    st.info("Moduł pobiera dane bezpośrednio z Yahoo Finance i automatycznie wylicza wycenę DCF.")
 
     ticker_f = st.text_input(
-        "Wpisz ticker do fundamentów:",
-        "AAPL",
+        "Wpisz ticker do fundamentów (np. AAPL, MSFT, CDR.WA):",
+        "STX.WA",
         key="fundamental_ticker_input"
     ).upper().strip()
 
     if "fundamental_data" not in st.session_state:
         st.session_state.fundamental_data = None
-
     if "fundamental_ticker" not in st.session_state:
         st.session_state.fundamental_ticker = None
 
-    if st.button("Pobierz Fundamenty", key="fetch_fundamentals_button"):
+    if st.button("Pobierz dane i uruchom model", key="fetch_fundamentals_button"):
         if not ticker_f:
             st.error("Wpisz poprawny ticker.")
         else:
-            with st.spinner("Pobieranie danych fundamentalnych z Yahoo Finance..."):
-                fund_data = fetch_yfinance_fundamentals(ticker_f)
-
-            st.session_state.fundamental_data = fund_data
-            st.session_state.fundamental_ticker = ticker_f
+            with st.spinner("Pobieranie danych finansowych..."):
+                st.session_state.fundamental_data = fetch_yfinance_fundamentals(ticker_f)
+                st.session_state.fundamental_ticker = ticker_f
 
     if st.session_state.fundamental_data is not None:
         fund_data = st.session_state.fundamental_data
+        st.subheader(f"Analiza spółki: {st.session_state.fundamental_ticker}")
 
-        st.subheader(f"Fundamenty: {st.session_state.fundamental_ticker}")
+        if fund_data.get("_errors"):
+            with st.expander("⚠️ Ostrzeżenia"):
+                for err in fund_data["_errors"]: st.warning(str(err))
 
-        errors = fund_data.get("_errors", [])
+        metrics = fund_data.get("metrics", {})
+        profile = fund_data.get("profile", {})
+        price_target = fund_data.get("price_target", {})
 
-        if errors:
-            with st.expander("Ostrzeżenia / braki danych"):
-                for err in errors:
-                    st.warning(str(err))
-
-        metrics = fund_data.get("metrics") or {}
-        profile = fund_data.get("profile") or {}
-        price_target = fund_data.get("price_target") or {}
+        def format_market_cap(val):
+            if not isinstance(val, (int, float)): return "brak"
+            if val >= 1e12: return f"{val / 1e12:.2f} Bln USD"
+            if val >= 1e9: return f"{val / 1e9:.2f} Mld USD"
+            return f"{val / 1e6:.2f} Mln USD"
 
         col1, col2, col3 = st.columns(3)
+        with col1: st.metric("Cena rynkowa", f"{metrics.get('currentPrice', 0):.2f} USD")
+        with col2: st.metric("Market Cap", format_market_cap(metrics.get("marketCap")))
+        with col3: st.metric("Wskaźnik P/E", f"{metrics.get('trailingPE', 0):.2f}" if metrics.get('trailingPE') else "brak")
 
-        with col1:
-            st.metric(
-                "Cena",
-                metrics.get("currentPrice") if metrics.get("currentPrice") is not None else "brak"
-            )
+        # ==================== SEKCJA DCF ====================
+        st.write("### 🧮 Interaktywny Model Wyceny DCF")
+        with st.expander("Symulacja wartości wewnętrznej (Zmień parametry)", expanded=True):
+            col_d1, col_d2, col_d3 = st.columns(3)
+            with col_d1: wacc_i = st.slider("WACC (Koszt kapitału):", 0.04, 0.20, 0.09, 0.01)
+            with col_d2: growth_i = st.slider("Wzrost FCF (lata 1-5):", -0.10, 0.40, 0.08, 0.01)
+            with col_d3: term_i = st.slider("Wzrost rezydualny (Terminal):", 0.00, 0.05, 0.02, 0.005)
 
-        with col2:
-            st.metric(
-                "Market Cap",
-                metrics.get("marketCap") if metrics.get("marketCap") is not None else "brak"
-            )
+            dcf = calculate_simple_dcf(fund_data, wacc_i, growth_i, term_i)
 
-        with col3:
-            st.metric(
-                "P/E",
-                metrics.get("trailingPE") if metrics.get("trailingPE") is not None else "brak"
-            )
+            if "error" in dcf:
+                st.warning(dcf["error"])
+            else:
+                dm1, dm2, dm3 = st.columns(3)
+                with dm1: st.metric("Wartość wewnętrzna DCF", f"{dcf['intrinsic_value']:.2f} USD")
+                with dm2: st.metric("Aktualna cena", f"{dcf['current_price']:.2f} USD")
+                with dm3: st.metric("Potencjał (Upside)", f"{dcf['upside']:+.2f}%", delta=f"{dcf['upside']:.2f}%")
 
-        st.write("### Profil spółki")
-        st.json(clean_for_json(profile))
+                if dcf["upside"] > 15: st.success(f"📈 Spółka niedowartościowana o {dcf['upside']:.1f}%. Sygnał: KUP.")
+                elif dcf["upside"] < -15: st.error(f"📉 Spółka przewartościowana o {abs(dcf['upside']):.1f}%. Sygnał: SPRZEDAJ.")
+                else: st.info("↔️ Cena rynkowa odzwierciedla wartość godziwą (Fair Value).")
+                st.caption(f"Bazowy przepływ gotówkowy (FCF) użyty do kalkulacji: {dcf['latest_fcf']:,.0f} USD")
 
-        st.write("### Wskaźniki")
-        st.json(clean_for_json(metrics))
-
-        st.write("### Price Target / Analitycy")
-        st.json(clean_for_json(price_target))
-
-        with st.expander("Rachunek zysków i strat"):
+        # ==================== REZULTATY SZCZEGÓŁOWE ====================
+        st.write("### 🏢 Profil i sprawozdania spółki")
+        st.write(f"**Pełna nazwa:** {profile.get('longName', 'brak')}")
+        st.write(f"**Sektor:** {profile.get('sector', 'brak')} | **Branża:** {profile.get('industry', 'brak')}")
+        
+        with st.expander("Zobacz opis biznesu"):
+            st.write(profile.get("longBusinessSummary", "Brak opisu."))
+            
+        with st.expander("Rachunek zysków i strat (Income Statement)"):
             st.json(clean_for_json(fund_data.get("income")))
-
-        with st.expander("Bilans"):
+            
+        with st.expander("Bilans (Balance Sheet)"):
             st.json(clean_for_json(fund_data.get("balance")))
-
-        with st.expander("Cash Flow"):
+            
+        with st.expander("Przepływy pieniężne (Cash Flow)"):
             st.json(clean_for_json(fund_data.get("cash")))
 
-        with st.expander("Pełne dane JSON"):
-            st.json(clean_for_json(fund_data))
 # =========================================================
 # MODE: MACRO
 # =========================================================
