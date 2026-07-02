@@ -1001,6 +1001,12 @@ with st.sidebar:
 if app_mode == "📈 Trading":
     st.title("📈 Trading Desk PRO")
 
+    # KROK 1: Inicjalizacja pamięci podręcznej sesji (aby dane nie znikały)
+    if "trading_data" not in st.session_state:
+        st.session_state.trading_data = None
+    if "ai_analysis_text" not in st.session_state:
+        st.session_state.ai_analysis_text = None
+
     col_a, col_b, col_c = st.columns(3)
 
     with col_a:
@@ -1024,7 +1030,10 @@ if app_mode == "📈 Trading":
             index=2
         )
 
+    # Czyszczenie starej analizy, jeśli użytkownik zmieni ticker/interwał
     if st.button("🚀 Uruchom analizę"):
+        st.session_state.ai_analysis_text = None  # Reset starej analizy AI
+        
         with st.spinner("Pobieranie danych cenowych..."):
             df = load_price_data(ticker, period, interval)
 
@@ -1049,145 +1058,71 @@ if app_mode == "📈 Trading":
 
         score = compute_scoring_pro(ind, sentiment)
 
+        # KROK 2: Zapisujemy pobrane i obliczone dane do sesji
+        st.session_state.trading_data = {
+            "df": df,
+            "ind": ind,
+            "sentiment": sentiment,
+            "headlines": headlines,
+            "msg": msg,
+            "score": score,
+            "ticker": ticker,
+            "interval": interval
+        }
+
+    # KROK 3: Wyświetlamy interfejs TYLKO jeśli dane są w sesji (nie znikną po kliknięciu AI)
+    if st.session_state.trading_data is not None:
+        data = st.session_state.trading_data
+        df = data["df"]
+        ind = data["ind"]
+        headlines = data["headlines"]
+        
+        close = df["Close"]
+
         # Metrics
         m1, m2, m3, m4, m5 = st.columns(5)
-
-        with m1:
-            st.metric("Cena", fmt_num(close.iloc[-1], 2))
-
-        with m2:
-            st.metric("Score PRO", f"{score}/100")
-
-        with m3:
-            st.metric("Trend", ind["trend"])
-
-        with m4:
-            st.metric("RSI", fmt_num(ind["rsi"], 2))
-
-        with m5:
-            st.metric("Sentyment", sentiment)
+        with m1: st.metric("Cena", fmt_num(close.iloc[-1], 2))
+        with m2: st.metric("Score PRO", f"{data['score']}/100")
+        with m3: st.metric("Trend", ind["trend"])
+        with m4: st.metric("RSI", fmt_num(ind["rsi"], 2))
+        with m5: st.metric("Sentyment", data["sentiment"])
 
         m6, m7, m8, m9 = st.columns(4)
-
-        with m6:
-            st.metric("ADX", fmt_num(ind["adx"], 2))
-
-        with m7:
-            st.metric("RVOL", fmt_num(ind["rvol"], 2))
-
-        with m8:
-            st.metric("MACD", fmt_num(ind["last_macd"], 4))
-
-        with m9:
-            st.metric("ATR", fmt_num(ind["atr"], 4))
+        with m6: st.metric("ADX", fmt_num(ind["adx"], 2))
+        with m7: st.metric("RVOL", fmt_num(ind["rvol"], 2))
+        with m8: st.metric("MACD", fmt_num(ind["last_macd"], 4))
+        with m9: st.metric("ATR", fmt_num(ind["atr"], 4))
 
         # Chart
         fig = make_subplots(
-            rows=4,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.03,
+            rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03,
             row_heights=[0.5, 0.15, 0.18, 0.17],
             subplot_titles=("Cena", "Wolumen", "RSI", "MACD")
         )
 
-        fig.add_trace(
-            go.Candlestick(
-                x=df.index,
-                open=df["Open"],
-                high=df["High"],
-                low=df["Low"],
-                close=df["Close"],
-                increasing_line_color="#22c55e",
-                decreasing_line_color="#ef4444",
-                name="Cena"
-            ),
-            row=1,
-            col=1
-        )
+        fig.add_trace(go.Candlestick(
+            x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
+            increasing_line_color="#22c55e", decreasing_line_color="#ef4444", name="Cena"
+        ), row=1, col=1)
 
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=close.rolling(10).mean(),
-                mode="lines",
-                name="MA10",
-                line=dict(color="#38bdf8", width=1.2)
-            ),
-            row=1,
-            col=1
-        )
-
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=close.rolling(30).mean(),
-                mode="lines",
-                name="MA30",
-                line=dict(color="#eab308", width=1.2)
-            ),
-            row=1,
-            col=1
-        )
+        fig.add_trace(go.Scatter(x=df.index, y=close.rolling(10).mean(), mode="lines", name="MA10", line=dict(color="#38bdf8", width=1.2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=close.rolling(30).mean(), mode="lines", name="MA30", line=dict(color="#eab308", width=1.2)), row=1, col=1)
 
         if ind["upper_bb"] is not None:
-            fig.add_trace(
-                go.Scatter(
-                    x=df.index,
-                    y=ind["upper_bb"],
-                    mode="lines",
-                    name="Upper BB",
-                    line=dict(color="#a855f7", width=1, dash="dot")
-                ),
-                row=1,
-                col=1
-            )
-
+            fig.add_trace(go.Scatter(x=df.index, y=ind["upper_bb"], mode="lines", name="Upper BB", line=dict(color="#a855f7", width=1, dash="dot")), row=1, col=1)
         if ind["lower_bb"] is not None:
-            fig.add_trace(
-                go.Scatter(
-                    x=df.index,
-                    y=ind["lower_bb"],
-                    mode="lines",
-                    name="Lower BB",
-                    line=dict(color="#a855f7", width=1, dash="dot")
-                ),
-                row=1,
-                col=1
-            )
+            fig.add_trace(go.Scatter(x=df.index, y=ind["lower_bb"], mode="lines", name="Lower BB", line=dict(color="#a855f7", width=1, dash="dot")), row=1, col=1)
 
         vol_colors = np.where(df["Close"] >= df["Open"], "#22c55e", "#ef4444")
+        fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Volume", marker_color=vol_colors), row=2, col=1)
 
-        fig.add_trace(
-            go.Bar(
-                x=df.index,
-                y=df["Volume"],
-                name="Volume",
-                marker_color=vol_colors
-            ),
-            row=2,
-            col=1
-        )
-
-        # RSI series
         delta = close.diff()
         gain = delta.where(delta > 0, 0).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rs = gain / (loss + 1e-9)
         rsi_series = 100 - (100 / (1 + rs))
 
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=rsi_series,
-                mode="lines",
-                name="RSI",
-                line=dict(color="#eab308", width=1.2)
-            ),
-            row=3,
-            col=1
-        )
-
+        fig.add_trace(go.Scatter(x=df.index, y=rsi_series, mode="lines", name="RSI", line=dict(color="#eab308", width=1.2)), row=3, col=1)
         fig.add_hline(y=70, line_dash="dot", line_color="#ef4444", row=3, col=1)
         fig.add_hline(y=30, line_dash="dot", line_color="#22c55e", row=3, col=1)
 
@@ -1197,49 +1132,11 @@ if app_mode == "📈 Trading":
         macd_signal = macd_series.ewm(span=9, adjust=False).mean()
         macd_hist = macd_series - macd_signal
 
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=macd_series,
-                mode="lines",
-                name="MACD",
-                line=dict(color="#22c55e", width=1.2)
-            ),
-            row=4,
-            col=1
-        )
+        fig.add_trace(go.Scatter(x=df.index, y=macd_series, mode="lines", name="MACD", line=dict(color="#22c55e", width=1.2)), row=4, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=macd_signal, mode="lines", name="MACD Signal", line=dict(color="#ef4444", width=1.2)), row=4, col=1)
+        fig.add_trace(go.Bar(x=df.index, y=macd_hist, name="MACD Hist", marker_color=np.where(macd_hist >= 0, "#22c55e", "#ef4444")), row=4, col=1)
 
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=macd_signal,
-                mode="lines",
-                name="MACD Signal",
-                line=dict(color="#ef4444", width=1.2)
-            ),
-            row=4,
-            col=1
-        )
-
-        fig.add_trace(
-            go.Bar(
-                x=df.index,
-                y=macd_hist,
-                name="MACD Hist",
-                marker_color=np.where(macd_hist >= 0, "#22c55e", "#ef4444")
-            ),
-            row=4,
-            col=1
-        )
-
-        fig.update_layout(
-            template="plotly_dark",
-            height=900,
-            showlegend=True,
-            xaxis_rangeslider_visible=False,
-            margin=dict(l=20, r=20, t=60, b=20)
-        )
-
+        fig.update_layout(template="plotly_dark", height=900, showlegend=True, xaxis_rangeslider_visible=False, margin=dict(l=20, r=20, t=60, b=20))
         st.plotly_chart(fig, use_container_width=True)
 
         # News
@@ -1248,31 +1145,36 @@ if app_mode == "📈 Trading":
             for h in headlines:
                 st.write("- " + h)
         else:
-            st.info(msg or "Brak newsów.")
+            st.info(data["msg"] or "Brak newsów.")
 
         # Indicator table
         with st.expander("Pokaż szczegóły wskaźników"):
-            ind_display = {
-                k: v for k, v in ind.items()
-                if k not in ["upper_bb", "lower_bb"]
-            }
+            ind_display = {k: v for k, v in ind.items() if k not in ["upper_bb", "lower_bb"]}
             st.json(clean_for_json(ind_display))
 
-        # AI
+        # =========================================================
+        # AI SECTION (KROK 4: Bezpieczny przycisk AI poza głównym przyciskiem)
+        # =========================================================
         st.subheader("🤖 Analiza AI")
 
         if st.button("Wygeneruj analizę AI"):
             with st.spinner("Generowanie analizy AI..."):
+                # Wywołanie poprawionej funkcji z odpowiednimi zmiennymi pobranymi z sesji
                 ai_text = generate_ai_analysis(
-                    ticker=ticker,
-                    interval=interval,
-                    ind=ind,
-                    score=score,
-                    sentiment=sentiment,
-                    headlines=headlines
+                    ticker=data["ticker"],
+                    interval=data["interval"],
+                    ind=data["ind"],
+                    score=data["score"],
+                    sentiment=data["sentiment"],
+                    headlines=data["headlines"]
                 )
+                st.session_state.ai_analysis_text = ai_text
 
-            st.markdown(ai_text)
+        # Stałe wyświetlanie tekstu analizy, jeśli została wygenerowana
+        if st.session_state.ai_analysis_text:
+            st.markdown("---")
+            st.markdown(st.session_state.ai_analysis_text)
+
 
 
 # =========================================================
