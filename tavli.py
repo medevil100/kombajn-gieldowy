@@ -191,7 +191,7 @@ if uruchom_globalny:
             df_high = pd.DataFrame()
             df_low = pd.DataFrame()
             
-            # POPRAWKA: Bezpieczne, odporne na MultiIndex sprawdzanie obecności kolumn w tabeli yfinance
+                       # POPRAWKA: Bezpieczne, odporne na MultiIndex sprawdzanie obecności kolumn w tabeli yfinance
             for t in lista_tickerów:
                 try:
                     if isinstance(dane_bulk.columns, pd.MultiIndex):
@@ -222,6 +222,8 @@ if uruchom_globalny:
                 
                 tech = przetwórz_dane_historyczne(ticker, df_close, df_volume, df_high, df_low)
                 if not tech:
+                    continue
+                    
                 if rynek == "USA" and tech['cena'] > cena_max_us:
                     continue
                 
