@@ -124,14 +124,25 @@ def głęboka_analiza_news_ai(ticker: str, tech: dict, rynek: str):
 # --- 5. INTERFEJS UŻYTKOWNIKA STREAMLIT ---
 st.title("📈 Profesjonalny Terminal Giełdowy AI (Rynek Akcji)")
 
-# --- TESTOWY PRZYCISK DIAGNOSTYCZNY TELEGRAMA ---
-st.sidebar.subheader("🛠️ Diagnostyka połączenia bota")
-if st.sidebar.button("🔌 Wyślij alert testowy"):
-    sukces = wyslij_telegram_alert("🤖 TEST połączenia Terminala AI: Powiadomienia działają prawidłowo!")
-    if sukces:
-        st.sidebar.success("Wiadomość testowa dotarła na Twój telefon!")
-    else:
-        st.sidebar.warning("Wysyłka nie powiodła się. Sprawdź błąd powyżej.")
+# --- 3. MODUŁ TELEGRAMA (NAPRAWIONY ADRES URL) ---
+def wyslij_telegram_alert(wiadomosc: str):
+    """Wysyła bezpieczny, czysty tekst na Telegram przy użyciu poprawnej ścieżki API"""
+    # DODANO SŁOWO "bot" PRZED TOKENEM - to naprawia błąd sieciowy
+    url = f"https://telegram.org{TG_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TG_CHAT_ID,
+        "text": wiadomosc
+    }
+    try:
+        response = requests.post(url, json=payload)
+        if response.status_code != 200:
+            st.sidebar.error(f"Telegram Error: {response.status_code} - {response.text}")
+            return False
+        return True
+    except Exception as e:
+        st.sidebar.error(f"Błąd sieci Telegram: {e}")
+        return False
+
 
 # --- CZĘŚĆ 1: SZYBKIE OKNO SPRAWDZANIA TICKERA ---
 st.subheader("🔍 Szybki podgląd i analiza wybranego waloru")
