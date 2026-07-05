@@ -386,8 +386,10 @@ if st.session_state.last_scanned_tickers:
             return "color: lime; font-weight: bold;"
         return ""
 
-   def highlight(row):
+  def highlight(row):
     style = {}
+
+    # Kolor statusu
     if "Kupuj" in row["Status / Ocena"]:
         style["Status / Ocena"] = "color: lime; font-weight: bold;"
     elif "Trzymaj" in row["Status / Ocena"]:
@@ -395,15 +397,11 @@ if st.session_state.last_scanned_tickers:
     else:
         style["Status / Ocena"] = "color: red; font-weight: bold;"
 
+    # Kolor SL / TP
     style["Stop Loss (SL na dole)"] = "color: red; font-weight: bold;"
     style["Take Profit (TP)"] = "color: lime; font-weight: bold;"
+
     return style
-
-st.dataframe(
-    df_wyniki.style.apply(highlight, axis=1),
-    use_container_width=True
-)
-
 
 # =====================================================================
 # TOP 5 OKAZJI DNIA
