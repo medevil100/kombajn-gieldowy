@@ -226,7 +226,7 @@ if uruchom_globalny:
                     "Take Profit (TP)": f"{tech['tp']:.2f}"
                 })
                 
-                # Uruchomienie wyszukiwarki Tavily wyłącznie dla spółek z wyraźną okazją (Skok wolumenu >= 1.5x lub sygnał)
+                              # Uruchomienie wyszukiwarki Tavily wyłącznie dla spółek z wyraźną okazją (Skok wolumenu >= 1.5x lub sygnał)
                 if tech['sygnal'] in ["LONG", "SHORT"] or tech['skok_wolumenu'] >= 1.5:
                     licznik_alertow += 1
                     komentarz_rynkowy = głęboka_analiza_news_ai(ticker, tech, rynek)
