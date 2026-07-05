@@ -295,6 +295,8 @@ if quick_ticker:
 
         # Każda wartość pobierana BEZPOŚREDNIO z df_q
         try:
+            st.write("DEBUG ostatnia:", ostatnia)
+
             close_val  = float(ostatnia["Close"])
             rsi_val    = float(ostatnia["RSI"])
             macd_val   = float(ostatnia["MACD"])
