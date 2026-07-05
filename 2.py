@@ -416,18 +416,23 @@ if st.session_state.last_scanned_tickers:
 
     df_top5 = df_top.head(5)
 
+    # --- BEZPIECZNE STYLOWANIE (działa nawet gdy brakuje kolumn) ---
     def highlight_top(row):
         style = {}
 
-        if "Kupuj" in row["Status / Ocena"]:
-            style["Status / Ocena"] = "color: lime; font-weight: bold;"
-        elif "Trzymaj" in row["Status / Ocena"]:
-            style["Status / Ocena"] = "color: gold; font-weight: bold;"
-        else:
-            style["Status / Ocena"] = "color: red; font-weight: bold;"
+        if "Status / Ocena" in row:
+            if "Kupuj" in row["Status / Ocena"]:
+                style["Status / Ocena"] = "color: lime; font-weight: bold;"
+            elif "Trzymaj" in row["Status / Ocena"]:
+                style["Status / Ocena"] = "color: gold; font-weight: bold;"
+            else:
+                style["Status / Ocena"] = "color: red; font-weight: bold;"
 
-        style["Stop Loss (SL na dole)"] = "color: red; font-weight: bold;"
-        style["Take Profit (TP)"] = "color: lime; font-weight: bold;"
+        if "Stop Loss (SL na dole)" in row:
+            style["Stop Loss (SL na dole)"] = "color: red; font-weight: bold;"
+
+        if "Take Profit (TP)" in row:
+            style["Take Profit (TP)"] = "color: lime; font-weight: bold;"
 
         return style
 
