@@ -51,7 +51,6 @@ def wyslij_telegram_alert(wiadomosc: str):
 
 # --- 4. SILNIK WYLICZEŃ TECHNICZNYCH (ŚCIŚLE DLA RYNKU AKCJI) ---
 def przetwórz_dane_historyczne(ticker, df_close, df_volume, df_high, df_low):
-    """Wylicza wskaźniki pod kątem handlu akcjami (Tylko pozycje LONG)"""
     try:
         if ticker not in df_close.columns or len(df_close[ticker].dropna()) < 20:
             return None
@@ -62,10 +61,13 @@ def przetwórz_dane_historyczne(ticker, df_close, df_volume, df_high, df_low):
         lows = df_low[ticker]
         closes = df_close[ticker]
         
+        # Ochrona przed wartościami pustymi (NaN) w najnowszym wierszu
+        if pd.isna(cena):
+            return None
+            
         sma20 = closes.rolling(window=20).mean().iloc[-1]
         sma50 = closes.rolling(window=50).mean().iloc[-1]
         
-        # Logika sygnałów dopasowana do fizycznych akcji (brak grania pozycji Short)
         if cena > sma20 > sma50:
             ocena = "Kupuj (Trend Wzrostowy)"
             sygnal = "LONG"
@@ -80,18 +82,15 @@ def przetwórz_dane_historyczne(ticker, df_close, df_volume, df_high, df_low):
         sredni_vol = vols.rolling(window=20).mean().iloc[-1]
         skok_wolumenu = ostatni_vol / sredni_vol if (sredni_vol and sredni_vol > 0) else 1.0
         
-        # Wyliczanie ATR dla zmienności
         high_low = highs - lows
         high_close = np.abs(highs - closes.shift())
         low_close = np.abs(lows - closes.shift())
         true_range = np.max(pd.concat([high_low, high_close, low_close], axis=1), axis=1)
         atr = true_range.rolling(14).mean().iloc[-1] if not pd.isna(true_range.rolling(14).mean().iloc[-1]) else (cena * 0.05)
         
-        # Mnożniki dopasowane do ochrony kapitału (Penny Stocks mają większy bufor zabezpieczający)
         mnoznik_sl = 2.5 if cena < 5 else 2.0
         mnoznik_tp = 4.0 if cena < 5 else 3.0
         
-        # Ochronny Stop Loss ZAWSZE na dole poniżej ceny rynkowej zakupu
         sl = cena - (mnoznik_sl * atr)
         tp = cena + (mnoznik_tp * atr)
         
@@ -192,12 +191,24 @@ if uruchom_globalny:
             df_high = pd.DataFrame()
             df_low = pd.DataFrame()
             
+            # POPRAWKA: Bezpieczne, odporne na MultiIndex sprawdzanie obecności kolumn w tabeli yfinance
             for t in lista_tickerów:
-                if t in dane_bulk.columns.levels:
-                    df_close[t] = dane_bulk[t]['Close']
-                    df_volume[t] = dane_bulk[t]['Volume']
-                    df_high[t] = dane_bulk[t]['High']
-                    df_low[t] = dane_bulk[t]['Low']
+                try:
+                    if isinstance(dane_bulk.columns, pd.MultiIndex):
+                        if t in dane_bulk.columns.levels[0]:
+                            df_close[t] = dane_bulk[t]['Close']
+                            df_volume[t] = dane_bulk[t]['Volume']
+                            df_high[t] = dane_bulk[t]['High']
+                            df_low[t] = dane_bulk[t]['Low']
+                    else:
+                        # Wariant rezerwowy dla pojedynczego tickera lub płaskiej struktury tabeli
+                        if t in dane_bulk.columns:
+                            df_close[t] = dane_bulk['Close']
+                            df_volume[t] = dane_bulk['Volume']
+                            df_high[t] = dane_bulk['High']
+                            df_low[t] = dane_bulk['Low']
+                except Exception:
+                    pass
 
         st.write("⏳ KROK 2: Analiza techniczna obrotu kapitału i wysyłanie alertów...")
         pasek = st.progress(0)
@@ -211,19 +222,17 @@ if uruchom_globalny:
                 
                 tech = przetwórz_dane_historyczne(ticker, df_close, df_volume, df_high, df_low)
                 if not tech:
-                    continue
-                    
                 if rynek == "USA" and tech['cena'] > cena_max_us:
                     continue
                 
                 # Zapis do tabeli Live
                 pelna_tabela_wynikow.append({
-                    "Ticker": ticker, 
-                    "Rynek": rynek, 
+                    "Ticker": ticker,
+                    "Rynek": rynek,
                     "Aktualny Kurs": f"{tech['cena']:.2f} {waluta}",
-                    "Ocena / Trend": tech['ocena'], 
+                    "Ocena / Trend": tech['ocena'],
                     "Skok Wolumenu": f"{tech['skok_wolumenu']}x",
-                    "Stop Loss (SL na dole)": f"{tech['sl']:.2f}", 
+                    "Stop Loss (SL na dole)": f"{tech['sl']:.2f}",
                     "Take Profit (TP)": f"{tech['tp']:.2f}"
                 })
                 
