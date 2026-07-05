@@ -386,13 +386,24 @@ if st.session_state.last_scanned_tickers:
             return "color: lime; font-weight: bold;"
         return ""
 
-    df_wyniki_styled = (
-        df_wyniki.style
-        .applymap(kolor_status, subset=["Status / Ocena"])
-        .applymap(kolor_sl_tp, subset=["Stop Loss (SL na dole)", "Take Profit (TP)"])
-    )
+   def highlight(row):
+    style = {}
+    if "Kupuj" in row["Status / Ocena"]:
+        style["Status / Ocena"] = "color: lime; font-weight: bold;"
+    elif "Trzymaj" in row["Status / Ocena"]:
+        style["Status / Ocena"] = "color: gold; font-weight: bold;"
+    else:
+        style["Status / Ocena"] = "color: red; font-weight: bold;"
 
-    st.dataframe(df_wyniki_styled, use_container_width=True)
+    style["Stop Loss (SL na dole)"] = "color: red; font-weight: bold;"
+    style["Take Profit (TP)"] = "color: lime; font-weight: bold;"
+    return style
+
+st.dataframe(
+    df_wyniki.style.apply(highlight, axis=1),
+    use_container_width=True
+)
+
 
 # =====================================================================
 # TOP 5 OKAZJI DNIA
