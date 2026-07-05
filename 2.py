@@ -273,10 +273,8 @@ if st.session_state.last_scanned_tickers:
 
 st.subheader("📌 Stałe tickery — szybki wybór spółki")
 
-# Twoje listy
 all_tickers = GPW_LIST + USA_LIST
 
-# Dropdown z wyborem spółki
 selected_ticker = st.selectbox("Wybierz spółkę:", all_tickers, key="selected_ticker")
 
 if selected_ticker:
@@ -291,40 +289,41 @@ if selected_ticker:
 
         last = df_s.iloc[-1]
 
-        # Pobieramy pojedyncze wartości
-    try:
-    cena_s   = float(last["Close"].item())
-    rsi_s    = float(last["RSI"].item())
-    macd_s   = float(last["MACD"].item())
-    signal_s = float(last["Signal"].item())
-    bb_up_s  = float(last["BB_UP"].item())
-    bb_mid_s = float(last["BB_MID"].item())
-    bb_down_s= float(last["BB_DOWN"].item())
-except Exception as e:
-    st.error(f"Nie można przetworzyć danych tickera: {e}")
-    st.stop()
+        try:
+            cena_s   = float(last["Close"].item())
+            rsi_s    = float(last["RSI"].item())
+            macd_s   = float(last["MACD"].item())
+            signal_s = float(last["Signal"].item())
+            bb_up_s  = float(last["BB_UP"].item())
+            bb_mid_s = float(last["BB_MID"].item())
+            bb_down_s= float(last["BB_DOWN"].item())
+        except Exception as e:
+            st.error(f"Nie można przetworzyć danych tickera: {e}")
+            st.stop()
 
+        st.markdown(
+            f"""
+            ### 🔍 Podgląd: **{selected_ticker}**
+            **Cena:** {cena_s:.2f}  
+            **RSI:** {rsi_s:.1f}  
+            **MACD:** {macd_s:.4f}  
+            **Signal:** {signal_s:.4f}  
+            **Bollinger:** UP {bb_up_s:.2f} | MID {bb_mid_s:.2f} | DOWN {bb_down_s:.2f}
+            """
+        )
 
-        # Wyświetlamy panel
-        st.markdown(f"""
-        ### 🔍 Podgląd: **{selected_ticker}**
-        **Cena:** {cena_s:.2f}  
-        **RSI:** {rsi_s:.1f}  
-        **MACD:** {macd_s:.4f}  
-        **Signal:** {signal_s:.4f}  
-        **Bollinger:** UP {bb_up_s:.2f} | MID {bb_mid_s:.2f} | DOWN {bb_down_s:.2f}
-        """)
-
-        # Mini-wykres
         fig2 = make_subplots(rows=3, cols=1, shared_xaxes=True)
 
-        fig2.add_trace(go.Candlestick(
-            x=df_s.index,
-            open=df_s["Open"],
-            high=df_s["High"],
-            low=df_s["Low"],
-            close=df_s["Close"]
-        ), row=1, col=1)
+        fig2.add_trace(
+            go.Candlestick(
+                x=df_s.index,
+                open=df_s["Open"],
+                high=df_s["High"],
+                low=df_s["Low"],
+                close=df_s["Close"]
+            ),
+            row=1, col=1
+        )
 
         fig2.add_trace(go.Scatter(x=df_s.index, y=df_s["RSI"]), row=2, col=1)
         fig2.add_trace(go.Scatter(x=df_s.index, y=df_s["MACD"]), row=3, col=1)
@@ -332,105 +331,3 @@ except Exception as e:
 
         fig2.update_layout(template="plotly_dark", height=700)
         st.plotly_chart(fig2, use_container_width=True)
- 
-# =====================================================================
-# SZYBKI PODGLĄD TICKERA — ODDZIELONY OD SKANERA I JSON
-# =====================================================================
-
-st.subheader("🔎 Szybki podgląd tickera (RSI / MACD / Bollinger / Świece)")
-
-quick_ticker = st.text_input("Ticker:", key="quick_ticker")
-
-if quick_ticker:
-
-    # Pobieramy TYLKO z YF — nigdy z JSON, nigdy ze skanera
-    df_q = yf.download(quick_ticker, period="10d", interval="30m", progress=False)
-
-    if df_q is None or df_q.empty:
-        st.error("Brak danych z Yahoo Finance.")
-    else:
-
-        # Wskaźniki liczone TYLKO na df_q
-        df_q["RSI"] = oblicz_rsi(df_q)
-        df_q = oblicz_macd(df_q)
-        df_q = oblicz_bollinger(df_q)
-
-        # Ostatni wiersz — PRAWDZIWE DANE Z YF
-        ostatnia = df_q.iloc[-1]
-
-        # DEBUG — zobaczysz dokładnie co tam jest
-        st.write("DEBUG ostatnia:", ostatnia)
-
-        # Pobieramy POJEDYNCZE wartości, nie Series
-        try:
-            close_val  = float(ostatnia["Close"].item())
-            rsi_val    = float(ostatnia["RSI"].item())
-            macd_val   = float(ostatnia["MACD"].item())
-            signal_val = float(ostatnia["Signal"].item())
-            bb_up      = float(ostatnia["BB_UP"].item())
-            bb_mid     = float(ostatnia["BB_MID"].item())
-            bb_down    = float(ostatnia["BB_DOWN"].item())
-        except Exception as e:
-            st.error(f"Nie można przetworzyć danych tickera: {e}")
-            st.stop()
-
-        # Wyświetlanie
-        st.write(f"**Cena:** {close_val:.2f}")
-        st.write(f"**RSI:** {rsi_val:.1f}")
-        st.write(f"**MACD:** {macd_val:.4f}")
-        st.write(f"**Signal:** {signal_val:.4f}")
-        st.write(f"**Bollinger:** UP {bb_up:.2f} | MID {bb_mid:.2f} | DOWN {bb_down:.2f}")
-
-        # Wykres
-        fig = make_subplots(
-            rows=3, cols=1, shared_xaxes=True,
-            vertical_spacing=0.02, row_heights=[0.55, 0.20, 0.25]
-        )
-
-        fig.add_trace(
-            go.Candlestick(
-                x=df_q.index,
-                open=df_q["Open"],
-                high=df_q["High"],
-                low=df_q["Low"],
-                close=df_q["Close"],
-                increasing_line_color="lime",
-                decreasing_line_color="red",
-            ),
-            row=1, col=1
-        )
-
-        fig.add_trace(
-            go.Scatter(x=df_q.index, y=df_q["RSI"], mode="lines", line=dict(color="orange")),
-            row=2, col=1
-        )
-
-        fig.add_trace(
-            go.Scatter(x=df_q.index, y=df_q["MACD"], mode="lines", line=dict(color="cyan")),
-            row=3, col=1
-        )
-
-        fig.add_trace(
-            go.Scatter(x=df_q.index, y=df_q["Signal"], mode="lines", line=dict(color="white")),
-            row=3, col=1
-        )
-
-        fig.update_layout(template="plotly_dark", height=900, width=1200)
-        st.plotly_chart(fig, use_container_width=True)
-
-
-# =====================================================================
-# AUTO-SCAN
-# =====================================================================
-
-auto_scan = st.selectbox("Auto-skan:", ["Wyłączony","Co 1 minutę","Co 5 minut","Co 15 minut"])
-
-if auto_scan == "Co 1 minutę":
-    time.sleep(60)
-    st.rerun()
-elif auto_scan == "Co 5 minut":
-    time.sleep(300)
-    st.rerun()
-elif auto_scan == "Co 15 minut":
-    time.sleep(900)
-    st.rerun()
