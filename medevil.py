@@ -154,7 +154,6 @@ def analizuj_jedna_spolke(ticker, now):
             sort_score = 1
             
         # POZYCJA LONG: Zabezpieczenie Stop Loss (SL) ZAWSZE NA DOLE (pod ceną zakupu)
-        # Obliczamy dynamiczny bufor 5% na podstawie ceny akcji
         sl_na_dole = aktualna_cena * 0.95
         tp_na_gorze = aktualna_cena * 1.15
         
@@ -173,16 +172,27 @@ def analizuj_jedna_spolke(ticker, now):
         
         if sygnal_trafiony:
             komentarz = generuj_komentarz_ai(ticker, aktualna_cena, skok_wolumenu, zmiana_ceny, current_rsi, waluta)
+            
+            # POPRAWKA: Sformatowanie tekstu pod bezpieczny i stabilny styl HTML
+            flag_rynek = "🇵🇱" if is_gpw else "🇺🇸"
             alert_text = (
-                f"🟢 *REALNA OKAZJA RYNKOWA:* `{ticker}`\n"
-                f"💰 Cena: {aktualna_cena:.2f} {waluta}\n"
-                f"📈 Zmiana: +{zmiana_ceny:.2f}%\n"
-                f"📊 Wolumen: {skok_wolumenu:.1f}x ponad średnią\n"
-                f"🛡️ Wskaźnik RSI: `{current_rsi:.1f}` (Strefa Bezpieczna)\n"
+                f"🚨 <b>ALERT SNAJPERA AKCJI {flag_rynek}: {ticker}</b>\n"
+                f"💰 Cena: {aktualna_cena:.2f} {waluta} (+{zmiana_ceny:.2f}%)\n"
+                f"📊 Wolumen: <b>{skok_wolumenu:.1f}x</b> ponad średnią\n"
+                f"🛡️ Wskaźnik RSI: <b>{current_rsi:.1f}</b> (Strefa Bezpieczna)\n"
                 f"🛑 Obrona (SL na dole): {sl_na_dole:.2f} {waluta}\n"
-                f"🤖 *AI:* {komentarz}"
+                f"🎯 Cel (TP): {tp_na_gorze:.2f} {waluta}\n\n"
+                f"📝 <b>AI:</b> {komentarz}"
             )
-            send_telegram_message(alert_text)
+            
+            # Wymuszamy wysłanie za pomocą zaktualizowanej funkcji HTML
+            czysty_token = str(TELEGRAM_TOKEN).strip()
+            url = f"https://telegram.org{czysty_token}/sendMessage"
+            payload = {"chat_id": str(TELEGRAM_CHAT_ID).strip(), "text": alert_text, "parse_mode": "HTML"}
+            try: 
+                requests.post(url, json=payload, timeout=5)
+            except Exception: 
+                pass
             
             ticker_info["Alert_Data"] = {
                 "Czas": now, "Ticker": ticker, "Cena": f"{aktualna_cena:.2f} {waluta}",
@@ -223,6 +233,20 @@ def job_skanera(status_placeholder=None, progress_bar=None):
 # =====================================================================
 st.sidebar.header("⏱️ Sterowanie Radarem")
 auto_scan = st.sidebar.selectbox("Automatyczne odświeżanie:", ["Tylko ręcznie", "Co 1 minutę", "Co 5 minut", "Co 15 minut"])
+
+# PRZYCISK DIAGNOSTYCZNY: Wysyła niezależną wiadomość bezpośrednio na Twój telefon
+if st.sidebar.button("🔌 Wyślij testowy alert"):
+    czysty_token = str(TELEGRAM_TOKEN).strip()
+    url = f"https://telegram.org{czysty_token}/sendMessage"
+    payload = {"chat_id": str(TELEGRAM_CHAT_ID).strip(), "text": "🤖 <b>TEST SYSTEMU:</b> Powiadomienia z lokalnego PowerShella działają poprawnie!", "parse_mode": "HTML"}
+    try:
+        res = requests.post(url, json=payload, timeout=5)
+        if res.status_code == 200:
+            st.sidebar.success("Test dostarczony!")
+        else:
+            st.sidebar.error(f"Błąd {res.status_code}: {res.text}")
+    except Exception as e:
+        st.sidebar.error(f"Błąd połączenia: {e}")
 
 col_btn1, col_btn2 = st.columns(2)
 with col_btn1:
