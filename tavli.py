@@ -215,8 +215,6 @@ if uruchom_globalny:
                 
                 # Zapis do tabeli Live
                 pelna_tabela_wynikow.append({
-                                    # Zapis do tabeli Live
-                pelna_tabela_wynikow.append({
                     "Ticker": ticker, 
                     "Rynek": rynek, 
                     "Aktualny Kurs": f"{tech['cena']:.2f} {waluta}",
