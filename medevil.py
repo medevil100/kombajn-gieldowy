@@ -27,7 +27,7 @@ if "last_scanned_tickers" not in st.session_state:
 # =====================================================================
 try:
     TELEGRAM_TOKEN = st.secrets.get("telegram_token") or st.secrets.get("TELEGRAM_TOKEN")
-    TELEGRAM_CHAT_ID = st.secrets.get("telegram_id") or st.secrets.get("TELEGRAM_CHAT_ID") or st.secrets.get("telegram_chat_id")
+    TELEGRAM_CHAT_ID = st.secrets.get("telegram_chat_id") or st.secrets.get("telegram_id") or st.secrets.get("TELEGRAM_CHAT_ID")
     OPENAI_API_KEY = st.secrets.get("openai_key") or st.secrets.get("OPENAI_API_KEY")
     
     INTERVAL = st.secrets.get("interval") or "15m"
@@ -57,7 +57,7 @@ user_input = st.text_area(
 
 MARKET_DATABASE = [t.strip().upper() for t in user_input.split(",") if t.strip()]
 
-# SUWAKI DO KONTROLI PARAMETRÓW W LOCIE (Zintegrowane z Twoim szkieletem)
+# SUWAKI DO KONTROLI PARAMETRÓW W LOCIE
 col_p1, col_p2, col_p3 = st.columns(3)
 with col_p1:
     ui_interval = st.selectbox("Interwał świecy:", ["1m", "5m", "15m", "30m", "1h"], index=3)
@@ -72,9 +72,11 @@ with col_p3:
 def send_telegram_message(message):
     czysty_token = str(TELEGRAM_TOKEN).strip()
     url = f"https://telegram.org{czysty_token}/sendMessage"
-    payload = {"chat_id": str(TELEGRAM_CHAT_ID).strip(), "text": message, "parse_mode": "Markdown"}
-    try: requests.post(url, json=payload, timeout=5)
-    except Exception: pass
+    payload = {"chat_id": str(TELEGRAM_CHAT_ID).strip(), "text": message, "parse_mode": "HTML"}
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception:
+        pass
 
 def oblicz_rsi(df, period=14):
     try:
@@ -84,20 +86,22 @@ def oblicz_rsi(df, period=14):
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
         return rsi
-    except Exception: return None
+    except Exception:
+        return None
 
 def generuj_komentarz_ai(ticker, price, volume, change, rsi, waluta):
     try:
         prompt = (
             f"Jesteś profesjonalnym traderem akcji (Long). Spółka {ticker} wygenerowała sygnał wzrostowy: "
             f"cena {float(price):.2f} {waluta}, wzrost o +{float(change):.2f}%, wolumen {float(volume):.1f}x ponad średnią, RSI {float(rsi):.1f}. "
-            f"Napisz jedno bardzo krótkie zdanie techniczne (max 10 słów) podsumowania okazji i uzasadnienia wejścia pod trend."
+            f"Napisz jedno bardzo krótkie zdanie techniczne (max 10 słów) podsumowania okazji."
         )
         response = client.chat.completions.create(
             model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], max_tokens=35, temperature=0.7
         )
         return response.choices.message.content.strip()
-    except Exception: return "Wykryto nagły skok momentum rynkowego."
+    except Exception:
+        return "Wykryto nagły skok momentum rynkowego."
 
 # =====================================================================
 # ROZBUDOWANA ANALIZA AKCJI (ŚCIŚLE LONG - SL NA DOLE)
@@ -117,32 +121,25 @@ def analizuj_jedna_spolke(ticker, now):
         def do_float(val):
             return float(val.iloc) if isinstance(val, pd.Series) else float(val)
 
-   # PRZYCISK DIAGNOSTYCZNY: Wysyła niezależną wiadomość bezpośrednio na Twój telefon
-if st.sidebar.button("🔌 Wyślij testowy alert"):
-    czysty_token = str(TELEGRAM_TOKEN).strip()
-    
-    # NAPRAWIONA ŚCIEŻKA SIECIOWA: Dodano "bot" oraz ukośniki, aby uniknąć błędów sklejenia tekstu
-    url = f"https://telegram.org{czysty_token}/sendMessage"
-    
-    payload = {
-        "chat_id": str(TELEGRAM_CHAT_ID).strip(), 
-        "text": "🤖 <b>TEST SYSTEMU:</b> Powiadomienia z lokalnego PowerShella działają poprawnie!", 
-        "parse_mode": "HTML"
-    }
-    try:
-        res = requests.post(url, json=payload, timeout=5)
-        if res.status_code == 200:
-            st.sidebar.success("Test dostarczony!")
-        else:
-            st.sidebar.error(f"Błąd {res.status_code}: {res.text}")
-    except Exception as e:
-        st.sidebar.error(f"Błąd połączenia: {e}")
-
+        aktualna_cena = do_float(ostatnia_swieca['Close'])
+        cena_zamkniecia_poprzednia = do_float(poprzednia_swieca['Close'])
+        current_rsi = do_float(ostatnia_swieca['RSI'])
+        
+        if aktualna_cena <= 0 or pd.isna(current_rsi): return None
+            
+        is_gpw = ticker.endswith(".WA")
+        waluta = "PLN" if is_gpw else "USD"
+        
+        if is_gpw and aktualna_cena > MAX_PRICE_PLN: return None
+        if not is_gpw and aktualna_cena > MAX_PRICE_USD: return None
+            
+        zmiana_ceny = ((aktualna_cena - cena_zamkniecia_poprzednia) / cena_zamkniecia_poprzednia) * 100
+        aktualny_wolumen = do_float(ostatnia_swieca['Volume'])
+        sredni_wolumen = do_float(df['Volume'].mean())
         
         if sredni_wolumen == 0: return None
         skok_wolumenu = aktualny_wolumen / sredni_wolumen
         
-        # Ocena trendu i generowanie statusu
         sygnal_techniczny = (zmiana_ceny >= ui_price_threshold and skok_wolumenu >= ui_vol_threshold)
         rsi_bezpieczny = (30.0 <= current_rsi <= 70.0)
         
@@ -150,7 +147,7 @@ if st.sidebar.button("🔌 Wyślij testowy alert"):
         
         if sygnal_trafiony:
             ocena_trendu = "🟢 Kupuj (Up)"
-            sort_score = 3  # Najwyższy priorytet do sortowania
+            sort_score = 3
         elif zmiana_ceny > 0:
             ocena_trendu = "🟡 Trzymaj"
             sort_score = 2
@@ -158,7 +155,6 @@ if st.sidebar.button("🔌 Wyślij testowy alert"):
             ocena_trendu = "🔴 Unikaj"
             sort_score = 1
             
-        # POZYCJA LONG: Zabezpieczenie Stop Loss (SL) ZAWSZE NA DOLE (pod ceną zakupu)
         sl_na_dole = aktualna_cena * 0.95
         tp_na_gorze = aktualna_cena * 1.15
         
@@ -177,27 +173,17 @@ if st.sidebar.button("🔌 Wyślij testowy alert"):
         
         if sygnal_trafiony:
             komentarz = generuj_komentarz_ai(ticker, aktualna_cena, skok_wolumenu, zmiana_ceny, current_rsi, waluta)
-            
-            # POPRAWKA: Sformatowanie tekstu pod bezpieczny i stabilny styl HTML
             flag_rynek = "🇵🇱" if is_gpw else "🇺🇸"
             alert_text = (
                 f"🚨 <b>ALERT SNAJPERA AKCJI {flag_rynek}: {ticker}</b>\n"
                 f"💰 Cena: {aktualna_cena:.2f} {waluta} (+{zmiana_ceny:.2f}%)\n"
                 f"📊 Wolumen: <b>{skok_wolumenu:.1f}x</b> ponad średnią\n"
-                f"🛡️ Wskaźnik RSI: <b>{current_rsi:.1f}</b> (Strefa Bezpieczna)\n"
+                f"🛡️ Wskaźnik RSI: <b>{current_rsi:.1f}</b>\n"
                 f"🛑 Obrona (SL na dole): {sl_na_dole:.2f} {waluta}\n"
                 f"🎯 Cel (TP): {tp_na_gorze:.2f} {waluta}\n\n"
                 f"📝 <b>AI:</b> {komentarz}"
             )
-            
-            # Wymuszamy wysłanie za pomocą zaktualizowanej funkcji HTML
-            czysty_token = str(TELEGRAM_TOKEN).strip()
-            url = f"https://telegram.org{czysty_token}/sendMessage"
-            payload = {"chat_id": str(TELEGRAM_CHAT_ID).strip(), "text": alert_text, "parse_mode": "HTML"}
-            try: 
-                requests.post(url, json=payload, timeout=5)
-            except Exception: 
-                pass
+            send_telegram_message(alert_text)
             
             ticker_info["Alert_Data"] = {
                 "Czas": now, "Ticker": ticker, "Cena": f"{aktualna_cena:.2f} {waluta}",
@@ -232,24 +218,22 @@ def job_skanera(status_placeholder=None, progress_bar=None):
             except Exception:
                 pass
             przetworzone += 1
-            if progress_bar: 
-                progress_bar.progress(przetworzone / total_spolki)
+            if progress_bar: progress_bar.progress(przetworzone / total_spolki)
                 
     st.session_state.last_scanned_tickers = lista_podgladu
 
 # =====================================================================
-# STEROWANIE RADAREM I MODUŁ DIAGNOSTYCZNY
+# STEROWANIE RADAREM
 # =====================================================================
 st.sidebar.header("⏱️ Sterowanie Radarem")
 auto_scan = st.sidebar.selectbox("Automatyczne odświeżanie:", ["Tylko ręcznie", "Co 1 minutę", "Co 5 minut", "Co 15 minut"])
 
-# PRZYCISK DIAGNOSTYCZNY: Wysyła niezależną wiadomość bezpośrednio na Twój telefon
 if st.sidebar.button("🔌 Wyślij testowy alert"):
     czysty_token = str(TELEGRAM_TOKEN).strip()
     url = f"https://telegram.org{czysty_token}/sendMessage"
     payload = {
-        "chat_id": str(TELEGRAM_CHAT_ID).strip(), 
-        "text": "🤖 <b>TEST SYSTEMU:</b> Powiadomienia z lokalnego PowerShella działają poprawnie!", 
+        "chat_id": str(TELEGRAM_CHAT_ID).strip(),
+        "text": "🤖 <b>TEST SYSTEMU:</b> Powiadomienia z lokalnego PowerShella działają poprawnie!",
         "parse_mode": "HTML"
     }
     try:
@@ -285,14 +269,13 @@ if st.session_state.last_scanned_tickers:
     st.subheader("📊 Podgląd aktualnego cyklu skanowania (Posortowany)")
     df_wyniki = pd.DataFrame(st.session_state.last_scanned_tickers)
     
-    # SORTOWANIE: Układamy tabelę od "Kupuj" do "Unikaj" przy użyciu wewnętrznego 'score'
     if "score" in df_wyniki.columns:
         df_wyniki = df_wyniki.sort_values(by="score", ascending=False)
         df_wyniki = df_wyniki.drop(columns=["score"])
         
-    if "Sygnał" in df_wyniki.columns: 
+    if "Sygnał" in df_wyniki.columns:
         df_wyniki = df_wyniki.drop(columns=["Sygnał"])
-    if "Alert_Data" in df_wyniki.columns: 
+    if "Alert_Data" in df_wyniki.columns:
         df_wyniki = df_wyniki.drop(columns=["Alert_Data"])
         
     st.dataframe(df_wyniki, use_container_width=True)
