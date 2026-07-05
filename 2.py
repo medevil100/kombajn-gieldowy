@@ -296,8 +296,7 @@ if quick_ticker:
         # Każda wartość pobierana BEZPOŚREDNIO z df_q
         try:
             st.write("DEBUG ostatnia:", ostatnia)
-
-            close_val  = float(ostatnia["Close"])
+             close_val  = float(ostatnia["Close"])
             rsi_val    = float(ostatnia["RSI"])
             macd_val   = float(ostatnia["MACD"])
             signal_val = float(ostatnia["Signal"])
@@ -368,3 +367,5 @@ elif auto_scan == "Co 5 minut":
 elif auto_scan == "Co 15 minut":
     time.sleep(900)
     st.rerun()
+
+           
