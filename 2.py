@@ -28,20 +28,21 @@ if "scanned_details" not in st.session_state:
     st.session_state.scanned_details = []
 
 # =====================================================================
-# SECRETS / KLUCZE (DOPASUJ DO SWOJEGO PLIKU secrets.toml)
+# SECRETS / KLUCZE
 # =====================================================================
 try:
     TELEGRAM_TOKEN = st.secrets["TELEGRAM_TOKEN"]
     TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-    INTERVAL = st.secrets.get("INTERVAL", "15m")
-    PRICE_THRESHOLD = float(st.secrets.get("PRICE_THRESHOLD", 5.0))
-    VOLUME_THRESHOLD = float(st.secrets.get("VOLUME_THRESHOLD", 3.0))
-    MAX_PRICE_PLN = float(st.secrets.get("MAX_PRICE_PLN", 15.0))
-    MAX_PRICE_USD = float(st.secrets.get("MAX_PRICE_USD", 5.0))
-except KeyError:
-    st.error("❌ Brak kluczowych zmiennych autoryzacyjnych w secrets.toml")
-    st.stop()
+
+    INTERVAL = "60m"  # 1 godzina
+    PRICE_THRESHOLD = 1.5
+    VOLUME_THRESHOLD = 1.4
+    MAX_PRICE_PLN = 15.0
+    MAX_PRICE_USD = 5.0
+    RSI_SAFE_LOW = 25
+    RSI_SAFE_HIGH = 75
+
 except Exception as e:
     st.error(f"❌ Błąd kluczy w secrets.toml: {e}")
     st.stop()
@@ -69,10 +70,9 @@ MARKET_DATABASE = [t.strip().upper() for t in user_input.split(",") if t.strip()
 # TELEGRAM
 # =====================================================================
 def send_telegram_message(message: str):
-    czysty_token = str(TELEGRAM_TOKEN).strip()
-    url = "https://" + "api.telegram.org" + "/bot" + czysty_token + "/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
-        "chat_id": str(TELEGRAM_CHAT_ID).strip(),
+        "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
         "parse_mode": "Markdown",
     }
@@ -96,14 +96,74 @@ def oblicz_rsi(df: pd.DataFrame, period: int = 14):
         return None
 
 # =====================================================================
-# AI KOMENTARZ (PRAWDZIWE AI)
+# WYKRYWANIE FORMACJI ŚWIECOWYCH
+# =====================================================================
+def wykryj_formacje(df):
+    if len(df) < 3:
+        return "Brak danych"
+
+    o1, h1, l1, c1 = df.iloc[-1][["Open","High","Low","Close"]]
+    o2, h2, l2, c2 = df.iloc[-2][["Open","High","Low","Close"]]
+    o3, h3, l3, c3 = df.iloc[-3][["Open","High","Low","Close"]]
+
+    # Hammer
+    if (c1 > o1) and ((h1 - max(o1, c1)) < (abs(c1 - o1) * 0.3)) and ((min(o1, c1) - l1) > (abs(c1 - o1) * 2)):
+        return "🔨 Hammer (odwrócenie w górę)"
+
+    # Bullish Engulfing
+    if (c1 > o1) and (c2 < o2) and (o1 < c2) and (c1 > o2):
+        return "🟢 Bullish Engulfing"
+
+    # Bearish Engulfing
+    if (c1 < o1) and (c2 > o2) and (o1 > c2) and (c1 < o2):
+        return "🔴 Bearish Engulfing"
+
+    # Doji
+    if abs(c1 - o1) <= (0.1 * (h1 - l1)):
+        return "⚪ Doji (niepewność)"
+
+    return "Brak formacji"
+
+# =====================================================================
+# AI PREDYKCJA KIERUNKU ŚWIECY
+# =====================================================================
+def predykcja_ai(ticker, zmiana, rsi, wolumen):
+    try:
+        prompt = (
+            f"Analizujesz spółkę {ticker}. "
+            f"Zmiana ceny: {zmiana:.2f}%. "
+            f"RSI: {rsi:.1f}. "
+            f"Wolumen: {wolumen:.1f}x ponad średnią. "
+            f"Przewidź kierunek kolejnej świecy: UP, DOWN lub SIDEWAYS. "
+            f"Podaj tylko jedno słowo."
+        )
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=5,
+            temperature=0.0
+        )
+
+        kierunek = response.choices[0].message.content.strip().upper()
+
+        if "UP" in kierunek:
+            return "📈 AI: UP"
+        if "DOWN" in kierunek:
+            return "📉 AI: DOWN"
+        return "➡️ AI: SIDEWAYS"
+
+    except Exception:
+        return "AI: brak predykcji"
+
+# =====================================================================
+# AI KOMENTARZ
 # =====================================================================
 def generuj_komentarz_ai(ticker, price, volume, change, rsi, waluta):
     try:
         prompt = (
-            f"Jesteś profesjonalnym traderem-snajperem. Spółka {ticker} wygenerowała sygnał Groszówek: "
-            f"cena {float(price):.2f} {waluta}, wzrost o +{float(change):.2f}%, wolumen {float(volume):.1f}x ponad średnią, RSI {float(rsi):.1f}. "
-            f"Napisz jedno ultra-krótkie zdanie techniczne (max 10 słów) podsumowania okazji."
+            f"Spółka {ticker}: cena {price:.2f} {waluta}, zmiana {change:.2f}%, wolumen {volume:.1f}x, RSI {rsi:.1f}. "
+            f"Napisz jedno krótkie zdanie techniczne (max 10 słów)."
         )
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -113,10 +173,10 @@ def generuj_komentarz_ai(ticker, price, volume, change, rsi, waluta):
         )
         return response.choices[0].message.content.strip()
     except Exception:
-        return "Wykryto nagły skok momentum rynkowego."
+        return "Wykryto skok momentum."
 
 # =====================================================================
-# WIELOWĄTKOWA ANALIZA SPÓŁKI (SNAJPER)
+# WIELOWĄTKOWA ANALIZA SPÓŁKI
 # =====================================================================
 def analizuj_jedna_spolke(ticker: str, now: str):
     try:
@@ -128,152 +188,142 @@ def analizuj_jedna_spolke(ticker: str, now: str):
             df.columns = df.columns.droplevel(1)
 
         df["RSI"] = oblicz_rsi(df)
-        ostatnia_swieca = df.iloc[-1]
-        poprzednia_swieca = df.iloc[-2]
+        ostatnia = df.iloc[-1]
+        poprzednia = df.iloc[-2]
 
-        def do_float(val):
+        def to_float(val):
             if isinstance(val, pd.Series):
                 return float(val.iloc[0])
             return float(val)
 
-        aktualna_cena = do_float(ostatnia_swieca["Close"])
-        cena_zamkniecia_poprzednia = do_float(poprzednia_swieca["Close"])
-        current_rsi = do_float(ostatnia_swieca["RSI"])
+        cena = to_float(ostatnia["Close"])
+        cena_prev = to_float(poprzednia["Close"])
+        rsi = to_float(ostatnia["RSI"])
 
-        if aktualna_cena <= 0 or pd.isna(current_rsi):
+        if cena <= 0 or pd.isna(rsi):
             return None
 
         is_gpw = ticker.endswith(".WA")
         waluta = "PLN" if is_gpw else "USD"
 
-        if is_gpw and aktualna_cena > MAX_PRICE_PLN:
+        if is_gpw and cena > MAX_PRICE_PLN:
             return None
-        if not is_gpw and aktualna_cena > MAX_PRICE_USD:
-            return None
-
-        zmiana_ceny = ((aktualna_cena - cena_zamkniecia_poprzednia) / cena_zamkniecia_poprzednia) * 100
-        aktualny_wolumen = do_float(ostatnia_swieca["Volume"])
-        sredni_wolumen = do_float(df["Volume"].mean())
-
-        if sredni_wolumen == 0:
+        if not is_gpw and cena > MAX_PRICE_USD:
             return None
 
-        skok_wolumenu = aktualny_wolumen / sredni_wolumen
+        zmiana = ((cena - cena_prev) / cena_prev) * 100
+        wolumen = to_float(ostatnia["Volume"])
+        sredni = to_float(df["Volume"].mean())
 
-        sygnal_techniczny = (zmiana_ceny >= PRICE_THRESHOLD and skok_wolumenu >= VOLUME_THRESHOLD)
-        rsi_bezpieczny = (30.0 <= current_rsi <= 70.0)
+        if sredni == 0:
+            return None
 
-        sygnal_trafiony = sygnal_techniczny and rsi_bezpieczny
-        status_okazji = "🟢 OKAZJA RYNKOWA" if sygnal_trafiony else "Filtrowane / Brak"
+        wolumen_x = wolumen / sredni
 
-        ticker_info = {
+        sygnal_techniczny = (zmiana >= PRICE_THRESHOLD and wolumen_x >= VOLUME_THRESHOLD)
+        rsi_ok = (RSI_SAFE_LOW <= rsi <= RSI_SAFE_HIGH)
+
+        sygnal = sygnal_techniczny and rsi_ok
+
+        # Formacje
+        formacja = wykryj_formacje(df)
+
+        # Predykcja AI
+        pred = predykcja_ai(ticker, zmiana, rsi, wolumen_x)
+
+        # Rekomendacja (AI wpływa)
+        if "UP" in pred:
+            rekomendacja = "🟢 KUP"
+        elif "DOWN" in pred:
+            rekomendacja = "🔴 SPRZEDAJ"
+        else:
+            rekomendacja = "🟡 TRZYMAJ"
+
+        info = {
             "Ticker": ticker,
-            "Cena": aktualna_cena,
+            "Cena": cena,
             "Waluta": waluta,
-            "RSI": current_rsi,
-            "Zmiana %": zmiana_ceny,
-            "Wolumen x": skok_wolumenu,
-            "Status": status_okazji,
+            "RSI": rsi,
+            "Zmiana %": zmiana,
+            "Wolumen x": wolumen_x,
+            "Formacja": formacja,
+            "Predykcja AI": pred,
+            "Rekomendacja": rekomendacja,
         }
 
-        if sygnal_trafiony:
-            komentarz = generuj_komentarz_ai(
-                ticker, aktualna_cena, skok_wolumenu, zmiana_ceny, current_rsi, waluta
+        if sygnal:
+            komentarz = generuj_komentarz_ai(ticker, cena, wolumen_x, zmiana, rsi, waluta)
+            alert = (
+                f"🟢 *OKAZJA RYNKOWA:* `{ticker}`\n"
+                f"💰 Cena: {cena:.2f} {waluta}\n"
+                f"📈 Zmiana: +{zmiana:.2f}%\n"
+                f"📊 Wolumen: {wolumen_x:.1f}x\n"
+                f"🛡️ RSI: {rsi:.1f}\n"
+                f"🔮 Predykcja: {pred}\n"
+                f"🤖 AI: {komentarz}"
             )
-            alert_text = (
-                f"🟢 *REALNA OKAZJA RYNKOWA:* `{ticker}`\n"
-                f"💰 Cena: {aktualna_cena:.2f} {waluta}\n"
-                f"📈 Zmiana: +{zmiana_ceny:.2f}%\n"
-                f"📊 Wolumen: {skok_wolumenu:.1f}x ponad średnią\n"
-                f"🛡️ Wskaźnik RSI: `{current_rsi:.1f}` (Strefa Bezpieczna)\n"
-                f"🤖 *AI:* {komentarz}"
-            )
-            send_telegram_message(alert_text)
+            send_telegram_message(alert)
+            info["Alert"] = alert
 
-            ticker_info["Alert"] = {
-                "Czas": now,
-                "Ticker": ticker,
-                "Cena": f"{aktualna_cena:.2f} {waluta}",
-                "Zmiana": f"+{zmiana_ceny:.2f}%",
-                "Wolumen Multiplier": f"{skok_wolumenu:.1f}x",
-                "RSI": f"{current_rsi:.1f}",
-                "Komentarz AI": komentarz,
-            }
+        return info
 
-        return ticker_info
     except Exception:
         return None
 
 # =====================================================================
-# JOB SKANERA (SNAJPER + KOMBAJN)
+# JOB SKANERA
 # =====================================================================
 def job_skanera(status_placeholder=None, progress_bar=None):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state.last_scan_time = now
-    st.session_state.last_scanned_tickers = []
     st.session_state.scanned_details = []
+    st.session_state.last_scanned_tickers = []
 
-    total_spolki = len(MARKET_DATABASE)
-    znalezione_sygnaly = []
-    lista_podgladu = []
-    detale_spolek = []
+    total = len(MARKET_DATABASE)
     przetworzone = 0
-
-    if total_spolki == 0:
-        if status_placeholder:
-            status_placeholder.error("❌ Lista spółek jest pusta!")
-        return
+    detale = []
+    podglad = []
+    alerty = []
 
     with ThreadPoolExecutor(max_workers=15) as executor:
         zadania = {
-            executor.submit(analizuj_jedna_spolke, ticker, now): ticker
-            for ticker in MARKET_DATABASE
+            executor.submit(analizuj_jedna_spolke, t, now): t
+            for t in MARKET_DATABASE
         }
         for future in as_completed(zadania):
             przetworzone += 1
-            ticker_name = zadania[future]
+            ticker = zadania[future]
 
             if status_placeholder and progress_bar:
                 status_placeholder.markdown(
-                    f"🔍 **Analiza Twojej Listy ({przetworzone}/{total_spolki}):** Sprawdzam `{ticker_name}`..."
+                    f"🔍 Analiza ({przetworzone}/{total}): `{ticker}`"
                 )
-                progress_bar.progress(przetworzone / total_spolki)
+                progress_bar.progress(przetworzone / total)
 
             wynik = future.result()
-            if wynik is not None:
-                detale_spolek.append(wynik)
-                lista_podgladu.append(
-                    f"{wynik['Ticker']} ({wynik['Cena']:.2f} {wynik['Waluta']}) -> RSI: {wynik['RSI']:.1f} | {wynik['Status']}"
+            if wynik:
+                detale.append(wynik)
+                podglad.append(
+                    f"{wynik['Ticker']} ({wynik['Cena']:.2f} {wynik['Waluta']}) → {wynik['Rekomendacja']}"
                 )
                 if "Alert" in wynik:
-                    znalezione_sygnaly.append(wynik["Alert"])
+                    alerty.append(wynik["Alert"])
 
-    if status_placeholder and progress_bar:
-        status_placeholder.markdown("✅ **Skanowanie Twojej listy zakończone.**")
-        progress_bar.empty()
+    st.session_state.scanned_details = detale
+    st.session_state.last_scanned_tickers = podglad
 
-    st.session_state.last_scanned_tickers = lista_podgladu
-    st.session_state.scanned_details = detale_spolek
-
-    if znalezione_sygnaly:
-        st.session_state.alerts_history.extend(znalezione_sygnaly)
+    if alerty:
+        st.session_state.alerts_history.extend(alerty)
     else:
-        is_piatek = (datetime.now().weekday() == 4)
-        naglowek = (
-            "🤖 *Market Sniper – Podsumowanie Tygodnia (Piątek)*"
-            if is_piatek
-            else "🤖 *Market Sniper – Status Cyklu*"
+        send_telegram_message(
+            f"🤖 *Status Cyklu*\n"
+            f"⏱️ {now}\n"
+            f"📊 Spółek: {total}\n"
+            f"🔍 Brak nowych okazji."
         )
-        raport_statusu = (
-            f"{naglowek}\n"
-            f"⏱️ Czas skanu: `{now}`\n"
-            f"📊 Twoja lista: `{total_spolki}` spółek.\n"
-            f"🔍 Wynik: Skan ukończony. Na Twoich spółkach nie ma jeszcze nowego ruchu."
-        )
-        send_telegram_message(raport_statusu)
 
 # =====================================================================
-# HARMONOGRAM W TLE (AUTO-SKAN)
+# AUTO-SKAN
 # =====================================================================
 schedule.clear()
 schedule.every(15).minutes.do(job_skanera)
@@ -285,92 +335,72 @@ def run_scheduler():
 
 if "worker_started" not in st.session_state:
     st.session_state.worker_started = True
-    thread = threading.Thread(target=run_scheduler, daemon=True)
-    thread.start()
+    threading.Thread(target=run_scheduler, daemon=True).start()
 
 # =====================================================================
-# PANEL GŁÓWNY (UI)
+# UI
 # =====================================================================
 st.write("---")
-st.success(
-    f"⚙️ Status: Wielowątkowy radar aktywny | Ostatni skan: {st.session_state.last_scan_time}"
-)
+st.success(f"⚙️ Radar aktywny | Ostatni skan: {st.session_state.last_scan_time}")
 
 status_live = st.empty()
 pasek_live = st.empty()
 
-if st.button("🚀 URUCHOM SKANOWANIE TWOJEJ LISTY TERAZ"):
-    job_skanera(status_placeholder=status_live, progress_bar=pasek_live)
+if st.button("🚀 SKANUJ TERAZ"):
+    job_skanera(status_live, pasek_live)
     st.rerun()
 
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    st.metric(label="Liczba wklejonych spółek", value=len(MARKET_DATABASE))
-with col2:
-    st.metric(label="Interwał świecy", value=INTERVAL)
-with col3:
-    st.metric(label="Próg wzrostu ceny", value=f"{PRICE_THRESHOLD}%")
-with col4:
-    st.metric(label="Próg skoku obrotu", value=f"{VOLUME_THRESHOLD}x")
-
-st.write("---")
-with st.expander(
-    f"👁️ Pokaż szczegółowe odczyty RSI dla Twoich spółek ({len(st.session_state.last_scanned_tickers)})"
-):
-    if st.session_state.last_scanned_tickers:
-        for item in st.session_state.last_scanned_tickers:
-            st.write(item)
-    else:
-        st.info(
-            "Brak danych. Wklej spółki i kliknij przycisk powyżej, aby odpalić skan."
-        )
-
-st.write("---")
-st.subheader("📋 Zapamiętane Okazje Snajperskie (Zielone Alerty 🟢)")
-if st.session_state.alerts_history:
-    st.dataframe(pd.DataFrame(st.session_state.alerts_history), use_container_width=True)
-else:
-    st.info("Brak zarejestrowanych okazji. Radar czuwa i filtruje rynek.")
-
 # =====================================================================
-# KOMBajn: LISTA WSZYSTKICH PRZESKANOWANYCH SPÓŁEK Z REKOMENDACJĄ
+# TABELA KOMBAJNU
 # =====================================================================
 st.write("---")
-st.subheader("📊 Lista wszystkich przeskanowanych spółek z rekomendacją")
+st.subheader("📊 KOMBAJN — pełna lista przeskanowanych spółek")
 
 if st.session_state.scanned_details:
     df = pd.DataFrame(st.session_state.scanned_details)
+
+    def kolor_rek(val):
+        if "🟢" in val: return "background-color: #00ff00; font-weight: bold;"
+        if "🔴" in val: return "background-color: #ff0000; font-weight: bold;"
+        if "🟡" in val: return "background-color: #ffff00; font-weight: bold;"
+        return ""
+
+    df_styled = df.style.applymap(kolor_rek, subset=["Rekomendacja"])
+
     st.dataframe(
-        df[["Ticker", "Cena", "Waluta", "RSI", "Zmiana %", "Wolumen x", "Status"]],
-        use_container_width=True,
+        df_styled[
+            [
+                "Ticker", "Cena", "Waluta", "RSI",
+                "Zmiana %", "Wolumen x",
+                "Formacja", "Predykcja AI", "Rekomendacja"
+            ]
+        ],
+        use_container_width=True
     )
 else:
-    st.info("Brak danych z ostatniego skanu. Radar czuwa, ale jeszcze nic nie wyłapał.")
+    st.info("Brak danych — skaner jeszcze nie wykonał cyklu.")
 
 # =====================================================================
-# SZYBKI PODGLĄD DOWOLNEGO TICKERA
+# SZYBKI PODGLĄD TICKERA
 # =====================================================================
 st.write("---")
-st.subheader("🔎 Szybki podgląd dowolnego tickera (RSI + cena)")
+st.subheader("🔎 Szybki podgląd dowolnego tickera")
 
-quick_ticker = st.text_input("Ticker (USA lub GPW z .WA):", key="quick_ticker")
+quick = st.text_input("Ticker (USA lub GPW .WA):")
 
-if quick_ticker:
-    df_q = yf.download(quick_ticker.strip().upper(), period="5d", interval="30m", progress=False)
+if quick:
+    df_q = yf.download(quick.strip().upper(), period="5d", interval="30m", progress=False)
     if df_q.empty:
-        st.error("Brak danych dla podanego tickera.")
+        st.error("Brak danych.")
     else:
         if isinstance(df_q.columns, pd.MultiIndex):
             df_q.columns = df_q.columns.droplevel(1)
 
         df_q["RSI"] = oblicz_rsi(df_q)
-        ostatnia = df_q.iloc[-1]
+        last = df_q.iloc[-1]
 
-        try:
-            cena = float(ostatnia["Close"])
-            rsi = float(ostatnia["RSI"])
-        except Exception:
-            st.error("Nie można poprawnie odczytać danych dla tego tickera.")
-        else:
-            st.write(f"**Cena:** {cena:.2f}")
-            st.write(f"**RSI:** {rsi:.1f}")
+        cena = float(last["Close"])
+        rsi = float(last["RSI"])
+
+        st.write(f"**Cena:** {cena:.2f}")
+        st.write(f"**RSI:** {rsi:.1f}")
