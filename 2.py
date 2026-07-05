@@ -416,13 +416,25 @@ if st.session_state.last_scanned_tickers:
 
     df_top5 = df_top.head(5)
 
-    df_top5_styled = (
-        df_top5.style
-        .applymap(kolor_status, subset=["Status / Ocena"])
-        .applymap(kolor_sl_tp, subset=["Stop Loss (SL na dole)", "Take Profit (TP)"])
-    )
+    def highlight_top(row):
+        style = {}
 
-    st.dataframe(df_top5_styled, use_container_width=True)
+        if "Kupuj" in row["Status / Ocena"]:
+            style["Status / Ocena"] = "color: lime; font-weight: bold;"
+        elif "Trzymaj" in row["Status / Ocena"]:
+            style["Status / Ocena"] = "color: gold; font-weight: bold;"
+        else:
+            style["Status / Ocena"] = "color: red; font-weight: bold;"
+
+        style["Stop Loss (SL na dole)"] = "color: red; font-weight: bold;"
+        style["Take Profit (TP)"] = "color: lime; font-weight: bold;"
+
+        return style
+
+    st.dataframe(
+        df_top5.style.apply(highlight_top, axis=1),
+        use_container_width=True
+    )
 
 # =====================================================================
 # SZYBKI PODGLĄD TICKERA
