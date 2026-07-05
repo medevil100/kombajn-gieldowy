@@ -7,10 +7,51 @@ import pandas as pd
 import streamlit as st
 import json
 import numpy as np
+import os
 from openai import OpenAI
 from tavily import TavilyClient
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# =====================================================================
+# INTERFEJS GRAFICZNY STREAMLIT
+# =====================================================================
+st.set_page_config(page_title="Kombajn Tradingowy: Market Sniper AI", page_icon="🎯", layout="wide")
+st.title("🎯 Kombajn Tradingowy: Market Sniper AI Pro")
+
+if "alerts_history" not in st.session_state:
+    st.session_state.alerts_history = []
+if "last_scan_time" not in st.session_state:
+    st.session_state.last_scan_time = "Nie skanowano"
+if "last_scanned_tickers" not in st.session_state:
+    st.session_state.last_scanned_tickers = []
+
+# =====================================================================
+# SYSTEMOWY ODCZYT KLUCZY (OMINIĘCIE DROGI ST.SECRETS)
+# =====================================================================
+# Pobieramy klucze bezpośrednio z pamięci RAM systemu operacyjnego Linux w chmurze
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or os.environ.get("openai_key")
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY") or os.environ.get("tavily_api_key")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("telegram_token")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID") or os.environ.get("telegram_chat_id") or os.environ.get("telegram_id")
+
+# Domyślne progi tradingowe
+INTERVAL = "15m"
+VOLUME_THRESHOLD = 3.5
+PRICE_THRESHOLD = 2.0
+MAX_PRICE_PLN = 165.0
+MAX_PRICE_USD = 5.0
+
+# Jeśli system operacyjny nie posiada tych kluczy w pamięci, wyświetlamy twardy komunikat stopu
+if not TELEGRAM_TOKEN or not OPENAI_API_KEY or not TAVILY_API_KEY:
+    st.error("🚨 Krytyczny błąd: Serwer chmury nie przekazał kluczy do pamięci systemowej!")
+    st.markdown("Wejdź w panelu chmury w **Settings -> Secrets** i upewnij się, że plik TOML jest tam zapisany.")
+    st.stop()
+
+# Inicjalizacja klientów bezpośrednio z bezpiecznych zmiennych systemowych
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
+tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+
 
 # =====================================================================
 # INTERFEJS GRAFICZNY STREAMLIT
