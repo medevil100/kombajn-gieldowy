@@ -292,7 +292,7 @@ if selected_ticker:
         last = df_s.iloc[-1]
 
         # Pobieramy pojedyncze wartości
-try:
+    try:
     cena_s   = float(last["Close"].item())
     rsi_s    = float(last["RSI"].item())
     macd_s   = float(last["MACD"].item())
