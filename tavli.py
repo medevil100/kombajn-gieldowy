@@ -42,131 +42,118 @@ TICKERS_USA = [
 # --- 3. BEZPIECZNA WYSYŁKA NA TELEGRAM ---
 def wyslij_telegram_alert(wiadomosc: str):
     url = f"https://telegram.org{TG_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TG_CHAT_ID,
-        "text": wiadomosc,
-        "parse_mode": "HTML"
-    }
+    payload = {"chat_id": TG_CHAT_ID, "text": wiadomosc, "parse_mode": "HTML"}
     try:
         response = requests.post(url, json=payload)
         return response.status_code == 200
     except Exception:
         return False
 
-# --- 4. SILNIK ANALIZY TECHNICZNEJ ---
-def oblicz_wskaźniki(df):
-    if df is None or len(df) < 20:
-        return None
-    df['SMA20'] = df['Close'].rolling(window=20).mean()
-    df['SMA50'] = df['Close'].rolling(window=50).mean()
-    
-    ostatnia_cena = df['Close'].iloc[-1]
-    sma20_ost = df['SMA20'].iloc[-1] if not pd.isna(df['SMA20'].iloc[-1]) else ostatnia_cena
-    sma50_ost = df['SMA50'].iloc[-1] if not pd.isna(df['SMA50'].iloc[-1]) else ostatnia_cena
-    
-    if ostatnia_cena > sma20_ost > sma50_ost:
-        ocena = "Kupuj (Silny Up)"
-        sygnal = "LONG"
-    elif ostatnia_cena < sma20_ost < sma50_ost:
-        ocena = "Sprzedaj (Silny Down)"
-        sygnal = "SHORT"
-    else:
-        ocena = "Trzymaj (Konsolidacja)"
-        sygnal = "NEUTRAL"
+# --- 4. ENGINE WYLICZEŃ TECHNICZNYCH (PRZETWARZANIE PACZKOWE) ---
+def przetwórz_dane_historyczne(ticker, df_close, df_volume, df_high, df_low):
+    """Szybkie wyliczanie wskaźników z pobranej wcześniej zbiorczej bazy danych"""
+    try:
+        if ticker not in df_close.columns or len(df_close[ticker].dropna()) < 20:
+            return None
+            
+        cena = df_close[ticker].iloc[-1]
+        vols = df_volume[ticker]
+        highs = df_high[ticker]
+        lows = df_low[ticker]
+        closes = df_close[ticker]
         
-    ostatni_wolumen = df['Volume'].iloc[-1]
-    sredni_wolumen = df['Volume'].rolling(window=20).mean().iloc[-1]
-    skok_wolumenu = ostatni_wolumen / sredni_wolumen if (sredni_wolumen and sredni_wolumen > 0) else 1.0
-    
-    high_low = df['High'] - df['Low']
-    high_close = np.abs(df['High'] - df['Close'].shift())
-    low_close = np.abs(df['Low'] - df['Close'].shift())
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = np.max(ranges, axis=1)
-    atr = true_range.rolling(14).mean().iloc[-1] if not pd.isna(true_range.rolling(14).mean().iloc[-1]) else (ostatnia_cena * 0.05)
-    
-    mnoznik_sl = 2.5 if ostatnia_cena < 5 else 2.0
-    mnoznik_tp = 4.0 if ostatnia_cena < 5 else 3.0
-    
-    sl = ostatnia_cena - (mnoznik_sl * atr) if sygnal == "LONG" else ostatnia_cena + (mnoznik_sl * atr)
-    tp = ostatnia_cena + (mnoznik_tp * atr) if sygnal == "LONG" else ostatnia_cena - (mnoznik_tp * atr)
-    
-    return {
-        "cena": ostatnia_cena, "ocena": ocena, "sygnal": sygnal,
-        "skok_wolumenu": round(skok_wolumenu, 2), "sl": round(sl, 2), "tp": round(tp, 2)
-    }
+        sma20 = closes.rolling(window=20).mean().iloc[-1]
+        sma50 = closes.rolling(window=50).mean().iloc[-1]
+        
+        if cena > sma20 > sma50:
+            ocena, sygnal = "Kupuj (Silny Up)", "LONG"
+        elif cena < sma20 < sma50:
+            ocena, sygnal = "Sprzedaj (Silny Down)", "SHORT"
+        else:
+            ocena, sygnal = "Trzymaj (Konsolidacja)", "NEUTRAL"
+            
+        ostatni_vol = vols.iloc[-1]
+        sredni_vol = vols.rolling(window=20).mean().iloc[-1]
+        skok_wolumenu = ostatni_vol / sredni_vol if (sredni_vol and sredni_vol > 0) else 1.0
+        
+        # Matematyka wskaźnika ATR
+        high_low = highs - lows
+        high_close = np.abs(highs - closes.shift())
+        low_close = np.abs(lows - closes.shift())
+        true_range = np.max(pd.concat([high_low, high_close, low_close], axis=1), axis=1)
+        atr = true_range.rolling(14).mean().iloc[-1] if not pd.isna(true_range.rolling(14).mean().iloc[-1]) else (cena * 0.05)
+        
+        mnoznik_sl = 2.5 if cena < 5 else 2.0
+        mnoznik_tp = 4.0 if cena < 5 else 3.0
+        
+        sl = cena - (mnoznik_sl * atr) if sygnal == "LONG" else cena + (mnoznik_sl * atr)
+        tp = cena + (mnoznik_tp * atr) if sygnal == "LONG" else cena - (mnoznik_tp * atr)
+        
+        return {"cena": cena, "ocena": ocena, "sygnal": sygnal, "skok_wolumenu": round(skok_wolumenu, 2), "sl": round(sl, 2), "tp": round(tp, 2)}
+    except Exception:
+        return None
 
 def głęboka_analiza_news_ai(ticker: str, tech: dict, rynek: str):
     try:
-        search_query = f"{ticker} wiadomości giełda akcje raport" if rynek == "PL" else f"{ticker} penny stock clinical trial SEC filing catalyst"
+        search_query = f"{ticker} wiadomości giełda akcje" if rynek == "PL" else f"{ticker} penny stock clinical trial SEC filing catalyst"
         tavily_response = tavily_client.search(query=search_query, search_depth="advanced", max_results=3)
-        
         context = ""
         for result in tavily_response['results']:
             context += f"- {result['title']}: {result['content']}\n"
             
-        prompt = f"""
-        Jesteś analitykiem giełdowym. Wyjaśnij zachowanie waloru {ticker}.
-        Cena: {tech['cena']}, Stan techniczny: {tech['ocena']}, Obrót: {tech['skok_wolumenu']}x średniej.
-        Doniesienia prasowe: {context}
-        Napisz w 2 zwięzłych zdaniach po polsku, co jest głównym powodem ruchu i czy jest to potwierdzone fundamentalnie.
-        Zwróć wyłącznie surowy format JSON: {{"komentarz": "TUTAJ WPISZ ANALIZĘ"}}
-        """
-        completion = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0.1
-        )
-        return json.loads(completion.choices.message.content).get("komentarz", "Brak istotnych danych.")
+        prompt = f"Jesteś analitykiem. Wyjaśnij zachowanie {ticker}. Cena: {tech['cena']}, Stan: {tech['ocena']}, Obrót: {tech['skok_wolumenu']}x. Teksty: {context}. Napisz po polsku w 2 zdaniach katalizator ruchu. Zwróć JSON: {{\n\"komentarz\": \"ANALIZA\"\n}}"
+        completion = openai_client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"}, temperature=0.1)
+        return json.loads(completion.choices.message.content).get("komentarz", "Brak danych.")
     except Exception:
         return "Brak połączenia z silnikiem informacyjnym."
 
 # --- 5. INTERFEJS UŻYTKOWNIKA STREAMLIT ---
 st.title("📈 Profesjonalny Terminal Giełdowy AI Multi-Market")
 
-# --- MODUŁ A: SZYBKIE OKNO SPRAWDZANIA TICKERA ---
+# --- CZĘŚĆ 1: SZYBKI PODGLĄD POJEDYNCZEGO WALORU ---
 st.subheader("🔍 Szybki podgląd i analiza wybranego waloru")
-col_input1, col_input2 = st.columns()
+col_input1, col_input2 = st.columns(2)
 with col_input1:
-    szukany_ticker = st.text_input("Wpisz DOWOLNY ticker rynkowy, aby sprawdzić go natychmiast (np. STX.WA, AAPL, NVDA, PLRX):", "").upper().strip()
+    szukany_ticker = st.text_input("Wpisz DOWOLNY ticker rynkowy (np. STX.WA, AAPL, PLRX):", "").upper().strip()
 with col_input2:
     st.write("##")
     uruchom_szukanie = st.button("🔎 Analizuj Ticker")
 
 if uruchom_szukanie and szukany_ticker:
-    with st.spinner(f"Trwa natychmiastowe skanowanie waloru {szukany_ticker}..."):
+    with st.spinner(f"Skanowanie pojedyncze waloru {szukany_ticker}..."):
         obj = yf.Ticker(szukany_ticker)
         h = obj.history(period="1y")
         if h.empty:
-            st.error(f"Nie znaleziono danych giełdowych dla symbolu: {szukany_ticker}")
+            st.error(f"Brak danych dla symbolu: {szukany_ticker}")
         else:
-            t_res = oblicz_wskaźniki(h)
-            rynek_typ = "PL" if ".WA" in szukany_ticker else "USA"
-            uzasadnienie = głęboka_analiza_news_ai(szukany_ticker, t_res, rynek_typ)
-            
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Aktualny Kurs", f"{t_res['cena']:.2f}")
-            c2.metric("Ocena Algorytmu", t_res['ocena'])
-            c3.metric("Skok Wolumenu Obrotu", f"{t_res['skok_wolumenu']}x")
-            
-            st.info(f"**Uzasadnienie AI (Tavily + OpenAI):** {uzasadnienie}")
-            st.write(f"🎯 Docelowy Take Profit (TP): **{t_res['tp']:.2f}** | 🛑 Poziom Stop Loss (SL): **{t_res['sl']:.2f}**")
-            
-            wiadomosc_tg = (
-                f"🔎 <b>SZYBKI SKAN TICKERA: {szukany_ticker}</b>\n"
-                f"▪️ Cena: {t_res['cena']:.2f}\n"
-                f"▪️ Ocena: <b>{t_res['ocena']}</b>\n"
-                f"▪️ Wolumen: {t_res['skok_wolumenu']}x\n"
-                f"🎯 TP: {t_res['tp']:.2f} | 🛑 SL: {t_res['sl']:.2f}\n"
-                f"📝 <b>Raport:</b> {uzasadnienie}"
-            )
-            wyslij_telegram_alert(wiadomosc_tg)
-            st.success("Wysłano raport z szybkiego podglądu na Twój Telegram!")
+            try:
+                # Mapowanie struktur dla pojedynczego przetwarzania
+                df_c = pd.DataFrame({szukany_ticker: h['Close']})
+                df_v = pd.DataFrame({szukany_ticker: h['Volume']})
+                df_h = pd.DataFrame({szukany_ticker: h['High']})
+                df_l = pd.DataFrame({szukany_ticker: h['Low']})
+                t_res = przetwórz_dane_historyczne(szukany_ticker, df_c, df_v, df_h, df_l)
+                
+                if t_res:
+                    rynek_typ = "PL" if ".WA" in szukany_ticker else "USA"
+                    uzasadnienie = głęboka_analiza_news_ai(szukany_ticker, t_res, rynek_typ)
+                    
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Aktualny Kurs", f"{t_res['cena']:.2f}")
+                    c2.metric("Ocena Algorytmu", t_res['ocena'])
+                    c3.metric("Skok Wolumenu Obrotu", f"{t_res['skok_wolumenu']}x")
+                    
+                    st.info(f"**Uzasadnienie AI:** {uzasadnienie}")
+                    st.write(f"🎯 Take Profit: **{t_res['tp']:.2f}** | 🛑 Stop Loss: **{t_res['sl']:.2f}**")
+                    
+                    wyslij_telegram_alert(f"🔎 <b>SZYBKI SKAN: {szukany_ticker}</b>\nCena: {t_res['cena']:.2f}\nOcena: {t_res['ocena']}\n📝 {uzasadnienie}")
+                    st.success("Wysłano raport na Telegram!")
+            except Exception as e:
+                st.error(f"Błąd przetwarzania: {e}")
 
 st.write("---")
 
-# --- MODUŁ B: GLOBALNA PĘTLA SKANOWANIA LISTY SPÓŁEK ---
+# --- CZĘŚĆ 2: GLOBALNA PĘTLA SKANOWANIA LISTY SPÓŁEK (BULK DOWNLOAD) ---
 st.subheader("🔄 Globalny Automatyczny Skaner Portfela Spółek")
 
 st.sidebar.header("⚙️ Zarządzanie Skanerem")
@@ -174,59 +161,72 @@ wybierz_pl = st.sidebar.checkbox("Skanuj listę GPW (43 spółki)", value=True)
 wybierz_usa = st.sidebar.checkbox("Skanuj listę USA (19 spółek)", value=True)
 cena_max_us = st.sidebar.slider("Maksymalny próg cenowy dla USA ($):", 0.5, 20.0, 5.0)
 
-col_btn1, col_btn2 = st.columns()
+col_btn1, col_btn2 = st.columns(2)
 with col_btn1:
     uruchom_globalny = st.button("🚀 Uruchom Skanowanie")
 with col_btn2:
-    if st.button("🔄 Wyczyszczenie pamięci i powtórny skan"):
+    if st.button("🔄 Wyczyszczenie pamięci i reset"):
         st.cache_data.clear()
         st.rerun()
 
 if uruchom_globalny:
-    lista_do_przejrzenia = []
+    lista_tickerów = []
     if wybierz_pl:
-        for tick in TICKERS_PL: lista_do_przejrzenia.append((tick, "PL", "PLN"))
+        lista_tickerów.extend(TICKERS_PL)
     if wybierz_usa:
-        for tick in TICKERS_USA: lista_do_przejrzenia.append((tick, "USA", "USD"))
+        lista_tickerów.extend(TICKERS_USA)
         
-    if not lista_do_przejrzenia:
-        st.warning("Zaznacz giełdy w panelu bocznym do wykonania operacji!")
+    if not lista_tickerów:
+        st.warning("Zaznacz przynajmniej jeden rynek w panelu bocznym!")
     else:
-        st.write(f"⏳ Analiza portfela giełdowego (Spółek do zbadania: {len(lista_do_przejrzenia)})...")
+        with st.spinner("🚀 KROK 1: Pobieranie zbiorcze danych z Yahoo Finance dla wszystkich spółek naraz..."):
+            # Pobieramy dane paczkowo (Wszystkie 62 spółki na raz w 2 sekundy)
+            dane_bulk = yf.download(lista_tickerów, period="1y", group_by="ticker", progress=False)
+            
+            # Budujemy słowniki indeksowane dla ułatwienia odczytu wielopoziomowego
+            df_close = pd.DataFrame()
+            df_volume = pd.DataFrame()
+            df_high = pd.DataFrame()
+            df_low = pd.DataFrame()
+            
+            for t in lista_tickerów:
+                if t in dane_bulk.columns.levels[0]:
+                    df_close[t] = dane_bulk[t]['Close']
+                    df_volume[t] = dane_bulk[t]['Volume']
+                    df_high[t] = dane_bulk[t]['High']
+                    df_low[t] = dane_bulk[t]['Low']
+
+        st.write("⏳ KROK 2: Analiza techniczna formacji rynkowych i wysyłanie alertów...")
         pasek = st.progress(0)
-        
         pelna_tabela_wynikow = []
         licznik_alertow = 0
         
-        for index, (ticker, rynek, waluta) in enumerate(lista_do_przejrzenia):
+        for index, ticker in enumerate(lista_tickerów):
             try:
-                t_obj = yf.Ticker(ticker)
-                historia = t_obj.history(period="1y")
+                waluta = "PLN" if ".WA" in ticker else "USD"
+                rynek = "PL" if ".WA" in ticker else "USA"
                 
-                if historia.empty:
-                    pasek.progress((index + 1) / len(lista_do_przejrzenia))
-                    continue
-                    
-                tech = oblicz_wskaźniki(historia)
+                tech = przetwórz_dane_historyczne(ticker, df_close, df_volume, df_high, df_low)
                 if not tech:
-                    pasek.progress((index + 1) / len(lista_do_przejrzenia))
                     continue
                     
                 if rynek == "USA" and tech['cena'] > cena_max_us:
-                    pasek.progress((index + 1) / len(lista_do_przejrzenia))
                     continue
                 
-                dane_wiersza = {
-                    "Ticker": ticker,
-                    "Rynek": rynek,
+                # Zapis do tabeli Live
+                pelna_tabela_wynikow.append({
+                                    # Zapis do tabeli Live
+                pelna_tabela_wynikow.append({
+                    "Ticker": ticker, 
+                    "Rynek": rynek, 
                     "Aktualny Kurs": f"{tech['cena']:.2f} {waluta}",
-                    "Ocena / Trend": tech['ocena'],
+                    "Ocena / Trend": tech['ocena'], 
                     "Skok Wolumenu": f"{tech['skok_wolumenu']}x",
-                    "Stop Loss (SL)": f"{tech['sl']:.2f}",
+                    "Stop Loss (SL)": f"{tech['sl']:.2f}", 
                     "Take Profit (TP)": f"{tech['tp']:.2f}"
-                }
-                pelna_tabela_wynikow.append(dane_wiersza)
+                })
                 
+                # Uruchomienie wyszukiwarki Tavily wyłącznie dla spółek z wyraźną okazją (Skok wolumenu >= 1.5x lub sygnał)
                 if tech['sygnal'] in ["LONG", "SHORT"] or tech['skok_wolumenu'] >= 1.5:
                     licznik_alertow += 1
                     komentarz_rynkowy = głęboka_analiza_news_ai(ticker, tech, rynek)
@@ -241,20 +241,17 @@ if uruchom_globalny:
                         f"📝 <b>Analiza:</b> {komentarz_rynkowy}"
                     )
                     wyslij_telegram_alert(raport_tg)
-                    time.sleep(0.5)
+                    time.sleep(0.3)
                     
             except Exception:
                 pass
                 
-            pasek.progress((index + 1) / len(lista_do_przejrzenia))
-            time.sleep(0.1)
+            pasek.progress((index + 1) / len(lista_tickerów))
             
         st.success("✅ Zbiorcza analiza giełdowa została pomyślnie sfinalizowana!")
-        st.write(f"Wysłano łącznie powiadomień na Telegram: **{licznik_alertow}** dla najciekawszych okazji.")
+        st.write(f"Wysłano ważnych alertów na Telegram: **{licznik_alertow}**")
         
         if pelna_tabela_wynikow:
             st.subheader("📊 Kompletny podgląd wszystkich przeskanowanych spółek")
             df_wynikowy = pd.DataFrame(pelna_tabela_wynikow)
             st.dataframe(df_wynikowy, use_container_width=True)
-        else:
-            st.info("Brak pasujących kryteriów cenowych dla spółek na wybranych rynkach.")
