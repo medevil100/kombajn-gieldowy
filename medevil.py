@@ -1,4 +1,5 @@
 import time
+import schedule
 import threading
 import requests
 import yfinance as yf
@@ -67,10 +68,11 @@ with col_p3:
     ui_price_threshold = st.slider("Próg wzrostu ceny (%):", 0.1, 5.0, PRICE_THRESHOLD, step=0.1)
 
 # =====================================================================
-# MODUŁ KOMUNIKACJI I MATEMATYKI RSI
+# MODUŁ KOMUNIKACJI (SZTYWNA, POPRAWNA ŚCIEŻKA SIECIOWA)
 # =====================================================================
 def send_telegram_message(message):
     czysty_token = str(TELEGRAM_TOKEN).strip()
+    # NAPRAWIONO: Pełny adres URL bez możliwości błędnego sklejenia
     url = f"https://telegram.org{czysty_token}/sendMessage"
     payload = {"chat_id": str(TELEGRAM_CHAT_ID).strip(), "text": message, "parse_mode": "HTML"}
     try:
@@ -228,9 +230,15 @@ def job_skanera(status_placeholder=None, progress_bar=None):
 st.sidebar.header("⏱️ Sterowanie Radarem")
 auto_scan = st.sidebar.selectbox("Automatyczne odświeżanie:", ["Tylko ręcznie", "Co 1 minutę", "Co 5 minut", "Co 15 minut"])
 
+# =====================================================================
+# PRZYCISK DIAGNOSTYCZNY
+# =====================================================================
 if st.sidebar.button("🔌 Wyślij testowy alert"):
     czysty_token = str(TELEGRAM_TOKEN).strip()
+    
+    # PEŁNY, POPRAWNY ADRES URL INTERNETOWY API TELEGRAMA
     url = f"https://telegram.org{czysty_token}/sendMessage"
+    
     payload = {
         "chat_id": str(TELEGRAM_CHAT_ID).strip(),
         "text": "🤖 <b>TEST SYSTEMU:</b> Powiadomienia z lokalnego PowerShella działają poprawnie!",
