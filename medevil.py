@@ -117,22 +117,27 @@ def analizuj_jedna_spolke(ticker, now):
         def do_float(val):
             return float(val.iloc) if isinstance(val, pd.Series) else float(val)
 
-        aktualna_cena = do_float(ostatnia_swieca['Close'])
-        cena_zamkniecia_poprzednia = do_float(poprzednia_swieca['Close'])
-        current_rsi = do_float(ostatnia_swieca['RSI'])
-        
-        if aktualna_cena <= 0 or pd.isna(current_rsi): return None
-            
-        is_gpw = ticker.endswith(".WA")
-        waluta = "PLN" if is_gpw else "USD"
-        
-        # Filtry odcinające drogie akcje
-        if is_gpw and aktualna_cena > MAX_PRICE_PLN: return None
-        if not is_gpw and aktualna_cena > MAX_PRICE_USD: return None
-            
-        zmiana_ceny = ((aktualna_cena - cena_zamkniecia_poprzednia) / cena_zamkniecia_poprzednia) * 100
-        aktualny_wolumen = do_float(ostatnia_swieca['Volume'])
-        sredni_wolumen = do_float(df['Volume'].mean())
+   # PRZYCISK DIAGNOSTYCZNY: Wysyła niezależną wiadomość bezpośrednio na Twój telefon
+if st.sidebar.button("🔌 Wyślij testowy alert"):
+    czysty_token = str(TELEGRAM_TOKEN).strip()
+    
+    # NAPRAWIONA ŚCIEŻKA SIECIOWA: Dodano "bot" oraz ukośniki, aby uniknąć błędów sklejenia tekstu
+    url = f"https://telegram.org{czysty_token}/sendMessage"
+    
+    payload = {
+        "chat_id": str(TELEGRAM_CHAT_ID).strip(), 
+        "text": "🤖 <b>TEST SYSTEMU:</b> Powiadomienia z lokalnego PowerShella działają poprawnie!", 
+        "parse_mode": "HTML"
+    }
+    try:
+        res = requests.post(url, json=payload, timeout=5)
+        if res.status_code == 200:
+            st.sidebar.success("Test dostarczony!")
+        else:
+            st.sidebar.error(f"Błąd {res.status_code}: {res.text}")
+    except Exception as e:
+        st.sidebar.error(f"Błąd połączenia: {e}")
+
         
         if sredni_wolumen == 0: return None
         skok_wolumenu = aktualny_wolumen / sredni_wolumen
