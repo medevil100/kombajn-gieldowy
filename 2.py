@@ -268,7 +268,7 @@ if st.session_state.last_scanned_tickers:
         st.write(f"### Paczka {idx}")
         st.json(batch)
 # =====================================================================
-# STAŁE TICKERY + OKNO PODGLĄDU
+# STAŁE SPÓŁKI — PODGLĄD
 # =====================================================================
 
 st.subheader("📌 Stałe tickery — szybki wybór spółki")
@@ -289,17 +289,13 @@ if selected_ticker:
 
         last = df_s.iloc[-1]
 
-        try:
-            cena_s   = float(last["Close"].item())
-            rsi_s    = float(last["RSI"].item())
-            macd_s   = float(last["MACD"].item())
-            signal_s = float(last["Signal"].item())
-            bb_up_s  = float(last["BB_UP"].item())
-            bb_mid_s = float(last["BB_MID"].item())
-            bb_down_s= float(last["BB_DOWN"].item())
-        except Exception as e:
-            st.error(f"Nie można przetworzyć danych tickera: {e}")
-            st.stop()
+        cena_s   = float(last["Close"].item())
+        rsi_s    = float(last["RSI"].item())
+        macd_s   = float(last["MACD"].item())
+        signal_s = float(last["Signal"].item())
+        bb_up_s  = float(last["BB_UP"].item())
+        bb_mid_s = float(last["BB_MID"].item())
+        bb_down_s= float(last["BB_DOWN"].item())
 
         st.markdown(
             f"""
@@ -331,3 +327,78 @@ if selected_ticker:
 
         fig2.update_layout(template="plotly_dark", height=700)
         st.plotly_chart(fig2, use_container_width=True)
+
+# =====================================================================
+# SZYBKI PODGLĄD TICKERA
+# =====================================================================
+
+st.subheader("🔎 Szybki podgląd tickera")
+
+quick_ticker = st.text_input("Ticker:", key="quick_ticker")
+
+if quick_ticker:
+    df_q = yf.download(quick_ticker, period="10d", interval="30m", progress=False)
+
+    if df_q is None or df_q.empty:
+        st.error("Brak danych z Yahoo Finance.")
+    else:
+        df_q["RSI"] = oblicz_rsi(df_q)
+        df_q = oblicz_macd(df_q)
+        df_q = oblicz_bollinger(df_q)
+
+        ostatnia = df_q.iloc[-1]
+
+        close_val  = float(ostatnia["Close"].item())
+        rsi_val    = float(ostatnia["RSI"].item())
+        macd_val   = float(ostatnia["MACD"].item())
+        signal_val = float(ostatnia["Signal"].item())
+        bb_up      = float(ostatnia["BB_UP"].item())
+        bb_mid     = float(ostatnia["BB_MID"].item())
+        bb_down    = float(ostatnia["BB_DOWN"].item())
+
+        st.write(f"**Cena:** {close_val:.2f}")
+        st.write(f"**RSI:** {rsi_val:.1f}")
+        st.write(f"**MACD:** {macd_val:.4f}")
+        st.write(f"**Signal:** {signal_val:.4f}")
+        st.write(f"**Bollinger:** UP {bb_up:.2f} | MID {bb_mid:.2f} | DOWN {bb_down:.2f}")
+
+        fig = make_subplots(
+            rows=3, cols=1, shared_xaxes=True,
+            vertical_spacing=0.02, row_heights=[0.55, 0.20, 0.25]
+        )
+
+        fig.add_trace(
+            go.Candlestick(
+                x=df_q.index,
+                open=df_q["Open"],
+                high=df_q["High"],
+                low=df_q["Low"],
+                close=df_q["Close"],
+                increasing_line_color="lime",
+                decreasing_line_color="red",
+            ),
+            row=1, col=1
+        )
+
+        fig.add_trace(go.Scatter(x=df_q.index, y=df_q["RSI"]), row=2, col=1)
+        fig.add_trace(go.Scatter(x=df_q.index, y=df_q["MACD"]), row=3, col=1)
+        fig.add_trace(go.Scatter(x=df_q.index, y=df_q["Signal"]), row=3, col=1)
+
+        fig.update_layout(template="plotly_dark", height=900, width=1200)
+        st.plotly_chart(fig, use_container_width=True)
+
+# =====================================================================
+# AUTO-SCAN
+# =====================================================================
+
+auto_scan = st.selectbox("Auto-skan:", ["Wyłączony","Co 1 minutę","Co 5 minut","Co 15 minut"])
+
+if auto_scan == "Co 1 minutę":
+    time.sleep(60)
+    st.rerun()
+elif auto_scan == "Co 5 minut":
+    time.sleep(300)
+    st.rerun()
+elif auto_scan == "Co 15 minut":
+    time.sleep(900)
+    st.rerun()
