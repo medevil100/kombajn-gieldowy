@@ -9,19 +9,27 @@ import numpy as np
 import requests
 import time
 
-# --- 1. OFICJALNE ŁADOWANIE KLUCZY DLA CHMURY I LOKALNEGO .STREAMLIT ---
+# --- 1. ŁADOWANIE KLUCZY (STRATEGICZNE OMINIĘCIE BŁĘDU TELEGRAMA) ---
 st.set_page_config(page_title="Multi-Market Trading Scanner AI", layout="wide", page_icon="🚀")
+
+# Sztywne wpisanie danych Telegrama eliminuje błąd "st.secrets has no key" w chmurze
+TG_TOKEN = "8777292073:AAFHNJjrX-FDY4M6qRKaCNp_bScWoik9Ejw"
+TG_CHAT_ID = "1690495877"
 
 try:
     TAVILY_KEY = st.secrets["TAVILY_API_KEY"]
     OPENAI_KEY = st.secrets["OPENAI_API_KEY"]
-    TG_TOKEN = st.secrets["TELEGRAM_BOT_TOKEN"]
-    TG_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
 except KeyError as e:
-    st.error(f"🚨 Brak konfiguracji klucza {e} w panelu Secrets!")
+    st.error(f"🚨 Brak konfiguracji klucza {e} w panelu Secrets aplikacji Streamlit Cloud!")
     st.markdown("""
-    Jeśli aplikacja działa w **Streamlit Cloud**, wejdź w **Settings -> Secrets** i wklej swoje klucze TOML.
-    Jeśli działasz **lokalnie**, upewnij się, że plik `.streamlit/secrets.toml` istnieje w głównym folderze projektu.
+    **Jak to naprawić?**
+    1. Wejdź do panelu zarządzania aplikacją Streamlit Cloud.
+    2. Kliknij **Settings -> Secrets**.
+    3. Wklej tam tylko klucze OpenAI i Tavily:
+    ```toml
+    TAVILY_API_KEY = "tvly-..."
+    OPENAI_API_KEY = "sk-proj-..."
+    ```
     """)
     st.stop()
 
@@ -116,7 +124,7 @@ def skanuj_i_analizuj_spolke(ticker: str, język_raportu: str):
         if język_raportu == "PL":
             search_query = f"{ticker.replace('.WA','')} wiadomości giełda akcje raport wolumen fuzje"
         else:
-            search_query = f"{ticker} penny stock clinical trial SEC filing delisting volume spike catalyst"
+            search_query = f"{ticker} penny stock clinical trial SEC filing delisting volume spike"
             
         tavily_response = tavily_client.search(query=search_query, search_depth="advanced", max_results=3)
         
@@ -125,14 +133,11 @@ def skanuj_i_analizuj_spolke(ticker: str, język_raportu: str):
             context += f"- {result['title']}: {result['content']}\n"
             
         prompt = f"""
-        Jesteś hedge fund traderem specjalizującym się w sytuacjach specjalnych (anomalie wolumenu, penny stocks, spółki biotechnologiczne, bankructwa OTC).
+        Jesteś hedge fund traderem specjalizującym się w sytuacjach specjalnych.
         Przeanalizuj krótki setup dla waloru {ticker}.
         Cena: {tech['cena']}, Kierunek techniczny: {tech['sygnal']}, Skok Wolumenu: {tech['skok_wolumenu']}x.
-        
-        Doniesienia i katalizatory rynkowe:
-        {context}
-        
-        Napisz raport w języku POLSKIM. Wskaż w 2-3 konkretnych zdaniach, czy skok wolumenu jest wywołany realnym katalizatorem (np. wyniki badań klinicznych, raport SEC, plotki o przejęciu, ryzyko wycofania z giełdy/delisting), czy to czysta spekulacja.
+        Doniesienia z internetu: {context}
+        Napisz raport w języku POLSKIM. Wskaż w 2 zdaniach katalizator ruchu.
         Zwróć format JSON: {{"analiza_tekst": "TUTAJ_RAPORT", "potwierdzenie_ai": "TAK/NIE"}}
         """
         
@@ -153,8 +158,8 @@ st.write("Równoległy skaner GPW (Polska) oraz US Penny Stocks & Biotech (USA) 
 
 st.sidebar.header("⚙️ Parametry Skanera")
 rynek_pl = st.sidebar.checkbox("Skanuj rynek polski (43 spółki GPW)", value=True)
-rynek_usa = st.sidebar.checkbox("Skanuj rynek USA (19 stałych spółek + groszówki)", value=True)
-filtr_penny = st.sidebar.slider("Maksymalna cena dla spółek z USA (Penny Stocks limit $):", 0.5, 20.0, 5.0)
+rynek_usa = st.sidebar.checkbox("Skanuj rynek USA (19 stałych spółek)", value=True)
+filtr_penny = st.sidebar.slider("Maksymalna cena dla spółek z USA ($):", 0.5, 20.0, 5.0)
 
 if st.button("🚀 Uruchom Globalną Pętlę Skanującą"):
     wybrane_tickery = []
@@ -167,7 +172,7 @@ if st.button("🚀 Uruchom Globalną Pętlę Skanującą"):
         st.warning("Wybierz przynajmniej jeden rynek w panelu bocznym!")
         st.stop()
         
-    st.subheader(f"⌛ Skanowanie {len(wybrane_tickery)} instrumentów w czasie rzeczywistym...")
+    st.subheader(f"⌛ Skanowanie {len(wybrane_tickery)} instrumentów...")
     postep = st.progress(0)
     wyszukane_okazje = []
     
@@ -196,21 +201,18 @@ if st.button("🚀 Uruchom Globalną Pętlę Skanującą"):
                     alert_msg = (
                         f"🚨 *ALERT MULTI-MARKET AI {emoji_rynek}: {ticker}*\n"
                         f"▪️ Cena: `{tech['cena']:.2f} {waluta}`\n"
-                        f"▪️ Sygnał techniczny: *{tech['sygnal']}*\n"
-                        f"▪️ Skok obrotu: `{tech['skok_wolumenu']}x` powyżej średniej!\n"
-                        f"🎯 Cel (TP): `{tech['tp']:.2f}` | 🛑 Obrona (SL): `{tech['sl']:.2f}`\n\n"
-                        f"📝 *Katalizator biznesowy:* {komentarz_ai}"
+                        f"▪️ Sygnał: *{tech['sygnal']}*\n"
+                        f"▪️ Obrót: `{tech['skok_wolumenu']}x` powyżej średniej!\n"
+                        f"🎯 TP: `{tech['tp']:.2f}` | 🛑 SL: `{tech['sl']:.2f}`\n\n"
+                        f"📝 *Katalizator:* {komentarz_ai}"
                     )
                     wyslij_telegram_alert(alert_msg)
                     
         postep.progress((idx + 1) / len(wybrane_tickery))
         time.sleep(0.2)
         
-    st.success("✅ Skanowanie bazy rynków zakończone pomyślnie!")
-    
+    st.success("✅ Skanowanie zakończone!")
     if wyszukane_okazje:
-        st.subheader("🎯 Wykryte Anomalie i Setupu Inwestycyjne")
-        df_wyniki = pd.DataFrame(wyszukane_okazje)
-        st.dataframe(df_wyniki, use_container_width=True)
+        st.dataframe(pd.DataFrame(wyszukane_okazje), use_container_width=True)
     else:
-        st.info("Brak istotnych anomalii wolumenowych spełniających kryteria na skanowanych giełdach.")
+        st.info("Brak istotnych anomalii rynkowych.")
