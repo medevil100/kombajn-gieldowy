@@ -540,9 +540,9 @@ def job_skanera(status_ph, prog_bar):
 
 col_btn1, col_btn2 = st.columns(2)
 with col_btn1:
-    uruchom_skan = st.button("🚀 Uruchom Skaner")
+    uruchom_skan = st.button("🚀 Uruchom Skaner", key="btn_skaner")
 with col_btn2:
-    if st.button("🗑️ Wyczyść Historię"):
+    if st.button("🗑️ Wyczyść Historię", key="btn_clear"):
         st.session_state.alerts_history = []
         st.session_state.last_scanned_tickers = []
         st.rerun()
@@ -603,7 +603,7 @@ if st.session_state.last_scanned_tickers:
 
 st.subheader("🔎 Szybki podgląd tickera (RSI + MACD + Świece)")
 
-quick_ticker = st.text_input("Ticker:", "")
+quick_ticker = st.text_input("Ticker:", key="quick_ticker")
 
 df_q = None
 if quick_ticker:
