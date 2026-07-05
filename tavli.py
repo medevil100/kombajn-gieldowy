@@ -41,7 +41,6 @@ TICKERS_USA = [
 
 # --- 3. BEZPIECZNA WYSYŁKA NA TELEGRAM ---
 def wyslij_telegram_alert(wiadomosc: str):
-    """Wysyła czysty tekst na Telegram (użycie HTML zapobiega błędom parsowania Markdown)"""
     url = f"https://telegram.org{TG_TOKEN}/sendMessage"
     payload = {
         "chat_id": TG_CHAT_ID,
@@ -65,7 +64,6 @@ def oblicz_wskaźniki(df):
     sma20_ost = df['SMA20'].iloc[-1] if not pd.isna(df['SMA20'].iloc[-1]) else ostatnia_cena
     sma50_ost = df['SMA50'].iloc[-1] if not pd.isna(df['SMA50'].iloc[-1]) else ostatnia_cena
     
-    # Przypisywanie oceny rynkowej na podstawie układu średnich kroczących
     if ostatnia_cena > sma20_ost > sma50_ost:
         ocena = "Kupuj (Silny Up)"
         sygnal = "LONG"
@@ -80,7 +78,6 @@ def oblicz_wskaźniki(df):
     sredni_wolumen = df['Volume'].rolling(window=20).mean().iloc[-1]
     skok_wolumenu = ostatni_wolumen / sredni_wolumen if (sredni_wolumen and sredni_wolumen > 0) else 1.0
     
-    # Wyliczanie poziomów obronnych ATR
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
     low_close = np.abs(df['Low'] - df['Close'].shift())
@@ -100,7 +97,6 @@ def oblicz_wskaźniki(df):
     }
 
 def głęboka_analiza_news_ai(ticker: str, tech: dict, rynek: str):
-    """Pobiera wiadomości z Tavily i generuje uzasadnienie decyzji przez OpenAI"""
     try:
         search_query = f"{ticker} wiadomości giełda akcje raport" if rynek == "PL" else f"{ticker} penny stock clinical trial SEC filing catalyst"
         tavily_response = tavily_client.search(query=search_query, search_depth="advanced", max_results=3)
@@ -131,7 +127,7 @@ st.title("📈 Profesjonalny Terminal Giełdowy AI Multi-Market")
 
 # --- MODUŁ A: SZYBKIE OKNO SPRAWDZANIA TICKERA ---
 st.subheader("🔍 Szybki podgląd i analiza wybranego waloru")
-col_input1, col_input2 = st.columns([3, 1])
+col_input1, col_input2 = st.columns()
 with col_input1:
     szukany_ticker = st.text_input("Wpisz DOWOLNY ticker rynkowy, aby sprawdzić go natychmiast (np. STX.WA, AAPL, NVDA, PLRX):", "").upper().strip()
 with col_input2:
@@ -157,7 +153,6 @@ if uruchom_szukanie and szukany_ticker:
             st.info(f"**Uzasadnienie AI (Tavily + OpenAI):** {uzasadnienie}")
             st.write(f"🎯 Docelowy Take Profit (TP): **{t_res['tp']:.2f}** | 🛑 Poziom Stop Loss (SL): **{t_res['sl']:.2f}**")
             
-            # Wymuszenie powiadomienia na Telegram z szybkiego okna
             wiadomosc_tg = (
                 f"🔎 <b>SZYBKI SKAN TICKERA: {szukany_ticker}</b>\n"
                 f"▪️ Cena: {t_res['cena']:.2f}\n"
@@ -170,6 +165,22 @@ if uruchom_szukanie and szukany_ticker:
             st.success("Wysłano raport z szybkiego podglądu na Twój Telegram!")
 
 st.write("---")
+
+# --- MODUŁ B: GLOBALNA PĘTLA SKANOWANIA LISTY SPÓŁEK ---
+st.subheader("🔄 Globalny Automatyczny Skaner Portfela Spółek")
+
+st.sidebar.header("⚙️ Zarządzanie Skanerem")
+wybierz_pl = st.sidebar.checkbox("Skanuj listę GPW (43 spółki)", value=True)
+wybierz_usa = st.sidebar.checkbox("Skanuj listę USA (19 spółek)", value=True)
+cena_max_us = st.sidebar.slider("Maksymalny próg cenowy dla USA ($):", 0.5, 20.0, 5.0)
+
+col_btn1, col_btn2 = st.columns()
+with col_btn1:
+    uruchom_globalny = st.button("🚀 Uruchom Skanowanie")
+with col_btn2:
+    if st.button("🔄 Wyczyszczenie pamięci i powtórny skan"):
+        st.cache_data.clear()
+        st.rerun()
 
 if uruchom_globalny:
     lista_do_przejrzenia = []
@@ -201,12 +212,10 @@ if uruchom_globalny:
                     pasek.progress((index + 1) / len(lista_do_przejrzenia))
                     continue
                     
-                # Filtracja progu cenowego dla groszówek z USA
                 if rynek == "USA" and tech['cena'] > cena_max_us:
                     pasek.progress((index + 1) / len(lista_do_przejrzenia))
                     continue
                 
-                # Zbieramy dane do pełnego podglądw przeskanowanych spółek
                 dane_wiersza = {
                     "Ticker": ticker,
                     "Rynek": rynek,
@@ -218,7 +227,55 @@ if uruchom_globalny:
                 }
                 pelna_tabela_wynikow.append(dane_wiersza)
                 
-                # Kryterium wysłania alertu na Telegram: silny sygnał giełdowy L/S LUB nagły wysoki obrót (Skok wolumenu >= 1.5x)
+                if tech['sygnal'] in ["LONG", "SHORT"] or tech['skok_wolumenu'] >= 1.5:
+                    licznik_alertow += 1
+                    komentarz_rynkowy = głęboka_analiza_news_ai(ticker, tech, rynek)
+                    
+if uruchom_globalny:
+    lista_do_przejrzenia = []
+    if wybierz_pl:
+        for tick in TICKERS_PL: lista_do_przejrzenia.append((tick, "PL", "PLN"))
+    if wybierz_usa:
+        for tick in TICKERS_USA: lista_do_przejrzenia.append((tick, "USA", "USD"))
+        
+    if not lista_do_przejrzenia:
+        st.warning("Zaznacz giełdy w panelu bocznym do wykonania operacji!")
+    else:
+        st.write(f"⏳ Analiza portfela giełdowego (Spółek do zbadania: {len(lista_do_przejrzenia)})...")
+        pasek = st.progress(0)
+        
+        pelna_tabela_wynikow = []
+        licznik_alertow = 0
+        
+        for index, (ticker, rynek, waluta) in enumerate(lista_do_przejrzenia):
+            try:
+                t_obj = yf.Ticker(ticker)
+                historia = t_obj.history(period="1y")
+                
+                if historia.empty:
+                    pasek.progress((index + 1) / len(lista_do_przejrzenia))
+                    continue
+                    
+                tech = oblicz_wskaźniki(historia)
+                if not tech:
+                    pasek.progress((index + 1) / len(lista_do_przejrzenia))
+                    continue
+                    
+                if rynek == "USA" and tech['cena'] > cena_max_us:
+                    pasek.progress((index + 1) / len(lista_do_przejrzenia))
+                    continue
+                
+                dane_wiersza = {
+                    "Ticker": ticker,
+                    "Rynek": rynek,
+                    "Aktualny Kurs": f"{tech['cena']:.2f} {waluta}",
+                    "Ocena / Trend": tech['ocena'],
+                    "Skok Wolumenu": f"{tech['skok_wolumenu']}x",
+                    "Stop Loss (SL)": f"{tech['sl']:.2f}",
+                    "Take Profit (TP)": f"{tech['tp']:.2f}"
+                }
+                pelna_tabela_wynikow.append(dane_wiersza)
+                
                 if tech['sygnal'] in ["LONG", "SHORT"] or tech['skok_wolumenu'] >= 1.5:
                     licznik_alertow += 1
                     komentarz_rynkowy = głęboka_analiza_news_ai(ticker, tech, rynek)
@@ -233,10 +290,10 @@ if uruchom_globalny:
                         f"📝 <b>Analiza:</b> {komentarz_rynkowy}"
                     )
                     wyslij_telegram_alert(raport_tg)
-                    time.sleep(0.5) # Zapobiega przekroczeniu limitów wysyłki w API Telegrama
+                    time.sleep(0.5)
                     
             except Exception:
-                pass  # Prawidłowy blok przechwytywania wyjątków, który naprawia Twój błąd
+                pass
                 
             pasek.progress((index + 1) / len(lista_do_przejrzenia))
             time.sleep(0.1)
@@ -244,7 +301,6 @@ if uruchom_globalny:
         st.success("✅ Zbiorcza analiza giełdowa została pomyślnie sfinalizowana!")
         st.write(f"Wysłano łącznie powiadomień na Telegram: **{licznik_alertow}** dla najciekawszych okazji.")
         
-        # WYŚWIETLENIE PEELNEJ TABELI PODGLĄDU
         if pelna_tabela_wynikow:
             st.subheader("📊 Kompletny podgląd wszystkich przeskanowanych spółek")
             df_wynikowy = pd.DataFrame(pelna_tabela_wynikow)
