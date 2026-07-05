@@ -292,13 +292,18 @@ if selected_ticker:
         last = df_s.iloc[-1]
 
         # Pobieramy pojedyncze wartości
-        cena_s   = float(last["Close"])
-        rsi_s    = float(last["RSI"])
-        macd_s   = float(last["MACD"])
-        signal_s = float(last["Signal"])
-        bb_up_s  = float(last["BB_UP"])
-        bb_mid_s = float(last["BB_MID"])
-        bb_down_s= float(last["BB_DOWN"])
+try:
+    cena_s   = float(last["Close"].item())
+    rsi_s    = float(last["RSI"].item())
+    macd_s   = float(last["MACD"].item())
+    signal_s = float(last["Signal"].item())
+    bb_up_s  = float(last["BB_UP"].item())
+    bb_mid_s = float(last["BB_MID"].item())
+    bb_down_s= float(last["BB_DOWN"].item())
+except Exception as e:
+    st.error(f"Nie można przetworzyć danych tickera: {e}")
+    st.stop()
+
 
         # Wyświetlamy panel
         st.markdown(f"""
