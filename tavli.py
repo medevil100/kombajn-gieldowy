@@ -231,55 +231,6 @@ if uruchom_globalny:
                     licznik_alertow += 1
                     komentarz_rynkowy = głęboka_analiza_news_ai(ticker, tech, rynek)
                     
-if uruchom_globalny:
-    lista_do_przejrzenia = []
-    if wybierz_pl:
-        for tick in TICKERS_PL: lista_do_przejrzenia.append((tick, "PL", "PLN"))
-    if wybierz_usa:
-        for tick in TICKERS_USA: lista_do_przejrzenia.append((tick, "USA", "USD"))
-        
-    if not lista_do_przejrzenia:
-        st.warning("Zaznacz giełdy w panelu bocznym do wykonania operacji!")
-    else:
-        st.write(f"⏳ Analiza portfela giełdowego (Spółek do zbadania: {len(lista_do_przejrzenia)})...")
-        pasek = st.progress(0)
-        
-        pelna_tabela_wynikow = []
-        licznik_alertow = 0
-        
-        for index, (ticker, rynek, waluta) in enumerate(lista_do_przejrzenia):
-            try:
-                t_obj = yf.Ticker(ticker)
-                historia = t_obj.history(period="1y")
-                
-                if historia.empty:
-                    pasek.progress((index + 1) / len(lista_do_przejrzenia))
-                    continue
-                    
-                tech = oblicz_wskaźniki(historia)
-                if not tech:
-                    pasek.progress((index + 1) / len(lista_do_przejrzenia))
-                    continue
-                    
-                if rynek == "USA" and tech['cena'] > cena_max_us:
-                    pasek.progress((index + 1) / len(lista_do_przejrzenia))
-                    continue
-                
-                dane_wiersza = {
-                    "Ticker": ticker,
-                    "Rynek": rynek,
-                    "Aktualny Kurs": f"{tech['cena']:.2f} {waluta}",
-                    "Ocena / Trend": tech['ocena'],
-                    "Skok Wolumenu": f"{tech['skok_wolumenu']}x",
-                    "Stop Loss (SL)": f"{tech['sl']:.2f}",
-                    "Take Profit (TP)": f"{tech['tp']:.2f}"
-                }
-                pelna_tabela_wynikow.append(dane_wiersza)
-                
-                if tech['sygnal'] in ["LONG", "SHORT"] or tech['skok_wolumenu'] >= 1.5:
-                    licznik_alertow += 1
-                    komentarz_rynkowy = głęboka_analiza_news_ai(ticker, tech, rynek)
-                    
                     flag_rynek = "🇵🇱" if rynek == "PL" else "🇺🇸"
                     raport_tg = (
                         f"🚨 <b>ALERT RYNKOWY {flag_rynek}: {ticker}</b>\n"
