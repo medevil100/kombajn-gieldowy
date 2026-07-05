@@ -16,3 +16,5 @@ streamlit-autorefresh
 websocket-client
 cloudscraper
 twilio
+streamlit-autorefresh
+schedule
