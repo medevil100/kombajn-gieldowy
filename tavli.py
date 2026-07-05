@@ -8,62 +8,23 @@ import pandas as pd
 import numpy as np
 import requests
 import time
-import os
 
-# --- 1. ROZBUDOWANE I BEZPIECZNE ŁADOWANIE KLUCZY (SYSTEM AWARYJNY) ---
+# --- 1. OFICJALNE ŁADOWANIE KLUCZY DLA CHMURY I LOKALNEGO .STREAMLIT ---
 st.set_page_config(page_title="Multi-Market Trading Scanner AI", layout="wide", page_icon="🚀")
 
-TAVILY_KEY = None
-OPENAI_KEY = None
-TG_TOKEN = None
-TG_CHAT_ID = None
-
-# Sposób A: Próba standardowa przez st.secrets
 try:
-    if "TAVILY_API_KEY" in st.secrets: TAVILY_KEY = st.secrets["TAVILY_API_KEY"]
-    if "OPENAI_API_KEY" in st.secrets: OPENAI_KEY = st.secrets["OPENAI_API_KEY"]
-    if "TELEGRAM_BOT_TOKEN" in st.secrets: TG_TOKEN = st.secrets["TELEGRAM_BOT_TOKEN"]
-    if "TELEGRAM_CHAT_ID" in st.secrets: TG_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
-except Exception:
-    pass
-
-# Sposób B (Awaryjny): Ręczne parsowanie pliku dyskowego, jeśli Streamlit go ignoruje
-if not TG_TOKEN or not TG_CHAT_ID:
-    sciezka_secrets = os.path.join("C:\\", "super_scaner", ".streamlit", "secrets.toml")
-    if os.path.exists(sciezka_secrets):
-        with open(sciezka_secrets, "r", encoding="utf-8") as f:
-            for linia in f:
-                linia = linia.strip()
-                if "=" in linia and not linia.startswith("#"):
-                    klucz, wartosc = linia.split("=", 1)
-                    klucz = klucz.strip()
-                    wartosc = wartosc.strip().strip('"').strip("'")
-                    
-                    if klucz == "TAVILY_API_KEY": TAVILY_KEY = wartosc
-                    elif klucz == "OPENAI_API_KEY": OPENAI_KEY = wartosc
-                    elif klucz == "TELEGRAM_BOT_TOKEN": TG_TOKEN = wartosc
-                    elif klucz == "TELEGRAM_CHAT_ID": TG_CHAT_ID = wartosc
-
-# Weryfikacja końcowa - jeśli nadal brakuje, wyświetlamy jasną instrukcję ratunkową
-if not TAVILY_KEY or not OPENAI_KEY or not TG_TOKEN or not TG_CHAT_ID:
-    st.error("🚨 Krytyczny brak konfiguracji kluczy!")
-    st.markdown(f"""
-    **System nie był w stanie automatycznie załadować wymaganych danych uwierzytelniających.**
-    
-    Utwórz ręcznie plik tekstowy o nazwie `secrets.toml` dokładnie w tej ścieżce:
-    `C:\\super_scaner\\.streamlit\\secrets.toml`
-    
-    Wklej do niego poniższą treść i zapisz plik:
-    ```toml
-    TAVILY_API_KEY = "TWÓJ_KLUCZ_TAVILY"
-    OPENAI_API_KEY = "TWÓJ_KLUCZ_OPENAI"
-    TELEGRAM_BOT_TOKEN = "8777292073:AAFHNJjrX-FDY4M6qRKaCNp_bScWoik9Ejw"
-    TELEGRAM_CHAT_ID = "1690495877"
-    ```
+    TAVILY_KEY = st.secrets["TAVILY_API_KEY"]
+    OPENAI_KEY = st.secrets["OPENAI_API_KEY"]
+    TG_TOKEN = st.secrets["TELEGRAM_BOT_TOKEN"]
+    TG_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
+except KeyError as e:
+    st.error(f"🚨 Brak konfiguracji klucza {e} w panelu Secrets!")
+    st.markdown("""
+    Jeśli aplikacja działa w **Streamlit Cloud**, wejdź w **Settings -> Secrets** i wklej swoje klucze TOML.
+    Jeśli działasz **lokalnie**, upewnij się, że plik `.streamlit/secrets.toml` istnieje w głównym folderze projektu.
     """)
     st.stop()
 
-# Inicjalizacja oficjalnych klientów giełdowych po upewnieniu się, że klucze są w pamięci
 openai_client = OpenAI(api_key=OPENAI_KEY)
 tavily_client = TavilyClient(api_key=TAVILY_KEY)
 
@@ -230,3 +191,26 @@ if st.button("🚀 Uruchom Globalną Pętlę Skanującą"):
                 }
                 wyszukane_okazje.append(wpis)
                 
+                if tech['skok_wolumenu'] >= 1.5 or potwierdzone == "TAK":
+                    emoji_rynek = "🇵🇱" if rynek == "PL" else "🇺🇸"
+                    alert_msg = (
+                        f"🚨 *ALERT MULTI-MARKET AI {emoji_rynek}: {ticker}*\n"
+                        f"▪️ Cena: `{tech['cena']:.2f} {waluta}`\n"
+                        f"▪️ Sygnał techniczny: *{tech['sygnal']}*\n"
+                        f"▪️ Skok obrotu: `{tech['skok_wolumenu']}x` powyżej średniej!\n"
+                        f"🎯 Cel (TP): `{tech['tp']:.2f}` | 🛑 Obrona (SL): `{tech['sl']:.2f}`\n\n"
+                        f"📝 *Katalizator biznesowy:* {komentarz_ai}"
+                    )
+                    wyslij_telegram_alert(alert_msg)
+                    
+        postep.progress((idx + 1) / len(wybrane_tickery))
+        time.sleep(0.2)
+        
+    st.success("✅ Skanowanie bazy rynków zakończone pomyślnie!")
+    
+    if wyszukane_okazje:
+        st.subheader("🎯 Wykryte Anomalie i Setupu Inwestycyjne")
+        df_wyniki = pd.DataFrame(wyszukane_okazje)
+        st.dataframe(df_wyniki, use_container_width=True)
+    else:
+        st.info("Brak istotnych anomalii wolumenowych spełniających kryteria na skanowanych giełdach.")
