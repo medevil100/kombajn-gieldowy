@@ -39,14 +39,24 @@ TICKERS_USA = [
     "SLS", "TTWOQ", "ATNXQ", "MNTS", "BBIG", "NBY", "AEMD", "XELA", "COMS"
 ]
 
-# --- 3. BEZPIECZNA WYSYŁKA NA TELEGRAM ---
+# --- 3. MODUŁ TELEGRAMA Z WYŚWIETLANIEM DIAGNOSTYKI BŁĘDÓW ---
 def wyslij_telegram_alert(wiadomosc: str):
+    """Wysyła bezpieczny, czysty tekst na Telegram i zwraca status wraz z odpowiedzią serwera"""
     url = f"https://telegram.org{TG_TOKEN}/sendMessage"
-    payload = {"chat_id": TG_CHAT_ID, "text": wiadomosc, "parse_mode": "HTML"}
+    payload = {
+        "chat_id": TG_CHAT_ID,
+        "text": wiadomosc
+        # Usunięto parse_mode, aby znaki specjalne z AI nie crashowały wysyłki
+    }
     try:
         response = requests.post(url, json=payload)
-        return response.status_code == 200
-    except Exception:
+        if response.status_code != 200:
+            # Rejestrujemy błąd w schowku Streamlit, aby użytkownik wiedział co poszło nie tak
+            st.sidebar.error(f"Telegram Error: {response.status_code} - {response.text}")
+            return False
+        return True
+    except Exception as e:
+        st.sidebar.error(f"Błąd sieci Telegram: {e}")
         return False
 
 # --- 4. SILNIK WYLICZEŃ TECHNICZNYCH (ŚCIŚLE DLA RYNKU AKCJI) ---
@@ -61,7 +71,6 @@ def przetwórz_dane_historyczne(ticker, df_close, df_volume, df_high, df_low):
         lows = df_low[ticker]
         closes = df_close[ticker]
         
-        # Ochrona przed wartościami pustymi (NaN) w najnowszym wierszu
         if pd.isna(cena):
             return None
             
@@ -115,16 +124,25 @@ def głęboka_analiza_news_ai(ticker: str, tech: dict, rynek: str):
 # --- 5. INTERFEJS UŻYTKOWNIKA STREAMLIT ---
 st.title("📈 Profesjonalny Terminal Giełdowy AI (Rynek Akcji)")
 
-# --- CZĘŚĆ 1: SZYBKI PODGLĄD POJEDYNCZEGO WALORU ---
+# --- TESTOWY PRZYCISK DIAGNOSTYCZNY TELEGRAMA ---
+st.sidebar.subheader("🛠️ Diagnostyka połączenia bota")
+if st.sidebar.button("🔌 Wyślij alert testowy"):
+    sukces = wyslij_telegram_alert("🤖 TEST połączenia Terminala AI: Powiadomienia działają prawidłowo!")
+    if sukces:
+        st.sidebar.success("Wiadomość testowa dotarła na Twój telefon!")
+    else:
+        st.sidebar.warning("Wysyłka nie powiodła się. Sprawdź błąd powyżej.")
+
+# --- CZĘŚĆ 1: SZYBKIE OKNO SPRAWDZANIA TICKERA ---
 st.subheader("🔍 Szybki podgląd i analiza wybranego waloru")
 col_input1, col_input2 = st.columns(2)
 with col_input1:
     szukany_ticker = st.text_input("Wpisz DOWOLNY ticker rynkowy (np. STX.WA, AAPL, PLRX):", "").upper().strip()
 with col_input2:
     st.write("##")
-    uruchom_szukanie = st.button("🔎 Analizuj Ticker")
+    val_szukanie = st.button("🔎 Analizuj Ticker")
 
-if uruchom_szukanie and szukany_ticker:
+if val_szukanie and szukany_ticker:
     with st.spinner(f"Skanowanie pojedyncze waloru {szukany_ticker}..."):
         obj = yf.Ticker(szukany_ticker)
         h = obj.history(period="1y")
@@ -150,8 +168,14 @@ if uruchom_szukanie and szukany_ticker:
                     st.info(f"**Uzasadnienie AI:** {uzasadnienie}")
                     st.write(f"🎯 Docelowy Profit (TP): **{t_res['tp']:.2f}** | 🛑 Poziom Obrony (SL na dole): **{t_res['sl']:.2f}**")
                     
-                    wyslij_telegram_alert(f"🔎 <b>SZYBKI SKAN AKCJI: {szukany_ticker}</b>\nCena: {t_res['cena']:.2f}\nStatus: {t_res['ocena']}\n🛑 SL (na dole): {t_res['sl']:.2f}\n📝 {uzasadnienie}")
-                    st.success("Wysłano raport na Telegram!")
+                    wiadomosc_szybka = (
+                        f"🔎 SZYBKI SKAN AKCJI: {szukany_ticker}\n"
+                        f"▪️ Cena: {t_res['cena']:.2f}\n"
+                        f"▪️ Status: {t_res['ocena']}\n"
+                        f"🛑 SL (na dole): {t_res['sl']:.2f}\n"
+                        f"📝 Raport: {uzasadnienie}"
+                    )
+                    wyslij_telegram_alert(wiadomosc_szybka)
             except Exception as e:
                 st.error(f"Błąd przetwarzania: {e}")
 
@@ -175,10 +199,8 @@ with col_btn2:
 
 if uruchom_globalny:
     lista_tickerów = []
-    if wybierz_pl:
-        lista_tickerów.extend(TICKERS_PL)
-    if wybierz_usa:
-        lista_tickerów.extend(TICKERS_USA)
+    if wybierz_pl: lista_tickerów.extend(TICKERS_PL)
+    if wybierz_usa: lista_tickerów.extend(TICKERS_USA)
         
     if not lista_tickerów:
         st.warning("Zaznacz przynajmniej jeden rynek w panelu bocznym!")
@@ -191,17 +213,15 @@ if uruchom_globalny:
             df_high = pd.DataFrame()
             df_low = pd.DataFrame()
             
-                       # POPRAWKA: Bezpieczne, odporne na MultiIndex sprawdzanie obecności kolumn w tabeli yfinance
             for t in lista_tickerów:
                 try:
                     if isinstance(dane_bulk.columns, pd.MultiIndex):
-                        if t in dane_bulk.columns.levels[0]:
+                        if t in dane_bulk.columns.levels:
                             df_close[t] = dane_bulk[t]['Close']
                             df_volume[t] = dane_bulk[t]['Volume']
                             df_high[t] = dane_bulk[t]['High']
                             df_low[t] = dane_bulk[t]['Low']
                     else:
-                        # Wariant rezerwowy dla pojedynczego tickera lub płaskiej struktury tabeli
                         if t in dane_bulk.columns:
                             df_close[t] = dane_bulk['Close']
                             df_volume[t] = dane_bulk['Volume']
@@ -221,36 +241,33 @@ if uruchom_globalny:
                 rynek = "PL" if ".WA" in ticker else "USA"
                 
                 tech = przetwórz_dane_historyczne(ticker, df_close, df_volume, df_high, df_low)
-                if not tech:
+                if not tech: 
+                    continue
+                if rynek == "USA" and tech['cena'] > cena_max_us: 
                     continue
                     
-                if rynek == "USA" and tech['cena'] > cena_max_us:
-                    continue
-                
-                # Zapis do tabeli Live
                 pelna_tabela_wynikow.append({
-                    "Ticker": ticker,
-                    "Rynek": rynek,
+                    "Ticker": ticker, 
+                    "Rynek": rynek, 
                     "Aktualny Kurs": f"{tech['cena']:.2f} {waluta}",
-                    "Ocena / Trend": tech['ocena'],
+                    "Ocena / Trend": tech['ocena'], 
                     "Skok Wolumenu": f"{tech['skok_wolumenu']}x",
-                    "Stop Loss (SL na dole)": f"{tech['sl']:.2f}",
+                    "Stop Loss (SL na dole)": f"{tech['sl']:.2f}", 
                     "Take Profit (TP)": f"{tech['tp']:.2f}"
                 })
                 
-                # Skan informacyjny AI wyzwalany jest wyłącznie przy trendzie wzrostowym lub skoku wolumenu
                 if tech['sygnal'] == "LONG" or tech['skok_wolumenu'] >= 1.5:
                     licznik_alertow += 1
                     komentarz_rynkowy = głęboka_analiza_news_ai(ticker, tech, rynek)
                     
                     flag_rynek = "🇵🇱" if rynek == "PL" else "🇺🇸"
                     raport_tg = (
-                        f"🚨 <b>ALERT AKCJI {flag_rynek}: {ticker}</b>\n"
+                        f"🚨 ALERT AKCJI {flag_rynek}: {ticker}\n"
                         f"▪️ Cena: {tech['cena']:.2f} {waluta}\n"
-                        f"▪️ Status: <b>{tech['ocena']}</b>\n"
+                        f"▪️ Status: {tech['ocena']}\n"
                         f"▪️ Wolumen obrotu: {tech['skok_wolumenu']}x\n"
                         f"🎯 Cel (TP): {tech['tp']:.2f} | 🛑 Obrona (SL na dole): {tech['sl']:.2f}\n\n"
-                        f"📝 <b>Analiza wzrostowa:</b> {komentarz_rynkowy}"
+                        f"📝 Analiza wzrostowa: {komentarz_rynkowy}"
                     )
                     wyslij_telegram_alert(raport_tg)
                     time.sleep(0.3)
