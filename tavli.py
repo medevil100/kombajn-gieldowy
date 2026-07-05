@@ -171,22 +171,6 @@ if uruchom_szukanie and szukany_ticker:
 
 st.write("---")
 
-# --- MODUŁ B: GLOBALNA PĘTLA SKANOWANIA LISTY SPÓŁEK ---
-st.subheader("🔄 Globalny Automatyczny Skaner Portfela Spółek")
-
-st.sidebar.header("⚙️ Zarządzanie Skanerem")
-wybierz_pl = st.sidebar.checkbox("Skanuj listę GPW (43 spółki)", value=True)
-wybierz_usa = st.sidebar.checkbox("Skanuj listę USA (19 spółek)", value=True)
-cena_max_us = st.sidebar.slider("Maksymalny próg cenowy dla USA ($):", 0.5, 20.0, 5.0)
-
-col_btn1, col_btn2 = st.columns([1, 5])
-with col_btn1:
-    uruchom_globalny = st.button("🚀 Uruchom Skanowanie")
-with col_btn2:
-    if st.button("🔄 Wyczyszczenie pamięci i powtórny skan"):
-        st.cache_data.clear()
-        st.rerun()
-
 if uruchom_globalny:
     lista_do_przejrzenia = []
     if wybierz_pl:
@@ -214,7 +198,7 @@ if uruchom_globalny:
                     
                 tech = oblicz_wskaźniki(historia)
                 if not tech:
-                    pasek.progress((index + 1) / len(wybrane_tickery if 'wybrane_tickery' in locals() else lista_do_przejrzenia))
+                    pasek.progress((index + 1) / len(lista_do_przejrzenia))
                     continue
                     
                 # Filtracja progu cenowego dla groszówek z USA
@@ -222,7 +206,7 @@ if uruchom_globalny:
                     pasek.progress((index + 1) / len(lista_do_przejrzenia))
                     continue
                 
-                              # Zbieramy dane do pełnego podglądu przeskanowanych spółek
+                # Zbieramy dane do pełnego podglądw przeskanowanych spółek
                 dane_wiersza = {
                     "Ticker": ticker,
                     "Rynek": rynek,
@@ -250,3 +234,20 @@ if uruchom_globalny:
                     )
                     wyslij_telegram_alert(raport_tg)
                     time.sleep(0.5) # Zapobiega przekroczeniu limitów wysyłki w API Telegrama
+                    
+            except Exception:
+                pass  # Prawidłowy blok przechwytywania wyjątków, który naprawia Twój błąd
+                
+            pasek.progress((index + 1) / len(lista_do_przejrzenia))
+            time.sleep(0.1)
+            
+        st.success("✅ Zbiorcza analiza giełdowa została pomyślnie sfinalizowana!")
+        st.write(f"Wysłano łącznie powiadomień na Telegram: **{licznik_alertow}** dla najciekawszych okazji.")
+        
+        # WYŚWIETLENIE PEELNEJ TABELI PODGLĄDU
+        if pelna_tabela_wynikow:
+            st.subheader("📊 Kompletny podgląd wszystkich przeskanowanych spółek")
+            df_wynikowy = pd.DataFrame(pelna_tabela_wynikow)
+            st.dataframe(df_wynikowy, use_container_width=True)
+        else:
+            st.info("Brak pasujących kryteriów cenowych dla spółek na wybranych rynkach.")
