@@ -267,7 +267,7 @@ if st.session_state.last_scanned_tickers:
     for idx, batch in enumerate(df_to_json_batches(df_all, 10), start=1):
         st.write(f"### Paczka {idx}")
         st.json(batch)
-       # =====================================================================
+# =====================================================================
 # STAŁE TICKERY + OKNO PODGLĄDU
 # =====================================================================
 
