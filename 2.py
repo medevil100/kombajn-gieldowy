@@ -1,14 +1,15 @@
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import requests
+import yfinance as yf
 import pandas as pd
+import numpy as np
 import streamlit as st
 from openai import OpenAI
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-
-from utils import analizuj_spolke, oblicz_rsi, oblicz_macd
 
 # =====================================================================
 # KONFIGURACJA STRONY – DARK TERMINAL
@@ -60,6 +61,189 @@ except Exception as e:
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =====================================================================
+# TELEGRAM API
+# =====================================================================
+def send_telegram_message(token, chat_id, message):
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": str(chat_id),
+        "text": message,
+        "parse_mode": "HTML"
+    }
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception:
+        pass
+
+# =====================================================================
+# RSI
+# =====================================================================
+def oblicz_rsi(df, period=14):
+    try:
+        delta = df["Close"].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    except Exception:
+        return None
+
+# =====================================================================
+# MACD
+# =====================================================================
+def oblicz_macd(df):
+    df["EMA12"] = df["Close"].ewm(span=12).mean()
+    df["EMA26"] = df["Close"].ewm(span=26).mean()
+    df["MACD"] = df["EMA12"] - df["EMA26"]
+    df["Signal"] = df["MACD"].ewm(span=9).mean()
+    return df
+
+# =====================================================================
+# AI KOMENTARZ
+# =====================================================================
+def generuj_komentarz_ai(client, ticker, price, volume, change, rsi, waluta):
+    try:
+        prompt = (
+            f"Jesteś profesjonalnym traderem akcji (Long). Spółka {ticker} wygenerowała sygnał wzrostowy: "
+            f"cena {float(price):.2f} {waluta}, wzrost o +{float(change):.2f}%, wolumen {float(volume):.1f}x ponad średnią, RSI {float(rsi):.1f}. "
+            f"Napisz jedno bardzo krótkie zdanie techniczne (max 10 słów) podsumowania okazji."
+        )
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=35,
+            temperature=0.7,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        return "Wykryto nagły skok momentum rynkowego."
+
+# =====================================================================
+# ANALIZA SPÓŁKI
+# =====================================================================
+def analizuj_spolke(
+    ticker, interval, max_price_pln, max_price_usd,
+    price_threshold, volume_threshold,
+    telegram_token, telegram_chat_id,
+    client
+):
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    df = yf.download(ticker, period="5d", interval=interval, progress=False)
+    if df.empty or len(df) < 15:
+        return None
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(1)
+
+    df["RSI"] = oblicz_rsi(df)
+    df = oblicz_macd(df)
+
+    ostatnia = df.iloc[-1]
+    poprzednia = df.iloc[-2]
+
+    cena = float(ostatnia["Close"])
+    cena_prev = float(poprzednia["Close"])
+    rsi = float(ostatnia["RSI"]) if not pd.isna(ostatnia["RSI"]) else np.nan
+
+    if cena <= 0 or pd.isna(rsi):
+        return None
+
+    is_gpw = ticker.endswith(".WA")
+    waluta = "PLN" if is_gpw else "USD"
+
+    if is_gpw and cena > max_price_pln:
+        return None
+    if not is_gpw and cena > max_price_usd:
+        return None
+
+    delisted_suffixes = ("Q", "Y", "F")
+    otc_prefixes = ("OTC:", "PINK:", "PK:")
+    ticker_upper = ticker.upper()
+
+    if ticker_upper.endswith(delisted_suffixes):
+        return None
+    if ticker_upper.startswith(otc_prefixes):
+        return None
+
+    is_penny = False
+    if is_gpw and 0.10 <= cena <= 15.0:
+        is_penny = True
+    if not is_gpw and 0.10 <= cena <= 5.0:
+        is_penny = True
+
+    zmiana = ((cena - cena_prev) / cena_prev) * 100
+
+    wolumen = float(ostatnia["Volume"])
+    sredni = float(df["Volume"].mean())
+    if sredni == 0:
+        return None
+    skok = wolumen / sredni
+
+    if is_penny:
+        prog_wol = 30.0
+        prog_rsi = 75.0
+    else:
+        prog_wol = 5.0
+        prog_rsi = 60.0
+
+    sygnal_push = (
+        skok >= prog_wol and
+        zmiana >= price_threshold and
+        rsi <= prog_rsi and
+        ostatnia["Close"] > ostatnia["Open"]
+    )
+
+    sl = cena * 0.95
+    tp = cena * 1.15
+
+    if sygnal_push:
+        ocena = "🟢 Kupuj (Momentum)"
+        score = 3
+    elif zmiana > 0:
+        ocena = "🟡 Trzymaj"
+        score = 2
+    else:
+        ocena = "🔴 Unikaj"
+        score = 1
+
+    if sygnal_push:
+        komentarz = generuj_komentarz_ai(client, ticker, cena, skok, zmiana, rsi, waluta)
+        flag = "🇵🇱" if is_gpw else "🇺🇸"
+
+        alert = (
+            f"🚨🚨 <b>ALERT PUSH – ŚMIECIOWY MOMENTUM {flag}: {ticker}</b>\n"
+            f"💰 Cena: {cena:.2f} {waluta} (+{zmiana:.2f}%)\n"
+            f"📊 Wolumen: <b>{skok:.1f}x</b>\n"
+            f"📈 Momentum świecy: TAK\n"
+            f"🛡️ RSI: <b>{rsi:.1f}</b>\n"
+            f"🛑 SL: {sl:.2f} {waluta}\n"
+            f"🎯 TP: {tp:.2f} {waluta}\n\n"
+            f"📝 <b>AI:</b> {komentarz}"
+        )
+
+        send_telegram_message(telegram_token, telegram_chat_id, alert)
+
+    return {
+        "Ticker": ticker,
+        "Cena": f"{cena:.2f} {waluta}",
+        "Zmiana %": round(zmiana, 2),
+        "Wolumen (Multiplier)": f"{skok:.2f}x",
+        "RSI": f"{rsi:.1f}",
+        "Stop Loss (SL na dole)": f"{sl:.2f} {waluta}",
+        "Take Profit (TP)": f"{tp:.2f} {waluta}",
+        "Status / Ocena": ocena,
+        "score": score,
+        "MACD": float(ostatnia["MACD"]),
+        "Signal": float(ostatnia["Signal"]),
+        "Open": float(ostatnia["Open"]),
+        "High": float(ostatnia["High"]),
+        "Low": float(ostatnia["Low"]),
+        "Close": float(ostatnia["Close"]),
+    }
+
+# =====================================================================
 # LISTA OBSERWACYJNA – TWOJE ŚMIECIOWKI
 # =====================================================================
 st.subheader("📝 Twoja Lista Groszówek (GPW + USA)")
@@ -94,7 +278,6 @@ auto_scan = st.sidebar.selectbox(
 )
 
 if st.sidebar.button("🔌 Wyślij testowy alert Telegram"):
-    from utils import send_telegram_message
     try:
         send_telegram_message(
             TELEGRAM_TOKEN,
@@ -197,7 +380,11 @@ if st.session_state.last_scanned_tickers:
         return ""
 
     def kolor_sl_tp(val):
-        return "color: red; font-weight: bold;" if "SL" in val else "color: lime; font-weight: bold;" if "TP" in val else ""
+        if "SL" in val:
+            return "color: red; font-weight: bold;"
+        if "TP" in val:
+            return "color: lime; font-weight: bold;"
+        return ""
 
     df_wyniki_styled = (
         df_wyniki.style
@@ -237,7 +424,6 @@ quick_ticker = st.text_input("Wpisz ticker do szybkiej analizy:", "")
 
 df_q = None
 if quick_ticker:
-    df_q = pd.DataFrame()
     try:
         df_q = pd.DataFrame(
             yf.download(quick_ticker, period="5d", interval="15m", progress=False)
@@ -265,9 +451,6 @@ if quick_ticker and df_q is not None and not df_q.empty:
     else:
         st.error("🔴 Trend spadkowy (MACD < Signal)")
 
-    # =================================================================
-    # WYKRES ŚWIECOWY + RSI + MACD
-    # =================================================================
     st.subheader("📈 Wykres świecowy + RSI + MACD")
 
     fig = make_subplots(
