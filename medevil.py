@@ -223,18 +223,22 @@ def job_skanera(status_placeholder=None, progress_bar=None):
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(analizuj_jedna_spolke, ticker, now): ticker for ticker in MARKET_DATABASE}
         for future in as_completed(futures):
-            res = future.result()
-            if res:
-                lista_podgladu.append(res)
-                if res.get("Sygnał") and "Alert_Data" in res:
-                    st.session_state.alerts_history.append(res["Alert_Data"])
+            try:
+                res = future.result()
+                if res:
+                    lista_podgladu.append(res)
+                    if res.get("Sygnał") and "Alert_Data" in res:
+                        st.session_state.alerts_history.append(res["Alert_Data"])
+            except Exception:
+                pass
             przetworzone += 1
-            if progress_bar: progress_bar.progress(przetworzone / total_spolki)
+            if progress_bar: 
+                progress_bar.progress(przetworzone / total_spolki)
                 
     st.session_state.last_scanned_tickers = lista_podgladu
 
 # =====================================================================
-# STEROWANIE RADAREM
+# STEROWANIE RADAREM I MODUŁ DIAGNOSTYCZNY
 # =====================================================================
 st.sidebar.header("⏱️ Sterowanie Radarem")
 auto_scan = st.sidebar.selectbox("Automatyczne odświeżanie:", ["Tylko ręcznie", "Co 1 minutę", "Co 5 minut", "Co 15 minut"])
@@ -243,7 +247,11 @@ auto_scan = st.sidebar.selectbox("Automatyczne odświeżanie:", ["Tylko ręcznie
 if st.sidebar.button("🔌 Wyślij testowy alert"):
     czysty_token = str(TELEGRAM_TOKEN).strip()
     url = f"https://telegram.org{czysty_token}/sendMessage"
-    payload = {"chat_id": str(TELEGRAM_CHAT_ID).strip(), "text": "🤖 <b>TEST SYSTEMU:</b> Powiadomienia z lokalnego PowerShella działają poprawnie!", "parse_mode": "HTML"}
+    payload = {
+        "chat_id": str(TELEGRAM_CHAT_ID).strip(), 
+        "text": "🤖 <b>TEST SYSTEMU:</b> Powiadomienia z lokalnego PowerShella działają poprawnie!", 
+        "parse_mode": "HTML"
+    }
     try:
         res = requests.post(url, json=payload, timeout=5)
         if res.status_code == 200:
