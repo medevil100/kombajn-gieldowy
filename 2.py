@@ -404,27 +404,206 @@ def highlight(row):
 
 
 # =====================================================================
-# TOP 5 OKAZJI DNIA
+# LISTY GPW + USA — TYLKO TWOJE
 # =====================================================================
-st.subheader("🏆 TOP 5 Okazji Dnia (Najmocniejsze Sygnały)")
+
+GPW_LIST = [
+    "APS.WA", "STX.WA", "AIT.WA", "CLD.WA", "NVS.WA", "PTN.WA", "IFR.WA", "KCH.WA", "ENG.WA",
+    "MDF.WA", "BIM.WA", "BML.WA", "VVD.WA", "MIR.WA", "QNT.WA", "MGT.WA", "SYN.WA", "OAT.WA", "IGN.WA",
+    "GT.WA", "BIO.WA", "PHR.WA", "PURE.WA", "MAB.WA", "VIV.WA", "ULT.WA", "HUG.WA", "TEN.WA", "RDS.WA",
+    "MOV.WA", "FOR.WA", "PCF.WA", "CIG.WA", "BBT.WA", "RFK.WA", "PXM.WA", "MSW.WA", "ZRE.WA", "TRK.WA"
+]
+
+USA_LIST = [
+    "PLRX", "HUMA", "FATE", "TCRX", "IOVA", "MREO", "GOSS", "SNTI", "VINC", "ACRS",
+    "SLS", "TTWOQ", "ATNXQ", "MNTS", "BBIG", "NBY", "AEMD", "XELA", "COMS", "HC"
+]
+
+MARKET_DATABASE = GPW_LIST + USA_LIST
+
+# =====================================================================
+# ANALIZA POJEDYNCZEJ SPÓŁKI (SL/TP/RSI/MACD/Ocena/Alert)
+# =====================================================================
+
+def analizuj_spolke(ticker, df):
+    close = df["Close"].iloc[-1]
+    rsi_series = oblicz_rsi(df)
+    rsi = rsi_series.iloc[-1] if len(rsi_series) > 0 else 50
+
+    macd_df = oblicz_macd(df)
+    macd = macd_df["MACD"].iloc[-1]
+    signal = macd_df["Signal"].iloc[-1]
+
+    sl = round(close * 0.90, 2)   # -10%
+    tp = round(close * 1.15, 2)   # +15%
+
+    if rsi < 30 and macd > signal:
+        ocena = "Kupuj"
+    elif 30 <= rsi <= 70:
+        ocena = "Trzymaj"
+    else:
+        ocena = "Sprzedaj"
+
+    alert_push = ocena == "Kupuj"
+
+    return {
+        "Ticker": ticker,
+        "Cena": round(close, 2),
+        "RSI": round(rsi, 1),
+        "MACD": round(macd, 4),
+        "Signal": round(signal, 4),
+        "SL": sl,
+        "TP": tp,
+        "Ocena": ocena,
+        "Alert": alert_push
+    }
+
+# =====================================================================
+# TELEGRAM ALERTY
+# =====================================================================
+
+TELEGRAM_BOT_TOKEN = "TWOJ_TOKEN_TUTAJ"
+TELEGRAM_CHAT_ID = "TWOJ_CHAT_ID_TUTAJ"
+
+import requests
+
+def wyslij_telegram_alerty(wyniki):
+    alerty = [w for w in wyniki if w.get("Alert")]
+
+    if not alerty:
+        return
+
+    tekst = "🟢 ALERTY GIEŁDOWE\n\n"
+    for a in alerty:
+        tekst += (
+            f"{a['Ticker']} — {a['Ocena']}\n"
+            f"Cena: {a['Cena']}\n"
+            f"SL: {a['SL']} | TP: {a['TP']}\n"
+            f"RSI: {a['RSI']} | MACD: {a['MACD']} | Signal: {a['Signal']}\n\n"
+        )
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": tekst
+    }
+
+    try:
+        requests.post(url, data=payload, timeout=5)
+    except:
+        pass
+
+# =====================================================================
+# JSON PACZKI PO 10
+# =====================================================================
+
+import json
+
+def df_to_json_batches(df, batch_size=10):
+    batches = []
+    for i in range(0, len(df), batch_size):
+        batch = df.iloc[i:i+batch_size].to_dict(orient="records")
+        batches.append(json.dumps(batch, ensure_ascii=False, indent=2))
+    return batches
+
+# =====================================================================
+# JOB SKANERA – PEŁNY CYKL ANALIZY + ALERTY
+# =====================================================================
+
+from datetime import datetime
+
+def job_skanera(status_ph, prog_bar):
+    st.session_state.last_scanned_tickers = []
+
+    total = len(MARKET_DATABASE)
+    for idx, ticker in enumerate(MARKET_DATABASE, start=1):
+        try:
+            df = yf.download(ticker, period="60d", interval="1d", progress=False)
+            if df.empty:
+                continue
+
+            wynik = analizuj_spolke(ticker, df)
+            st.session_state.last_scanned_tickers.append(wynik)
+
+        except Exception:
+            continue
+
+        prog_bar.progress(idx / total)
+
+    st.session_state.last_scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    wyslij_telegram_alerty(st.session_state.last_scanned_tickers)
+
+# =====================================================================
+# PRZYCISKI GŁÓWNE
+# =====================================================================
+
+col_btn1, col_btn2 = st.columns(2)
+with col_btn1:
+    uruchom_skan = st.button("🚀 Uruchom Skaner")
+with col_btn2:
+    if st.button("🗑️ Wyczyść Historię"):
+        st.session_state.alerts_history = []
+        st.session_state.last_scanned_tickers = []
+        st.rerun()
+
+status_ph = st.empty()
+prog_bar = st.empty()
+
+if uruchom_skan:
+    status_ph.write("⌛ Trwa pobieranie i analiza danych...")
+    prog_bar.progress(0)
+    job_skanera(status_ph, prog_bar)
+    status_ph.success(
+        f"⚙️ Status: Skan zakończony | Ostatni skan: {st.session_state.last_scan_time}"
+    )
+
+# =====================================================================
+# WYNIKI – TABELA POSORTOWANA
+# =====================================================================
 
 if st.session_state.last_scanned_tickers:
-    df_top = pd.DataFrame(st.session_state.last_scanned_tickers)
+    st.subheader("📊 Wyniki skanowania (wszystkie spółki)")
 
-    if "score" in df_top.columns:
-        df_top = df_top.sort_values(by="score", ascending=False)
+    df_wyniki = pd.DataFrame(st.session_state.last_scanned_tickers)
 
-    df_top5 = df_top.head(5)
+    if "Ocena" in df_wyniki.columns:
+        df_wyniki = df_wyniki.sort_values(by="Ocena", ascending=True)
 
-    # --- BEZ STYLOWANIA (Streamlit Cloud nie wspiera Styler) ---
-    st.dataframe(df_top5, use_container_width=True)
+    st.dataframe(df_wyniki, use_container_width=True)
+
+# =====================================================================
+# ALERTY PUSH W APLIKACJI
+# =====================================================================
+
+if st.session_state.last_scanned_tickers:
+    for row in st.session_state.last_scanned_tickers:
+        if row.get("Alert"):
+            st.toast(
+                f"🟢 ALERT: {row['Ticker']} | {row['Ocena']} | SL: {row['SL']} | TP: {row['TP']}"
+            )
+
+# =====================================================================
+# JSON PACZKI PO 10 (PEŁNA ANALIZA)
+# =====================================================================
+
+if st.session_state.last_scanned_tickers:
+    st.subheader("📦 JSON — paczki po 10 spółek (pełna analiza)")
+
+    df_all = pd.DataFrame(st.session_state.last_scanned_tickers)
+    json_batches = df_to_json_batches(df_all, 10)
+
+    for idx, batch in enumerate(json_batches, start=1):
+        st.write(f"### Paczka {idx}")
+        st.json(batch)
 
 # =====================================================================
 # SZYBKI PODGLĄD TICKERA
 # =====================================================================
-st.subheader("🔎 Szybki podgląd pojedynczego tickera (RSI + MACD + Świece)")
 
-quick_ticker = st.text_input("Wpisz ticker do szybkiej analizy:", "")
+st.subheader("🔎 Szybki podgląd tickera (RSI + MACD + Świece)")
+
+quick_ticker = st.text_input("Ticker:", "")
 
 df_q = None
 if quick_ticker:
@@ -446,23 +625,15 @@ if quick_ticker and df_q is not None and not df_q.empty:
     st.write(f"**MACD:** {ostatnia['MACD']:.4f}")
     st.write(f"**Signal:** {ostatnia['Signal']:.4f}")
     st.write(f"**Wolumen:** {ostatnia['Volume']}")
-    st.write(
-        f"**Świeca:** O:{ostatnia['Open']:.2f} H:{ostatnia['High']:.2f} L:{ostatnia['Low']:.2f} C:{ostatnia['Close']:.2f}"
-    )
 
     if ostatnia["MACD"] > ostatnia["Signal"]:
-        st.success("🟢 Trend rosnący (MACD > Signal)")
+        st.success("🟢 Trend rosnący")
     else:
-        st.error("🔴 Trend spadkowy (MACD < Signal)")
-
-    st.subheader("📈 Wykres świecowy + RSI + MACD")
+        st.error("🔴 Trend spadkowy")
 
     fig = make_subplots(
-        rows=3,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.02,
-        row_heights=[0.55, 0.20, 0.25],
+        rows=3, cols=1, shared_xaxes=True,
+        vertical_spacing=0.02, row_heights=[0.55, 0.20, 0.25]
     )
 
     fig.add_trace(
@@ -472,66 +643,34 @@ if quick_ticker and df_q is not None and not df_q.empty:
             high=df_q["High"],
             low=df_q["Low"],
             close=df_q["Close"],
-            name="Świece",
             increasing_line_color="lime",
             decreasing_line_color="red",
         ),
-        row=1,
-        col=1,
+        row=1, col=1
     )
 
     fig.add_trace(
-        go.Scatter(
-            x=df_q.index,
-            y=df_q["RSI"],
-            mode="lines",
-            name="RSI",
-            line=dict(color="orange", width=2),
-        ),
-        row=2,
-        col=1,
-    )
-
-    fig.add_hline(y=30, line=dict(color="gray", dash="dot"), row=2, col=1)
-    fig.add_hline(y=70, line=dict(color="gray", dash="dot"), row=2, col=1)
-
-    fig.add_trace(
-        go.Scatter(
-            x=df_q.index,
-            y=df_q["MACD"],
-            mode="lines",
-            name="MACD",
-            line=dict(color="cyan", width=2),
-        ),
-        row=3,
-        col=1,
+        go.Scatter(x=df_q.index, y=df_q["RSI"], mode="lines", line=dict(color="orange")),
+        row=2, col=1
     )
 
     fig.add_trace(
-        go.Scatter(
-            x=df_q.index,
-            y=df_q["Signal"],
-            mode="lines",
-            name="Signal",
-            line=dict(color="white", width=1),
-        ),
-        row=3,
-        col=1,
+        go.Scatter(x=df_q.index, y=df_q["MACD"], mode="lines", line=dict(color="cyan")),
+        row=3, col=1
     )
 
-    fig.update_layout(
-        height=900,
-        width=1200,
-        showlegend=True,
-        xaxis_rangeslider_visible=False,
-        template="plotly_dark",
+    fig.add_trace(
+        go.Scatter(x=df_q.index, y=df_q["Signal"], mode="lines", line=dict(color="white")),
+        row=3, col=1
     )
 
+    fig.update_layout(template="plotly_dark", height=900, width=1200)
     st.plotly_chart(fig, use_container_width=True)
 
 # =====================================================================
-# AUTO-SCAN – NATIVE RERUN
+# AUTO-SCAN
 # =====================================================================
+
 if auto_scan == "Co 1 minutę":
     time.sleep(60)
     st.rerun()
