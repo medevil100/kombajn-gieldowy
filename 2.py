@@ -335,7 +335,6 @@ def job_skanera(status_placeholder=None, progress_bar=None):
                 progress_bar.progress(przetworzone / total_spolki)
 
     st.session_state.last_scanned_tickers = lista_podgladu
-
 # =====================================================================
 # PRZYCISKI GŁÓWNE
 # =====================================================================
@@ -386,7 +385,7 @@ if st.session_state.last_scanned_tickers:
             return "color: lime; font-weight: bold;"
         return ""
 
-  def highlight(row):
+def highlight(row):
     style = {}
 
     # Kolor statusu
@@ -402,6 +401,7 @@ if st.session_state.last_scanned_tickers:
     style["Take Profit (TP)"] = "color: lime; font-weight: bold;"
 
     return style
+
 
 # =====================================================================
 # TOP 5 OKAZJI DNIA
