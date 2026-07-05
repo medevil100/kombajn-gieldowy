@@ -280,7 +280,6 @@ if quick_ticker:
     # Pobieramy TYLKO z YF — nigdy z JSON, nigdy ze skanera
     df_q = yf.download(quick_ticker, period="10d", interval="30m", progress=False)
 
-    # Jeśli YF nie zwróci danych — koniec
     if df_q is None or df_q.empty:
         st.error("Brak danych z Yahoo Finance.")
     else:
@@ -293,16 +292,18 @@ if quick_ticker:
         # Ostatni wiersz — PRAWDZIWE DANE Z YF
         ostatnia = df_q.iloc[-1]
 
-        # Każda wartość pobierana BEZPOŚREDNIO z df_q
+        # DEBUG — zobaczysz dokładnie co tam jest
+        st.write("DEBUG ostatnia:", ostatnia)
+
+        # Pobieramy POJEDYNCZE wartości, nie Series
         try:
-            st.write("DEBUG ostatnia:", ostatnia)
-             close_val  = float(ostatnia["Close"])
-            rsi_val    = float(ostatnia["RSI"])
-            macd_val   = float(ostatnia["MACD"])
-            signal_val = float(ostatnia["Signal"])
-            bb_up      = float(ostatnia["BB_UP"])
-            bb_mid     = float(ostatnia["BB_MID"])
-            bb_down    = float(ostatnia["BB_DOWN"])
+            close_val  = float(ostatnia["Close"].item())
+            rsi_val    = float(ostatnia["RSI"].item())
+            macd_val   = float(ostatnia["MACD"].item())
+            signal_val = float(ostatnia["Signal"].item())
+            bb_up      = float(ostatnia["BB_UP"].item())
+            bb_mid     = float(ostatnia["BB_MID"].item())
+            bb_down    = float(ostatnia["BB_DOWN"].item())
         except Exception as e:
             st.error(f"Nie można przetworzyć danych tickera: {e}")
             st.stop()
@@ -367,5 +368,3 @@ elif auto_scan == "Co 5 minut":
 elif auto_scan == "Co 15 minut":
     time.sleep(900)
     st.rerun()
-
-           
