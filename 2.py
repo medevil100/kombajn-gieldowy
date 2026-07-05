@@ -338,205 +338,6 @@ def job_skanera(status_placeholder=None, progress_bar=None):
 # =====================================================================
 # PRZYCISKI GŁÓWNE
 # =====================================================================
-col_btn1, col_btn2 = st.columns(2)
-with col_btn1:
-    uruchom_skan = st.button("🚀 Uruchom Skaner")
-with col_btn2:
-    if st.button("🗑️ Wyczyść Historię"):
-        st.session_state.alerts_history = []
-        st.session_state.last_scanned_tickers = []
-        st.rerun()
-
-status_ph = st.empty()
-prog_bar = st.empty()
-
-if uruchom_skan:
-    status_ph.write("⌛ Trwa pobieranie i analiza danych groszówek...")
-    prog_bar.progress(0)
-    job_skanera(status_ph, prog_bar)
-    status_ph.success(
-        f"⚙️ Status: Dark Terminal aktywny | Ostatni skan: {st.session_state.last_scan_time}"
-    )
-
-# =====================================================================
-# WYNIKI – TABELA POSORTOWANA
-# =====================================================================
-if st.session_state.last_scanned_tickers:
-    st.subheader("📊 Podgląd aktualnego cyklu skanowania (Posortowany)")
-
-    df_wyniki = pd.DataFrame(st.session_state.last_scanned_tickers)
-
-    if "score" in df_wyniki.columns:
-        df_wyniki = df_wyniki.sort_values(by="score", ascending=False)
-
-    def kolor_status(val):
-        if "Kupuj" in val:
-            return "color: lime; font-weight: bold;"
-        if "Trzymaj" in val:
-            return "color: gold; font-weight: bold;"
-        if "Unikaj" in val or "Sprzedaj" in val:
-            return "color: red; font-weight: bold;"
-        return ""
-
-    def kolor_sl_tp(val):
-        if "SL" in val:
-            return "color: red; font-weight: bold;"
-        if "TP" in val:
-            return "color: lime; font-weight: bold;"
-        return ""
-
-def highlight(row):
-    style = {}
-
-    # Kolor statusu
-    if "Kupuj" in row["Status / Ocena"]:
-        style["Status / Ocena"] = "color: lime; font-weight: bold;"
-    elif "Trzymaj" in row["Status / Ocena"]:
-        style["Status / Ocena"] = "color: gold; font-weight: bold;"
-    else:
-        style["Status / Ocena"] = "color: red; font-weight: bold;"
-
-    # Kolor SL / TP
-    style["Stop Loss (SL na dole)"] = "color: red; font-weight: bold;"
-    style["Take Profit (TP)"] = "color: lime; font-weight: bold;"
-
-    return style
-
-
-# =====================================================================
-# LISTY GPW + USA — TYLKO TWOJE
-# =====================================================================
-
-GPW_LIST = [
-    "APS.WA", "STX.WA", "AIT.WA", "CLD.WA", "NVS.WA", "PTN.WA", "IFR.WA", "KCH.WA", "ENG.WA",
-    "MDF.WA", "BIM.WA", "BML.WA", "VVD.WA", "MIR.WA", "QNT.WA", "MGT.WA", "SYN.WA", "OAT.WA", "IGN.WA",
-    "GT.WA", "BIO.WA", "PHR.WA", "PURE.WA", "MAB.WA", "VIV.WA", "ULT.WA", "HUG.WA", "TEN.WA", "RDS.WA",
-    "MOV.WA", "FOR.WA", "PCF.WA", "CIG.WA", "BBT.WA", "RFK.WA", "PXM.WA", "MSW.WA", "ZRE.WA", "TRK.WA"
-]
-
-USA_LIST = [
-    "PLRX", "HUMA", "FATE", "TCRX", "IOVA", "MREO", "GOSS", "SNTI", "VINC", "ACRS",
-    "SLS", "TTWOQ", "ATNXQ", "MNTS", "BBIG", "NBY", "AEMD", "XELA", "COMS", "HC"
-]
-
-MARKET_DATABASE = GPW_LIST + USA_LIST
-
-# =====================================================================
-# ANALIZA POJEDYNCZEJ SPÓŁKI (SL/TP/RSI/MACD/Ocena/Alert)
-# =====================================================================
-
-def analizuj_spolke(ticker, df):
-    close = df["Close"].iloc[-1]
-    rsi_series = oblicz_rsi(df)
-    rsi = rsi_series.iloc[-1] if len(rsi_series) > 0 else 50
-
-    macd_df = oblicz_macd(df)
-    macd = macd_df["MACD"].iloc[-1]
-    signal = macd_df["Signal"].iloc[-1]
-
-    sl = round(close * 0.90, 2)   # -10%
-    tp = round(close * 1.15, 2)   # +15%
-
-    if rsi < 30 and macd > signal:
-        ocena = "Kupuj"
-    elif 30 <= rsi <= 70:
-        ocena = "Trzymaj"
-    else:
-        ocena = "Sprzedaj"
-
-    alert_push = ocena == "Kupuj"
-
-    return {
-        "Ticker": ticker,
-        "Cena": round(close, 2),
-        "RSI": round(rsi, 1),
-        "MACD": round(macd, 4),
-        "Signal": round(signal, 4),
-        "SL": sl,
-        "TP": tp,
-        "Ocena": ocena,
-        "Alert": alert_push
-    }
-
-# =====================================================================
-# TELEGRAM ALERTY
-# =====================================================================
-
-TELEGRAM_BOT_TOKEN = "TWOJ_TOKEN_TUTAJ"
-TELEGRAM_CHAT_ID = "TWOJ_CHAT_ID_TUTAJ"
-
-import requests
-
-def wyslij_telegram_alerty(wyniki):
-    alerty = [w for w in wyniki if w.get("Alert")]
-
-    if not alerty:
-        return
-
-    tekst = "🟢 ALERTY GIEŁDOWE\n\n"
-    for a in alerty:
-        tekst += (
-            f"{a['Ticker']} — {a['Ocena']}\n"
-            f"Cena: {a['Cena']}\n"
-            f"SL: {a['SL']} | TP: {a['TP']}\n"
-            f"RSI: {a['RSI']} | MACD: {a['MACD']} | Signal: {a['Signal']}\n\n"
-        )
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": tekst
-    }
-
-    try:
-        requests.post(url, data=payload, timeout=5)
-    except:
-        pass
-
-# =====================================================================
-# JSON PACZKI PO 10
-# =====================================================================
-
-import json
-
-def df_to_json_batches(df, batch_size=10):
-    batches = []
-    for i in range(0, len(df), batch_size):
-        batch = df.iloc[i:i+batch_size].to_dict(orient="records")
-        batches.append(json.dumps(batch, ensure_ascii=False, indent=2))
-    return batches
-
-# =====================================================================
-# JOB SKANERA – PEŁNY CYKL ANALIZY + ALERTY
-# =====================================================================
-
-from datetime import datetime
-
-def job_skanera(status_ph, prog_bar):
-    st.session_state.last_scanned_tickers = []
-
-    total = len(MARKET_DATABASE)
-    for idx, ticker in enumerate(MARKET_DATABASE, start=1):
-        try:
-            df = yf.download(ticker, period="60d", interval="1d", progress=False)
-            if df.empty:
-                continue
-
-            wynik = analizuj_spolke(ticker, df)
-            st.session_state.last_scanned_tickers.append(wynik)
-
-        except Exception:
-            continue
-
-        prog_bar.progress(idx / total)
-
-    st.session_state.last_scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    wyslij_telegram_alerty(st.session_state.last_scanned_tickers)
-
-# =====================================================================
-# PRZYCISKI GŁÓWNE
-# =====================================================================
 
 col_btn1, col_btn2 = st.columns(2)
 with col_btn1:
@@ -620,13 +421,20 @@ if quick_ticker and df_q is not None and not df_q.empty:
 
     ostatnia = df_q.iloc[-1]
 
-    st.write(f"**Cena:** {ostatnia['Close']:.2f}")
-    st.write(f"**RSI:** {ostatnia['RSI']:.1f}")
-    st.write(f"**MACD:** {ostatnia['MACD']:.4f}")
-    st.write(f"**Signal:** {ostatnia['Signal']:.4f}")
-    st.write(f"**Wolumen:** {ostatnia['Volume']}")
+    # BEZ TypeError – wszystko rzutowane na float
+    close_val = float(ostatnia["Close"])
+    rsi_val = float(ostatnia["RSI"])
+    macd_val = float(ostatnia["MACD"])
+    signal_val = float(ostatnia["Signal"])
+    vol_val = float(ostatnia["Volume"])
 
-    if ostatnia["MACD"] > ostatnia["Signal"]:
+    st.write(f"**Cena:** {close_val:.2f}")
+    st.write(f"**RSI:** {rsi_val:.1f}")
+    st.write(f"**MACD:** {macd_val:.4f}")
+    st.write(f"**Signal:** {signal_val:.4f}")
+    st.write(f"**Wolumen:** {vol_val:.0f}")
+
+    if macd_val > signal_val:
         st.success("🟢 Trend rosnący")
     else:
         st.error("🔴 Trend spadkowy")
