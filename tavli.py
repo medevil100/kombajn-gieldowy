@@ -9,17 +9,21 @@ import numpy as np
 import requests
 import time
 
-# --- 1. INICJALIZACJA I KONFIGURACJA KLUCZY ---
+# --- 1. OFICJALNE, BEZPIECZNE ŁADOWANIE KLUCZY (BRAK TOKENÓW W KODZIE) ---
 st.set_page_config(page_title="Terminal Akcji AI Pro", layout="wide", page_icon="📈")
-
-TG_TOKEN = "8777292073:AAFHNJjrX-FDY4M6qRKaCNp_bScWoik9Ejw"
-TG_CHAT_ID = "1690495877"
 
 try:
     TAVILY_KEY = st.secrets["TAVILY_API_KEY"]
     OPENAI_KEY = st.secrets["OPENAI_API_KEY"]
+    TG_TOKEN = st.secrets["TELEGRAM_BOT_TOKEN"]
+    TG_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
 except KeyError as e:
     st.error(f"🚨 Brak klucza {e} w panelu Secrets aplikacji Streamlit Cloud!")
+    st.markdown("""
+    **Jak to naprawić w chmurze?**
+    1. Przejdź do panelu Streamlit Cloud.
+    2. Wejdź w **Settings -> Secrets** i wklej tam swoje klucze TOML.
+    """)
     st.stop()
 
 openai_client = OpenAI(api_key=OPENAI_KEY)
@@ -39,27 +43,24 @@ TICKERS_USA = [
     "SLS", "TTWOQ", "ATNXQ", "MNTS", "BBIG", "NBY", "AEMD", "XELA", "COMS"
 ]
 
-# --- 3. MODUŁ TELEGRAMA Z WYŚWIETLANIEM DIAGNOSTYKI BŁĘDÓW ---
+# --- 3. MODUŁ TELEGRAMA ---
 def wyslij_telegram_alert(wiadomosc: str):
-    """Wysyła bezpieczny, czysty tekst na Telegram i zwraca status wraz z odpowiedzią serwera"""
     url = f"https://telegram.org{TG_TOKEN}/sendMessage"
     payload = {
         "chat_id": TG_CHAT_ID,
         "text": wiadomosc
-        # Usunięto parse_mode, aby znaki specjalne z AI nie crashowały wysyłki
     }
     try:
         response = requests.post(url, json=payload)
         if response.status_code != 200:
-            # Rejestrujemy błąd w schowku Streamlit, aby użytkownik wiedział co poszło nie tak
-            st.sidebar.error(f"Telegram Error: {response.status_code} - {response.text}")
+            st.sidebar.error(f"Telegram Error: {response.status_code}")
             return False
         return True
     except Exception as e:
-        st.sidebar.error(f"Błąd sieci Telegram: {e}")
+        st.sidebar.error(f"Błąd sieci Telegram")
         return False
 
-# --- 4. SILNIK WYLICZEŃ TECHNICZNYCH (ŚCIŚLE DLA RYNKU AKCJI) ---
+# --- 4. SILNIK WYLICZEŃ TECHNICZNYCH ---
 def przetwórz_dane_historyczne(ticker, df_close, df_volume, df_high, df_low):
     try:
         if ticker not in df_close.columns or len(df_close[ticker].dropna()) < 20:
@@ -115,7 +116,7 @@ def głęboka_analiza_news_ai(ticker: str, tech: dict, rynek: str):
         for result in tavily_response['results']:
             context += f"- {result['title']}: {result['content']}\n"
             
-        prompt = f"Jesteś analitykiem akcji. Wyjaśnij ruch dla {ticker}. Cena: {tech['cena']}, Stan: {tech['ocena']}, Obrót: {tech['skok_wolumenu']}x. Teksty: {context}. Napisz po polsku w 2 zdaniach powód i czy warto akumulować akcje pod kątem wzrostów. Zwróć JSON: {{\n\"komentarz\": \"ANALIZA\"\n}}"
+        prompt = f"Jesteś analitykiem akcji. Wyjaśnij ruch dla {ticker}. Cena: {tech['cena']}, Stan: {tech['ocena']}, Obrót: {tech['skok_wolumenu']}x. Teksty: {context}. Napisz po polsku w 2 zdaniach powód ruchu. Zwróć JSON: {{\n\"komentarz\": \"ANALIZA\"\n}}"
         completion = openai_client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"}, temperature=0.1)
         return json.loads(completion.choices.message.content).get("komentarz", "Brak danych.")
     except Exception:
@@ -124,31 +125,39 @@ def głęboka_analiza_news_ai(ticker: str, tech: dict, rynek: str):
 # --- 5. INTERFEJS UŻYTKOWNIKA STREAMLIT ---
 st.title("📈 Profesjonalny Terminal Giełdowy AI (Rynek Akcji)")
 
-# --- 3. MODUŁ TELEGRAMA (NAPRAWIONY ADRES URL) ---
-def wyslij_telegram_alert(wiadomosc: str):
-    """Wysyła bezpieczny, czysty tekst na Telegram przy użyciu poprawnej ścieżki API"""
-    # DODANO SŁOWO "bot" PRZED TOKENEM - to naprawia błąd sieciowy
-    url = f"https://telegram.org{TG_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TG_CHAT_ID,
-        "text": wiadomosc
-    }
-    try:
-        response = requests.post(url, json=payload)
-        if response.status_code != 200:
-            st.sidebar.error(f"Telegram Error: {response.status_code} - {response.text}")
-            return False
-        return True
-    except Exception as e:
-        st.sidebar.error(f"Błąd sieci Telegram: {e}")
-        return False
+# --- REORGANIZACJA SIDEBARU I HARMONOGRAMU CZASOWEGO ---
+st.sidebar.header("⚙️ Zarządzanie Skanerem")
+wybierz_pl = st.sidebar.checkbox("Skanuj listę GPW (43 spółki)", value=True)
+wybierz_usa = st.sidebar.checkbox("Skanuj listę USA (19 spółek)", value=True)
+cena_max_us = st.sidebar.slider("Maksymalny próg cenowy dla USA ($):", 0.5, 20.0, 5.0)
 
+# FUNKCJA CZASU: Automatyczne odświeżanie interfejsu (Skanowanie pętli w tle)
+interwal_skanu = st.sidebar.selectbox("⏱️ Automatyczne powtórne skanowanie:", ["Tylko ręcznie", "Co 5 minut", "Co 15 minut", "Co 1 godzinę"])
 
-# --- CZĘŚĆ 1: SZYBKIE OKNO SPRAWDZANIA TICKERA ---
+# Logika czasu powtórzeń na serwerze
+if interwal_skanu == "Co 5 minut":
+    st.sidebar.info("Aplikacja odświeży dane automatycznie za 5 minut.")
+    time.sleep(300)
+    st.rerun()
+elif interwal_skanu == "Co 15 minut":
+    st.sidebar.info("Aplikacja odświeży dane automatycznie za 15 minut.")
+    time.sleep(900)
+    st.rerun()
+elif interwal_skanu == "Co 1 godzinę":
+    st.sidebar.info("Aplikacja odświeży dane automatycznie za 1 godzinę.")
+    time.sleep(3600)
+    st.rerun()
+
+# Przycisk wymuszenia natychmiastowego nowego skanu
+if st.sidebar.button("🔄 Wymuś natychmiastowy restart i nowy skan"):
+    st.cache_data.clear()
+    st.rerun()
+
+# --- CZĘŚĆ A: SZYBKIE OKNO SPRAWDZANIA TICKERA ---
 st.subheader("🔍 Szybki podgląd i analiza wybranego waloru")
 col_input1, col_input2 = st.columns(2)
 with col_input1:
-    szukany_ticker = st.text_input("Wpisz DOWOLNY ticker rynkowy (np. STX.WA, AAPL, PLRX):", "").upper().strip()
+    szukany_ticker = st.text_input("Wpisz DOWOLNY ticker rynkowy do natychmiastowej weryfikacji:", "").upper().strip()
 with col_input2:
     st.write("##")
     val_szukanie = st.button("🔎 Analizuj Ticker")
@@ -180,7 +189,7 @@ if val_szukanie and szukany_ticker:
                     st.write(f"🎯 Docelowy Profit (TP): **{t_res['tp']:.2f}** | 🛑 Poziom Obrony (SL na dole): **{t_res['sl']:.2f}**")
                     
                     wiadomosc_szybka = (
-                        f"🔎 SZYBKI SKAN AKCJI: {szukany_ticker}\n"
+                        f"🚨 SZYBKI SKAN AKCJI: {szukany_ticker}\n"
                         f"▪️ Cena: {t_res['cena']:.2f}\n"
                         f"▪️ Status: {t_res['ocena']}\n"
                         f"🛑 SL (na dole): {t_res['sl']:.2f}\n"
@@ -192,21 +201,9 @@ if val_szukanie and szukany_ticker:
 
 st.write("---")
 
-# --- CZĘŚĆ 2: GLOBALNA PĘTLA SKANOWANIA LISTY SPÓŁEK ---
-st.subheader("🔄 Globalny Automatyczny Skaner Portfela Spółek")
-
-st.sidebar.header("⚙️ Zarządzanie Skanerem")
-wybierz_pl = st.sidebar.checkbox("Skanuj listę GPW (43 spółki)", value=True)
-wybierz_usa = st.sidebar.checkbox("Skanuj listę USA (19 spółek)", value=True)
-cena_max_us = st.sidebar.slider("Maksymalny próg cenowy dla USA ($):", 0.5, 20.0, 5.0)
-
-col_btn1, col_btn2 = st.columns(2)
-with col_btn1:
-    uruchom_globalny = st.button("🚀 Uruchom Skanowanie")
-with col_btn2:
-    if st.button("🔄 Wyczyszczenie pamięci i reset"):
-        st.cache_data.clear()
-        st.rerun()
+# --- CZĘŚĆ B: GLOBALNY SKANER PORTFELA ---
+st.subheader("🔄 Globalny Skaner Portfela Spółek")
+uruchom_globalny = st.button("🚀 Uruchom Pełne Skanowanie Rynków")
 
 if uruchom_globalny:
     lista_tickerów = []
@@ -227,7 +224,7 @@ if uruchom_globalny:
             for t in lista_tickerów:
                 try:
                     if isinstance(dane_bulk.columns, pd.MultiIndex):
-                        if t in dane_bulk.columns.levels:
+                        if t in dane_bulk.columns.levels[0]:
                             df_close[t] = dane_bulk[t]['Close']
                             df_volume[t] = dane_bulk[t]['Volume']
                             df_high[t] = dane_bulk[t]['High']
@@ -256,7 +253,8 @@ if uruchom_globalny:
                     continue
                 if rynek == "USA" and tech['cena'] > cena_max_us: 
                     continue
-                    
+                
+                # Słownik do wygenerowania tabeli Live w przeglądarce
                 pelna_tabela_wynikow.append({
                     "Ticker": ticker, 
                     "Rynek": rynek, 
@@ -291,6 +289,7 @@ if uruchom_globalny:
         st.success("✅ Zbiorcza analiza giełdowa została pomyślnie sfinalizowana!")
         st.write(f"Wysłano ważnych alertów na Telegram: **{licznik_alertow}**")
         
+        # TABELA LIVE WYŚWIETLA SIĘ ZAWSZE PO SKANOWANIU
         if pelna_tabela_wynikow:
             st.subheader("📊 Kompletny podgląd wszystkich przeskanowanych akcji")
             df_wynikowy = pd.DataFrame(pelna_tabela_wynikow)
