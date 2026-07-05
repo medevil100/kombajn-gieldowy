@@ -268,52 +268,88 @@ if st.session_state.last_scanned_tickers:
         st.write(f"### Paczka {idx}")
         st.json(batch)
 # =====================================================================
-# SZYBKI PODGLĄD TICKERA — ODDZIELONY OD SKANERA
+# SZYBKI PODGLĄD TICKERA — ODDZIELONY OD SKANERA I JSON
 # =====================================================================
 
-st.subheader("🔎 Szybki podgląd tickera")
+st.subheader("🔎 Szybki podgląd tickera (RSI / MACD / Bollinger / Świece)")
 
 quick_ticker = st.text_input("Ticker:", key="quick_ticker")
 
 if quick_ticker:
+
+    # Pobieramy TYLKO z YF — nigdy z JSON, nigdy ze skanera
     df_q = yf.download(quick_ticker, period="10d", interval="30m", progress=False)
 
-    if not df_q.empty:
+    # Jeśli YF nie zwróci danych — koniec
+    if df_q is None or df_q.empty:
+        st.error("Brak danych z Yahoo Finance.")
+    else:
+
+        # Wskaźniki liczone TYLKO na df_q
         df_q["RSI"] = oblicz_rsi(df_q)
         df_q = oblicz_macd(df_q)
         df_q = oblicz_bollinger(df_q)
 
+        # Ostatni wiersz — PRAWDZIWE DANE Z YF
         ostatnia = df_q.iloc[-1]
 
-        close_val  = float(ostatnia["Close"])
-        rsi_val    = float(ostatnia["RSI"])
-        macd_val   = float(ostatnia["MACD"])
-        signal_val = float(ostatnia["Signal"])
-        bb_up      = float(ostatnia["BB_UP"])
-        bb_mid     = float(ostatnia["BB_MID"])
-        bb_down    = float(ostatnia["BB_DOWN"])
+        # Każda wartość pobierana BEZPOŚREDNIO z df_q
+        try:
+            close_val  = float(ostatnia["Close"])
+            rsi_val    = float(ostatnia["RSI"])
+            macd_val   = float(ostatnia["MACD"])
+            signal_val = float(ostatnia["Signal"])
+            bb_up      = float(ostatnia["BB_UP"])
+            bb_mid     = float(ostatnia["BB_MID"])
+            bb_down    = float(ostatnia["BB_DOWN"])
+        except Exception as e:
+            st.error(f"Nie można przetworzyć danych tickera: {e}")
+            st.stop()
 
-        st.write(f"Cena: {close_val:.2f}")
-        st.write(f"RSI: {rsi_val:.1f}")
-        st.write(f"MACD: {macd_val:.4f}")
-        st.write(f"Signal: {signal_val:.4f}")
-        st.write(f"Bollinger: UP {bb_up:.2f} | MID {bb_mid:.2f} | DOWN {bb_down:.2f}")
+        # Wyświetlanie
+        st.write(f"**Cena:** {close_val:.2f}")
+        st.write(f"**RSI:** {rsi_val:.1f}")
+        st.write(f"**MACD:** {macd_val:.4f}")
+        st.write(f"**Signal:** {signal_val:.4f}")
+        st.write(f"**Bollinger:** UP {bb_up:.2f} | MID {bb_mid:.2f} | DOWN {bb_down:.2f}")
 
-        fig = make_subplots(rows=3, cols=1, shared_xaxes=True)
+        # Wykres
+        fig = make_subplots(
+            rows=3, cols=1, shared_xaxes=True,
+            vertical_spacing=0.02, row_heights=[0.55, 0.20, 0.25]
+        )
 
-        fig.add_trace(go.Candlestick(
-            x=df_q.index,
-            open=df_q["Open"],
-            high=df_q["High"],
-            low=df_q["Low"],
-            close=df_q["Close"]
-        ), row=1, col=1)
+        fig.add_trace(
+            go.Candlestick(
+                x=df_q.index,
+                open=df_q["Open"],
+                high=df_q["High"],
+                low=df_q["Low"],
+                close=df_q["Close"],
+                increasing_line_color="lime",
+                decreasing_line_color="red",
+            ),
+            row=1, col=1
+        )
 
-        fig.add_trace(go.Scatter(x=df_q.index, y=df_q["RSI"]), row=2, col=1)
-        fig.add_trace(go.Scatter(x=df_q.index, y=df_q["MACD"]), row=3, col=1)
-        fig.add_trace(go.Scatter(x=df_q.index, y=df_q["Signal"]), row=3, col=1)
+        fig.add_trace(
+            go.Scatter(x=df_q.index, y=df_q["RSI"], mode="lines", line=dict(color="orange")),
+            row=2, col=1
+        )
 
+        fig.add_trace(
+            go.Scatter(x=df_q.index, y=df_q["MACD"], mode="lines", line=dict(color="cyan")),
+            row=3, col=1
+        )
+
+        fig.add_trace(
+            go.Scatter(x=df_q.index, y=df_q["Signal"], mode="lines", line=dict(color="white")),
+            row=3, col=1
+        )
+
+        fig.update_layout(template="plotly_dark", height=900, width=1200)
         st.plotly_chart(fig, use_container_width=True)
+
 
 # =====================================================================
 # AUTO-SCAN
