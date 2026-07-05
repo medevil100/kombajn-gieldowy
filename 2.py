@@ -267,6 +267,67 @@ if st.session_state.last_scanned_tickers:
     for idx, batch in enumerate(df_to_json_batches(df_all, 10), start=1):
         st.write(f"### Paczka {idx}")
         st.json(batch)
+       # =====================================================================
+# STAŁE TICKERY + OKNO PODGLĄDU
+# =====================================================================
+
+st.subheader("📌 Stałe tickery — szybki wybór spółki")
+
+# Twoje listy
+all_tickers = GPW_LIST + USA_LIST
+
+# Dropdown z wyborem spółki
+selected_ticker = st.selectbox("Wybierz spółkę:", all_tickers, key="selected_ticker")
+
+if selected_ticker:
+    df_s = yf.download(selected_ticker, period="30d", interval="1d", progress=False)
+
+    if df_s is None or df_s.empty:
+        st.error("Brak danych dla wybranego tickera.")
+    else:
+        df_s["RSI"] = oblicz_rsi(df_s)
+        df_s = oblicz_macd(df_s)
+        df_s = oblicz_bollinger(df_s)
+
+        last = df_s.iloc[-1]
+
+        # Pobieramy pojedyncze wartości
+        cena_s   = float(last["Close"])
+        rsi_s    = float(last["RSI"])
+        macd_s   = float(last["MACD"])
+        signal_s = float(last["Signal"])
+        bb_up_s  = float(last["BB_UP"])
+        bb_mid_s = float(last["BB_MID"])
+        bb_down_s= float(last["BB_DOWN"])
+
+        # Wyświetlamy panel
+        st.markdown(f"""
+        ### 🔍 Podgląd: **{selected_ticker}**
+        **Cena:** {cena_s:.2f}  
+        **RSI:** {rsi_s:.1f}  
+        **MACD:** {macd_s:.4f}  
+        **Signal:** {signal_s:.4f}  
+        **Bollinger:** UP {bb_up_s:.2f} | MID {bb_mid_s:.2f} | DOWN {bb_down_s:.2f}
+        """)
+
+        # Mini-wykres
+        fig2 = make_subplots(rows=3, cols=1, shared_xaxes=True)
+
+        fig2.add_trace(go.Candlestick(
+            x=df_s.index,
+            open=df_s["Open"],
+            high=df_s["High"],
+            low=df_s["Low"],
+            close=df_s["Close"]
+        ), row=1, col=1)
+
+        fig2.add_trace(go.Scatter(x=df_s.index, y=df_s["RSI"]), row=2, col=1)
+        fig2.add_trace(go.Scatter(x=df_s.index, y=df_s["MACD"]), row=3, col=1)
+        fig2.add_trace(go.Scatter(x=df_s.index, y=df_s["Signal"]), row=3, col=1)
+
+        fig2.update_layout(template="plotly_dark", height=700)
+        st.plotly_chart(fig2, use_container_width=True)
+ 
 # =====================================================================
 # SZYBKI PODGLĄD TICKERA — ODDZIELONY OD SKANERA I JSON
 # =====================================================================
