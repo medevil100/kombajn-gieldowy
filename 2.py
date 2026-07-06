@@ -41,13 +41,15 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # INPUT TICKERS
 # =====================================================================
 user_input = st.text_area(
-    "Wklej swoje spółki (np. STX.WA, AAPL, NVDA):",
+    "Wklej swoje spółki (np. STX.WA, APS.WA, TEN.WA):",
     value="",
     height=120,
-    placeholder="Np. STX.WA, AAPL, NVDA..."
+    placeholder="Np. STX.WA, APS.WA, TEN.WA..."
 )
 
-MARKET_DATABASE = [t.strip().upper() for t in user_input.split(",") if t.strip()]
+# akceptujemy przecinki, entery, spacje – wszystko rozbijamy na tokeny
+raw_tokens = user_input.replace("\n", ",").replace(" ", ",").split(",")
+MARKET_DATABASE = [t.strip() for t in raw_tokens if t.strip()]
 
 # =====================================================================
 # TELEGRAM
@@ -141,13 +143,14 @@ def mini_chart(df: pd.DataFrame) -> str:
         return ""
 
 # =====================================================================
-# RSI — SERIES, BEZ DF["RSI"]
+# RSI — klasyczne, na czystym df["Close"]
 # =====================================================================
 def oblicz_rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    delta = df["Close"].diff()
+    close = df["Close"]
+    delta = close.diff()
 
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
 
     avg_gain = gain.rolling(period).mean()
     avg_loss = loss.rolling(period).mean()
@@ -236,7 +239,7 @@ def rekomendacja_pro(trend, score, sentiment, rsi, pred):
     return "🟡 TRZYMAJ"
 
 # =====================================================================
-# ANALIZA SPÓŁKI — BEZ df["RSI"]
+# ANALIZA SPÓŁKI — bez MultiIndex, bez kombinacji
 # =====================================================================
 def analizuj_jedna_spolke(ticker: str, now: str) -> dict:
     try:
@@ -244,24 +247,15 @@ def analizuj_jedna_spolke(ticker: str, now: str) -> dict:
             ticker,
             period="3mo",
             interval="1d",
-            progress=False,
-            group_by="ticker"
+            progress=False
         )
-
-        if df.empty:
-            time.sleep(1)
-            df = yf.download(
-                ticker,
-                period="3mo",
-                interval="1d",
-                progress=False,
-                group_by="ticker"
-            )
 
         if df.empty:
             raise ValueError("Brak danych z yfinance")
 
-        df.columns = [str(c).capitalize() for c in df.columns]
+        # klasyczne kolumny: Open, High, Low, Close, Volume
+        if not {"Open","High","Low","Close","Volume"}.issubset(df.columns):
+            raise ValueError("Brak wymaganych kolumn OHLCV")
 
         rsi_series = oblicz_rsi(df)
         rsi = float(rsi_series.iloc[-1])
@@ -318,7 +312,7 @@ def analizuj_jedna_spolke(ticker: str, now: str) -> dict:
         }
 
 # =====================================================================
-# SKANER — WĄTKI ZAPISUJĄ LOKALNIE, NIE DO session_state
+# SKANER — wątki zapisują lokalnie, potem do session_state
 # =====================================================================
 def job_skanera(status=None, bar=None):
     total = len(MARKET_DATABASE)
@@ -365,7 +359,7 @@ with col1:
         st.rerun()
 
 with col2:
-    st.write("⏲️ Ten kombajn działa w trybie ręcznym — kliknij, gdy chcesz nowy skan.")
+    st.write("⏲️ Tryb ręczny — kliknij, gdy chcesz nowy skan.")
 
 # =====================================================================
 # TABELA PRO — MINI‑ŚWIECE + KOLOROWANIE
@@ -407,16 +401,14 @@ quick = st.text_input("Ticker:")
 
 if quick:
     df_q = yf.download(
-        quick.strip().upper(),
+        quick.strip(),
         period="3mo",
         interval="1d",
-        progress=False,
-        group_by="ticker"
+        progress=False
     )
     if df_q.empty:
         st.error("Brak danych.")
     else:
-        df_q.columns = [str(c).capitalize() for c in df_q.columns]
         rsi_q = oblicz_rsi(df_q)
         last = df_q.iloc[-1]
         st.write(f"**Cena:** {last['Close']:.2f}")
