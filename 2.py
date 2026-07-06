@@ -332,6 +332,9 @@ def run_scheduler():
 # =====================================================================
 # UI — STATUS + RĘCZNY SKAN
 # =====================================================================
+# =====================================================================
+# UI — STATUS + RĘCZNY SKAN
+# =====================================================================
 st.write("---")
 st.success(f"⚙️ Ostatni skan: {st.session_state.last_scan_time}")
 
@@ -348,8 +351,60 @@ with col1:
 with col2:
     st.write(f"⏲️ Auto-skan co {scan_minutes} min")
 
-# uruchom scheduler przy każdym odświeżeniu
+# scheduler działa przy każdym odświeżeniu
 run_scheduler()
+
+# =====================================================================
+# TABELA PRO — MINI‑ŚWIECE + KOLOROWANIE + REKOMENDACJE
+# =====================================================================
+st.write("---")
+st.subheader("📊 KOMBAJN PRO — pełna analiza AI")
+
+if st.session_state.scanned_details:
+
+    df = pd.DataFrame(st.session_state.scanned_details)
+
+    # Kolorowanie wierszy
+    def kolor(row):
+        if "🟢" in row["Rekomendacja"]:
+            return ["background-color: #003300; color: #00ff00"] * len(row)
+        if "🔴" in row["Rekomendacja"]:
+            return ["background-color: #330000; color: #ff4444"] * len(row)
+        return ["background-color: #333300; color: #ffff66"] * len(row)
+
+    # Mini-wykres jako IMG
+    df["MiniWykres"] = df["Chart"].apply(
+        lambda x: f'<img src="data:image/png;base64,{x}" width="120" height="80"/>'
+    )
+
+    # Stylowanie
+    styled = df.style.apply(kolor, axis=1)
+
+    # Render HTML
+    html = styled.to_html(escape=False)
+    st.markdown(html, unsafe_allow_html=True)
+
+else:
+    st.info("Brak danych — skaner jeszcze nie wykonał cyklu.")
+
+# =====================================================================
+# PODGLĄD TICKERA
+# =====================================================================
+st.write("---")
+st.subheader("🔎 Szybki podgląd tickera")
+
+quick = st.text_input("Ticker:")
+
+if quick:
+    df_q = yf.download(quick.strip().upper(), period="3mo", interval="1d", progress=False)
+    if df_q.empty:
+        st.error("Brak danych.")
+    else:
+        df_q["RSI"] = oblicz_rsi(df_q)
+        last = df_q.iloc[-1]
+        st.write(f"**Cena:** {last['Close']:.2f}")
+        st.write(f"**RSI:** {last['RSI']:.1f}")
+
 
 
 # =====================================================================
