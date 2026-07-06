@@ -38,7 +38,7 @@ TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =====================================================================
-# INPUT TICKERS
+# INPUT TICKERS + CZAS SKANU
 # =====================================================================
 user_input = st.text_area(
     "Wklej swoje spółki (np. APS.WA, STX.WA, AIT.WA):",
@@ -47,8 +47,21 @@ user_input = st.text_area(
     placeholder="Np. APS.WA, STX.WA, AIT.WA..."
 )
 
-raw_tokens = user_input.replace("\n", ",").replace(" ", ",").split(",")
+raw_tokens = (
+    user_input
+    .replace("\n", ",")
+    .replace(" ", ",")
+    .split(",")
+)
 MARKET_DATABASE = [t.strip() for t in raw_tokens if t.strip()]
+
+scan_minutes = st.slider(
+    "⏱️ Czas między skanami (minuty)",
+    min_value=15,
+    max_value=120,
+    value=60,
+    step=15
+)
 
 # =====================================================================
 # TELEGRAM
@@ -237,7 +250,7 @@ def rekomendacja_pro(trend, score, sentiment, rsi, pred):
     return "🟡 TRZYMAJ"
 
 # =====================================================================
-# ANALIZA SPÓŁKI — KLUCZOWA POPRAWKA: MultiIndex
+# ANALIZA SPÓŁKI — BEZ DEFAULTÓW, BEZ MASKOWANIA BŁĘDÓW
 # =====================================================================
 def analizuj_jedna_spolke(ticker: str, now: str) -> dict:
     try:
@@ -251,12 +264,16 @@ def analizuj_jedna_spolke(ticker: str, now: str) -> dict:
         if df.empty:
             raise ValueError("Brak danych z yfinance")
 
-        # KLUCZOWA POPRAWKA — obsługa MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
             try:
                 df = df.xs(ticker, level=1, axis=1)
-            except:
+            except Exception:
                 df.columns = df.columns.get_level_values(0)
+
+        # jeśli dalej nie ma wymaganych kolumn – pokazujemy błąd, nie robimy defaultów
+        required = {"Open", "High", "Low", "Close", "Volume"}
+        if not required.issubset(set(df.columns)):
+            raise ValueError(f"Brak kolumn OHLCV dla {ticker}: {df.columns}")
 
         rsi_series = oblicz_rsi(df)
         rsi = float(rsi_series.iloc[-1])
@@ -297,20 +314,9 @@ def analizuj_jedna_spolke(ticker: str, now: str) -> dict:
             "Chart": chart_b64
         }
     except Exception as e:
+        # KLUCZ: nie zwracamy defaultów, tylko sygnalizujemy błąd i NIE dodajemy tej spółki do tabeli
         print(f"Błąd analizy dla {ticker}: {e}")
-        return {
-            "Ticker": ticker,
-            "Cena": 0.0,
-            "RSI": 50.0,
-            "Zmiana %": 0.0,
-            "Wolumen x": 1.0,
-            "Trend": "➡️ SIDEWAYS",
-            "Ryzyko": "🟡 MEDIUM",
-            "Scoring": 50,
-            "Sentiment": "neutralny",
-            "Rekomendacja": "🟡 TRZYMAJ",
-            "Chart": ""
-        }
+        return None
 
 # =====================================================================
 # SKANER — wątki zapisują lokalnie, potem do session_state
@@ -321,6 +327,7 @@ def job_skanera(status=None, bar=None):
         return
 
     tymczasowa_lista = []
+    błędy = []
 
     with ThreadPoolExecutor(max_workers=15) as ex:
         tasks = {
@@ -337,17 +344,23 @@ def job_skanera(status=None, bar=None):
                 bar.progress(done / total)
 
             res = fut.result()
-            tymczasowa_lista.append(res)
+            if res is None:
+                błędy.append(ticker)
+            else:
+                tymczasowa_lista.append(res)
 
     st.session_state.scanned_details = tymczasowa_lista
     st.session_state.last_scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    send_telegram_message(f"🤖 Skan zakończony dla {total} spółek.")
+
+    msg = f"🤖 Skan zakończony dla {len(tymczasowa_lista)} spółek. Błędy: {', '.join(błędy) if błędy else 'brak'}."
+    send_telegram_message(msg)
 
 # =====================================================================
-# UI — STATUS + RĘCZNY SKAN
+# UI — STATUS + RĘCZNY SKAN + INFO O INTERWALE
 # =====================================================================
 st.write("---")
 st.success(f"⚙️ Ostatni skan: {st.session_state.last_scan_time}")
+st.info(f"⏱️ Ustawiony interwał skanowania: co {scan_minutes} minut (do użycia w zewnętrznym cron / schedulerze).")
 
 status = st.empty()
 bar = st.empty()
@@ -360,7 +373,7 @@ with col1:
         st.rerun()
 
 with col2:
-    st.write("⏲️ Tryb ręczny — kliknij, gdy chcesz nowy skan.")
+    st.write("⏲️ Ten kombajn działa w trybie ręcznym. Auto‑skan zrobisz przez zewnętrzny cron (np. Cloud).")
 
 # =====================================================================
 # TABELA PRO — MINI‑ŚWIECE + KOLOROWANIE
@@ -413,7 +426,7 @@ if quick:
         if isinstance(df_q.columns, pd.MultiIndex):
             try:
                 df_q = df_q.xs(quick.strip(), level=1, axis=1)
-            except:
+            except Exception:
                 df_q.columns = df_q.columns.get_level_values(0)
 
         rsi_q = oblicz_rsi(df_q)
