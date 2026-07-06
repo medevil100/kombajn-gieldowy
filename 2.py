@@ -1,4 +1,5 @@
 import time
+import traceback
 import requests
 import yfinance as yf
 import pandas as pd
@@ -16,6 +17,13 @@ from io import BytesIO
 # =====================================================================
 st.set_page_config(page_title="KOMBAJN PRO", page_icon="📈", layout="wide")
 st.title("📈 KOMBAJN PRO — AI + Tavily + Mini‑Świece + Telegram")
+
+# =====================================================================
+# ERROR DISPLAY
+# =====================================================================
+def show_error(e):
+    st.error(f"❌ Błąd: {e}")
+    st.code(traceback.format_exc())
 
 # =====================================================================
 # SESSION STATE
@@ -71,7 +79,7 @@ def send_telegram_message(msg: str):
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
     except Exception as e:
-        print(f"Telegram error: {e}")
+        show_error(e)
 
 # =====================================================================
 # TAVILY NEWS + AI SENTIMENT
@@ -88,7 +96,7 @@ def tavily_news(query: str):
         r = requests.post(url, json=payload, timeout=10).json()
         return r.get("results", [])
     except Exception as e:
-        print(f"Tavily error: {e}")
+        show_error(e)
         return []
 
 def ai_news_sentiment(ticker: str, news: list):
@@ -112,7 +120,7 @@ def ai_news_sentiment(ticker: str, news: list):
         )
         return r.choices[0].message.content.strip()
     except Exception as e:
-        print(f"AI sentiment error: {e}")
+        show_error(e)
         return "neutralny"
 
 # =====================================================================
@@ -151,7 +159,7 @@ def mini_chart(df: pd.DataFrame) -> str:
 
         return base64.b64encode(buf.getvalue()).decode("utf-8")
     except Exception as e:
-        print(f"Mini chart error: {e}")
+        show_error(e)
         return ""
 
 # =====================================================================
@@ -208,7 +216,7 @@ def predykcja_ai(ticker, zmiana, rsi, wolumen_x):
             return "📉 DOWN"
         return "➡️ SIDEWAYS"
     except Exception as e:
-        print(f"AI prediction error dla {ticker}: {e}")
+        show_error(e)
         return "➡️ SIDEWAYS"
 
 def trend_ai(zmiana, rsi):
@@ -262,7 +270,7 @@ def analizuj_jedna_spolke(ticker: str, now: str) -> dict:
         )
 
         if df.empty:
-            raise ValueError("Brak danych z yfinance")
+            raise ValueError(f"Brak danych z yfinance dla {ticker}")
 
         if isinstance(df.columns, pd.MultiIndex):
             try:
@@ -270,7 +278,6 @@ def analizuj_jedna_spolke(ticker: str, now: str) -> dict:
             except Exception:
                 df.columns = df.columns.get_level_values(0)
 
-        # jeśli dalej nie ma wymaganych kolumn – pokazujemy błąd, nie robimy defaultów
         required = {"Open", "High", "Low", "Close", "Volume"}
         if not required.issubset(set(df.columns)):
             raise ValueError(f"Brak kolumn OHLCV dla {ticker}: {df.columns}")
@@ -314,8 +321,7 @@ def analizuj_jedna_spolke(ticker: str, now: str) -> dict:
             "Chart": chart_b64
         }
     except Exception as e:
-        # KLUCZ: nie zwracamy defaultów, tylko sygnalizujemy błąd i NIE dodajemy tej spółki do tabeli
-        print(f"Błąd analizy dla {ticker}: {e}")
+        show_error(e)
         return None
 
 # =====================================================================
@@ -360,7 +366,7 @@ def job_skanera(status=None, bar=None):
 # =====================================================================
 st.write("---")
 st.success(f"⚙️ Ostatni skan: {st.session_state.last_scan_time}")
-st.info(f"⏱️ Ustawiony interwał skanowania: co {scan_minutes} minut (do użycia w zewnętrznym cron / schedulerze).")
+st.info(f"⏱️ Ustawiony interwał skanowania: co {scan_minutes} minut.")
 
 status = st.empty()
 bar = st.empty()
@@ -373,7 +379,7 @@ with col1:
         st.rerun()
 
 with col2:
-    st.write("⏲️ Ten kombajn działa w trybie ręcznym. Auto‑skan zrobisz przez zewnętrzny cron (np. Cloud).")
+    st.write("⏲️ Tryb ręczny — kliknij, gdy chcesz nowy skan.")
 
 # =====================================================================
 # TABELA PRO — MINI‑ŚWIECE + KOLOROWANIE
