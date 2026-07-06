@@ -21,9 +21,12 @@ st.title("📈 KOMBAJN PRO — AI + Tavily + Mini‑Świece + Telegram")
 # =====================================================================
 # SESSION STATE
 # =====================================================================
-for key in ["alerts_history", "last_scan_time", "scanned_details"]:
-    if key not in st.session_state:
-        st.session_state[key] = [] if key == "scanned_details" else ""
+if "alerts_history" not in st.session_state:
+    st.session_state.alerts_history = []
+if "last_scan_time" not in st.session_state:
+    st.session_state.last_scan_time = "Nigdy"
+if "scanned_details" not in st.session_state:
+    st.session_state.scanned_details = []
 
 # =====================================================================
 # SECRETS
@@ -141,6 +144,7 @@ def mini_chart(df):
         return base64.b64encode(buf.getvalue()).decode("utf-8")
     except:
         return ""
+
 # =====================================================================
 # RSI
 # =====================================================================
@@ -298,6 +302,9 @@ def job_skanera(status=None, bar=None):
     st.session_state.scanned_details = []
     total = len(MARKET_DATABASE)
 
+    if total == 0:
+        return
+
     with ThreadPoolExecutor(max_workers=15) as ex:
         tasks = {ex.submit(analizuj_jedna_spolke, t, datetime.now().isoformat()): t for t in MARKET_DATABASE}
         done = 0
@@ -323,6 +330,7 @@ schedule.every(scan_minutes).minutes.do(job_skanera)
 
 def run_scheduler():
     schedule.run_pending()
+
 # =====================================================================
 # UI — STATUS + RĘCZNY SKAN
 # =====================================================================
