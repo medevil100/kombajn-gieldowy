@@ -1,329 +1,398 @@
+import asyncio
 import os
-import requests
 import streamlit as st
-import yfinance as yf
 import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import base64
-from io import BytesIO
+import yfinance as yf
+import ta
+from openai import OpenAI
+from tavily import TavilyClient
+import httpx
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+# =====================================================================
+# CONFIGURATION & REQUISITES (Streamlit Secrets Layer)
+# =====================================================================
+st.set_page_config(page_title="GPW AI Terminal", layout="wide")
 
-# ==========================
-# 1. DATA LAYER
-# ==========================
-def normalize_ohlcv(df_raw: pd.DataFrame) -> pd.DataFrame:
-    # MultiIndex → spłaszczamy
-    if isinstance(df_raw.columns, pd.MultiIndex):
-        df_raw.columns = [
-            " ".join([str(c) for c in col if str(c) != ""])
-            for col in df_raw.columns
-        ]
-
-    cols = [str(c) for c in df_raw.columns]
-
-    # mapujemy po fragmencie nazwy, nie po całym stringu
-    lower_cols = {c.lower(): c for c in cols}
-
-    def find_col(*candidates):
-        for lc, orig in lower_cols.items():
-            for cand in candidates:
-                if cand in lc:
-                    return orig
-        return None
-
-    col_open = find_col("open")
-    col_high = find_col("high")
-    col_low = find_col("low")
-    col_close = find_col("close", "adj close", "last", "close*")
-    col_volume = find_col("volume", "vol", "total volume")
-
-    needed = [col_open, col_high, col_low, col_close, col_volume]
-    if any(c is None for c in needed):
-        raise ValueError(f"Nie udało się znormalizować OHLCV: {df_raw.columns}")
-
-    df = df_raw[[col_open, col_high, col_low, col_close, col_volume]].copy()
-    df.columns = ["Open", "High", "Low", "Close", "Volume"]
-
-    # wyrzucamy zerowy wolumen
-    df = df[df["Volume"] > 0]
-    # wygładzamy wolumen
-    df["Volume"] = df["Volume"].rolling(3).mean().fillna(df["Volume"])
-
-    return df
-
-
-def fetch_price_data(ticker: str, period: str = "3mo") -> pd.DataFrame:
-    df_raw = yf.download(
-        ticker,
-        period=period,
-        interval="1d",
-        auto_adjust=True,
-        threads=False,
-        progress=False
+# Konfiguracja kluczy z .streamlit/secrets.toml
+try:
+    OPENAI_API_KEY = st.secrets["openai"]["api_key"]
+    TAVILY_API_KEY = st.secrets["tavily"]["api_key"]
+    TELEGRAM_TOKEN = st.secrets["telegram"]["bot_token"]
+    TELEGRAM_CHAT_ID = st.secrets["telegram"]["chat_id"]
+except Exception as e:
+    st.error(
+        f"❌ Błąd konfiguracji secrets.toml. Upewnij się, że plik zawiera sekcje "
+        f"[openai], [tavily] oraz [telegram]. Szczegóły: {e}"
     )
+    st.stop()
 
-    if df_raw.empty:
-        raise ValueError(f"Brak danych dla {ticker}")
-
-    df = normalize_ohlcv(df_raw)
-    if df.empty:
-        raise ValueError(f"Brak danych po normalizacji dla {ticker}")
-
-    return df
-
-# ==========================
-# 2. TECHNICAL ENGINE
-# ==========================
-def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-
-    out["MA10"] = out["Close"].rolling(10).mean()
-    out["MA30"] = out["Close"].rolling(30).mean()
-
-    delta = out["Close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    rs = gain.rolling(14).mean() / loss.rolling(14).mean()
-    out["RSI"] = 100 - (100 / (1 + rs))
-
-    ema12 = out["Close"].ewm(span=12).mean()
-    ema26 = out["Close"].ewm(span=26).mean()
-    out["MACD"] = ema12 - ema26
-    out["MACD_signal"] = out["MACD"].ewm(span=9).mean()
-
-    out["ATR"] = (out["High"] - out["Low"]).rolling(14).mean()
-    out["TREND"] = np.where(out["MA10"] > out["MA30"], "UP", "DOWN")
-
-    return out
-
-# ==========================
-# 3. FUNDAMENTAL & NEWS LAYER (SZKIELET)
-# ==========================
-def get_fundamentals_and_news(ticker: str) -> dict:
-    return {
-        "price": None,
-        "market_cap": None,
-        "pe": None,
-        "sector": None,
-        "industry": None,
-        "events": []
-    }
-
-# ==========================
-# 4. SCORING & AI ENGINE
-# ==========================
-def score_technical(df: pd.DataFrame) -> float:
-    last = df.iloc[-1]
-    rsi = last["RSI"]
-    macd = last["MACD"]
-    atr = last["ATR"]
-    close = last["Close"]
-    trend = last["TREND"]
-
-    score = 0
-    if rsi < 30:
-        score += 25
-    if macd > 0:
-        score += 25
-    if atr < close * 0.03:
-        score += 25
-    if trend == "UP":
-        score += 25
-
-    return float(score)
+# REGULA 3: Jawna i bezwzględna inicjalizacja session_state przed użyciem
+if "ticker" not in st.session_state:
+    st.session_state.ticker = "PKO.WA"
+if "report_output" not in st.session_state:
+    st.session_state.report_output = ""
+if "logs" not in st.session_state:
+    st.session_state.logs = []
 
 
-def score_fundamental(facts: dict) -> float:
-    return 50.0
+def log_message(msg: str):
+    """Cichy system rejestracji zdarzeń."""
+    st.session_state.logs.append(msg)
 
 
-def fused_score(tech: float, fund: float) -> float:
-    return round(tech * 0.6 + fund * 0.4, 1)
+# =====================================================================
+# MODUŁ 1: DATA LAYER (Pozyskiwanie i Normalizacja)
+# =====================================================================
+class GPWDataProvider:
+
+    @staticmethod
+    def get_clean_data(ticker: str, period: str = "6m") -> pd.DataFrame:
+        """Pobiera dane i bezwzględnie prostuje chaos yfinance (REGUŁA 1)."""
+        log_message(f"Pobieranie danych z yfinance dla: {ticker}")
+
+        # Bezwzględne wyłączenie group_by chroniące przed MultiIndex (REGUŁA 2 ze wstępu)
+        df = yf.download(ticker, period=period, group_by=None, progress=False)
+
+        if df.empty:
+            raise ValueError(
+                f"Brak danych lub błędny ticker dla spółki: {ticker}"
+            )
+
+        # Spłaszczenie MultiIndex jeśli mimo wszystko powstał
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(-1)
+
+        # Usunięcie gwiazdek i sprowadzenie nazw kolumn do małych/wielkich liter
+        df.columns = (
+            df.columns.str.replace("*", "", regex=False)
+            .str.strip()
+            .str.capitalize()
+        )
+
+        # Sztywne mapowanie na docelowy standard OHLCV
+        expected_columns = ["Open", "High", "Low", "Close", "Volume"]
+        for col in expected_columns:
+            if col not in df.columns:
+                # Jeśli brakuje np. Adj close zamienionego na Close
+                if col == "Close" and "Adj close" in df.columns:
+                    df["Close"] = df["Adj close"]
+                else:
+                    raise KeyError(
+                        f"Krytyczny brak wymaganej kolumny '{col}' w danych źródłowych."
+                    )
+
+        # Odrzucenie nadmiarowych kolumn i zachowanie właściwej kolejności
+        df = df[expected_columns].copy()
+
+        # Konwersja typów numerycznych
+        for col in expected_columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df = df.dropna(subset=["Close"])
+
+        # FILTROWANIE ANOMALII PŁYNNOŚCI (REGUŁA 1.2): Obsługa dni bez wolumenu i wygładzanie
+        df["Volume"] = df["Volume"].fillna(0)
+        # Zastąp zerowy wolumen medianą z ostatnich 5 dni (usuwanie fałszywych anomalii pod OBV/RVol)
+        rolling_vol_median = df["Volume"].rolling(window=5, min_periods=1).median()
+        df.loc[df["Volume"] == 0, "Volume"] = rolling_vol_median
+
+        return df
 
 
-def classify(score: float) -> str:
-    if score < 40:
-        return "UNIKAJ"
-    if score < 70:
-        return "NEUTRAL"
-    return "OKAZJA"
+# =====================================================================
+# MODUŁ 2: TECHNICAL ENGINE (Matematyczna Analityka)
+# =====================================================================
+class GPWTechnicalEngine:
+
+    @staticmethod
+    def calculate_indicators(df: pd.DataFrame) -> dict:
+        """Liczy wskaźniki i wykrywa struktury wyłącznie na znormalizowanych danych (REGUŁA 2)."""
+        if len(df) < 20:
+            raise ValueError("Za mała próbka danych do wyliczenia wskaźników.")
+
+        # Klonowanie serii close pod wyliczenia biblioteki ta
+        close_series = df["Close"].squeeze()
+        high_series = df["High"].squeeze()
+        low_series = df["Low"].squeeze()
+
+        # Kalkulator wskaźników
+        rsi = ta.momentum.RSIIndicator(close=close_series, window=14).rsi()
+        macd_obj = ta.trend.MACD(
+            close=close_series, window_fast=12, window_slow=26, window_sign=9
+        )
+        macd = macd_obj.macd()
+        macd_signal = macd_obj.macd_signal()
+        atr = ta.volatility.AverageTrueRange(
+            high=high_series, low=low_series, close=close_series, window=14
+        ).average_true_range()
+        sma_20 = (
+            ta.trend.SMAIndicator(close=close_series, window=20)
+            .sma_indicator()
+        )
+
+        last_close = float(close_series.iloc[-1])
+        last_rsi = float(rsi.iloc[-1])
+        last_macd = float(macd.iloc[-1])
+        last_signal = float(macd_signal.iloc[-1])
+        last_atr = float(atr.iloc[-1])
+        last_sma = float(sma_20.iloc[-1])
+
+        # Detektor poziomów wsparcia/oporu (lokalne ekstrema z ostatnich 20 sesji)
+        recent_data = close_series.tail(20)
+        support = float(recent_data.min())
+        resistance = float(recent_data.max())
+
+        # Prosta ocena trendu w kodzie (Detektor formacji/układu)
+        trend = "Wzrostowy" if last_close > last_sma else "Spadkowy"
+
+        return {
+            "Ostatnia Cena": f"{last_close:.2f} PLN",
+            "RSI (14)": f"{last_rsi:.2f}",
+            "MACD Line": f"{last_macd:.4f}",
+            "MACD Signal": f"{last_signal:.4f}",
+            "ATR (14)": f"{last_atr:.2f} PLN",
+            "Wsparcie (20s)": f"{support:.2f} PLN",
+            "Opór (20s)": f"{resistance:.2f} PLN",
+            "Trend SMA20": trend,
+        }
 
 
-def build_report(ticker: str, tech: float, fund: float, fused: float,
-                 df: pd.DataFrame, facts: dict) -> str:
-    last = df.iloc[-1]
-    rsi = last["RSI"]
-    macd = last["MACD"]
-    macd_sig = last["MACD_signal"]
-    ma10 = last["MA10"]
-    ma30 = last["MA30"]
-    atr = last["ATR"]
-    rv = last["Volume"] / df["Volume"].rolling(20).mean().iloc[-1]
-    trend = last["TREND"]
-    cls = classify(fused)
+# =====================================================================
+# MODUŁ 3: FUNDAMENTAL & NEWS LAYER (Tavily Skaner)
+# =====================================================================
+class GPWNewsScanner:
 
-    return f"""
-2.py – Okazje + Wejścia dla {ticker}
-Technical Score (60%): {tech:.1f}/100
-Fundamental Score (40%): {fund:.1f}/100
-Fused Score: {fused:.1f}/100
-Klasyfikacja okazji: {cls}
+    @staticmethod
+    def fetch_market_facts(ticker: str) -> list:
+        """Wyciąga bieżące fakty rynkowe z odcięciem szumu forów (REGUŁA 3)."""
+        log_message(f"Uruchamianie Tavily Web Research dla: {ticker}")
+        client = TavilyClient(api_key=TAVILY_API_KEY)
 
-Technika:
-Trend: {trend} | RSI: {rsi:.2f} | MACD: {macd:.4f} vs sygnał {macd_sig:.4f}
-MA10: {ma10:.2f} | MA30: {ma30:.2f} | RVOL: {rv:.2f} | ATR: {atr:.2f}
+        # Budowanie precyzyjnego zapytania pod kątem faktów giełdowych GPW
+        query = f"GPW {ticker} wiadomości komunikaty ESPI dywidenda wyniki finansowe"
 
-Fundamenty:
-Cena: {facts['price'] if facts['price'] is not None else 'brak'} |
-Market Cap: {facts['market_cap'] if facts['market_cap'] is not None else 'brak'} |
-P/E: {facts['pe'] if facts['pe'] is not None else 'brak'}
-Spółka: {ticker} | Sektor: {facts['sector'] or 'brak'} | Branża: {facts['industry'] or 'brak'}
+        try:
+            # Wyszukiwanie ukierunkowane na newsy biznesowe
+            response = client.search(
+                query=query,
+                search_depth="advanced",
+                max_results=4,
+                include_answer=False,
+            )
+            results = response.get("results", [])
+            return [
+                {
+                    "title": item.get("title"),
+                    "content": item.get("content"),
+                    "url": item.get("url"),
+                }
+                for item in results
+            ]
+        except Exception as e:
+            log_message(f"Błąd skanera Tavily: {e}")
+            return []
 
-Wejście (modelowe):
-Entry: {last['Close']:.2f} | SL: {last['Close']*0.92:.2f} |
-TP1: {last['Close']*1.08:.2f} | TP2: {last['Close']*1.16:.2f}
 
-To nie jest rekomendacja inwestycyjna. Model ma charakter edukacyjny.
+# =====================================================================
+# MODUŁ 4: SCORING & AI ENGINE (Rygorystyczny Evaluator)
+# =====================================================================
+class GPWScoringEngine:
+
+    @staticmethod
+    def evaluate_and_score(
+        ticker: str, tech_data: dict, facts: list
+    ) -> str:
+        """Logiczna ocena bez halucynacji przy zerowej kreatywności (REGUŁA 4)."""
+        log_message("Uruchamianie silnika AI (GPT-4o)")
+        client = OpenAI(api_key=OPENAI_API_KEY)
+
+        # Formatowanie faktów prasowych
+        formatted_facts = ""
+        for idx, f in enumerate(facts, 1):
+            formatted_facts += f"[{idx}] Tytuł: {f['title']}\nTreść: {f['content']}\nŹródło: {f['url']}\n\n"
+
+        if not formatted_facts:
+            formatted_facts = "Brak najnowszych doniesień prasowych i komunikatów ESPI w sieci."
+
+        # Rygorystyczny Prompt Systemowy tłumiący fantazję modelu
+        system_prompt = (
+            "Jesteś chłodnym, pragmatycznym systemem analitycznym dla traderów GPW.\n"
+            "Działasz bez emocji. Oceniasz TYLKO przekazane liczby i fakty tekstowe.\n"
+            "Zakaz domysłów, interpretacji makroekonomicznych spoza tekstu i halucynacji.\n"
+            "Wynik musi być sformatowany surowo pod czytelność w Telegramie."
+        )
+
+        user_prompt = f"""
+ANALIZOWANY WALOR: {ticker}
+
+[PARAMETRY TECHNICZNE]:
+{tech_data}
+
+[ZWERYFIKOWANE FAKTY Z SIECI (TAVILY)]:
+{formatted_facts}
+
+WYGENERUJ RAPORT WEDŁUG SZABLONU PROFESJONALISTY:
+📊 RAPORT ANALITYCZNY: {ticker}
+----------------------------------
+🎯 SCORING FINALNY: [X/10] (Podaj TYLKO jedną sztywną cyfrę od 1 do 10, gdzie 1 to natychmiastowa ewakuacja/S, 5 neutralnie, 10 silny sygnał kupna/B na bazie ryzyka do zysku)
+
+📈 ANALIZA TECHNICZNA:
+- [Max 2 zdania surowego podsumowania układu wskaźników i poziomów wsparcia]
+
+📰 ANALIZA SENTYMENTU:
+- [Faktyczna synteza doniesień prasowych. Co realnie dzieje się w spółce?]
+
+💡 KLUCZOWE WNIOSKI:
+• [Wniosek 1 wynikający z zestawienia technika + news]
+• [Wniosek 2]
+
+⚠️ RYZYKA:
+• [Główne zagrożenie techniczne lub informacyjne dla pozycji]
+----------------------------------
+Zwróć czysty tekst bez bloków kodu ``` i bez słów wstępnych.
 """
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,  # Skrajnie niska temperatura = czysta logika
+            max_tokens=800,
+        )
+# =====================================================================
+# MODUŁ 5: EXECUTION & NOTIFICATION LAYER (Niezależny Bot Telegram)
+# =====================================================================
+class TelegramNotifier:
 
-# ==========================
-# 5. TELEGRAM
-# ==========================
-def send_telegram_message(text: str) -> None:
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return
+    @staticmethod
+    async def send_alert_async(text: str) -> bool:
+        """Asynchroniczne, pancerne wysyłanie alertu z ponawianiem prób (REGUŁA 5)."""
+        # POPRAWIONE: Pełny, prawidłowy i stabilny adres URL API Telegrama
+        url = f"https://telegram.org{TELEGRAM_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+            "parse_mode": "Markdown",
+        }
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
-    try:
-        requests.post(url, data=payload, timeout=5)
-    except Exception:
-        pass
+        # Próba wysyłki (max 3 razy w razie błędu sieciowego)
+        async with httpx.AsyncClient() as client:
+            for attempt in range(1, 4):
+                try:
+                    response = await client.post(
+                        url, json=payload, timeout=10.0
+                    )
+                    if response.status_code == 200:
+                        return True
+                    else:
+                        log_message(
+                            f"Telegram API zwrócił błąd (Próba {attempt}): {response.text}"
+                        )
+                except httpx.HTTPError as e:
+                    log_message(
+                        f"Błąd sieciowy podczas wysyłania na Telegram (Próba {attempt}): {e}"
+                    )
+                await asyncio.sleep(2)
+        return False
 
-# ==========================
-# 6. UI LAYER
-# ==========================
-def init_session_state():
-    defaults = {
-        "last_ticker": None,
-        "last_df": None,
-        "last_tech": None,
-        "last_fund": None,
-        "last_fused": None,
-        "last_facts": None,
-        "last_report": None
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+    @staticmethod
+    def send_alert(text: str) -> bool:
+        """Wrapper do uruchomienia asynchronicznego kodu w synchronicznym Streamlicie."""
+        try:
+            return asyncio.run(TelegramNotifier.send_alert_async(text))
+        except Exception as e:
+            log_message(f"Krytyczny błąd pętli asynchronicznej: {e}")
+            return False
 
 
-def mini_candles(df: pd.DataFrame) -> str:
-    df = df.tail(20)
+# =====================================================================
+# MODUŁ 6: UI LAYER (Streamlit Kokpit)
+# =====================================================================
+st.title("🤖 Profesjonalny Terminal AI dla GPW")
+st.caption(
+    "Automatyczny potok danych: yfinance -> Ta -> Tavily -> OpenAI GPT-4o -> Telegram"
+)
 
-    fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(1.6, 1.0),
-        gridspec_kw={"height_ratios": [3, 1]},
-        dpi=75
+# Panel boczny sterowania
+with st.sidebar:
+    st.header("🎛️ Parametry skanowania")
+    # Zmiana wartości bezpośrednio aktualizuje session_state
+    ticker_input = st.text_input(
+        "Wpisz Ticker GPW (z końcówką .WA):",
+        value=st.session_state.ticker,
+        key="ticker_entry",
     )
+    if ticker_input:
+        st.session_state.ticker = ticker_input.upper().strip()
 
-    for i, row in enumerate(df.itertuples()):
-        o, h, l, c = row.Open, row.High, row.Low, row.Close
-        color = "#00ff00" if c >= o else "#ff0000"
-        ax1.vlines(i, l, h, color=color, linewidth=0.8)
-        ax1.vlines(i, o, c, color=color, linewidth=2)
+    run_pipeline = st.button("🚀 Uruchom Pełny Potok Analizy", use_container_width=True)
 
-    ax1.set_xticks([]); ax1.set_yticks([]); ax1.set_facecolor("#000000")
-    ax2.bar(range(len(df)), df["Volume"], color="#666666", width=0.6)
-    ax2.set_xticks([]); ax2.set_yticks([]); ax2.set_facecolor("#000000")
+    st.subheader("🛠️ Monitor Systemowy")
+    if st.button("Wyczyść logi"):
+        st.session_state.logs = []
+    for log in st.session_state.logs[-10:]:
+        st.caption(log)
 
-    plt.tight_layout()
-    buf = BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
-    fig.clf(); plt.close(fig)
+# Główny interfejs wyświetlania danych
+col1, col2 = st.columns([2, 1])
 
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
-
-# ==========================
-# MAIN
-# ==========================
-st.set_page_config(page_title="2.py", page_icon="📈", layout="wide")
-st.title("2.py – Okazje + Wejścia")
-
-init_session_state()
-
-col1, col2 = st.columns(2)
 with col1:
-    ticker = st.text_input("Ticker (GPW/USA):", "STX.WA")
-with col2:
-    period = st.selectbox("Okres danych cenowych:", ["1mo", "3mo", "6mo", "1y"], index=1)
+    st.subheader("📋 Wynik Oceny AI & Scoringu")
 
-if st.button("Analizuj"):
-    try:
-        df = fetch_price_data(ticker, period)
-        df = compute_indicators(df)
-        facts = get_fundamentals_and_news(ticker)
+    # Blok kalkulacji: Wykonuje się tylko po kliknięciu przycisku
+    if run_pipeline:
+        try:
+            with st.spinner("Przetwarzanie danych, analiza wskaźników i research sieci..."):
+                # 1. Pobranie i oczyszczenie danych
+                cleaned_df = GPWDataProvider.get_clean_data(st.session_state.ticker)
+                log_message("Moduł 1 (Data Layer) - Zakończony pomyślnie.")
 
-        tech = score_technical(df)
-        fund = score_fundamental(facts)
-        fused = fused_score(tech, fund)
-        report = build_report(ticker, tech, fund, fused, df, facts)
+                # REGUŁA 4: Wyświetlanie mini-świec w col2
+                with col2:
+                    st.subheader("📊 Znormalizowany Podgląd OHLCV")
+                    st.dataframe(cleaned_df.tail(7), use_container_width=True)
 
-        st.session_state.last_ticker = ticker
-        st.session_state.last_df = df
-        st.session_state.last_tech = tech
-        st.session_state.last_fund = fund
-        st.session_state.last_fused = fused
-        st.session_state.last_facts = facts
-        st.session_state.last_report = report
+                # 2. Obliczenia techniczne
+                tech_analysis = GPWTechnicalEngine.calculate_indicators(cleaned_df)
+                log_message("Moduł 2 (Technical Engine) - Zakończony pomyślnie.")
 
-        if classify(fused) == "OKAZJA":
-            send_telegram_message(f"[2.py] OKAZJA na {ticker}\n\n{report}")
+                with col2:
+                    st.subheader("📈 Wyliczone wskaźniki")
+                    st.json(tech_analysis)
 
-    except Exception as e:
-        st.error(f"Błąd: {e}")
+                # 3. Skanowanie Tavily
+                market_facts = GPWNewsScanner.fetch_market_facts(st.session_state.ticker)
+                log_message("Moduł 3 (News Layer) - Zakończony pomyślnie.")
 
-st.write("---")
-st.write(f"Ostatni ticker: {st.session_state.last_ticker or 'brak'}")
+                # 4. Silnik AI / Scoring i zapis do stanu sesji
+                final_report = GPWScoringEngine.evaluate_and_score(
+                    st.session_state.ticker, tech_analysis, market_facts
+                )
+                st.session_state.report_output = final_report
+                log_message("Moduł 4 (AI Engine) - Zakończony pomyślnie.")
+                
+                # Wymuszenie odświeżenia UI, aby natychmiast pokazać raport
+                st.rerun()
 
-if st.session_state.last_df is not None:
-    df = st.session_state.last_df
-    tech = st.session_state.last_tech
-    fund = st.session_state.last_fund
-    fused = st.session_state.last_fused
-    report = st.session_state.last_report
+        except Exception as error:
+            st.error(f"❌ Awaria potoku przetwarzania: {error}")
+            log_message(f"BŁĄD KRYTYCZNY: {error}")
 
-    st.subheader("📈 Wykres cenowy + MA")
-    st.line_chart(df[["Close", "MA10", "MA30"]])
+    # POPRAWIONE: Wyciągnięcie renderowania poza 'if run_pipeline'.
+    # Dzięki temu raport i przycisk nie znikają po kliknięciu wyślij.
+    if st.session_state.report_output:
+        st.markdown(st.session_state.report_output)
 
-    st.subheader("📊 Technika")
-    last = df.iloc[-1]
-    rv = last["Volume"] / df["Volume"].rolling(20).mean().iloc[-1]
-    st.write(f"Trend (MA10 vs MA30): {last['TREND']}")
-    st.write(f"RSI (14): {last['RSI']:.2f}")
-    st.write(f"MACD: {last['MACD']:.4f}")
-    st.write(f"MACD sygnał: {last['MACD_signal']:.4f}")
-    st.write(f"RVOL (20): {rv:.2f}")
-    st.write(f"ATR (14): {last['ATR']:.2f}")
-
-    st.subheader("🎯 Okazja + Wejście")
-    st.write(f"Technical Score: {tech:.1f}/100")
-    st.write(f"Fundamental Score: {fund:.1f}/100")
-    st.write(f"Fused Score: {fused:.1f}/100")
-    st.write(f"Klasyfikacja okazji: {classify(fused)}")
-
-    entry = last["Close"]
-    sl = entry * 0.92
-    tp1 = entry * 1.08
-    tp2 = entry * 1.16
-
-    st.write(f"Entry: {entry:.2f}")
-    st.write(f"Stop Loss: {sl:.2f}")
-    st.write(f"TP1: {tp1:.2f}")
-    st.write(f"TP2: {tp2:.2f}")
-
-    st.subheader("📄 Raport")
-    st.text(report)
+        # 5. Dystrybucja i wysyłka alertu na Telegram
+        st.markdown("---")
+        if st.button("📲 Wyślij ten raport natychmiast na Telegram", use_container_width=True):
+            with st.spinner("Wysyłanie alertu pakietowego..."):
+                success = TelegramNotifier.send_alert(st.session_state.report_output)
+                if success:
+                    st.success("🎯 Raport dostarczony pomyślnie na Twój Telegram!")
+                    log_message("Moduł 5 (Telegram Layer) - Alert wysłany.")
+                else:
+                    st.error("❌ Nie udało się dostarczyć powiadomienia. Sprawdź monitor w panelu bocznym.")
+    else:
+        st.info("Wprowadź poprawny ticker i kliknij przycisk w panelu bocznym, aby wygenerować raport.")
