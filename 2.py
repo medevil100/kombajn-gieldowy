@@ -146,13 +146,13 @@ def mini_chart(df: pd.DataFrame) -> str:
         return ""
 
 # =====================================================================
-# RSI
+# RSI — POPRAWNA WERSJA (ZWRACA SERIES)
 # =====================================================================
 def oblicz_rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
     delta = df["Close"].diff()
 
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
 
     avg_gain = gain.rolling(period).mean()
     avg_loss = loss.rolling(period).mean()
