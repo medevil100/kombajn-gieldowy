@@ -61,7 +61,7 @@ scan_minutes = st.slider(
 # =====================================================================
 # TELEGRAM
 # =====================================================================
-def send_telegram_message(msg):
+def send_telegram_message(msg: str):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
@@ -71,7 +71,7 @@ def send_telegram_message(msg):
 # =====================================================================
 # TAVILY NEWS + AI SENTIMENT
 # =====================================================================
-def tavily_news(query):
+def tavily_news(query: str):
     try:
         url = "https://api.tavily.com/search"
         payload = {
@@ -85,7 +85,7 @@ def tavily_news(query):
     except:
         return []
 
-def ai_news_sentiment(ticker, news):
+def ai_news_sentiment(ticker: str, news: list):
     if not news:
         return "neutralny"
 
@@ -111,7 +111,7 @@ def ai_news_sentiment(ticker, news):
 # =====================================================================
 # MINI‑ŚWIECA + WOLUMEN (120×80 px)
 # =====================================================================
-def mini_chart(df):
+def mini_chart(df: pd.DataFrame) -> str:
     try:
         df = df.tail(20)
         fig, (ax1, ax2) = plt.subplots(
@@ -148,17 +148,24 @@ def mini_chart(df):
 # =====================================================================
 # RSI
 # =====================================================================
-def oblicz_rsi(df, period=14):
+def oblicz_rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
     delta = df["Close"].diff()
-    gain = delta.where(delta > 0, 0).rolling(period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
+
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+
+    return rsi
 
 # =====================================================================
 # FORMACJE
 # =====================================================================
-def wykryj_formacje(df):
+def wykryj_formacje(df: pd.DataFrame) -> str:
     if len(df) < 3:
         return "Brak"
     o1, h1, l1, c1 = df.iloc[-1][["Open","High","Low","Close"]]
@@ -234,7 +241,7 @@ def rekomendacja_pro(trend, score, sentiment, rsi, pred):
 # =====================================================================
 # ANALIZA SPÓŁKI
 # =====================================================================
-def analizuj_jedna_spolke(ticker, now):
+def analizuj_jedna_spolke(ticker: str, now: str) -> dict:
     df = yf.download(ticker, period="3mo", interval="1d", progress=False)
 
     if df.empty:
@@ -245,12 +252,12 @@ def analizuj_jedna_spolke(ticker, now):
         return {
             "Ticker": ticker,
             "Cena": 0,
-            "RSI": 0,
+            "RSI": 50,
             "Zmiana %": 0,
-            "Wolumen x": 0,
+            "Wolumen x": 1,
             "Trend": "➡️ SIDEWAYS",
             "Ryzyko": "🟡 MEDIUM",
-            "Scoring": 0,
+            "Scoring": 50,
             "Sentiment": "neutralny",
             "Rekomendacja": "🟡 TRZYMAJ",
             "Chart": ""
@@ -259,7 +266,9 @@ def analizuj_jedna_spolke(ticker, now):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.droplevel(1)
 
-    df["RSI"] = oblicz_rsi(df)
+    rsi_series = oblicz_rsi(df).fillna(50)
+    df["RSI"] = rsi_series
+
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
@@ -394,7 +403,7 @@ if quick:
     if df_q.empty:
         st.error("Brak danych.")
     else:
-        df_q["RSI"] = oblicz_rsi(df_q)
+        df_q["RSI"] = oblicz_rsi(df_q).fillna(50)
         last = df_q.iloc[-1]
         st.write(f"**Cena:** {last['Close']:.2f}")
         st.write(f"**RSI:** {last['RSI']:.1f}")
