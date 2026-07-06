@@ -8,12 +8,8 @@ import matplotlib.pyplot as plt
 import base64
 from io import BytesIO
 
-# ==========================
-# CONFIG (TOKEN / CHAT_ID)
-# ==========================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "WSTAW_SWÓJ_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "WSTAW_SWÓJ_CHAT_ID")
-
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ==========================
 # 1. DATA LAYER
@@ -27,29 +23,22 @@ def normalize_ohlcv(df_raw: pd.DataFrame) -> pd.DataFrame:
         ]
 
     cols = [str(c) for c in df_raw.columns]
-    cleaned = []
-    for col in cols:
-        # usuwanie prefiksów typu "STX.WA Close", "APS.WA Adj Close"
-        if " " in col:
-            col = col.split(" ")[-1]
-        if "." in col:
-            col = col.split(".")[-1]
-        cleaned.append(col)
-    df_raw.columns = cleaned
 
-    lower_map = {c.lower(): c for c in df_raw.columns}
+    # mapujemy po fragmencie nazwy, nie po całym stringu
+    lower_cols = {c.lower(): c for c in cols}
 
-    def pick(*candidates):
-        for cand in candidates:
-            if cand in lower_map:
-                return lower_map[cand]
+    def find_col(*candidates):
+        for lc, orig in lower_cols.items():
+            for cand in candidates:
+                if cand in lc:
+                    return orig
         return None
 
-    col_open = pick("open")
-    col_high = pick("high")
-    col_low = pick("low")
-    col_close = pick("close", "adj close", "close*", "last", "close price")
-    col_volume = pick("volume", "vol", "volume*", "total volume")
+    col_open = find_col("open")
+    col_high = find_col("high")
+    col_low = find_col("low")
+    col_close = find_col("close", "adj close", "last", "close*")
+    col_volume = find_col("volume", "vol", "total volume")
 
     needed = [col_open, col_high, col_low, col_close, col_volume]
     if any(c is None for c in needed):
@@ -58,9 +47,9 @@ def normalize_ohlcv(df_raw: pd.DataFrame) -> pd.DataFrame:
     df = df_raw[[col_open, col_high, col_low, col_close, col_volume]].copy()
     df.columns = ["Open", "High", "Low", "Close", "Volume"]
 
-    # filtracja anomalii płynności (zerowy wolumen)
+    # wyrzucamy zerowy wolumen
     df = df[df["Volume"] > 0]
-    # wygładzanie wolumenu
+    # wygładzamy wolumen
     df["Volume"] = df["Volume"].rolling(3).mean().fillna(df["Volume"])
 
     return df
@@ -85,53 +74,43 @@ def fetch_price_data(ticker: str, period: str = "3mo") -> pd.DataFrame:
 
     return df
 
-
 # ==========================
 # 2. TECHNICAL ENGINE
 # ==========================
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
-    # MA
     out["MA10"] = out["Close"].rolling(10).mean()
     out["MA30"] = out["Close"].rolling(30).mean()
 
-    # RSI
     delta = out["Close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     rs = gain.rolling(14).mean() / loss.rolling(14).mean()
     out["RSI"] = 100 - (100 / (1 + rs))
 
-    # MACD
     ema12 = out["Close"].ewm(span=12).mean()
     ema26 = out["Close"].ewm(span=26).mean()
     out["MACD"] = ema12 - ema26
     out["MACD_signal"] = out["MACD"].ewm(span=9).mean()
 
-    # ATR
     out["ATR"] = (out["High"] - out["Low"]).rolling(14).mean()
-
-    # prosty detektor trendu
     out["TREND"] = np.where(out["MA10"] > out["MA30"], "UP", "DOWN")
 
     return out
-
 
 # ==========================
 # 3. FUNDAMENTAL & NEWS LAYER (SZKIELET)
 # ==========================
 def get_fundamentals_and_news(ticker: str) -> dict:
-    # SZKIELET – brak realnego API, tylko placeholdery
     return {
         "price": None,
         "market_cap": None,
         "pe": None,
         "sector": None,
         "industry": None,
-        "events": []  # tu kiedyś wejdą fakty z Tavily / ESPI
+        "events": []
     }
-
 
 # ==========================
 # 4. SCORING & AI ENGINE
@@ -145,7 +124,6 @@ def score_technical(df: pd.DataFrame) -> float:
     trend = last["TREND"]
 
     score = 0
-
     if rsi < 30:
         score += 25
     if macd > 0:
@@ -159,7 +137,6 @@ def score_technical(df: pd.DataFrame) -> float:
 
 
 def score_fundamental(facts: dict) -> float:
-    # szkielet – stała wartość, później podmienisz na realny model
     return 50.0
 
 
@@ -212,28 +189,22 @@ TP1: {last['Close']*1.08:.2f} | TP2: {last['Close']*1.16:.2f}
 To nie jest rekomendacja inwestycyjna. Model ma charakter edukacyjny.
 """
 
-
 # ==========================
-# 5. EXECUTION & NOTIFICATION LAYER
+# 5. TELEGRAM
 # ==========================
 def send_telegram_message(text: str) -> None:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return  # brak konfiguracji – ciche pominięcie
+        return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text
-    }
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
     try:
         requests.post(url, data=payload, timeout=5)
     except Exception:
-        # ciche logowanie – tu możesz kiedyś dodać plik logów / retry
         pass
 
-
 # ==========================
-# 6. UI LAYER (STREAMLIT)
+# 6. UI LAYER
 # ==========================
 def init_session_state():
     defaults = {
@@ -276,9 +247,8 @@ def mini_candles(df: pd.DataFrame) -> str:
 
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
-
 # ==========================
-# MAIN (2.py)
+# MAIN
 # ==========================
 st.set_page_config(page_title="2.py", page_icon="📈", layout="wide")
 st.title("2.py – Okazje + Wejścia")
@@ -310,7 +280,6 @@ if st.button("Analizuj"):
         st.session_state.last_facts = facts
         st.session_state.last_report = report
 
-        # ALERT NA TELEGRAM – tylko gdy jest OKAZJA
         if classify(fused) == "OKAZJA":
             send_telegram_message(f"[2.py] OKAZJA na {ticker}\n\n{report}")
 
