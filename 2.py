@@ -357,26 +357,50 @@ st.write("---")
 st.subheader("📊 KOMBAJN — pełna lista przeskanowanych spółek")
 
 if st.session_state.scanned_details:
+
     df = pd.DataFrame(st.session_state.scanned_details)
 
-    def kolor_rek(val):
-        if "🟢" in val: return "background-color: #00ff00; font-weight: bold;"
-        if "🔴" in val: return "background-color: #ff0000; font-weight: bold;"
-        if "🟡" in val: return "background-color: #ffff00; font-weight: bold;"
-        return ""
+    html = """
+    <table style="width:100%; border-collapse: collapse;">
+        <tr style="background-color:#222; color:white;">
+            <th>Ticker</th>
+            <th>Cena</th>
+            <th>Waluta</th>
+            <th>RSI</th>
+            <th>Zmiana %</th>
+            <th>Wolumen x</th>
+            <th>Formacja</th>
+            <th>Predykcja AI</th>
+            <th>Rekomendacja</th>
+        </tr>
+    """
 
-    df_styled = df.style.applymap(kolor_rek, subset=["Rekomendacja"])
+    for _, row in df.iterrows():
 
-    st.dataframe(
-        df_styled[
-            [
-                "Ticker", "Cena", "Waluta", "RSI",
-                "Zmiana %", "Wolumen x",
-                "Formacja", "Predykcja AI", "Rekomendacja"
-            ]
-        ],
-        use_container_width=True
-    )
+        if "🟢" in row["Rekomendacja"]:
+            kolor = "#00ff00"
+        elif "🔴" in row["Rekomendacja"]:
+            kolor = "#ff0000"
+        else:
+            kolor = "#ffff00"
+
+        html += f"""
+        <tr style="background-color:#111; color:white;">
+            <td>{row['Ticker']}</td>
+            <td>{row['Cena']:.2f}</td>
+            <td>{row['Waluta']}</td>
+            <td>{row['RSI']:.1f}</td>
+            <td>{row['Zmiana %']:.2f}</td>
+            <td>{row['Wolumen x']:.2f}</td>
+            <td>{row['Formacja']}</td>
+            <td>{row['Predykcja AI']}</td>
+            <td style="background-color:{kolor}; font-weight:bold;">{row['Rekomendacja']}</td>
+        </tr>
+        """
+
+    html += "</table>"
+
+    st.markdown(html, unsafe_allow_html=True)
 else:
     st.info("Brak danych — skaner jeszcze nie wykonał cyklu.")
 
