@@ -339,18 +339,18 @@ status = st.empty()
 bar = st.empty()
 
 col1, col2 = st.columns(2)
+
 with col1:
     if st.button("🚀 SKANUJ TERAZ"):
         job_skanera(status, bar)
-        if st.button("🚀 SKANUJ TERAZ"):
-    job_skanera(status, bar)
-    st.rerun()
+        st.rerun()
 
 with col2:
     st.write(f"⏲️ Auto-skan co {scan_minutes} min")
 
 # uruchom scheduler przy każdym odświeżeniu
 run_scheduler()
+
 
 # =====================================================================
 # TABELA PRO — MINI‑ŚWIECE + KOLOROWANIE
