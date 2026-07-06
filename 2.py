@@ -13,7 +13,7 @@ import base64
 from io import BytesIO
 
 # =====================================================================
-# KONFIG STREAMLIT
+# STREAMLIT CONFIG
 # =====================================================================
 st.set_page_config(page_title="KOMBAJN PRO", page_icon="📈", layout="wide")
 st.title("📈 KOMBAJN PRO — AI + Tavily + Mini‑Świece + Telegram")
@@ -21,29 +21,22 @@ st.title("📈 KOMBAJN PRO — AI + Tavily + Mini‑Świece + Telegram")
 # =====================================================================
 # SESSION STATE
 # =====================================================================
-if "alerts_history" not in st.session_state:
-    st.session_state.alerts_history = []
-if "last_scan_time" not in st.session_state:
-    st.session_state.last_scan_time = "Nigdy"
-if "scanned_details" not in st.session_state:
-    st.session_state.scanned_details = []
+for key in ["alerts_history", "last_scan_time", "scanned_details"]:
+    if key not in st.session_state:
+        st.session_state[key] = [] if key == "scanned_details" else ""
 
 # =====================================================================
 # SECRETS
 # =====================================================================
-try:
-    TELEGRAM_TOKEN = st.secrets["TELEGRAM_TOKEN"]
-    TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
-    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-    TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
-except Exception as e:
-    st.error(f"❌ Brak kluczy w secrets.toml: {e}")
-    st.stop()
+TELEGRAM_TOKEN = st.secrets["TELEGRAM_TOKEN"]
+TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =====================================================================
-# LISTA SPÓŁEK + CZAS SKANU
+# INPUT TICKERS + SCAN TIME
 # =====================================================================
 user_input = st.text_area(
     "Wklej swoje spółki (np. STX.WA, AAPL, NVDA):",
@@ -65,18 +58,17 @@ scan_minutes = st.slider(
 # =====================================================================
 # TELEGRAM
 # =====================================================================
-def send_telegram_message(msg: str):
+def send_telegram_message(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
-        requests.post(url, json=payload, timeout=5)
-    except Exception:
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
+    except:
         pass
 
 # =====================================================================
 # TAVILY NEWS + AI SENTIMENT
 # =====================================================================
-def tavily_news(query: str):
+def tavily_news(query):
     try:
         url = "https://api.tavily.com/search"
         payload = {
@@ -87,10 +79,10 @@ def tavily_news(query: str):
         }
         r = requests.post(url, json=payload, timeout=10).json()
         return r.get("results", [])
-    except Exception:
+    except:
         return []
 
-def ai_news_sentiment(ticker: str, news: list):
+def ai_news_sentiment(ticker, news):
     if not news:
         return "neutralny"
 
@@ -110,13 +102,13 @@ def ai_news_sentiment(ticker: str, news: list):
             temperature=0
         )
         return r.choices[0].message.content.strip()
-    except Exception:
+    except:
         return "neutralny"
 
 # =====================================================================
-# MINI‑ŚWIECA + WOLUMEN (120x80 px)
+# MINI‑ŚWIECA + WOLUMEN (120×80 px)
 # =====================================================================
-def mini_chart(df: pd.DataFrame) -> str:
+def mini_chart(df):
     try:
         df = df.tail(20)
         fig, (ax1, ax2) = plt.subplots(
@@ -147,12 +139,12 @@ def mini_chart(df: pd.DataFrame) -> str:
         plt.close(fig)
 
         return base64.b64encode(buf.getvalue()).decode("utf-8")
-    except Exception:
+    except:
         return ""
 # =====================================================================
 # RSI
 # =====================================================================
-def oblicz_rsi(df: pd.DataFrame, period: int = 14):
+def oblicz_rsi(df, period=14):
     delta = df["Close"].diff()
     gain = delta.where(delta > 0, 0).rolling(period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
@@ -162,7 +154,7 @@ def oblicz_rsi(df: pd.DataFrame, period: int = 14):
 # =====================================================================
 # FORMACJE
 # =====================================================================
-def wykryj_formacje(df: pd.DataFrame) -> str:
+def wykryj_formacje(df):
     if len(df) < 3:
         return "Brak"
     o1, h1, l1, c1 = df.iloc[-1][["Open","High","Low","Close"]]
@@ -194,7 +186,7 @@ def predykcja_ai(ticker, zmiana, rsi, wolumen_x):
         if "DOWN" in out:
             return "📉 DOWN"
         return "➡️ SIDEWAYS"
-    except Exception:
+    except:
         return "➡️ SIDEWAYS"
 
 def trend_ai(zmiana, rsi):
@@ -238,70 +230,73 @@ def rekomendacja_pro(trend, score, sentiment, rsi, pred):
 # =====================================================================
 # ANALIZA SPÓŁKI
 # =====================================================================
-def analizuj_jedna_spolke(ticker: str, now: str):
-    try:
+def analizuj_jedna_spolke(ticker, now):
+    df = yf.download(ticker, period="3mo", interval="1d", progress=False)
+
+    if df.empty:
+        time.sleep(1)
         df = yf.download(ticker, period="3mo", interval="1d", progress=False)
-        if df.empty:
-            return None
 
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
-
-        df["RSI"] = oblicz_rsi(df)
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-
-        cena = float(last["Close"])
-        cena_prev = float(prev["Close"])
-        rsi = float(last["RSI"])
-        zmiana = ((cena - cena_prev) / cena_prev) * 100
-        wolumen_x = float(last["Volume"]) / float(df["Volume"].mean())
-
-        formacja = wykryj_formacje(df)
-        pred = predykcja_ai(ticker, zmiana, rsi, wolumen_x)
-        trend = trend_ai(zmiana, rsi)
-        ryzyko = ryzyko_ai(rsi, wolumen_x)
-        score = scoring_ai(zmiana, rsi, wolumen_x, pred)
-
-        news = tavily_news(ticker)
-        sentiment = ai_news_sentiment(ticker, news)
-
-        rekom = rekomendacja_pro(trend, score, sentiment, rsi, pred)
-        chart_b64 = mini_chart(df)
-
-        info = {
+    if df.empty:
+        return {
             "Ticker": ticker,
-            "Cena": cena,
-            "RSI": rsi,
-            "Zmiana %": zmiana,
-            "Wolumen x": wolumen_x,
-            "Trend": trend,
-            "Ryzyko": ryzyko,
-            "Scoring": score,
-            "Sentiment": sentiment,
-            "Rekomendacja": rekom,
-            "Chart": chart_b64,
+            "Cena": 0,
+            "RSI": 0,
+            "Zmiana %": 0,
+            "Wolumen x": 0,
+            "Trend": "➡️ SIDEWAYS",
+            "Ryzyko": "🟡 MEDIUM",
+            "Scoring": 0,
+            "Sentiment": "neutralny",
+            "Rekomendacja": "🟡 TRZYMAJ",
+            "Chart": ""
         }
 
-        if rekom == "🟢 KUP":
-            send_telegram_message(f"🟢 KUP: {ticker} ({cena:.2f})")
-        elif rekom == "🔴 SPRZEDAJ":
-            send_telegram_message(f"🔴 SPRZEDAJ: {ticker} ({cena:.2f})")
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(1)
 
-        return info
+    df["RSI"] = oblicz_rsi(df)
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
 
-    except Exception:
-        return None
+    cena = float(last["Close"])
+    cena_prev = float(prev["Close"])
+    rsi = float(last["RSI"])
+    zmiana = ((cena - cena_prev) / cena_prev) * 100
+    wolumen_x = float(last["Volume"]) / float(df["Volume"].mean())
+
+    formacja = wykryj_formacje(df)
+    pred = predykcja_ai(ticker, zmiana, rsi, wolumen_x)
+    trend = trend_ai(zmiana, rsi)
+    ryzyko = ryzyko_ai(rsi, wolumen_x)
+    score = scoring_ai(zmiana, rsi, wolumen_x, pred)
+
+    news = tavily_news(ticker)
+    sentiment = ai_news_sentiment(ticker, news)
+
+    rekom = rekomendacja_pro(trend, score, sentiment, rsi, pred)
+    chart_b64 = mini_chart(df)
+
+    return {
+        "Ticker": ticker,
+        "Cena": cena,
+        "RSI": rsi,
+        "Zmiana %": zmiana,
+        "Wolumen x": wolumen_x,
+        "Trend": trend,
+        "Ryzyko": ryzyko,
+        "Scoring": score,
+        "Sentiment": sentiment,
+        "Rekomendacja": rekom,
+        "Chart": chart_b64
+    }
 
 # =====================================================================
 # SKANER
 # =====================================================================
 def job_skanera(status=None, bar=None):
     st.session_state.scanned_details = []
-
     total = len(MARKET_DATABASE)
-    if total == 0:
-        return
 
     with ThreadPoolExecutor(max_workers=15) as ex:
         tasks = {ex.submit(analizuj_jedna_spolke, t, datetime.now().isoformat()): t for t in MARKET_DATABASE}
@@ -315,23 +310,19 @@ def job_skanera(status=None, bar=None):
                 bar.progress(done/total)
 
             res = fut.result()
-            if res:
-                st.session_state.scanned_details.append(res)
+            st.session_state.scanned_details.append(res)
 
     st.session_state.last_scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     send_telegram_message(f"🤖 Skan zakończony. Kolejny za ~{scan_minutes} min.")
 
 # =====================================================================
-# SCHEDULER (wywoływany w UI)
+# SCHEDULER
 # =====================================================================
 schedule.clear()
 schedule.every(scan_minutes).minutes.do(job_skanera)
 
 def run_scheduler():
     schedule.run_pending()
-# =====================================================================
-# UI — STATUS + RĘCZNY SKAN
-# =====================================================================
 # =====================================================================
 # UI — STATUS + RĘCZNY SKAN
 # =====================================================================
@@ -351,61 +342,7 @@ with col1:
 with col2:
     st.write(f"⏲️ Auto-skan co {scan_minutes} min")
 
-# scheduler działa przy każdym odświeżeniu
 run_scheduler()
-
-# =====================================================================
-# TABELA PRO — MINI‑ŚWIECE + KOLOROWANIE + REKOMENDACJE
-# =====================================================================
-st.write("---")
-st.subheader("📊 KOMBAJN PRO — pełna analiza AI")
-
-if st.session_state.scanned_details:
-
-    df = pd.DataFrame(st.session_state.scanned_details)
-
-    # Kolorowanie wierszy
-    def kolor(row):
-        if "🟢" in row["Rekomendacja"]:
-            return ["background-color: #003300; color: #00ff00"] * len(row)
-        if "🔴" in row["Rekomendacja"]:
-            return ["background-color: #330000; color: #ff4444"] * len(row)
-        return ["background-color: #333300; color: #ffff66"] * len(row)
-
-    # Mini-wykres jako IMG
-    df["MiniWykres"] = df["Chart"].apply(
-        lambda x: f'<img src="data:image/png;base64,{x}" width="120" height="80"/>'
-    )
-
-    # Stylowanie
-    styled = df.style.apply(kolor, axis=1)
-
-    # Render HTML
-    html = styled.to_html(escape=False)
-    st.markdown(html, unsafe_allow_html=True)
-
-else:
-    st.info("Brak danych — skaner jeszcze nie wykonał cyklu.")
-
-# =====================================================================
-# PODGLĄD TICKERA
-# =====================================================================
-st.write("---")
-st.subheader("🔎 Szybki podgląd tickera")
-
-quick = st.text_input("Ticker:")
-
-if quick:
-    df_q = yf.download(quick.strip().upper(), period="3mo", interval="1d", progress=False)
-    if df_q.empty:
-        st.error("Brak danych.")
-    else:
-        df_q["RSI"] = oblicz_rsi(df_q)
-        last = df_q.iloc[-1]
-        st.write(f"**Cena:** {last['Close']:.2f}")
-        st.write(f"**RSI:** {last['RSI']:.1f}")
-
-
 
 # =====================================================================
 # TABELA PRO — MINI‑ŚWIECE + KOLOROWANIE
@@ -429,8 +366,8 @@ if st.session_state.scanned_details:
     )
 
     styled = df.style.apply(kolor, axis=1)
-
     html = styled.to_html(escape=False)
+
     st.markdown(html, unsafe_allow_html=True)
 
 else:
