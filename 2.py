@@ -1,5 +1,4 @@
 import time
-import schedule
 import requests
 import yfinance as yf
 import pandas as pd
@@ -39,7 +38,7 @@ TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =====================================================================
-# INPUT TICKERS + SCAN TIME
+# INPUT TICKERS
 # =====================================================================
 user_input = st.text_area(
     "Wklej swoje spółki (np. STX.WA, AAPL, NVDA):",
@@ -50,14 +49,6 @@ user_input = st.text_area(
 
 MARKET_DATABASE = [t.strip().upper() for t in user_input.split(",") if t.strip()]
 
-scan_minutes = st.slider(
-    "⏱️ Czas między skanami (minuty)",
-    min_value=15,
-    max_value=120,
-    value=60,
-    step=15
-)
-
 # =====================================================================
 # TELEGRAM
 # =====================================================================
@@ -65,8 +56,8 @@ def send_telegram_message(msg: str):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
-    except:
-        pass
+    except Exception as e:
+        print(f"Telegram error: {e}")
 
 # =====================================================================
 # TAVILY NEWS + AI SENTIMENT
@@ -82,7 +73,8 @@ def tavily_news(query: str):
         }
         r = requests.post(url, json=payload, timeout=10).json()
         return r.get("results", [])
-    except:
+    except Exception as e:
+        print(f"Tavily error: {e}")
         return []
 
 def ai_news_sentiment(ticker: str, news: list):
@@ -105,7 +97,8 @@ def ai_news_sentiment(ticker: str, news: list):
             temperature=0
         )
         return r.choices[0].message.content.strip()
-    except:
+    except Exception as e:
+        print(f"AI sentiment error: {e}")
         return "neutralny"
 
 # =====================================================================
@@ -139,14 +132,16 @@ def mini_chart(df: pd.DataFrame) -> str:
         plt.tight_layout()
         buf = BytesIO()
         fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
+        fig.clf()
         plt.close(fig)
 
         return base64.b64encode(buf.getvalue()).decode("utf-8")
-    except:
+    except Exception as e:
+        print(f"Mini chart error: {e}")
         return ""
 
 # =====================================================================
-# RSI — POPRAWNA WERSJA (ZWRACA SERIES)
+# RSI — SERIES, BEZ DF["RSI"]
 # =====================================================================
 def oblicz_rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
     delta = df["Close"].diff()
@@ -160,6 +155,7 @@ def oblicz_rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
 
+    rsi = rsi.replace([float("inf"), float("-inf")], 50).fillna(50)
     return rsi
 
 # =====================================================================
@@ -197,7 +193,8 @@ def predykcja_ai(ticker, zmiana, rsi, wolumen_x):
         if "DOWN" in out:
             return "📉 DOWN"
         return "➡️ SIDEWAYS"
-    except:
+    except Exception as e:
+        print(f"AI prediction error dla {ticker}: {e}")
         return "➡️ SIDEWAYS"
 
 def trend_ai(zmiana, rsi):
@@ -239,22 +236,79 @@ def rekomendacja_pro(trend, score, sentiment, rsi, pred):
     return "🟡 TRZYMAJ"
 
 # =====================================================================
-# ANALIZA SPÓŁKI
+# ANALIZA SPÓŁKI — BEZ df["RSI"]
 # =====================================================================
 def analizuj_jedna_spolke(ticker: str, now: str) -> dict:
-    df = yf.download(ticker, period="3mo", interval="1d", progress=False)
+    try:
+        df = yf.download(
+            ticker,
+            period="3mo",
+            interval="1d",
+            progress=False,
+            group_by="ticker"
+        )
 
-    if df.empty:
-        time.sleep(1)
-        df = yf.download(ticker, period="3mo", interval="1d", progress=False)
+        if df.empty:
+            time.sleep(1)
+            df = yf.download(
+                ticker,
+                period="3mo",
+                interval="1d",
+                progress=False,
+                group_by="ticker"
+            )
 
-    if df.empty:
+        if df.empty:
+            raise ValueError("Brak danych z yfinance")
+
+        df.columns = [str(c).capitalize() for c in df.columns]
+
+        rsi_series = oblicz_rsi(df)
+        rsi = float(rsi_series.iloc[-1])
+
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        cena = float(last["Close"])
+        cena_prev = float(prev["Close"])
+        zmiana = ((cena - cena_prev) / cena_prev) * 100
+
+        srednia_vol = df["Volume"].mean()
+        wolumen_x = float(last["Volume"]) / srednia_vol if srednia_vol > 0 else 1.0
+
+        formacja = wykryj_formacje(df)
+        pred = predykcja_ai(ticker, zmiana, rsi, wolumen_x)
+        trend = trend_ai(zmiana, rsi)
+        ryzyko = ryzyko_ai(rsi, wolumen_x)
+        score = scoring_ai(zmiana, rsi, wolumen_x, pred)
+
+        news = tavily_news(ticker)
+        sentiment = ai_news_sentiment(ticker, news)
+
+        rekom = rekomendacja_pro(trend, score, sentiment, rsi, pred)
+        chart_b64 = mini_chart(df)
+
         return {
             "Ticker": ticker,
-            "Cena": 0,
-            "RSI": 50,
-            "Zmiana %": 0,
-            "Wolumen x": 1,
+            "Cena": cena,
+            "RSI": rsi,
+            "Zmiana %": zmiana,
+            "Wolumen x": wolumen_x,
+            "Trend": trend,
+            "Ryzyko": ryzyko,
+            "Scoring": score,
+            "Sentiment": sentiment,
+            "Rekomendacja": rekom,
+            "Chart": chart_b64
+        }
+    except Exception as e:
+        print(f"Błąd analizy dla {ticker}: {e}")
+        return {
+            "Ticker": ticker,
+            "Cena": 0.0,
+            "RSI": 50.0,
+            "Zmiana %": 0.0,
+            "Wolumen x": 1.0,
             "Trend": "➡️ SIDEWAYS",
             "Ryzyko": "🟡 MEDIUM",
             "Scoring": 50,
@@ -263,59 +317,21 @@ def analizuj_jedna_spolke(ticker: str, now: str) -> dict:
             "Chart": ""
         }
 
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.droplevel(1)
-
-    rsi_series = oblicz_rsi(df).fillna(50)
-    df["RSI"] = rsi_series
-
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    cena = float(last["Close"])
-    cena_prev = float(prev["Close"])
-    rsi = float(last["RSI"])
-    zmiana = ((cena - cena_prev) / cena_prev) * 100
-    wolumen_x = float(last["Volume"]) / float(df["Volume"].mean())
-
-    formacja = wykryj_formacje(df)
-    pred = predykcja_ai(ticker, zmiana, rsi, wolumen_x)
-    trend = trend_ai(zmiana, rsi)
-    ryzyko = ryzyko_ai(rsi, wolumen_x)
-    score = scoring_ai(zmiana, rsi, wolumen_x, pred)
-
-    news = tavily_news(ticker)
-    sentiment = ai_news_sentiment(ticker, news)
-
-    rekom = rekomendacja_pro(trend, score, sentiment, rsi, pred)
-    chart_b64 = mini_chart(df)
-
-    return {
-        "Ticker": ticker,
-        "Cena": cena,
-        "RSI": rsi,
-        "Zmiana %": zmiana,
-        "Wolumen x": wolumen_x,
-        "Trend": trend,
-        "Ryzyko": ryzyko,
-        "Scoring": score,
-        "Sentiment": sentiment,
-        "Rekomendacja": rekom,
-        "Chart": chart_b64
-    }
-
 # =====================================================================
-# SKANER
+# SKANER — WĄTKI ZAPISUJĄ LOKALNIE, NIE DO session_state
 # =====================================================================
 def job_skanera(status=None, bar=None):
-    st.session_state.scanned_details = []
     total = len(MARKET_DATABASE)
-
     if total == 0:
         return
 
+    tymczasowa_lista = []
+
     with ThreadPoolExecutor(max_workers=15) as ex:
-        tasks = {ex.submit(analizuj_jedna_spolke, t, datetime.now().isoformat()): t for t in MARKET_DATABASE}
+        tasks = {
+            ex.submit(analizuj_jedna_spolke, t, datetime.now().isoformat()): t
+            for t in MARKET_DATABASE
+        }
         done = 0
         for fut in as_completed(tasks):
             done += 1
@@ -323,22 +339,14 @@ def job_skanera(status=None, bar=None):
             if status:
                 status.write(f"🔍 {done}/{total} — {ticker}")
             if bar:
-                bar.progress(done/total)
+                bar.progress(done / total)
 
             res = fut.result()
-            st.session_state.scanned_details.append(res)
+            tymczasowa_lista.append(res)
 
+    st.session_state.scanned_details = tymczasowa_lista
     st.session_state.last_scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    send_telegram_message(f"🤖 Skan zakończony. Kolejny za ~{scan_minutes} min.")
-
-# =====================================================================
-# SCHEDULER
-# =====================================================================
-schedule.clear()
-schedule.every(scan_minutes).minutes.do(job_skanera)
-
-def run_scheduler():
-    schedule.run_pending()
+    send_telegram_message(f"🤖 Skan zakończony dla {total} spółek.")
 
 # =====================================================================
 # UI — STATUS + RĘCZNY SKAN
@@ -357,9 +365,7 @@ with col1:
         st.rerun()
 
 with col2:
-    st.write(f"⏲️ Auto-skan co {scan_minutes} min")
-
-run_scheduler()
+    st.write("⏲️ Ten kombajn działa w trybie ręcznym — kliknij, gdy chcesz nowy skan.")
 
 # =====================================================================
 # TABELA PRO — MINI‑ŚWIECE + KOLOROWANIE
@@ -369,26 +375,27 @@ st.subheader("📊 KOMBAJN PRO — pełna analiza AI")
 
 if st.session_state.scanned_details:
 
-    df = pd.DataFrame(st.session_state.scanned_details)
+    df_wyswietl = pd.DataFrame(st.session_state.scanned_details)
 
     def kolor(row):
-        if "🟢" in row["Rekomendacja"]:
-            return ["background-color: #003300; color: #00ff00"] * len(row)
-        if "🔴" in row["Rekomendacja"]:
-            return ["background-color: #330000; color: #ff4444"] * len(row)
-        return ["background-color: #333300; color: #ffff66"] * len(row)
+        if "🟢" in str(row["Rekomendacja"]):
+            return ["background-color: #002200; color: #00ff00"] * len(row)
+        if "🔴" in str(row["Rekomendacja"]):
+            return ["background-color: #220000; color: #ff4444"] * len(row)
+        return ["background-color: #222200; color: #ffff66"] * len(row)
 
-    df["MiniWykres"] = df["Chart"].apply(
-        lambda x: f'<img src="data:image/png;base64,{x}" width="120" height="80"/>'
+    df_wyswietl["MiniWykres"] = df_wyswietl["Chart"].apply(
+        lambda x: f'<img src="data:image/png;base64,{x}" width="120" height="80"/>' if x else "Brak wykresu"
     )
 
-    styled = df.style.apply(kolor, axis=1)
-    html = styled.to_html(escape=False)
+    df_render = df_wyswietl.drop(columns=["Chart"])
 
+    styled = df_render.style.apply(kolor, axis=1)
+    html = styled.to_html(escape=False)
     st.markdown(html, unsafe_allow_html=True)
 
 else:
-    st.info("Brak danych — skaner jeszcze nie wykonał cyklu.")
+    st.info("Brak danych — kliknij 'SKANUJ TERAZ', żeby uruchomić pierwszy skan.")
 
 # =====================================================================
 # PODGLĄD TICKERA
@@ -399,11 +406,18 @@ st.subheader("🔎 Szybki podgląd tickera")
 quick = st.text_input("Ticker:")
 
 if quick:
-    df_q = yf.download(quick.strip().upper(), period="3mo", interval="1d", progress=False)
+    df_q = yf.download(
+        quick.strip().upper(),
+        period="3mo",
+        interval="1d",
+        progress=False,
+        group_by="ticker"
+    )
     if df_q.empty:
         st.error("Brak danych.")
     else:
-        df_q["RSI"] = oblicz_rsi(df_q).fillna(50)
+        df_q.columns = [str(c).capitalize() for c in df_q.columns]
+        rsi_q = oblicz_rsi(df_q)
         last = df_q.iloc[-1]
         st.write(f"**Cena:** {last['Close']:.2f}")
-        st.write(f"**RSI:** {last['RSI']:.1f}")
+        st.write(f"**RSI:** {float(rsi_q.iloc[-1]):.1f}")
