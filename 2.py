@@ -55,7 +55,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 st.subheader("📝 Zarządzanie Twoją Listą Obserwacyjną")
 
 domyslna_lista = (
-    "APS.WA, STX.WA, AITON.WA, CALDWELL.WA, NOVAWIS.WA, POLTRONIC.WA"
+    "APS.WA, STX.WA,"
 )
 
 user_input = st.text_area(
