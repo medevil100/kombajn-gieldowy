@@ -13,9 +13,9 @@ st.set_page_config(page_title="GPW AI Terminal", layout="wide")
 # =====================================================================
 # SZTYWNA KONFIGURACJA KLUCZY (BEZ PLIKÓW .env I secrets.toml)
 # =====================================================================
-TELEGRAM_TOKEN = "8777292073:AAFHNJjrX-FDY4M6qRKaCNp_bScWoik9Ejw"
-TELEGRAM_CHAT_ID = "1690495877"
-TAVILY_API_KEY = "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"
+TELEGRAM_TOKEN = 
+TELEGRAM_CHAT_ID = 
+TAVILY_API_KEY = "
 
 # 🔴 TUTAJ WKLEJ SWÓJ KLUCZ OPENAI POMIĘDZY CUDZYSŁOWY:
 OPENAI_API_KEY = "TWÓJ_KLUCZ_OPENAI_TUTAJ"
