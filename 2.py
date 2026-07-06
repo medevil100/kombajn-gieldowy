@@ -15,14 +15,14 @@ st.set_page_config(page_title="GPW AI Terminal", layout="wide")
 # =====================================================================
 TELEGRAM_TOKEN = "8777292073:AAFHNJjrX-FDY4M6qRKaCNp_bScWoik9Ejw"
 TELEGRAM_CHAT_ID = "1690495877"
-TAVILY_API_KEY = "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" # Wklejony na sztywno, stabilny klucz
+TAVILY_API_KEY = "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"
 
 # 🔴 TUTAJ WKLEJ SWÓJ KLUCZ OPENAI POMIĘDZY CUDZYSŁOWY:
 OPENAI_API_KEY = "TWÓJ_KLUCZ_OPENAI_TUTAJ"
 
 # Blokada startu w przypadku braku klucza OpenAI
 if OPENAI_API_KEY == "TWÓJ_KLUCZ_OPENAI_TUTAJ" or not OPENAI_API_KEY:
-    st.error("❌ Musisz podmienić 'TWÓJ_KLUCZ_OPENAI_TUTAJ' w linii 16 kodu na swój prawdziwy klucz API OpenAI.")
+    st.error("❌ Musisz podmienić 'TWÓJ_KLUCZ_OPENAI_TUTAJ' w linii 18 kodu na swój prawdziwy klucz API OpenAI.")
     st.stop()
 
 # REGUŁA 3: Jawna i bezwzględna inicjalizacja session_state przed użyciem
@@ -113,7 +113,6 @@ class GPWTechnicalEngine:
             "Opór (20s)": f"{resistance:.2f} PLN",
             "Trend SMA20": trend,
         }
-
 # =====================================================================
 # MODUŁ 3: FUNDAMENTAL & NEWS LAYER (Tavily Skaner)
 # =====================================================================
@@ -222,7 +221,7 @@ class TelegramNotifier:
             return False
 
 # =====================================================================
-# MODUŁ 6: UI LAYER (Streamlit Kokpit)
+# MODUŁ 6: UI LAYER (Streamlit Kokpit) - Z POPRAWIONYMI WCIĘCIAMI
 # =====================================================================
 st.title("🤖 Profesjonalny Terminal AI dla GPW")
 st.caption("Automatyczny potok danych: yfinance -> Ta -> Tavily -> OpenAI GPT-4o -> Telegram")
@@ -237,15 +236,13 @@ with st.sidebar:
 
     st.subheader("🛠️ Monitor Systemowy")
     if st.button("Wyczyść logi"):
-    # Naprawa sklejonej linii czyszczenia logów i pętli wyświetlającej
-    if st.button("Wyczyść logi"):
         st.session_state.logs = []
-    
+        
     for log in st.session_state.logs[-10:]:
         st.caption(log)
 
-# Główny interfejs wyświetlania danych z zachowaniem proporcji kolumn 2:1
-col1, col2 = st.columns([2, 1])
+# Główny interfejs wyświetlania danych (Bez wcięć bocznych)
+col1, col2 = st.columns()
 
 with col1:
     st.subheader("📋 Wynik Oceny AI & Scoringu")
@@ -253,7 +250,6 @@ with col1:
     if run_pipeline:
         try:
             with st.spinner("Przetwarzanie danych, analiza wskaźników i research sieci..."):
-                # 1. Pobranie i oczyszczenie danych
                 cleaned_df = GPWDataProvider.get_clean_data(st.session_state.ticker)
                 log_message("Moduł 1 (Data Layer) - OK.")
 
@@ -261,7 +257,6 @@ with col1:
                     st.subheader("📊 Znormalizowany Podgląd OHLCV")
                     st.dataframe(cleaned_df.tail(7), use_container_width=True)
 
-                # 2. Obliczenia techniczne
                 tech_analysis = GPWTechnicalEngine.calculate_indicators(cleaned_df)
                 log_message("Moduł 2 (Technical Engine) - OK.")
 
@@ -269,30 +264,22 @@ with col1:
                     st.subheader("📈 Wyliczone wskaźniki")
                     st.json(tech_analysis)
 
-                # 3. Skanowanie Tavily
                 market_facts = GPWNewsScanner.fetch_market_facts(st.session_state.ticker)
-                log_message("Moduł 4 (News Layer) - OK.")
+                log_message("Moduł 3 (News Layer) - OK.")
 
-                # 4. Silnik AI / Scoring
-                final_report = GPWScoringEngine.evaluate_and_score(
-                    st.session_state.ticker, tech_analysis, market_facts
-                )
+                final_report = GPWScoringEngine.evaluate_and_score(st.session_state.ticker, tech_analysis, market_facts)
                 st.session_state.report_output = final_report
                 log_message("Moduł 4 (AI Engine) - OK.")
                 
-                # Bezpieczne wymuszenie przeładowania UI po zakończeniu potoku
                 st.rerun()
 
         except Exception as error:
             st.error(f"❌ Awaria potoku: {error}")
             log_message(f"BŁĄD KRYTYCZNY: {error}")
 
-    # Wyświetlenie zapisanego raportu (wyciągnięte poza blok run_pipeline)
     if st.session_state.report_output:
         st.markdown(st.session_state.report_output)
         st.markdown("---")
-        
-        # 5. Dystrybucja i wysyłka alertu na Telegram
         if st.button("📲 Wyślij ten raport natychmiast na Telegram", use_container_width=True):
             with st.spinner("Wysyłanie..."):
                 success = TelegramNotifier.send_alert(st.session_state.report_output)
