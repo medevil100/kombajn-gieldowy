@@ -258,14 +258,17 @@ def rekomendacja_pro(trend, score, sentiment, rsi, pred):
     return "🟡 TRZYMAJ"
 
 # =====================================================================
-# ANALIZA SPÓŁKI — BEZ DEFAULTÓW, BEZ MASKOWANIA BŁĘDÓW
+# ANALIZA SPÓŁKI — KLUCZOWA POPRAWKA: PARAMETRY YFINANCE
 # =====================================================================
 def analizuj_jedna_spolke(ticker: str, now: str) -> dict:
     try:
         df = yf.download(
             ticker,
-            period="3mo",
+            period="6mo",
             interval="1d",
+            auto_adjust=True,
+            threads=False,
+            group_by="ticker",
             progress=False
         )
 
@@ -422,8 +425,11 @@ quick = st.text_input("Ticker:")
 if quick:
     df_q = yf.download(
         quick.strip(),
-        period="3mo",
+        period="6mo",
         interval="1d",
+        auto_adjust=True,
+        threads=False,
+        group_by="ticker",
         progress=False
     )
     if df_q.empty:
