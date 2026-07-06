@@ -342,7 +342,10 @@ col1, col2 = st.columns(2)
 with col1:
     if st.button("🚀 SKANUJ TERAZ"):
         job_skanera(status, bar)
-        st.experimental_rerun()
+        if st.button("🚀 SKANUJ TERAZ"):
+    job_skanera(status, bar)
+    st.rerun()
+
 with col2:
     st.write(f"⏲️ Auto-skan co {scan_minutes} min")
 
