@@ -18,3 +18,4 @@ cloudscraper
 twilio
 streamlit-autorefresh
 schedule
+matplotlib
