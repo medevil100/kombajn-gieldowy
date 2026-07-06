@@ -38,8 +38,8 @@ def pobierz_df(ticker):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    # KLUCZ: usuwamy prefiks "STX.WA " → zostaje "Open", "Close", "Volume"
-    df.columns = [col.replace(f"{ticker} ", "") for col in df.columns]
+    # KLUCZ: usuwamy wszystko przed spacją → zostaje "Open", "Close", "Volume"
+    df.columns = [col.split(" ")[-1] for col in df.columns]
 
     return df
 
