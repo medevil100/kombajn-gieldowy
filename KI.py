@@ -803,7 +803,4 @@ def render_ai_chat():
 
     if "OPENAI_API_KEY" not in st.secrets:
         st.error("❌ Brak OPENAI_API_KEY w .streamlit/secrets.toml")
-        st.info("Dodaj plik .streamlit/secrets.toml z kluczami")
-        return
-        
-
+        st.info("Dodaj plik .streamlit/secrets.toml z zawartoscia
