@@ -347,7 +347,6 @@ def generate_signal(price, ind):
     stoch_d = ind.get("stoch_d", np.nan)
     sl = ind["sl"]
     tp = ind["tp"]
-    vol = ind["vol"]
 
     if any(np.isnan(x) for x in [rsi, ma_fast, ma_slow]):
         return "HOLD", "Za mało danych do wygenerowania sygnału."
@@ -804,4 +803,7 @@ def render_ai_chat():
 
     if "OPENAI_API_KEY" not in st.secrets:
         st.error("❌ Brak OPENAI_API_KEY w .streamlit/secrets.toml")
-        st.info("Dodaj plik .streamlit/secrets.toml z zawartością:\n```\
+        st.info("Dodaj plik .streamlit/secrets.toml z kluczami")
+        return
+        
+    if "
