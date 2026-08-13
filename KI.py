@@ -82,17 +82,25 @@ def compute_indicators(close, volume):
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / (loss + 1e-9)
     rsi_series = 100 - (100 / (1 + rs)).dropna()
-    last_rsi = to_scalar(rsi_series.iloc[-1]) if not rsi_series.empty else np.nan
+   def to_scalar(x):
+    import pandas as pd
+    import numpy as np
 
-    # MA
-    ma_fast_series = close.rolling(10).mean().dropna()
-    ma_slow_series = close.rolling(30).mean().dropna()
-    last_ma_fast = to_scalar(ma_fast_series.iloc[-1]) if not ma_fast_series.empty else np.nan
-    last_ma_slow = to_scalar(ma_slow_series.iloc[-1]) if not ma_slow_series.empty else np.nan
+    if isinstance(x, (pd.Series, np.ndarray, list)):
+        if len(x) == 0:
+            return np.nan
+        try:
+            val = np.asarray(x).ravel()[0]
+        except Exception:
+            return np.nan
+    else:
+        val = x
 
-    # Bollinger
-    ma_bb = close.rolling(20).mean()
-    std_bb = close.rolling(20).std()
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return np.nan
+
     upper_bb = ma_bb + 2 * std_bb
     lower_bb = ma_bb - 2 * std_bb
     last_upper_bb = to_scalar(upper_bb.iloc[-1]) if not upper_bb.dropna().empty else np.nan
