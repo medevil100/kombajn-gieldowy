@@ -62,10 +62,9 @@ with st.sidebar:
 # ---------------- POMOCNICZE ----------------
 
 def detect_ticker_from_text(text: str):
-    """Wykrywa ticker w formacie NP. AAPL, MSFT, STX.WA"""
+    """Wykrywa ticker w formacie np. AAPL, MSFT, STX.WA"""
     pattern = r"\b[A-Z0-9]{2,5}\.[A-Z]{2,3}\b|\b[A-Z]{1,5}\b"
     matches = re.findall(pattern, text)
-    # Filtrujemy typowe słowa, które nie są tickerami
     stop_words = {'I', 'A', 'THE', 'TO', 'FOR', 'OF', 'WITH', 'ON', 'AT', 'BY', 'IN', 'IS', 'IT', 'AS', 'OR', 'AND', 'BUT'}
     for m in matches:
         if m not in stop_words and len(m) >= 2:
@@ -87,16 +86,6 @@ def to_scalar(x):
         return np.nan
 
 
-def safe_get_column(data, col_name):
-    """Bezpiecznie pobiera kolumnę z DataFrame, obsługując MultiIndex"""
-    if col_name in data.columns:
-        return data[col_name]
-    if isinstance(data.columns, pd.MultiIndex):
-        if col_name in data.columns.get_level_values(0):
-            return data[col_name].iloc[:, 0]
-    return None
-
-
 # ---------------- MODUŁ 2: KOMBAJN TRADINGOWY ----------------
 
 def compute_indicators(close, volume):
@@ -104,7 +93,6 @@ def compute_indicators(close, volume):
     close = close.copy()
     volume = volume.copy()
     
-    # Upewniamy się, że mamy wystarczająco danych
     if len(close) < 30:
         return {
             "rsi": np.nan, "ma_fast": np.nan, "ma_slow": np.nan,
@@ -172,7 +160,7 @@ def compute_indicators(close, volume):
     atr_series = tr.rolling(14).mean()
     last_atr = to_scalar(atr_series.iloc[-1]) if not atr_series.dropna().empty else np.nan
 
-    # ADX (uproszczony)
+    # ADX
     try:
         plus_dm = high.diff()
         minus_dm = -low.diff()
@@ -284,13 +272,11 @@ def compute_scoring_pro(ind, sentiment: str | None = None):
     """Oblicza scoring dla spółki"""
     score = 0
 
-    # Trend (max 20)
     if ind["trend"] == "Uptrend":
         score += 20
     elif ind["trend"] == "Sideways":
         score += 10
 
-    # ADX (max 20)
     adx = ind.get("adx", np.nan)
     if not np.isnan(adx):
         if adx > 40:
@@ -300,7 +286,6 @@ def compute_scoring_pro(ind, sentiment: str | None = None):
         elif adx > 20:
             score += 10
 
-    # RSI (max 15)
     rsi = ind.get("rsi", np.nan)
     if not np.isnan(rsi):
         if 30 <= rsi <= 50:
@@ -310,7 +295,6 @@ def compute_scoring_pro(ind, sentiment: str | None = None):
         elif 50 < rsi <= 70:
             score += 5
 
-    # Stochastic (max 10)
     k = ind.get("stoch_k", np.nan)
     d = ind.get("stoch_d", np.nan)
     if not np.isnan(k) and not np.isnan(d):
@@ -321,7 +305,6 @@ def compute_scoring_pro(ind, sentiment: str | None = None):
         else:
             score += 5
 
-    # RVOL (max 15)
     rvol = ind.get("rvol", np.nan)
     if not np.isnan(rvol):
         if rvol > 1.5:
@@ -331,23 +314,19 @@ def compute_scoring_pro(ind, sentiment: str | None = None):
         elif rvol > 0.7:
             score += 5
 
-    # MACD (max 10)
     if not np.isnan(ind.get("last_macd", np.nan)) and not np.isnan(ind.get("last_macd_signal", np.nan)):
         if ind["last_macd"] > ind["last_macd_signal"]:
             score += 10
 
-    # Bollinger (max 10)
     if not np.isnan(ind.get("last_lower_bb", np.nan)):
         score += 5
     if not np.isnan(ind.get("last_upper_bb", np.nan)):
         score += 5
 
-    # ATR (max 5)
     atr = ind.get("atr", np.nan)
     if not np.isnan(atr):
         score += 5
 
-    # Sentiment (max 10)
     if sentiment == "Bullish":
         score += 10
     elif sentiment == "Bearish":
@@ -376,7 +355,6 @@ def generate_signal(price, ind):
     reasons = []
     signal = "HOLD"
 
-    # Trend
     if trend == "Uptrend":
         reasons.append("📈 Trend wzrostowy (MA10 > MA30)")
     elif trend == "Downtrend":
@@ -384,7 +362,6 @@ def generate_signal(price, ind):
     else:
         reasons.append("➡️ Trend boczny / niejednoznaczny")
 
-    # ADX
     if not np.isnan(adx):
         if adx < 20:
             reasons.append(f"🔹 ADX {adx:.1f} → słaby trend")
@@ -393,7 +370,6 @@ def generate_signal(price, ind):
         else:
             reasons.append(f"🔺 ADX {adx:.1f} → silny trend")
 
-    # RSI
     if rsi < 30:
         reasons.append(f"📊 RSI {rsi:.1f} → wyprzedanie")
     elif rsi > 70:
@@ -401,21 +377,18 @@ def generate_signal(price, ind):
     else:
         reasons.append(f"📊 RSI {rsi:.1f} → strefa neutralna")
 
-    # Stochastic
     if not np.isnan(stoch_k) and not np.isnan(stoch_d):
         if stoch_k < 20 and stoch_d < 20:
             reasons.append(f"🔻 Stochastic %K/D: {stoch_k:.1f}/{stoch_d:.1f} → wyprzedanie")
         elif stoch_k > 80 and stoch_d > 80:
             reasons.append(f"🔺 Stochastic %K/D: {stoch_k:.1f}/{stoch_d:.1f} → wykupienie")
 
-    # RVOL
     if not np.isnan(rvol):
         if rvol > 1.5:
             reasons.append(f"📊 RVOL {rvol:.2f} → podwyższony wolumen")
         elif rvol < 0.7:
             reasons.append(f"📊 RVOL {rvol:.2f} → niski wolumen")
 
-    # Generowanie sygnału
     if trend == "Uptrend" and rsi < 40:
         signal = "BUY"
         reasons.append("✅ Sygnał BUY: trend wzrostowy + RSI < 40")
@@ -432,7 +405,6 @@ def generate_signal(price, ind):
         signal = "HOLD"
         reasons.append("⏸️ HOLD: brak jednoznacznego sygnału")
 
-    # SL/TP
     if not np.isnan(sl):
         reasons.append(f"🛑 SL: {sl:.2f}")
     if not np.isnan(tp):
@@ -490,7 +462,6 @@ def render_trading():
                     st.error("Brak danych dla tego tickera lub interwału.")
                     return
 
-                # AUTO-FALLBACK
                 if len(data) < 60:
                     st.info("Za mało danych, używam okresu 6mo i interwału 1d")
                     data = yf.download(ticker, period="6mo", interval="1d", progress=False)
@@ -498,7 +469,6 @@ def render_trading():
                         st.error("Brak wystarczających danych historycznych.")
                         return
 
-                # Pobieranie danych
                 if isinstance(data.columns, pd.MultiIndex):
                     close = data["Close"].iloc[:, 0]
                     open_ = data["Open"].iloc[:, 0]
@@ -528,7 +498,6 @@ def render_trading():
                     )
                 )
                 
-                # Bollinger bands
                 if not ind["upper_bb"].isna().all():
                     fig.add_trace(
                         go.Scatter(
@@ -558,14 +527,10 @@ def render_trading():
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-                # News sentiment
                 sentiment, titles, comment = fetch_news_sentiment(ticker)
-
-                # Sygnał + scoring
                 signal, explanation = generate_signal(price, ind)
                 scoring = compute_scoring_pro(ind, sentiment)
 
-                # Wyświetlanie wyników
                 st.subheader("🤖 Analiza automatyczna")
                 
                 col1, col2 = st.columns(2)
@@ -581,7 +546,6 @@ def render_trading():
                     st.metric("RVOL (20)", f"{ind['rvol']:.2f}" if not np.isnan(ind['rvol']) else "Brak")
                     st.metric("Sentyment", sentiment)
 
-                # Szczegółowe wskaźniki
                 with st.expander("📊 Wszystkie wskaźniki"):
                     indicators = {
                         "RSI (14)": ind['rsi'],
@@ -608,14 +572,12 @@ def render_trading():
                 st.markdown("**Uzasadnienie sygnału:**")
                 st.markdown(explanation)
 
-                # News
                 st.subheader("📰 News sentiment")
                 st.write(f"**Sentyment:** {sentiment}")
                 if titles:
                     for t in titles:
                         st.write(f"- {t}")
 
-                # Zapisz do session state
                 st.session_state["last_analysis"] = {
                     "ticker": ticker,
                     "price": price,
@@ -652,10 +614,9 @@ def render_scanner():
     max_to_show = st.slider("Ile spółek pokazać (TOP N):", 5, 20, 10)
 
     if st.button("🔍 Skanuj spółki", use_container_width=True):
-        # Parsowanie tickerów
         raw = re.split(r'[,\s\n]+', tickers_text)
         tickers = [t.strip().upper() for t in raw if t.strip()]
-        tickers = list(dict.fromkeys(tickers))  # unikalne
+        tickers = list(dict.fromkeys(tickers))
 
         if not tickers:
             st.error("Brak poprawnych tickerów.")
@@ -699,7 +660,7 @@ def render_scanner():
                     "Sentyment": sentiment,
                     "Scoring": scoring,
                 })
-            except Exception as e:
+            except Exception:
                 continue
 
         progress_bar.empty()
@@ -714,7 +675,6 @@ def render_scanner():
 
         st.subheader(f"🏆 TOP {len(df_sorted)} spółek wg Scoring PRO")
 
-        # Wyświetlanie wyników
         for _, row in df_sorted.iterrows():
             score = row["Scoring"]
             
@@ -751,7 +711,6 @@ def render_scanner():
 
         st.caption("_Scoring PRO łączy trend, ADX, RSI, Stochastic, RVOL, MACD, Bollinger, ATR oraz sentyment newsów._")
         
-        # Przycisk do zapisania wyników
         if st.button("💾 Zapisz wyniki do CSV"):
             csv = df_sorted.to_csv(index=False)
             st.download_button(
@@ -780,7 +739,7 @@ def tavily_research(tavily_key, ticker, question):
     all_answers = []
     all_results = []
 
-    for q in base_queries[:3]:  # Limit zapytań
+    for q in base_queries[:3]:
         try:
             resp = requests.post(
                 "https://api.tavily.com/search",
@@ -802,5 +761,47 @@ def tavily_research(tavily_key, ticker, question):
         except Exception:
             continue
 
-    # Filtrowanie wyników
-   
+    filtered_results = []
+    ticker_upper = (ticker or "").upper()
+
+    for item in all_results:
+        title = item.get("title", "") or ""
+        url = item.get("url", "") or ""
+        content = item.get("content", "") or ""
+        blob = f"{title} {content} {url}"
+
+        if ticker_upper and ticker_upper not in blob.upper():
+            continue
+        filtered_results.append(item)
+
+    bullets = []
+    for item in filtered_results[:5]:
+        title = item.get("title", "")
+        url = item.get("url", "")
+        if title or url:
+            bullets.append(f"- {title} ({url})")
+
+    merged_answer = ""
+    if all_answers:
+        merged_answer = "\n\n".join(all_answers)
+
+    research_text = ""
+    if merged_answer:
+        research_text += f"Podsumowanie Tavily:\n{merged_answer}\n\n"
+    if bullets:
+        research_text += "Źródła Tavily:\n" + "\n".join(bullets)
+
+    if not research_text:
+        return "Brak wiarygodnych danych z Tavily dla tego tickera.", False
+
+    return research_text, True
+
+
+def render_ai_chat():
+    """Renderuje czat AI"""
+    st.title("🤖 Czat AI – Analityk finansowy")
+    st.caption("Zero zgadywania: tylko dane z trading engine + Tavily.")
+
+    if "OPENAI_API_KEY" not in st.secrets:
+        st.error("❌ Brak OPENAI_API_KEY w .streamlit/secrets.toml")
+        st.info("Dodaj plik .streamlit/secrets.toml z zawartością:\n```\
