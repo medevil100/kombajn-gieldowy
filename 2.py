@@ -15,7 +15,7 @@ st.set_page_config(page_title="GPW AI Terminal", layout="wide")
 # =====================================================================
 TELEGRAM_TOKEN = 
 TELEGRAM_CHAT_ID = 
-TAVILY_API_KEY = "
+TAVILY_API_KEY = 
 
 # 🔴 TUTAJ WKLEJ SWÓJ KLUCZ OPENAI POMIĘDZY CUDZYSŁOWY:
 OPENAI_API_KEY = "TWÓJ_KLUCZ_OPENAI_TUTAJ"
