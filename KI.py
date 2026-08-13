@@ -806,4 +806,4 @@ def render_ai_chat():
         st.info("Dodaj plik .streamlit/secrets.toml z kluczami")
         return
         
-    if "
+
