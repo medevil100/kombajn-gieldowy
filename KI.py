@@ -82,7 +82,7 @@ def compute_indicators(close, volume):
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / (loss + 1e-9)
     rsi_series = 100 - (100 / (1 + rs)).dropna()
-   def to_scalar(x):
+def to_scalar(x):
     import pandas as pd
     import numpy as np
 
