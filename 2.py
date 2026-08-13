@@ -10,12 +10,6 @@ import httpx
 
 st.set_page_config(page_title="GPW AI Terminal", layout="wide")
 
-# =====================================================================
-# SZTYWNA KONFIGURACJA KLUCZY (BEZ PLIKÓW .env I secrets.toml)
-# ====================================================================
-
-# 🔴 TUTAJ WKLEJ SWÓJ KLUCZ OPENAI POMIĘDZY CUDZYSŁOWY:
-OPENAI_API_KEY = "TWÓJ_KLUCZ_OPENAI_TUTAJ"
 
 # Blokada startu w przypadku braku klucza OpenAI
 if OPENAI_API_KEY == "TWÓJ_KLUCZ_OPENAI_TUTAJ" or not OPENAI_API_KEY:
