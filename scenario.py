@@ -408,7 +408,7 @@ def plot_scenarios_plotly(scen: pd.DataFrame, price: float, sl: float, tp: float
 
 st.title("📈 AI Scenariusze Rynkowe – Wersja PRO + AI Alerty")
 
-ticker = st.text_input("Ticker:", "AAPL").upper()
+ticker = st.text_input("Ticker:", "STX.WA").upper()
 side = st.selectbox("Strona pozycji:", ["long", "short"])
 horizon = st.slider("Horyzont (dni):", 20, 60, 30)
 
