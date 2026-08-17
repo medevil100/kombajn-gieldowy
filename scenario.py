@@ -10,14 +10,21 @@ from tavily import TavilyClient
 
 
 # ============================
-#   KLUCZE API
+#   KLUCZE API – PRIORYTET: secrets.toml > zmienne środowiskowe
 # ============================
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY") or os.getenv("TAVILY_API_KEY")
 
+# Inicjalizacja klientów (jeśli klucz jest dostępny)
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
+
+# Komunikaty ostrzegawcze w UI
+if not OPENAI_API_KEY:
+    st.warning("⚠️ Brak klucza OpenAI – funkcje AI (komentarz, alerty) będą niedostępne.")
+if not TAVILY_API_KEY:
+    st.warning("⚠️ Brak klucza Tavily – pobieranie newsów będzie wyłączone.")
 
 
 # ============================
@@ -61,7 +68,7 @@ def safe_load_yahoo(ticker: str) -> pd.DataFrame | None:
     if df is None or df.empty:
         return None
 
-    # Obsługa MultiIndex
+    # Obsługa MultiIndex (gdy ticker jest w nazwie kolumny)
     if isinstance(df.columns, pd.MultiIndex):
         if ticker.upper() in df.columns.get_level_values(-1):
             df = df.xs(ticker.upper(), axis=1, level=-1)
@@ -171,7 +178,7 @@ def scenarios_numeric(price: float, df: pd.DataFrame, horizon_days: int = 30) ->
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_news_summary(ticker: str, horizon_days: int = 30) -> str:
     if tavily_client is None:
-        return "Brak klucza Tavily."
+        return "Brak klucza Tavily – nie można pobrać newsów."
 
     try:
         res = tavily_client.search(
@@ -211,7 +218,7 @@ def ai_analysis_pl(
     horizon_days: int
 ) -> str:
     if client is None:
-        return "Brak klucza OpenAI."
+        return "Brak klucza OpenAI – nie można wygenerować komentarza."
 
     scen_last = scen_df.iloc[-1]
 
@@ -269,7 +276,7 @@ def ai_alerts_pl(
     horizon_days: int
 ) -> str:
     if client is None:
-        return "Brak klucza OpenAI."
+        return "Brak klucza OpenAI – nie można wygenerować alertów."
 
     price = fmt_num(last_row.get("Close", np.nan))
     sma_fast = fmt_num(last_row.get(f"SMA{SMA_FAST}", np.nan))
