@@ -11,11 +11,30 @@ import requests
 from openai import AsyncOpenAI
 from streamlit_autorefresh import st_autorefresh
 
-# --- OPCJONALNIE: Tavily (jeśli zainstalowano) ---
 try:
     from tavily import TavilyClient
 except ImportError:
     TavilyClient = None
+
+st.set_page_config(page_title="Skaner Groszówek AI Master Pro", page_icon="📱", layout="centered")
+
+# --- DIAGNOSTYKA ---
+st.write("🔍 Stan secrets:", "dostępne" if st.secrets else "brak")
+st.write("Klucze w secrets:", list(st.secrets.keys()) if st.secrets else [])
+
+# --- ODCZYT SECRETS Z OBSŁUGĄ BŁĘDÓW ---
+try:
+    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+    APP_PASSWORD = st.secrets["APP_PASSWORD"]
+    TELEGRAM_BOT_TOKEN = st.secrets.get("TELEGRAM_BOT_TOKEN")
+    TELEGRAM_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID")
+    TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY")
+except KeyError as e:
+    st.error(f"Brakuje klucza w secrets: {e}")
+    st.stop()
+except Exception as e:
+    st.error(f"Nieoczekiwany błąd odczytu secrets: {e}")
+    st.stop()
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
