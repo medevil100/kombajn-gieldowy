@@ -17,7 +17,7 @@ except ImportError:
     TavilyClient = None
 
 # -------------------------------------------------------------------
-# KONFIGURACJA STRONY – TYLKO RAZ, NA POCZĄTKU
+# KONFIGURACJA STRONY – TYLKO RAZ
 # -------------------------------------------------------------------
 st.set_page_config(
     page_title="Skaner Groszówek AI Master Pro",
@@ -26,29 +26,34 @@ st.set_page_config(
 )
 
 # -------------------------------------------------------------------
-# ODCZYT SECRETS Z PEŁNĄ DIAGNOSTYKĄ
+# ODCZYT SECRETS – BEZ HASŁA
 # -------------------------------------------------------------------
-def get_secret(key, default=None):
-    """Bezpieczne pobieranie secretu z komunikatami błędów."""
+def get_required_secret(key):
+    """Pobiera wymagany klucz; w razie braku zatrzymuje aplikację."""
     try:
-        val = st.secrets.get(key, default)
-        if val is None:
-            st.error(f"❌ Brak klucza '{key}' w secrets.toml")
-            st.stop()
+        val = st.secrets[key]
         return val
-    except Exception as e:
-        st.error(f"❌ Błąd odczytu secrets: {e}")
+    except Exception:
+        st.error(f"❌ Brak wymaganego klucza '{key}' w secrets.toml")
         st.stop()
 
-# Pobieramy wszystkie wymagane klucze
-OPENAI_API_KEY = get_secret("OPENAI_API_KEY")
-APP_PASSWORD = get_secret("APP_PASSWORD")
-TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", None)
-TELEGRAM_CHAT_ID = get_secret("TELEGRAM_CHAT_ID", None)
-TAVILY_API_KEY = get_secret("TAVILY_API_KEY", None)
+def get_optional_secret(key, default=None):
+    """Pobiera opcjonalny klucz; zwraca None jeśli brak."""
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
+# Wymagany klucz
+OPENAI_API_KEY = get_required_secret("OPENAI_API_KEY")
+
+# Opcjonalne – Telegram i Tavily
+TELEGRAM_BOT_TOKEN = get_optional_secret("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = get_optional_secret("TELEGRAM_CHAT_ID")
+TAVILY_API_KEY = get_optional_secret("TAVILY_API_KEY")
 
 # -------------------------------------------------------------------
-# STYL CSS (bez zmian)
+# STYL CSS
 # -------------------------------------------------------------------
 st.markdown(
     """
@@ -66,23 +71,6 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
-
-# -------------------------------------------------------------------
-# AUTORYZACJA
-# -------------------------------------------------------------------
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-
-if not st.session_state.logged_in:
-    st.title("🔒 Autoryzacja")
-    haslo = st.text_input("Wpisz hasło mobilne:", type="password")
-    if st.button("Zaloguj się", use_container_width=True):
-        if haslo == APP_PASSWORD:
-            st.session_state.logged_in = True
-            st.rerun()
-        else:
-            st.error("Błędne hasło!")
-    st.stop()
 
 # -------------------------------------------------------------------
 # INICJALIZACJA STANU SESJI
@@ -129,7 +117,7 @@ def wczytaj_liste_z_pliku(rynek):
         with open(nazwa_pliku, "r") as f:
             zawartosc = f.read()
             return [t.strip().upper() for t in zawartosc.split(",") if t.strip()]
-    return []   # pusta lista – brak domyślnych
+    return []
 
 def zapisz_liste_do_pliku(rynek, lista_tickerow):
     nazwa_pliku = "spolki_pl.txt" if rynek == "PL (GPW)" else "spolki_usa.txt"
@@ -205,11 +193,7 @@ def skanuj_wybrane_spolki(lista_tickerow):
             wolumen_srednia = df["Volume"].rolling(10).mean().iloc[-1]
             if wolumen_teraz > 0:
                 sma_10 = df["Close"].rolling(10).mean().iloc[-1]
-                skok_vol = (
-                    wolumen_teraz / wolumen_srednia
-                    if wolumen_srednia > 0
-                    else 1.0
-                )
+                skok_vol = wolumen_teraz / wolumen_srednia if wolumen_srednia > 0 else 1.0
                 trend = "🟢 Wzrostowy" if cena > sma_10 else "🔴 Spadkowy"
                 u_band = ostatni["Upper_Band"]
                 l_band = ostatni["Lower_Band"]
@@ -302,8 +286,12 @@ def rysuj_wykres(df, ticker):
     l_52w = okres_52w["Low"].min()
     diff = h_52w - l_52w
     poziomy_fibo = {
-        "Fibo 100%": h_52w, "Fibo 61.8%": h_52w - (0.382 * diff), "Fibo 50.0%": h_52w - (0.500 * diff),
-        "Fibo 38.2%": h_52w - (0.618 * diff), "Fibo 23.6%": h_52w - (0.764 * diff), "Fibo 0%": l_52w
+        "Fibo 100%": h_52w,
+        "Fibo 61.8%": h_52w - (0.382 * diff),
+        "Fibo 50.0%": h_52w - (0.500 * diff),
+        "Fibo 38.2%": h_52w - (0.618 * diff),
+        "Fibo 23.6%": h_52w - (0.764 * diff),
+        "Fibo 0%": l_52w
     }
     colors = ["#ff4d4d", "#ffaa00", "#ffff00", "#00ffaa", "#00aaff", "#aa00ff"]
     for (nazwa, poziom), kolor in zip(poziomy_fibo.items(), colors):
@@ -387,7 +375,7 @@ with st.sidebar:
     opcja_refresh = st.selectbox(
         "Interwał automatyczny:",
         ["Wyłączone", "5 minut", "15 minut", "30 minut", "60 minut"],
-        index=2   # domyślnie 15 minut
+        index=2
     )
     if opcja_refresh != "Wyłączone":
         minuty = int(opcja_refresh.split(" ")[0])
@@ -406,7 +394,7 @@ with st.sidebar:
         st.rerun()
 
 # -------------------------------------------------------------------
-# AUTOMATYCZNE SKANOWANIE (co interwał)
+# AUTOMATYCZNE SKANOWANIE
 # -------------------------------------------------------------------
 interwal_sek = minuty * 60
 teraz = time.time()
