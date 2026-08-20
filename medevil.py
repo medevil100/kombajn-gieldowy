@@ -10,13 +10,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from tavily import TavilyClient
 
 # =====================================================================
-# KONFIGURACJA STRONY STREAMLIT
+# KONFIGURACJA STRONY
 # =====================================================================
 st.set_page_config(page_title="Snajper Rynkowy Custom", page_icon="🎯", layout="wide")
 st.title("🎯 Twój Autorski Skaner Groszówek: Market Sniper")
 
 # =====================================================================
-# SESJA – HISTORIA ALERTÓW, OSTATNI SKAN, BLOKADA
+# SESJA
 # =====================================================================
 if "alerts_history" not in st.session_state:
     st.session_state.alerts_history = []
@@ -30,7 +30,7 @@ if "last_auto_scan" not in st.session_state:
     st.session_state.last_auto_scan = datetime.now()
 
 # =====================================================================
-# ŁADOWANIE KLUCZY Z SECRETS.TOML
+# ŁADOWANIE KLUCZY
 # =====================================================================
 try:
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
@@ -53,7 +53,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 tavily = TavilyClient(api_key=TAVILY_API_KEY)
 
 # =====================================================================
-# DYNAMICZNE OKNO NA TWOJE TICKERY
+# LISTA OBSERWACYJNA
 # =====================================================================
 st.subheader("📝 Zarządzanie Twoją Listą Obserwacyjną")
 domyslna_lista = "APS.WA, STX.WA"
@@ -65,7 +65,7 @@ user_input = st.text_area(
 MARKET_DATABASE = [t.strip().upper() for t in user_input.split(",") if t.strip()]
 
 # =====================================================================
-# SUWAKI – PARAMETRY W LOCIE
+# SUWAKI
 # =====================================================================
 col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns(5)
 with col_p1:
@@ -80,12 +80,12 @@ with col_p5:
     ui_tp = st.slider("Take Profit (% od ceny):", 5, 50, 15, step=5) / 100.0
 
 # =====================================================================
-# OPCJA WŁĄCZANIA DODATKOWEJ ANALIZY (Tavily + głębsze AI)
+# OPCJA ANALIZY Z NEWSAMI
 # =====================================================================
 use_deep_analysis = st.checkbox("🧠 Włącz analizę z użyciem newsów (Tavily)", value=True)
 
 # =====================================================================
-# MODUŁ KOMUNIKACJI – TELEGRAM
+# TELEGRAM
 # =====================================================================
 def send_telegram_message(message: str) -> bool:
     czysty_token = str(TELEGRAM_TOKEN).strip()
@@ -118,45 +118,44 @@ def oblicz_rsi(df: pd.DataFrame, period: int = 14):
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
         return rsi
-    except:
+    except Exception:
         return None
 
-def oblicz_macd(df: pd.DataFrame, fast=12, slow=26, signal=9):
+def oblicz_sma(df: pd.DataFrame, period: int):
+    return df["Close"].rolling(window=period).mean()
+
+def oblicz_macd(df: pd.DataFrame):
     try:
-        exp1 = df["Close"].ewm(span=fast, adjust=False).mean()
-        exp2 = df["Close"].ewm(span=slow, adjust=False).mean()
-        macd = exp1 - exp2
-        signal_line = macd.ewm(span=signal, adjust=False).mean()
-        histogram = macd - signal_line
-        return macd, signal_line, histogram
-    except:
-        return None, None, None
+        exp12 = df["Close"].ewm(span=12, adjust=False).mean()
+        exp26 = df["Close"].ewm(span=26, adjust=False).mean()
+        macd = exp12 - exp26
+        signal = macd.ewm(span=9, adjust=False).mean()
+        return macd, signal
+    except Exception:
+        return None, None
 
 def oblicz_atr(df: pd.DataFrame, period: int = 14):
     try:
         high = df["High"]
         low = df["Low"]
-        close = df["Close"]
+        close = df["Close"].shift(1)
         tr1 = high - low
-        tr2 = (high - close.shift()).abs()
-        tr3 = (low - close.shift()).abs()
+        tr2 = (high - close).abs()
+        tr3 = (low - close).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr = tr.rolling(window=period).mean()
         return atr
-    except:
+    except Exception:
         return None
 
-def oblicz_srednie_kroczace(df: pd.DataFrame, okresy=[20, 50]):
-    wyniki = {}
-    for ok in okresy:
-        try:
-            wyniki[f"MA{ok}"] = df["Close"].rolling(window=ok).mean()
-        except:
-            wyniki[f"MA{ok}"] = None
-    return wyniki
+def oblicz_momentum(df: pd.DataFrame, period: int = 5):
+    try:
+        return (df["Close"] / df["Close"].shift(period) - 1) * 100
+    except Exception:
+        return None
 
 # =====================================================================
-# POMOCNICZA FUNKCJA DO BEZPIECZNEGO POBRANIA WARTOŚCI
+# POMOCNICZA FUNKCJA DO POBRANIA WARTOŚCI
 # =====================================================================
 def pobierz_wartosc(series_or_float):
     try:
@@ -170,11 +169,11 @@ def pobierz_wartosc(series_or_float):
         if pd.isna(val):
             return None
         return float(val)
-    except:
+    except Exception:
         return None
 
 # =====================================================================
-# FUNKCJA: POBRANIE NEWSÓW Z TAVILY (OSTATNIE 24H)
+# TAVILY – NEWS
 # =====================================================================
 def pobierz_newsy_tavily(ticker: str) -> str:
     try:
@@ -199,19 +198,28 @@ def pobierz_newsy_tavily(ticker: str) -> str:
         return ""
 
 # =====================================================================
-# ANALIZA AI NA PODSTAWIE DANYCH RYNKOWYCH + WSKAŹNIKI
+# ANALIZA AI – NA PODSTAWIE DANYCH RYNKOWYCH + NEWSY
 # =====================================================================
-def analizuj_rynkowo_ai(ticker: str, dane: dict, news: str = "") -> str:
-    """
-    dane: słownik z kluczami: cena, waluta, zmiana, wolumen_x, rsi,
-          macd_hist, atr, ma20, ma50, sl, tp, sygnal
-    """
-    prompt = f"Jesteś profesjonalnym analitykiem technicznym. Oceń sytuację spółki {ticker} na podstawie poniższych danych:\n"
-    for k, v in dane.items():
-        if k in ["cena", "waluta", "zmiana", "wolumen_x", "rsi", "macd_hist", "atr", "ma20", "ma50", "sl", "tp"]:
-            prompt += f"- {k}: {v}\n"
-    prompt += f"- Sygnał kupna (techniczny): {'TAK' if dane['sygnal'] else 'NIE'}\n"
-
+def analizuj_rynkowo_ai(ticker: str, cena: float, waluta: str, zmiana: float,
+                        wolumen_x: float, rsi: float, sl: float, tp: float,
+                        sygnal: bool, sma20: float, sma50: float,
+                        macd: float, atr: float, momentum: float, news: str = "") -> str:
+    sygnal_str = "TAK" if sygnal else "NIE"
+    prompt = (
+        f"Jesteś profesjonalnym analitykiem technicznym. Oceń sytuację spółki {ticker} na podstawie danych:\n"
+        f"- Cena: {cena:.2f} {waluta}\n"
+        f"- Zmiana ceny: {zmiana:.2f}%\n"
+        f"- Wolumen (względem średniej): {wolumen_x:.2f}x\n"
+        f"- RSI: {rsi:.1f}\n"
+        f"- SMA20: {sma20:.2f} {waluta}\n"
+        f"- SMA50: {sma50:.2f} {waluta}\n"
+        f"- MACD: {macd:.3f}\n"
+        f"- ATR (zmienność): {atr:.2f} {waluta}\n"
+        f"- Momentum (5 świec): {momentum:.2f}%\n"
+        f"- Stop Loss: {sl:.2f} {waluta}\n"
+        f"- Take Profit: {tp:.2f} {waluta}\n"
+        f"- Sygnał kupna (techniczny): {sygnal_str}\n"
+    )
     if news:
         prompt += f"\nDodatkowe informacje z rynkowych newsów (ostatnie 24h):\n{news[:500]}\n"
         prompt += "Uwzględnij te informacje w swojej ocenie, ale przede wszystkim oprzyj się na danych technicznych."
@@ -223,6 +231,7 @@ def analizuj_rynkowo_ai(ticker: str, dane: dict, news: str = "") -> str:
         "jaki jest potencjalny zasięg wzrostu, czy istnieje ryzyko, oraz ogólna rekomendacja. "
         "Używaj języka zrozumiałego dla inwestora detalicznego."
     )
+
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -235,46 +244,44 @@ def analizuj_rynkowo_ai(ticker: str, dane: dict, news: str = "") -> str:
         return f"Błąd analizy AI: {e}"
 
 # =====================================================================
-# ANALIZA POJEDYNCZEJ SPÓŁKI – Z PEŁNYMI WSKAŹNIKAMI
+# ANALIZA POJEDYNCZEJ SPÓŁKI
 # =====================================================================
 def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold, sl_pct, tp_pct, deep_analysis):
     try:
         df = yf.download(ticker, period="5d", interval=ui_interval, progress=False)
-        if df.empty or len(df) < 30:  # potrzeba więcej danych dla MA50
+        if df.empty or len(df) < 15:
             return None
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Oblicz wszystkie wskaźniki
+        # Oblicz wskaźniki
         df["RSI"] = oblicz_rsi(df)
-        macd, signal, hist = oblicz_macd(df)
+        df["SMA20"] = oblicz_sma(df, 20)
+        df["SMA50"] = oblicz_sma(df, 50) if len(df) >= 50 else None
+        macd, signal = oblicz_macd(df)
         df["MACD"] = macd
-        df["MACD_signal"] = signal
-        df["MACD_hist"] = hist
+        df["Signal"] = signal
         df["ATR"] = oblicz_atr(df)
-        ma = oblicz_srednie_kroczace(df, [20, 50])
-        if ma.get("MA20") is not None:
-            df["MA20"] = ma["MA20"]
-        if ma.get("MA50") is not None:
-            df["MA50"] = ma["MA50"]
+        df["Momentum"] = oblicz_momentum(df)
 
-        # Sprawdź, czy ostatnie dane są kompletne
+        if df["RSI"].isna().all():
+            return None
+
         ostatnia = df.iloc[-1]
         poprzednia = df.iloc[-2]
 
-        # Pobieramy wartości
         aktualna_cena = pobierz_wartosc(ostatnia["Close"])
         cena_poprzednia = pobierz_wartosc(poprzednia["Close"])
         aktualny_wolumen = pobierz_wartosc(ostatnia["Volume"])
         sredni_wolumen = pobierz_wartosc(df["Volume"].mean())
         current_rsi = pobierz_wartosc(ostatnia["RSI"])
-        macd_hist = pobierz_wartosc(ostatnia["MACD_hist"]) if "MACD_hist" in ostatnia else None
-        atr = pobierz_wartosc(ostatnia["ATR"]) if "ATR" in ostatnia else None
-        ma20 = pobierz_wartosc(ostatnia["MA20"]) if "MA20" in ostatnia else None
-        ma50 = pobierz_wartosc(ostatnia["MA50"]) if "MA50" in ostatnia else None
+        sma20 = pobierz_wartosc(ostatnia["SMA20"])
+        sma50 = pobierz_wartosc(ostatnia["SMA50"]) if "SMA50" in ostatnia else None
+        macd_val = pobierz_wartosc(ostatnia["MACD"])
+        atr_val = pobierz_wartosc(ostatnia["ATR"])
+        momentum_val = pobierz_wartosc(ostatnia["Momentum"])
 
-        # Walidacja – nie wszystkie muszą być obecne, ale kluczowe tak
         if any(v is None for v in [aktualna_cena, cena_poprzednia, aktualny_wolumen, sredni_wolumen, current_rsi]):
             return None
         if aktualna_cena <= 0 or cena_poprzednia <= 0 or sredni_wolumen <= 0:
@@ -308,60 +315,44 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
         sl_na_dole = aktualna_cena * (1 - sl_pct)
         tp_na_gorze = aktualna_cena * (1 + tp_pct)
 
-        # ====================================================
-        # ZBIERAMY DANE DO ANALIZY AI
-        # ====================================================
-        dane_do_ai = {
-            "cena": f"{aktualna_cena:.2f} {waluta}",
-            "zmiana": f"{zmiana_ceny:.2f}%",
-            "wolumen_x": f"{skok_wolumenu:.2f}x",
-            "rsi": f"{current_rsi:.1f}",
-            "sl": f"{sl_na_dole:.2f}",
-            "tp": f"{tp_na_gorze:.2f}",
-            "sygnal": sygnal_trafiony,
-        }
-        # Dodajemy opcjonalne wskaźniki
-        if macd_hist is not None:
-            dane_do_ai["macd_hist"] = f"{macd_hist:.3f}"
-        if atr is not None:
-            dane_do_ai["atr"] = f"{atr:.3f}"
-        if ma20 is not None:
-            dane_do_ai["ma20"] = f"{ma20:.2f}"
-        if ma50 is not None:
-            dane_do_ai["ma50"] = f"{ma50:.2f}"
-
-        # Pobieramy newsy (jeśli włączono)
+        # Pobranie newsów i analizy AI
         news = ""
         if deep_analysis:
             news = pobierz_newsy_tavily(ticker)
 
-        # Generujemy analizę AI
-        analiza_ai = analizuj_rynkowo_ai(ticker, dane_do_ai, news)
+        analiza_ai = analizuj_rynkowo_ai(
+            ticker, aktualna_cena, waluta, zmiana_ceny,
+            skok_wolumenu, current_rsi, sl_na_dole, tp_na_gorze,
+            sygnal_trafiony,
+            sma20 if sma20 is not None else 0.0,
+            sma50 if sma50 is not None else 0.0,
+            macd_val if macd_val is not None else 0.0,
+            atr_val if atr_val is not None else 0.0,
+            momentum_val if momentum_val is not None else 0.0,
+            news
+        )
 
-        # Przygotowanie danych do wyświetlenia
         ticker_info = {
             "Ticker": ticker,
             "Cena": f"{aktualna_cena:.2f} {waluta}",
             "Zmiana %": round(zmiana_ceny, 2),
-            "Wolumen (x)": f"{skok_wolumenu:.2f}x",
+            "Wolumen (x śr.)": f"{skok_wolumenu:.2f}x",
             "RSI": f"{current_rsi:.1f}",
-            "SL": f"{sl_na_dole:.2f}",
-            "TP": f"{tp_na_gorze:.2f}",
+            "SMA20": f"{sma20:.2f}" if sma20 is not None else "—",
+            "SMA50": f"{sma50:.2f}" if sma50 is not None else "—",
+            "MACD": f"{macd_val:.3f}" if macd_val is not None else "—",
+            "ATR": f"{atr_val:.2f}" if atr_val is not None else "—",
+            "Momentum": f"{momentum_val:.2f}%" if momentum_val is not None else "—",
+            "SL": f"{sl_na_dole:.2f} {waluta}",
+            "TP": f"{tp_na_gorze:.2f} {waluta}",
             "Status": ocena_trendu,
             "Sygnał": sygnal_trafiony,
             "score": sort_score,
             "Analiza AI": analiza_ai,
             "Newsy (pełne)": news if news else "Brak",
-            # Dodatkowe wskaźniki do wyświetlenia w tabeli (opcjonalnie)
-            "MACD hist": f"{macd_hist:.3f}" if macd_hist is not None else "brak",
-            "ATR": f"{atr:.3f}" if atr is not None else "brak",
-            "MA20": f"{ma20:.2f}" if ma20 is not None else "brak",
-            "MA50": f"{ma50:.2f}" if ma50 is not None else "brak",
         }
 
-        # ====================================================
-        # WYSYŁKA NA TELEGRAM (tylko przy sygnale)
-        # ====================================================
+        # Telegram tylko przy sygnale
         if sygnal_trafiony:
             flag_rynek = "🇵🇱" if is_gpw else "🇺🇸"
             wiadomosc = (
@@ -369,16 +360,15 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
                 f"💰 Cena: {aktualna_cena:.2f} {waluta} (+{zmiana_ceny:.2f}%)\n"
                 f"📊 Wolumen: <b>{skok_wolumenu:.1f}x</b> ponad średnią\n"
                 f"🛡️ RSI: <b>{current_rsi:.1f}</b>\n"
-                f"🛑 SL: {sl_na_dole:.2f} {waluta} | 🎯 TP: {tp_na_gorze:.2f} {waluta}\n"
-                f"📈 MACD hist: {macd_hist:.3f}" if macd_hist is not None else ""
-                f"📉 ATR: {atr:.3f}" if atr is not None else ""
-                f"\n\n🧠 <b>Analiza AI:</b>\n{analiza_ai}"
+                f"📈 SMA20: {sma20:.2f} | SMA50: {sma50:.2f}\n"
+                f"📉 MACD: {macd_val:.3f} | ATR: {atr_val:.2f}\n"
+                f"🛑 SL: {sl_na_dole:.2f} {waluta} | 🎯 TP: {tp_na_gorze:.2f} {waluta}\n\n"
+                f"🧠 <b>Analiza AI:</b>\n{analiza_ai}"
             )
             if news:
                 wiadomosc += f"\n\n📰 <b>Newsy (24h):</b>\n{news[:500]}"
             send_telegram_message(wiadomosc)
 
-            # Zapis do historii
             historia = {
                 "Czas": now,
                 "Ticker": ticker,
@@ -454,7 +444,7 @@ def job_skanera(status_placeholder=None, progress_bar=None):
     st.session_state.last_auto_scan = datetime.now()
 
 # =====================================================================
-# STEROWANIE RADAREM – SIDEBAR
+# SIDEBAR
 # =====================================================================
 st.sidebar.header("⏱️ Sterowanie Radarem")
 auto_scan = st.sidebar.selectbox(
@@ -469,7 +459,7 @@ if st.sidebar.button("🔌 Wyślij testowy alert"):
 st.sidebar.info(f"⏱️ Ostatni udany skan: {st.session_state.last_scan_time}")
 
 # =====================================================================
-# PRZYCISKI GŁÓWNE – URUCHOMIENIE SKANERA I CZYSZCZENIE HISTORII
+# PRZYCISKI
 # =====================================================================
 col_btn1, col_btn2 = st.columns(2)
 with col_btn1:
@@ -488,7 +478,7 @@ if uruchom_skan:
     job_skanera(status_ph, prog_bar)
     status_ph.success(f"⚙️ Status: Wielowątkowy radar aktywny | Ostatni skan: {st.session_state.last_scan_time}")
 
-# AUTO-SKAN – BEZ TIME.SLEEP
+# AUTO-SKAN
 if auto_scan != "Tylko ręcznie":
     interwal = {"Co 1 minutę": 60, "Co 5 minut": 300, "Co 15 minut": 900}[auto_scan]
     if (datetime.now() - st.session_state.last_auto_scan).total_seconds() >= interwal:
@@ -501,13 +491,13 @@ if auto_scan != "Tylko ręcznie":
             status_ph.info("⏳ Skan już trwa, pomijam automatyczne wywołanie.")
 
 # =====================================================================
-# WYNIKI – TABELA Z KOLOROWANIEM (użyjemy stylera Pandas)
+# WYŚWIETLANIE WYNIKÓW Z KOLOROWANIEM
 # =====================================================================
 if st.session_state.last_scanned_tickers:
     st.subheader("📊 Podgląd aktualnego cyklu skanowania (Posortowany)")
+
     df_wyniki = pd.DataFrame(st.session_state.last_scanned_tickers)
 
-    # Sortowanie
     if "score" in df_wyniki.columns:
         df_wyniki = df_wyniki.sort_values(by="score", ascending=False)
         df_wyniki = df_wyniki.drop(columns=["score"])
@@ -517,56 +507,79 @@ if st.session_state.last_scanned_tickers:
         if col in df_wyniki.columns:
             df_wyniki = df_wyniki.drop(columns=[col])
 
-    # Skracamy długie teksty dla czytelności
+    # Skracamy długie teksty w tabeli
     if "Analiza AI" in df_wyniki.columns:
         df_wyniki["Analiza AI"] = df_wyniki["Analiza AI"].apply(
             lambda x: x[:150] + "..." if isinstance(x, str) and len(x) > 150 else x
         )
 
-    # ===== KOLOROWANIE (dla kolumn liczbowych) =====
-    # Tworzymy styler, który koloruje tło komórek w zależności od wartości
+    # =============================================================
+    # KOLOROWANIE – funkcje pomocnicze
+    # =============================================================
     def koloruj_zmiane(val):
-        if isinstance(val, (int, float)):
-            if val > 2:
-                return 'background-color: #90EE90'  # zielony
-            elif val < -2:
-                return 'background-color: #FFCCCB'  # czerwony
-        return ''
+        try:
+            if isinstance(val, (int, float)):
+                if val > 0:
+                    return 'color: green; font-weight: bold;'
+                elif val < 0:
+                    return 'color: red; font-weight: bold;'
+            return ''
+        except:
+            return ''
+
+    def koloruj_wolumen(val):
+        try:
+            if isinstance(val, str) and 'x' in val:
+                liczba = float(val.replace('x', '').strip())
+                if liczba >= 3:
+                    return 'background-color: #d4edda;'  # jasnozielony
+                elif liczba >= 1.5:
+                    return 'background-color: #fff3cd;'  # jasnożółty
+                else:
+                    return 'background-color: #f8d7da;'  # jasnoczerwony
+            return ''
+        except:
+            return ''
 
     def koloruj_rsi(val):
-        if isinstance(val, (int, float)):
-            if 30 <= val <= 70:
-                return 'background-color: #FFFF99'  # żółty
-            elif val > 70:
-                return 'background-color: #FFA07A'  # pomarańczowy (przegrzany)
-            elif val < 30:
-                return 'background-color: #87CEEB'  # niebieski (wyprzedany)
+        try:
+            if isinstance(val, (int, float)):
+                if 30 <= val <= 70:
+                    return 'color: green;'
+                elif val < 30:
+                    return 'color: orange; font-weight: bold;'
+                else:
+                    return 'color: red; font-weight: bold;'
+            return ''
+        except:
+            return ''
+
+    def koloruj_status(val):
+        if 'Kupuj' in val:
+            return 'background-color: #d4edda; color: #155724; font-weight: bold;'
+        elif 'Trzymaj' in val:
+            return 'background-color: #fff3cd; color: #856404;'
+        elif 'Unikaj' in val:
+            return 'background-color: #f8d7da; color: #721c24;'
         return ''
 
-    # Zastosowanie stylera do wybranych kolumn
-    # Uwaga: kolumny muszą być numeryczne, więc konwertujemy odpowiednie
-    if "Zmiana %" in df_wyniki.columns:
-        df_wyniki["Zmiana %"] = pd.to_numeric(df_wyniki["Zmiana %"], errors='coerce')
-        df_wyniki = df_wyniki.style.applymap(koloruj_zmiane, subset=["Zmiana %"])
+    # =============================================================
+    # STYLOWANIE – zastosowanie do kolumn
+    # =============================================================
+    styled = df_wyniki.style \
+        .applymap(koloruj_zmiane, subset=['Zmiana %']) \
+        .applymap(koloruj_wolumen, subset=['Wolumen (x śr.)']) \
+        .applymap(koloruj_rsi, subset=['RSI']) \
+        .applymap(koloruj_status, subset=['Status']) \
+        .set_properties(**{'text-align': 'center'}) \
+        .set_table_styles([{'selector': 'thead th', 'props': [('text-align', 'center')]}])
 
-    if "RSI" in df_wyniki.columns:
-        # RSI może być stringiem z wartością, wyciągamy liczbę
-        # Najpierw przekonwertujmy na float
-        df_wyniki_copy = df_wyniki.data.copy() if hasattr(df_wyniki, 'data') else df_wyniki
-        if "RSI" in df_wyniki_copy.columns:
-            df_wyniki_copy["RSI_num"] = df_wyniki_copy["RSI"].str.extract(r'(\d+\.?\d*)').astype(float)
-            df_wyniki_copy = df_wyniki_copy.style.applymap(koloruj_rsi, subset=["RSI_num"])
-            # Ukryj kolumnę pomocniczą
-            df_wyniki = df_wyniki_copy.hide(axis='columns', subset=['RSI_num'])
-        else:
-            df_wyniki = df_wyniki.style
+    # Wyświetlenie stylizowanej tabeli
+    st.dataframe(styled, use_container_width=True)
 
-    # Wyświetlenie
-    st.dataframe(df_wyniki, use_container_width=True)
-
-    # =====================================================================
-    # ROZWIJANE SZCZEGÓŁY – PEŁNA ANALIZA I NEWSY
-    # =====================================================================
+    # =============================================================
+    # ROZWIJANE SZCZEGÓŁY
+    # =============================================================
     st.subheader("📰 Szczegółowe analizy (rozwiń dla tickera)")
     for item in st.session_state.last_scanned_tickers:
         with st.expander(f"{item['Ticker']} – szczegóły analizy"):
@@ -576,7 +589,7 @@ if st.session_state.last_scanned_tickers:
             st.write(item.get("Newsy (pełne)", "Brak"))
 
 # =====================================================================
-# HISTORIA ALERTÓW – ZIELONE OKAZJE
+# HISTORIA ALERTÓW
 # =====================================================================
 if st.session_state.alerts_history:
     st.subheader("📋 Zapamiętane Okazje Snajperskie (Zielone Alerty 🟢)")
