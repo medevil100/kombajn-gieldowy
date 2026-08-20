@@ -82,7 +82,7 @@ with col_p5:
 # =====================================================================
 # OPCJA WŁĄCZANIA DODATKOWEJ ANALIZY (Tavily + głębsze AI)
 # =====================================================================
-use_deep_analysis = st.checkbox("🧠 Włącz pogłębioną analizę (newsy + AI)", value=True)
+use_deep_analysis = st.checkbox("🧠 Włącz analizę z użyciem newsów (Tavily)", value=True)
 
 # =====================================================================
 # MODUŁ KOMUNIKACJI – TELEGRAM (Z LOGOWANIEM BŁĘDÓW)
@@ -140,18 +140,17 @@ def pobierz_wartosc(series_or_float):
         return None
 
 # =====================================================================
-# FUNKCJA: POBRANIE NEWSÓW Z TAVILY (OSTATNIE 24H) – POPRAWIONA
+# FUNKCJA: POBRANIE NEWSÓW Z TAVILY (OSTATNIE 24H)
 # =====================================================================
 def pobierz_newsy_tavily(ticker: str) -> str:
     try:
-        # Szukamy wiadomości z ostatniego dnia
         query = f"{ticker} stock news OR akcje"
         response = tavily.search(
             query=query,
             search_depth="advanced",
             max_results=5,
             include_domains=["reuters.com", "bloomberg.com", "cnbc.com", "money.pl", "pb.pl"],
-            days=1  # <-- zamiast time_range
+            days=1
         )
         if not response or "results" not in response:
             return ""
@@ -166,31 +165,51 @@ def pobierz_newsy_tavily(ticker: str) -> str:
         return ""
 
 # =====================================================================
-# FUNKCJA: POGŁĘBIONA ANALIZA AI NA PODSTAWIE NEWSÓW
+# NOWA FUNKCJA: ANALIZA AI NA PODSTAWIE DANYCH RYNKOWYCH (+ opcjonalne newsy)
 # =====================================================================
-def analizuj_newsy_openai(ticker: str, news: str, cena: float, waluta: str) -> str:
-    if not news:
-        return "Brak świeżych wiadomości do analizy."
+def analizuj_rynkowo_ai(ticker: str, cena: float, waluta: str, zmiana: float,
+                        wolumen_x: float, rsi: float, sl: float, tp: float,
+                        sygnal: bool, news: str = "") -> str:
+    """
+    Generuje analizę techniczną na podstawie danych rynkowych.
+    Jeśli podano newsy – dołącza je jako dodatkowy kontekst.
+    """
+    sygnal_str = "TAK" if sygnal else "NIE"
     prompt = (
-        f"Jesteś analitykiem finansowym. Dla spółki {ticker} (cena {cena:.2f} {waluta}) "
-        f"pojawiły się następujące wiadomości z ostatnich 24 godzin:\n\n{news}\n\n"
-        "Na podstawie tych informacji oceń krótkoterminowy wpływ na kurs (0-10 skala, "
-        "gdzie 0 – bardzo negatywny, 10 – bardzo pozytywny) i napisz 2-3 zdania "
-        "podsumowujące, czy to dobra okazja do zakupu (long). Odpowiedz zwięźle."
+        f"Jesteś profesjonalnym analitykiem technicznym. Oceń sytuację spółki {ticker} na podstawie danych:\n"
+        f"- Cena: {cena:.2f} {waluta}\n"
+        f"- Zmiana ceny: {zmiana:.2f}%\n"
+        f"- Wolumen (względem średniej): {wolumen_x:.2f}x\n"
+        f"- RSI: {rsi:.1f}\n"
+        f"- Stop Loss: {sl:.2f} {waluta}\n"
+        f"- Take Profit: {tp:.2f} {waluta}\n"
+        f"- Sygnał kupna (techniczny): {sygnal_str}\n"
     )
+    if news:
+        prompt += f"\nDodatkowe informacje z rynkowych newsów (ostatnie 24h):\n{news[:500]}\n"
+        prompt += "Uwzględnij te informacje w swojej ocenie, ale przede wszystkim oprzyj się na danych technicznych."
+    else:
+        prompt += "\nBrak dostępnych newsów – analizuj wyłącznie dane techniczne."
+
+    prompt += (
+        "\n\nNapisz krótkie (do 100 słów) podsumowanie: czy to dobra okazja do zakupu (long), "
+        "jaki jest potencjalny zasięg wzrostu, czy istnieje ryzyko, oraz ogólna rekomendacja. "
+        "Używaj języka zrozumiałego dla inwestora detalicznego."
+    )
+
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=150,
-            temperature=0.5,
+            max_tokens=200,
+            temperature=0.4,
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
         return f"Błąd analizy AI: {e}"
 
 # =====================================================================
-# ANALIZA POJEDYNCZEJ SPÓŁKI – Z PEŁNĄ ANALIZĄ DLA KAŻDEJ
+# ANALIZA POJEDYNCZEJ SPÓŁKI – Z PEŁNĄ ANALIZĄ AI (dane rynkowe + newsy)
 # =====================================================================
 def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold, sl_pct, tp_pct, deep_analysis):
     try:
@@ -198,7 +217,6 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
         if df.empty or len(df) < 15:
             return None
 
-        # BEZPIECZNE spłaszczenie kolumn
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
@@ -248,7 +266,21 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
         sl_na_dole = aktualna_cena * (1 - sl_pct)
         tp_na_gorze = aktualna_cena * (1 + tp_pct)
 
-        # Podstawowe dane
+        # ====================================================
+        # POBRANIE NEWSÓW (jeśli włączono) i ANALIZA AI
+        # ====================================================
+        news = ""
+        if deep_analysis:
+            news = pobierz_newsy_tavily(ticker)
+
+        # Generujemy analizę AI na podstawie danych rynkowych (+ ewentualnie newsy)
+        analiza_ai = analizuj_rynkowo_ai(
+            ticker, aktualna_cena, waluta, zmiana_ceny,
+            skok_wolumenu, current_rsi, sl_na_dole, tp_na_gorze,
+            sygnal_trafiony, news
+        )
+
+        # Przygotowanie danych do wyświetlenia
         ticker_info = {
             "Ticker": ticker,
             "Cena": f"{aktualna_cena:.2f} {waluta}",
@@ -260,49 +292,25 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
             "Status": ocena_trendu,
             "Sygnał": sygnal_trafiony,
             "score": sort_score,
+            "Analiza AI": analiza_ai,                     # <-- główna analiza
+            "Newsy (pełne)": news if news else "Brak",
         }
 
-        # =================================================================
-        # ZAWSZE (jeśli włączona analiza) pobieramy newsy i analizę AI
-        # =================================================================
-        if deep_analysis:
-            news = pobierz_newsy_tavily(ticker)
-            if news:
-                analiza_ai = analizuj_newsy_openai(ticker, news, aktualna_cena, waluta)
-            else:
-                analiza_ai = "Brak newsów w ciągu ostatnich 24h."
-            # Zapisujemy pełne dane
-            ticker_info["Newsy (skrót)"] = news[:200] + "..." if news else "Brak"
-            ticker_info["Newsy (pełne)"] = news if news else "Brak"
-            ticker_info["Analiza AI"] = analiza_ai
-        else:
-            ticker_info["Newsy (skrót)"] = "Analiza wyłączona"
-            ticker_info["Newsy (pełne)"] = "Analiza wyłączona"
-            ticker_info["Analiza AI"] = "Wyłączona"
-
-        # =================================================================
-        # Jeśli sygnał – wysyłamy na Telegram (z ewentualną analizą)
-        # =================================================================
+        # ====================================================
+        # WYSYŁKA NA TELEGRAM (tylko przy sygnale)
+        # ====================================================
         if sygnal_trafiony:
             flag_rynek = "🇵🇱" if is_gpw else "🇺🇸"
-            if deep_analysis and news:
-                wiadomosc = (
-                    f"🚨 <b>ALERT SNAJPERA AKCJI {flag_rynek}: {ticker}</b>\n"
-                    f"💰 Cena: {aktualna_cena:.2f} {waluta} (+{zmiana_ceny:.2f}%)\n"
-                    f"📊 Wolumen: <b>{skok_wolumenu:.1f}x</b> ponad średnią\n"
-                    f"🛡️ RSI: <b>{current_rsi:.1f}</b>\n"
-                    f"🛑 SL: {sl_na_dole:.2f} {waluta} | 🎯 TP: {tp_na_gorze:.2f} {waluta}\n"
-                    f"📰 <b>Najnowsze newsy (24h):</b>\n{news[:500]}\n\n"
-                    f"🧠 <b>Analiza AI:</b> {analiza_ai}"
-                )
-            else:
-                wiadomosc = (
-                    f"🚨 <b>ALERT SNAJPERA AKCJI {flag_rynek}: {ticker}</b>\n"
-                    f"💰 Cena: {aktualna_cena:.2f} {waluta} (+{zmiana_ceny:.2f}%)\n"
-                    f"📊 Wolumen: <b>{skok_wolumenu:.1f}x</b> ponad średnią\n"
-                    f"🛡️ RSI: <b>{current_rsi:.1f}</b>\n"
-                    f"🛑 SL: {sl_na_dole:.2f} {waluta} | 🎯 TP: {tp_na_gorze:.2f} {waluta}"
-                )
+            wiadomosc = (
+                f"🚨 <b>ALERT SNAJPERA AKCJI {flag_rynek}: {ticker}</b>\n"
+                f"💰 Cena: {aktualna_cena:.2f} {waluta} (+{zmiana_ceny:.2f}%)\n"
+                f"📊 Wolumen: <b>{skok_wolumenu:.1f}x</b> ponad średnią\n"
+                f"🛡️ RSI: <b>{current_rsi:.1f}</b>\n"
+                f"🛑 SL: {sl_na_dole:.2f} {waluta} | 🎯 TP: {tp_na_gorze:.2f} {waluta}\n\n"
+                f"🧠 <b>Analiza AI:</b>\n{analiza_ai}"
+            )
+            if news:
+                wiadomosc += f"\n\n📰 <b>Newsy (24h):</b>\n{news[:500]}"
             send_telegram_message(wiadomosc)
 
             # Zapis do historii
@@ -313,9 +321,8 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
                 "Zmiana": f"+{zmiana_ceny:.2f}%",
                 "Wolumen": f"{skok_wolumenu:.1f}x",
                 "RSI": f"{current_rsi:.1f}",
+                "Analiza AI": analiza_ai[:150] + "..." if len(analiza_ai) > 150 else analiza_ai,
             }
-            if deep_analysis:
-                historia["Analiza AI"] = analiza_ai[:200] + "..." if len(analiza_ai) > 200 else analiza_ai
             st.session_state.alerts_history.append(historia)
 
         return ticker_info
@@ -416,7 +423,7 @@ if uruchom_skan:
     job_skanera(status_ph, prog_bar)
     status_ph.success(f"⚙️ Status: Wielowątkowy radar aktywny | Ostatni skan: {st.session_state.last_scan_time}")
 
-# AUTO-SKAN – BEZ TIME.SLEEP (sprawdzamy przy każdym odświeżeniu)
+# AUTO-SKAN – BEZ TIME.SLEEP
 if auto_scan != "Tylko ręcznie":
     interwal = {"Co 1 minutę": 60, "Co 5 minut": 300, "Co 15 minut": 900}[auto_scan]
     if (datetime.now() - st.session_state.last_auto_scan).total_seconds() >= interwal:
@@ -444,11 +451,7 @@ if st.session_state.last_scanned_tickers:
         if col in df_wyniki.columns:
             df_wyniki = df_wyniki.drop(columns=[col])
 
-    # Skracamy długie teksty dla czytelności
-    if "Newsy (skrót)" in df_wyniki.columns:
-        df_wyniki["Newsy (skrót)"] = df_wyniki["Newsy (skrót)"].apply(
-            lambda x: x[:150] + "..." if isinstance(x, str) and len(x) > 150 else x
-        )
+    # Skracamy długie teksty dla czytelności tabeli
     if "Analiza AI" in df_wyniki.columns:
         df_wyniki["Analiza AI"] = df_wyniki["Analiza AI"].apply(
             lambda x: x[:150] + "..." if isinstance(x, str) and len(x) > 150 else x
@@ -457,17 +460,15 @@ if st.session_state.last_scanned_tickers:
     st.dataframe(df_wyniki, use_container_width=True)
 
     # =====================================================================
-    # ROZWIJANE SZCZEGÓŁY – PEŁNE NEWSY I ANALIZA
+    # ROZWIJANE SZCZEGÓŁY – PEŁNA ANALIZA I NEWSY
     # =====================================================================
     st.subheader("📰 Szczegółowe analizy (rozwiń dla tickera)")
     for item in st.session_state.last_scanned_tickers:
-        # Sprawdzamy, czy są dane do wyświetlenia
-        if "Newsy (pełne)" in item and "Analiza AI" in item:
-            with st.expander(f"{item['Ticker']} – szczegóły analizy"):
-                st.write("**📰 Newsy (pełne):**")
-                st.write(item.get("Newsy (pełne)", "Brak"))
-                st.write("**🧠 Analiza AI:**")
-                st.write(item.get("Analiza AI", "Brak"))
+        with st.expander(f"{item['Ticker']} – szczegóły analizy"):
+            st.write("**🧠 Analiza AI (pełna):**")
+            st.write(item.get("Analiza AI", "Brak"))
+            st.write("**📰 Newsy (pełne):**")
+            st.write(item.get("Newsy (pełne)", "Brak"))
 
 # =====================================================================
 # HISTORIA ALERTÓW – ZIELONE OKAZJE
