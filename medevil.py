@@ -30,13 +30,13 @@ if "skan_w_toku" not in st.session_state:
 if "last_auto_scan" not in st.session_state:
     st.session_state.last_auto_scan = datetime.now()
 
-# Ustawienia zapisywane w sesji
+# Ustawienia zapisywane w sesji (z niższymi progami na start)
 if "ui_interval" not in st.session_state:
     st.session_state.ui_interval = "30m"
 if "ui_vol_threshold" not in st.session_state:
-    st.session_state.ui_vol_threshold = 3.0
+    st.session_state.ui_vol_threshold = 1.5   # niższy próg dla testów
 if "ui_price_threshold" not in st.session_state:
-    st.session_state.ui_price_threshold = 1.0
+    st.session_state.ui_price_threshold = 0.5  # niższy próg dla testów
 if "ui_sl" not in st.session_state:
     st.session_state.ui_sl = 0.05
 if "ui_tp" not in st.session_state:
@@ -46,15 +46,15 @@ if "use_deep_analysis" not in st.session_state:
 if "auto_scan" not in st.session_state:
     st.session_state.auto_scan = "Tylko ręcznie"
 if "market_database" not in st.session_state:
-    st.session_state.market_database = ["APS.WA", "STX.WA"]
+    st.session_state.market_database = ["APS.WA", "STX.WA"]  # przykładowe tickery – możesz zmienić
 if "filter_gpw" not in st.session_state:
     st.session_state.filter_gpw = True
 if "filter_usa" not in st.session_state:
     st.session_state.filter_usa = True
 if "rsi_min" not in st.session_state:
-    st.session_state.rsi_min = 30
+    st.session_state.rsi_min = 10   # szeroki zakres, aby nie odrzucać
 if "rsi_max" not in st.session_state:
-    st.session_state.rsi_max = 70
+    st.session_state.rsi_max = 90
 if "macd_sign" not in st.session_state:
     st.session_state.macd_sign = "Dowolny"
 
@@ -125,7 +125,7 @@ with col_p1:
     )
 with col_p2:
     st.session_state.ui_vol_threshold = st.slider(
-        "Próg skoku obrotu (x średniej):", 1.0, 10.0,
+        "Próg skoku obrotu (x średniej):", 0.5, 10.0,
         st.session_state.ui_vol_threshold, step=0.5
     )
 with col_p3:
@@ -382,11 +382,14 @@ def analizuj_rynkowo_ai(ticker: str, cena: float, waluta: str, zmiana: float,
         return f"Błąd analizy AI: {e}"
 
 # =====================================================================
-# ANALIZA POJEDYNCZEJ SPÓŁKI (z dynamicznym okresem)
+# ANALIZA POJEDYNCZEJ SPÓŁKI (z dynamicznym okresem i diagnostyką)
 # =====================================================================
 def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
                           sl_pct, tp_pct, deep_analysis,
                           rsi_min, rsi_max, macd_sign):
+    """
+    Zwraca słownik z danymi lub słownik z błędem.
+    """
     try:
         # Dynamiczny okres pobierania
         interval = st.session_state.ui_interval
@@ -398,8 +401,20 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
             period = "3mo"
 
         df = yf.download(ticker, period=period, interval=interval, progress=False)
-        if df.empty or len(df) < 20:
-            return None
+        if df.empty:
+            return {
+                "Ticker": ticker,
+                "Status": "❌ Brak danych",
+                "score": 0,
+                "Analiza AI": "Brak danych z Yahoo Finance."
+            }
+        if len(df) < 20:
+            return {
+                "Ticker": ticker,
+                "Status": "❌ Za mało świec",
+                "score": 0,
+                "Analiza AI": f"Potrzebuję co najmniej 20 świec, mam tylko {len(df)}."
+            }
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
@@ -421,7 +436,12 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
         df["ADX"] = oblicz_adx(df)
 
         if df["RSI"].isna().all():
-            return None
+            return {
+                "Ticker": ticker,
+                "Status": "❌ RSI nieobliczalny",
+                "score": 0,
+                "Analiza AI": "Nie udało się obliczyć RSI – dane mogą być niekompletne."
+            }
 
         ostatnia = df.iloc[-1]
         poprzednia = df.iloc[-2]
@@ -442,18 +462,40 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
         obv_val = pobierz_wartosc(ostatnia["OBV"])
         adx_val = pobierz_wartosc(ostatnia["ADX"])
 
+        # Sprawdzenie, czy wszystkie potrzebne wartości są dostępne
         if any(v is None for v in [aktualna_cena, cena_poprzednia, aktualny_wolumen, sredni_wolumen, current_rsi]):
-            return None
+            return {
+                "Ticker": ticker,
+                "Status": "❌ Brak kluczowych danych (cena/wolumen/RSI)",
+                "score": 0,
+                "Analiza AI": "Niektóre dane są puste – sprawdź ticker."
+            }
         if aktualna_cena <= 0 or cena_poprzednia <= 0 or sredni_wolumen <= 0:
-            return None
+            return {
+                "Ticker": ticker,
+                "Status": "❌ Nieprawidłowe wartości (cena <=0 lub wolumen =0)",
+                "score": 0,
+                "Analiza AI": "Cena lub wolumen są zerowe – dane niepoprawne."
+            }
 
         is_gpw = ticker.endswith(".WA")
         waluta = "PLN" if is_gpw else "USD"
 
+        # Filtry cenowe
         if is_gpw and aktualna_cena > MAX_PRICE_PLN:
-            return None
+            return {
+                "Ticker": ticker,
+                "Status": f"⛔ Cena > {MAX_PRICE_PLN} PLN",
+                "score": 0,
+                "Analiza AI": f"Cena {aktualna_cena:.2f} przekracza limit {MAX_PRICE_PLN} PLN."
+            }
         if not is_gpw and aktualna_cena > MAX_PRICE_USD:
-            return None
+            return {
+                "Ticker": ticker,
+                "Status": f"⛔ Cena > {MAX_PRICE_USD} USD",
+                "score": 0,
+                "Analiza AI": f"Cena {aktualna_cena:.2f} przekracza limit {MAX_PRICE_USD} USD."
+            }
 
         zmiana_ceny = ((aktualna_cena - cena_poprzednia) / cena_poprzednia) * 100.0
         skok_wolumenu = aktualny_wolumen / sredni_wolumen
@@ -463,12 +505,13 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
         rsi_warunek = (rsi_min <= current_rsi <= rsi_max)
         macd_warunek = True
         if macd_sign == ">0":
-            macd_warunek = macd_val > 0
+            macd_warunek = macd_val > 0 if macd_val is not None else False
         elif macd_sign == "<0":
-            macd_warunek = macd_val < 0
+            macd_warunek = macd_val < 0 if macd_val is not None else False
 
         sygnal_trafiony = sygnal_techniczny and rsi_warunek and macd_warunek
 
+        # Ustalamy status
         if sygnal_trafiony:
             ocena_trendu = "🟢 Kupuj (Up)"
             sort_score = 3
@@ -560,8 +603,12 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
 
         return ticker_info
     except Exception as e:
-        st.sidebar.warning(f"Błąd dla {ticker}: {e}")
-        return None
+        return {
+            "Ticker": ticker,
+            "Status": f"❌ Błąd: {str(e)}",
+            "score": 0,
+            "Analiza AI": f"Wystąpił błąd: {e}"
+        }
 
 # =====================================================================
 # BACKTEST STRATEGII
@@ -687,6 +734,8 @@ def job_skanera(status_placeholder=None, progress_bar=None):
             if progress_bar:
                 progress_bar.progress(przetworzone / total_spolki)
 
+    # Sortowanie wyników (najpierw sygnały, potem reszta)
+    lista_podgladu.sort(key=lambda x: x.get("score", 0), reverse=True)
     st.session_state.last_scanned_tickers = lista_podgladu
     st.session_state.skan_w_toku = False
     st.session_state.last_auto_scan = datetime.now()
@@ -767,6 +816,10 @@ if st.session_state.last_scanned_tickers:
 
     df_wyniki = pd.DataFrame(st.session_state.last_scanned_tickers)
 
+    # Jeśli brak kolumny "Status", dodaj domyślną
+    if "Status" not in df_wyniki.columns:
+        df_wyniki["Status"] = "Brak danych"
+
     if "score" in df_wyniki.columns:
         df_wyniki = df_wyniki.sort_values(by="score", ascending=False)
         df_wyniki = df_wyniki.drop(columns=["score"])
@@ -780,6 +833,7 @@ if st.session_state.last_scanned_tickers:
             lambda x: x[:150] + "..." if isinstance(x, str) and len(x) > 150 else x
         )
 
+    # Funkcje kolorowania
     def koloruj_zmiane(val):
         try:
             if isinstance(val, (int, float)):
@@ -819,14 +873,18 @@ if st.session_state.last_scanned_tickers:
             return ''
 
     def koloruj_status(val):
-        if 'Kupuj' in val:
-            return 'background-color: #d4edda; color: #155724; font-weight: bold;'
-        elif 'Trzymaj' in val:
-            return 'background-color: #fff3cd; color: #856404;'
-        elif 'Unikaj' in val:
-            return 'background-color: #f8d7da; color: #721c24;'
+        if isinstance(val, str):
+            if 'Kupuj' in val:
+                return 'background-color: #d4edda; color: #155724; font-weight: bold;'
+            elif 'Trzymaj' in val:
+                return 'background-color: #fff3cd; color: #856404;'
+            elif 'Unikaj' in val:
+                return 'background-color: #f8d7da; color: #721c24;'
+            elif '❌' in val or '⛔' in val:
+                return 'background-color: #f5c6cb; color: #721c24;'
         return ''
 
+    # Stylizacja
     styled = df_wyniki.style \
         .map(koloruj_zmiane, subset=['Zmiana %']) \
         .map(koloruj_wolumen, subset=['Wolumen (x śr.)']) \
