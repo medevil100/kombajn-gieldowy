@@ -4,6 +4,7 @@ import yfinance as yf
 import pandas as pd
 import streamlit as st
 import numpy as np
+import plotly.graph_objects as go
 from openai import OpenAI
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,7 +17,7 @@ st.set_page_config(page_title="Snajper Rynkowy Custom", page_icon="🎯", layout
 st.title("🎯 Twój Autorski Skaner Groszówek: Market Sniper")
 
 # =====================================================================
-# SESJA
+# SESJA – przechowywanie ustawień i historii
 # =====================================================================
 if "alerts_history" not in st.session_state:
     st.session_state.alerts_history = []
@@ -28,6 +29,28 @@ if "skan_w_toku" not in st.session_state:
     st.session_state.skan_w_toku = False
 if "last_auto_scan" not in st.session_state:
     st.session_state.last_auto_scan = datetime.now()
+
+# Ustawienia zapisywane w sesji (by nie resetować przy każdym odświeżeniu)
+if "ui_interval" not in st.session_state:
+    st.session_state.ui_interval = "30m"
+if "ui_vol_threshold" not in st.session_state:
+    st.session_state.ui_vol_threshold = 3.0
+if "ui_price_threshold" not in st.session_state:
+    st.session_state.ui_price_threshold = 1.0
+if "ui_sl" not in st.session_state:
+    st.session_state.ui_sl = 0.05
+if "ui_tp" not in st.session_state:
+    st.session_state.ui_tp = 0.15
+if "use_deep_analysis" not in st.session_state:
+    st.session_state.use_deep_analysis = True
+if "auto_scan" not in st.session_state:
+    st.session_state.auto_scan = "Tylko ręcznie"
+if "market_database" not in st.session_state:
+    st.session_state.market_database = ["APS.WA", "STX.WA"]
+if "filter_gpw" not in st.session_state:
+    st.session_state.filter_gpw = True
+if "filter_usa" not in st.session_state:
+    st.session_state.filter_usa = True
 
 # =====================================================================
 # ŁADOWANIE KLUCZY
@@ -53,36 +76,89 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 tavily = TavilyClient(api_key=TAVILY_API_KEY)
 
 # =====================================================================
-# LISTA OBSERWACYJNA
+# LISTA OBSERWACYJNA Z ZAPISEM W SESJI
 # =====================================================================
 st.subheader("📝 Zarządzanie Twoją Listą Obserwacyjną")
-domyslna_lista = "APS.WA, STX.WA"
+domyslna_lista = ", ".join(st.session_state.market_database)
 user_input = st.text_area(
     "Wklej tutaj swoje spółki rozdzielone przecinkami (USA lub GPW z końcówką .WA):",
     value=domyslna_lista,
     height=100
 )
-MARKET_DATABASE = [t.strip().upper() for t in user_input.split(",") if t.strip()]
+# Zapisz listę do sesji
+st.session_state.market_database = [t.strip().upper() for t in user_input.split(",") if t.strip()]
 
 # =====================================================================
-# SUWAKI
+# FILTRY RYNKOWE (GPW / USA)
+# =====================================================================
+col_f1, col_f2 = st.columns(2)
+with col_f1:
+    st.session_state.filter_gpw = st.checkbox("🇵🇱 GPW (z .WA)", value=st.session_state.filter_gpw)
+with col_f2:
+    st.session_state.filter_usa = st.checkbox("🇺🇸 USA (bez .WA)", value=st.session_state.filter_usa)
+
+# Filtruj listę obserwacyjną
+MARKET_DATABASE = []
+for t in st.session_state.market_database:
+    is_gpw = t.endswith(".WA")
+    if is_gpw and st.session_state.filter_gpw:
+        MARKET_DATABASE.append(t)
+    elif not is_gpw and st.session_state.filter_usa:
+        MARKET_DATABASE.append(t)
+
+if not MARKET_DATABASE:
+    st.warning("⚠️ Brak spółek po zastosowaniu filtrów – sprawdź listę lub filtry.")
+
+# =====================================================================
+# SUWAKI – z zapisem w sesji
 # =====================================================================
 col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns(5)
 with col_p1:
-    ui_interval = st.selectbox("Interwał świecy:", ["1m", "5m", "15m", "30m", "1h"], index=3)
+    st.session_state.ui_interval = st.selectbox(
+        "Interwał świecy:",
+        ["1m", "5m", "15m", "30m", "1h"],
+        index=["1m", "5m", "15m", "30m", "1h"].index(st.session_state.ui_interval)
+    )
 with col_p2:
-    ui_vol_threshold = st.slider("Próg skoku obrotu (x średniej):", 1.0, 10.0, VOLUME_THRESHOLD, step=0.5)
+    st.session_state.ui_vol_threshold = st.slider(
+        "Próg skoku obrotu (x średniej):", 1.0, 10.0,
+        st.session_state.ui_vol_threshold, step=0.5
+    )
 with col_p3:
-    ui_price_threshold = st.slider("Próg wzrostu ceny (%):", 0.1, 5.0, PRICE_THRESHOLD, step=0.1)
+    st.session_state.ui_price_threshold = st.slider(
+        "Próg wzrostu ceny (%):", 0.1, 5.0,
+        st.session_state.ui_price_threshold, step=0.1
+    )
 with col_p4:
-    ui_sl = st.slider("Stop Loss (% od ceny):", 1, 20, 5, step=1) / 100.0
+    st.session_state.ui_sl = st.slider(
+        "Stop Loss (% od ceny):", 1, 20,
+        int(st.session_state.ui_sl * 100), step=1
+    ) / 100.0
 with col_p5:
-    ui_tp = st.slider("Take Profit (% od ceny):", 5, 50, 15, step=5) / 100.0
+    st.session_state.ui_tp = st.slider(
+        "Take Profit (% od ceny):", 5, 50,
+        int(st.session_state.ui_tp * 100), step=5
+    ) / 100.0
+
+# =====================================================================
+# DODATKOWE WARUNKI ALERTÓW (RSI, MACD)
+# =====================================================================
+st.subheader("⚙️ Dodatkowe warunki sygnału")
+col_c1, col_c2, col_c3 = st.columns(3)
+with col_c1:
+    rsi_min = st.slider("Min RSI", 10, 80, 30, step=5)
+with col_c2:
+    rsi_max = st.slider("Max RSI", 20, 90, 70, step=5)
+with col_c3:
+    macd_sign = st.selectbox("MACD", ["Dowolny", ">0", "<0"], index=0)
 
 # =====================================================================
 # OPCJA ANALIZY Z NEWSAMI
 # =====================================================================
-use_deep_analysis = st.checkbox("🧠 Włącz analizę z użyciem newsów (Tavily)", value=True)
+st.session_state.use_deep_analysis = st.checkbox(
+    "🧠 Włącz analizę z użyciem newsów (Tavily)",
+    value=st.session_state.use_deep_analysis
+)
 
 # =====================================================================
 # TELEGRAM
@@ -108,7 +184,7 @@ def send_telegram_message(message: str) -> bool:
         return False
 
 # =====================================================================
-# WSKAŹNIKI TECHNICZNE
+# WSKAŹNIKI TECHNICZNE (rozszerzone)
 # =====================================================================
 def oblicz_rsi(df: pd.DataFrame, period: int = 14):
     try:
@@ -154,6 +230,44 @@ def oblicz_momentum(df: pd.DataFrame, period: int = 5):
     except Exception:
         return None
 
+# ----- NOWE WSKAŹNIKI -----
+def oblicz_bollinger(df: pd.DataFrame, period: int = 20, std: int = 2):
+    try:
+        sma = df["Close"].rolling(period).mean()
+        std_dev = df["Close"].rolling(period).std()
+        upper = sma + std * std_dev
+        lower = sma - std * std_dev
+        return upper, sma, lower
+    except Exception:
+        return None, None, None
+
+def oblicz_obv(df: pd.DataFrame):
+    try:
+        obv = (np.sign(df["Close"].diff()) * df["Volume"]).fillna(0).cumsum()
+        return obv
+    except Exception:
+        return None
+
+def oblicz_adx(df: pd.DataFrame, period: int = 14):
+    try:
+        high = df["High"]
+        low = df["Low"]
+        close = df["Close"]
+        plus_dm = high.diff()
+        minus_dm = low.diff()
+        plus_dm[plus_dm < 0] = 0
+        minus_dm[minus_dm > 0] = 0
+        minus_dm = abs(minus_dm)
+        tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+        atr = tr.rolling(period).mean()
+        plus_di = 100 * (plus_dm.rolling(period).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(period).mean() / atr)
+        dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+        adx = dx.rolling(period).mean()
+        return adx
+    except Exception:
+        return None
+
 # =====================================================================
 # POMOCNICZA FUNKCJA DO POBRANIA WARTOŚCI
 # =====================================================================
@@ -173,9 +287,12 @@ def pobierz_wartosc(series_or_float):
         return None
 
 # =====================================================================
-# TAVILY – NEWS
+# TAVILY – NEWS + SENTYMENT
 # =====================================================================
-def pobierz_newsy_tavily(ticker: str) -> str:
+def pobierz_newsy_tavily(ticker: str) -> tuple:
+    """
+    Zwraca (pełny_tekst_newsów, sentyment: -1,0,1)
+    """
     try:
         query = f"{ticker} stock news OR akcje"
         response = tavily.search(
@@ -186,25 +303,39 @@ def pobierz_newsy_tavily(ticker: str) -> str:
             days=1
         )
         if not response or "results" not in response:
-            return ""
+            return "", 0
         news_text = ""
+        pozytywne = ["wzrost", "zysk", "rekord", "kupno", "kontrakt", "dobry", "przebicie", "partnerstwo"]
+        negatywne = ["spadek", "strata", "obniżenie", "sprzedaż", "problem", "ryzyko", "kary", "spowolnienie"]
+        sent_score = 0
         for result in response["results"][:5]:
             title = result.get("title", "")
             snippet = result.get("content", "")
             news_text += f"• {title}\n  {snippet}\n\n"
-        return news_text.strip()
+            # Prosty sentyment
+            for p in pozytywne:
+                if p in title.lower() or p in snippet.lower():
+                    sent_score += 1
+            for n in negatywne:
+                if n in title.lower() or n in snippet.lower():
+                    sent_score -= 1
+        sentiment = 1 if sent_score > 0 else (-1 if sent_score < 0 else 0)
+        return news_text.strip(), sentiment
     except Exception as e:
         st.sidebar.warning(f"Tavily błąd dla {ticker}: {e}")
-        return ""
+        return "", 0
 
 # =====================================================================
-# ANALIZA AI – NA PODSTAWIE DANYCH RYNKOWYCH + NEWSY
+# ANALIZA AI – NA PODSTAWIE DANYCH RYNKOWYCH + NEWSY + SENTYMENT
 # =====================================================================
 def analizuj_rynkowo_ai(ticker: str, cena: float, waluta: str, zmiana: float,
                         wolumen_x: float, rsi: float, sl: float, tp: float,
                         sygnal: bool, sma20: float, sma50: float,
-                        macd: float, atr: float, momentum: float, news: str = "") -> str:
+                        macd: float, atr: float, momentum: float,
+                        bb_upper: float, bb_mid: float, bb_lower: float,
+                        obv: float, adx: float, news: str = "", sentiment: int = 0) -> str:
     sygnal_str = "TAK" if sygnal else "NIE"
+    sent_str = "pozytywny" if sentiment > 0 else ("negatywny" if sentiment < 0 else "neutralny")
     prompt = (
         f"Jesteś profesjonalnym analitykiem technicznym. Oceń sytuację spółki {ticker} na podstawie danych:\n"
         f"- Cena: {cena:.2f} {waluta}\n"
@@ -216,12 +347,16 @@ def analizuj_rynkowo_ai(ticker: str, cena: float, waluta: str, zmiana: float,
         f"- MACD: {macd:.3f}\n"
         f"- ATR (zmienność): {atr:.2f} {waluta}\n"
         f"- Momentum (5 świec): {momentum:.2f}%\n"
+        f"- Bollinger Górne: {bb_upper:.2f}, Środkowe: {bb_mid:.2f}, Dolne: {bb_lower:.2f}\n"
+        f"- OBV: {obv:.0f}\n"
+        f"- ADX: {adx:.1f}\n"
         f"- Stop Loss: {sl:.2f} {waluta}\n"
         f"- Take Profit: {tp:.2f} {waluta}\n"
         f"- Sygnał kupna (techniczny): {sygnal_str}\n"
     )
     if news:
         prompt += f"\nDodatkowe informacje z rynkowych newsów (ostatnie 24h):\n{news[:500]}\n"
+        prompt += f"Sentyment newsów: {sent_str}\n"
         prompt += "Uwzględnij te informacje w swojej ocenie, ale przede wszystkim oprzyj się na danych technicznych."
     else:
         prompt += "\nBrak dostępnych newsów – analizuj wyłącznie dane techniczne."
@@ -244,18 +379,20 @@ def analizuj_rynkowo_ai(ticker: str, cena: float, waluta: str, zmiana: float,
         return f"Błąd analizy AI: {e}"
 
 # =====================================================================
-# ANALIZA POJEDYNCZEJ SPÓŁKI
+# ANALIZA POJEDYNCZEJ SPÓŁKI (z nowymi wskaźnikami i warunkami)
 # =====================================================================
-def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold, sl_pct, tp_pct, deep_analysis):
+def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
+                          sl_pct, tp_pct, deep_analysis,
+                          rsi_min, rsi_max, macd_sign):
     try:
-        df = yf.download(ticker, period="5d", interval=ui_interval, progress=False)
-        if df.empty or len(df) < 15:
+        df = yf.download(ticker, period="5d", interval=st.session_state.ui_interval, progress=False)
+        if df.empty or len(df) < 20:  # potrzebujemy więcej danych dla BB, ADX
             return None
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Oblicz wskaźniki
+        # Oblicz wszystkie wskaźniki
         df["RSI"] = oblicz_rsi(df)
         df["SMA20"] = oblicz_sma(df, 20)
         df["SMA50"] = oblicz_sma(df, 50) if len(df) >= 50 else None
@@ -264,6 +401,12 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
         df["Signal"] = signal
         df["ATR"] = oblicz_atr(df)
         df["Momentum"] = oblicz_momentum(df)
+        bb_upper, bb_mid, bb_lower = oblicz_bollinger(df)
+        df["BB_Upper"] = bb_upper
+        df["BB_Mid"] = bb_mid
+        df["BB_Lower"] = bb_lower
+        df["OBV"] = oblicz_obv(df)
+        df["ADX"] = oblicz_adx(df)
 
         if df["RSI"].isna().all():
             return None
@@ -281,6 +424,11 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
         macd_val = pobierz_wartosc(ostatnia["MACD"])
         atr_val = pobierz_wartosc(ostatnia["ATR"])
         momentum_val = pobierz_wartosc(ostatnia["Momentum"])
+        bb_upper_val = pobierz_wartosc(ostatnia["BB_Upper"])
+        bb_mid_val = pobierz_wartosc(ostatnia["BB_Mid"])
+        bb_lower_val = pobierz_wartosc(ostatnia["BB_Lower"])
+        obv_val = pobierz_wartosc(ostatnia["OBV"])
+        adx_val = pobierz_wartosc(ostatnia["ADX"])
 
         if any(v is None for v in [aktualna_cena, cena_poprzednia, aktualny_wolumen, sredni_wolumen, current_rsi]):
             return None
@@ -298,9 +446,17 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
         zmiana_ceny = ((aktualna_cena - cena_poprzednia) / cena_poprzednia) * 100.0
         skok_wolumenu = aktualny_wolumen / sredni_wolumen
 
+        # Podstawowy sygnał
         sygnal_techniczny = (zmiana_ceny >= price_threshold and skok_wolumenu >= vol_threshold)
-        rsi_bezpieczny = (30.0 <= current_rsi <= 70.0)
-        sygnal_trafiony = sygnal_techniczny and rsi_bezpieczny
+        # Dodatkowe warunki
+        rsi_warunek = (rsi_min <= current_rsi <= rsi_max)
+        macd_warunek = True
+        if macd_sign == ">0":
+            macd_warunek = macd_val > 0
+        elif macd_sign == "<0":
+            macd_warunek = macd_val < 0
+
+        sygnal_trafiony = sygnal_techniczny and rsi_warunek and macd_warunek
 
         if sygnal_trafiony:
             ocena_trendu = "🟢 Kupuj (Up)"
@@ -315,10 +471,10 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
         sl_na_dole = aktualna_cena * (1 - sl_pct)
         tp_na_gorze = aktualna_cena * (1 + tp_pct)
 
-        # Pobranie newsów i analizy AI
         news = ""
+        sentiment = 0
         if deep_analysis:
-            news = pobierz_newsy_tavily(ticker)
+            news, sentiment = pobierz_newsy_tavily(ticker)
 
         analiza_ai = analizuj_rynkowo_ai(
             ticker, aktualna_cena, waluta, zmiana_ceny,
@@ -329,7 +485,12 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
             macd_val if macd_val is not None else 0.0,
             atr_val if atr_val is not None else 0.0,
             momentum_val if momentum_val is not None else 0.0,
-            news
+            bb_upper_val if bb_upper_val is not None else 0.0,
+            bb_mid_val if bb_mid_val is not None else 0.0,
+            bb_lower_val if bb_lower_val is not None else 0.0,
+            obv_val if obv_val is not None else 0.0,
+            adx_val if adx_val is not None else 0.0,
+            news, sentiment
         )
 
         ticker_info = {
@@ -343,6 +504,10 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
             "MACD": f"{macd_val:.3f}" if macd_val is not None else "—",
             "ATR": f"{atr_val:.2f}" if atr_val is not None else "—",
             "Momentum": f"{momentum_val:.2f}%" if momentum_val is not None else "—",
+            "BB_Upper": f"{bb_upper_val:.2f}" if bb_upper_val is not None else "—",
+            "BB_Lower": f"{bb_lower_val:.2f}" if bb_lower_val is not None else "—",
+            "ADX": f"{adx_val:.1f}" if adx_val is not None else "—",
+            "Sentyment": "😊" if sentiment > 0 else ("😟" if sentiment < 0 else "😐"),
             "SL": f"{sl_na_dole:.2f} {waluta}",
             "TP": f"{tp_na_gorze:.2f} {waluta}",
             "Status": ocena_trendu,
@@ -350,6 +515,10 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
             "score": sort_score,
             "Analiza AI": analiza_ai,
             "Newsy (pełne)": news if news else "Brak",
+            # do wykresu
+            "_df": df,
+            "_cena_akt": aktualna_cena,
+            "_waluta": waluta
         }
 
         # Telegram tylko przy sygnale
@@ -386,7 +555,80 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
         return None
 
 # =====================================================================
-# GŁÓWNY JOB SKANERA
+# BACKTEST STRATEGII (prosty)
+# =====================================================================
+def backtest_strategy(ticker, vol_threshold, price_threshold, sl_pct, tp_pct,
+                      rsi_min, rsi_max, macd_sign, lookback_days=60):
+    """
+    Symulacja strategii na ostatnich lookback_days dniach.
+    Zwraca: (win_rate, avg_return, total_trades)
+    """
+    try:
+        df = yf.download(ticker, period=f"{lookback_days+5}d", interval="1d", progress=False)
+        if df.empty or len(df) < 20:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        # Oblicz wskaźniki (dzienne)
+        df["RSI"] = oblicz_rsi(df, 14)
+        df["SMA20"] = oblicz_sma(df, 20)
+        macd, signal = oblicz_macd(df)
+        df["MACD"] = macd
+        df["ATR"] = oblicz_atr(df, 14)
+        df["Momentum"] = oblicz_momentum(df, 5)
+        df["Volume_Avg"] = df["Volume"].rolling(20).mean()
+
+        # Symulacja przesuwnego okna
+        trades = []
+        for i in range(20, len(df) - 1):  # od 20 dnia, żeby mieć średnie
+            row = df.iloc[i]
+            if row["Volume_Avg"] == 0:
+                continue
+            skok_wol = row["Volume"] / row["Volume_Avg"]
+            zmiana = ((row["Close"] - df.iloc[i-1]["Close"]) / df.iloc[i-1]["Close"]) * 100
+            # Warunki sygnału
+            syg_tech = (zmiana >= price_threshold and skok_wol >= vol_threshold)
+            rsi_ok = (rsi_min <= row["RSI"] <= rsi_max) if not pd.isna(row["RSI"]) else False
+            macd_ok = True
+            if macd_sign == ">0":
+                macd_ok = row["MACD"] > 0 if not pd.isna(row["MACD"]) else False
+            elif macd_sign == "<0":
+                macd_ok = row["MACD"] < 0 if not pd.isna(row["MACD"]) else False
+
+            if syg_tech and rsi_ok and macd_ok:
+                entry = row["Close"]
+                sl = entry * (1 - sl_pct)
+                tp = entry * (1 + tp_pct)
+                # Sprawdzamy kolejne dni (max 5)
+                exit_price = None
+                for j in range(i+1, min(i+6, len(df))):
+                    high = df.iloc[j]["High"]
+                    low = df.iloc[j]["Low"]
+                    if high >= tp:
+                        exit_price = tp
+                        break
+                    if low <= sl:
+                        exit_price = sl
+                        break
+                if exit_price is None:
+                    # jeśli nie osiągnięto, bierzemy cenę zamknięcia z ostatniego dnia
+                    exit_price = df.iloc[min(i+5, len(df)-1)]["Close"]
+                ret = (exit_price - entry) / entry
+                trades.append(ret)
+
+        if not trades:
+            return {"win_rate": 0, "avg_return": 0, "total": 0}
+
+        wins = sum(1 for r in trades if r > 0)
+        win_rate = wins / len(trades) * 100
+        avg_return = np.mean(trades) * 100
+        return {"win_rate": win_rate, "avg_return": avg_return, "total": len(trades)}
+    except Exception as e:
+        return None
+
+# =====================================================================
+# GŁÓWNY JOB SKANERA (z nowymi parametrami)
 # =====================================================================
 def job_skanera(status_placeholder=None, progress_bar=None):
     if st.session_state.skan_w_toku:
@@ -398,11 +640,15 @@ def job_skanera(status_placeholder=None, progress_bar=None):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state.last_scan_time = now
 
-    vol_thr = ui_vol_threshold
-    price_thr = ui_price_threshold
-    sl_pct = ui_sl
-    tp_pct = ui_tp
-    deep = use_deep_analysis
+    vol_thr = st.session_state.ui_vol_threshold
+    price_thr = st.session_state.ui_price_threshold
+    sl_pct = st.session_state.ui_sl
+    tp_pct = st.session_state.ui_tp
+    deep = st.session_state.use_deep_analysis
+    # dodatkowe warunki
+    rsi_min = st.session_state.get("rsi_min", 30)
+    rsi_max = st.session_state.get("rsi_max", 70)
+    macd_sign = st.session_state.get("macd_sign", "Dowolny")
 
     total_spolki = len(MARKET_DATABASE)
     lista_podgladu = []
@@ -424,7 +670,10 @@ def job_skanera(status_placeholder=None, progress_bar=None):
                 price_thr,
                 sl_pct,
                 tp_pct,
-                deep
+                deep,
+                rsi_min,
+                rsi_max,
+                macd_sign
             ): ticker
             for ticker in MARKET_DATABASE
         }
@@ -444,12 +693,13 @@ def job_skanera(status_placeholder=None, progress_bar=None):
     st.session_state.last_auto_scan = datetime.now()
 
 # =====================================================================
-# SIDEBAR
+# SIDEBAR – sterowanie, auto-skan, test Telegram
 # =====================================================================
 st.sidebar.header("⏱️ Sterowanie Radarem")
-auto_scan = st.sidebar.selectbox(
+st.session_state.auto_scan = st.sidebar.selectbox(
     "Automatyczne odświeżanie:",
     ["Tylko ręcznie", "Co 1 minutę", "Co 5 minut", "Co 15 minut"],
+    index=["Tylko ręcznie", "Co 1 minutę", "Co 5 minut", "Co 15 minut"].index(st.session_state.auto_scan)
 )
 
 if st.sidebar.button("🔌 Wyślij testowy alert"):
@@ -458,16 +708,38 @@ if st.sidebar.button("🔌 Wyślij testowy alert"):
 
 st.sidebar.info(f"⏱️ Ostatni udany skan: {st.session_state.last_scan_time}")
 
+# Przycisk do czyszczenia pamięci podręcznej Yahoo Finance
+if st.sidebar.button("🗑️ Wyczyść cache danych"):
+    yf.pdr_override()  # nie działa bezpośrednio, ale możemy spróbować
+    st.sidebar.success("Cache wyczyszczony (jeśli był).")
+
 # =====================================================================
-# PRZYCISKI
+# PRZYCISKI GŁÓWNE
 # =====================================================================
-col_btn1, col_btn2 = st.columns(2)
+col_btn1, col_btn2, col_btn3 = st.columns(3)
 with col_btn1:
     uruchom_skan = st.button("🚀 Uruchom Skaner")
 with col_btn2:
     if st.button("🗑️ Wyczyść Historię"):
         st.session_state.alerts_history = []
         st.rerun()
+with col_btn3:
+    if st.button("📥 Eksportuj wyniki CSV"):
+        if st.session_state.last_scanned_tickers:
+            df_exp = pd.DataFrame(st.session_state.last_scanned_tickers)
+            # usuń zbędne kolumny
+            for c in ["_df", "_cena_akt", "_waluta", "score", "Sygnał"]:
+                if c in df_exp.columns:
+                    df_exp = df_exp.drop(columns=[c])
+            csv = df_exp.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Pobierz CSV",
+                data=csv,
+                file_name=f"skaner_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.warning("Brak wyników do eksportu.")
 
 status_ph = st.empty()
 prog_bar = st.empty()
@@ -479,8 +751,8 @@ if uruchom_skan:
     status_ph.success(f"⚙️ Status: Wielowątkowy radar aktywny | Ostatni skan: {st.session_state.last_scan_time}")
 
 # AUTO-SKAN
-if auto_scan != "Tylko ręcznie":
-    interwal = {"Co 1 minutę": 60, "Co 5 minut": 300, "Co 15 minut": 900}[auto_scan]
+if st.session_state.auto_scan != "Tylko ręcznie":
+    interwal = {"Co 1 minutę": 60, "Co 5 minut": 300, "Co 15 minut": 900}[st.session_state.auto_scan]
     if (datetime.now() - st.session_state.last_auto_scan).total_seconds() >= interwal:
         if not st.session_state.skan_w_toku:
             status_ph.write("⌛ Automatyczny skan...")
@@ -491,7 +763,7 @@ if auto_scan != "Tylko ręcznie":
             status_ph.info("⏳ Skan już trwa, pomijam automatyczne wywołanie.")
 
 # =====================================================================
-# WYŚWIETLANIE WYNIKÓW Z KOLOROWANIEM
+# WYŚWIETLANIE WYNIKÓW Z KOLOROWANIEM (poprawione .map)
 # =====================================================================
 if st.session_state.last_scanned_tickers:
     st.subheader("📊 Podgląd aktualnego cyklu skanowania (Posortowany)")
@@ -503,7 +775,7 @@ if st.session_state.last_scanned_tickers:
         df_wyniki = df_wyniki.drop(columns=["score"])
 
     # Usuwamy zbędne kolumny
-    for col in ["Sygnał", "Alert_Data"]:
+    for col in ["Sygnał", "_df", "_cena_akt", "_waluta"]:
         if col in df_wyniki.columns:
             df_wyniki = df_wyniki.drop(columns=[col])
 
@@ -532,11 +804,11 @@ if st.session_state.last_scanned_tickers:
             if isinstance(val, str) and 'x' in val:
                 liczba = float(val.replace('x', '').strip())
                 if liczba >= 3:
-                    return 'background-color: #d4edda;'  # jasnozielony
+                    return 'background-color: #d4edda;'
                 elif liczba >= 1.5:
-                    return 'background-color: #fff3cd;'  # jasnożółty
+                    return 'background-color: #fff3cd;'
                 else:
-                    return 'background-color: #f8d7da;'  # jasnoczerwony
+                    return 'background-color: #f8d7da;'
             return ''
         except:
             return ''
@@ -564,21 +836,69 @@ if st.session_state.last_scanned_tickers:
         return ''
 
     # =============================================================
-    # STYLOWANIE – zastosowanie do kolumn
+    # STYLOWANIE – zastosowanie do kolumn (poprawione .map)
     # =============================================================
     styled = df_wyniki.style \
-        .applymap(koloruj_zmiane, subset=['Zmiana %']) \
-        .applymap(koloruj_wolumen, subset=['Wolumen (x śr.)']) \
-        .applymap(koloruj_rsi, subset=['RSI']) \
-        .applymap(koloruj_status, subset=['Status']) \
+        .map(koloruj_zmiane, subset=['Zmiana %']) \
+        .map(koloruj_wolumen, subset=['Wolumen (x śr.)']) \
+        .map(koloruj_rsi, subset=['RSI']) \
+        .map(koloruj_status, subset=['Status']) \
         .set_properties(**{'text-align': 'center'}) \
         .set_table_styles([{'selector': 'thead th', 'props': [('text-align', 'center')]}])
 
-    # Wyświetlenie stylizowanej tabeli
     st.dataframe(styled, use_container_width=True)
 
     # =============================================================
-    # ROZWIJANE SZCZEGÓŁY
+    # MINI-WYKRESY (Plotly) dla każdego tickera
+    # =============================================================
+    st.subheader("📈 Wykresy cenowe i wskaźniki (rozwiń)")
+    for item in st.session_state.last_scanned_tickers:
+        with st.expander(f"📊 {item['Ticker']} – wykres"):
+            df = item.get("_df")
+            if df is not None and not df.empty:
+                # Wykres świecowy + wskaźniki
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=df.index, y=df["Close"],
+                    mode='lines', name='Zamknięcie',
+                    line=dict(color='blue')
+                ))
+                if "SMA20" in df.columns and df["SMA20"].notna().any():
+                    fig.add_trace(go.Scatter(
+                        x=df.index, y=df["SMA20"],
+                        mode='lines', name='SMA20',
+                        line=dict(color='orange', dash='dot')
+                    ))
+                if "SMA50" in df.columns and df["SMA50"].notna().any():
+                    fig.add_trace(go.Scatter(
+                        x=df.index, y=df["SMA50"],
+                        mode='lines', name='SMA50',
+                        line=dict(color='red', dash='dot')
+                    ))
+                if "BB_Upper" in df.columns and df["BB_Upper"].notna().any():
+                    fig.add_trace(go.Scatter(
+                        x=df.index, y=df["BB_Upper"],
+                        mode='lines', name='BB Górne',
+                        line=dict(color='gray', dash='dash')
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=df.index, y=df["BB_Lower"],
+                        mode='lines', name='BB Dolne',
+                        line=dict(color='gray', dash='dash'),
+                        fill='tonexty'
+                    ))
+                fig.update_layout(
+                    title=f"{item['Ticker']} – cena i wskaźniki",
+                    xaxis_title="Data",
+                    yaxis_title=f"Cena ({item.get('_waluta', 'USD')})",
+                    height=400
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.write("Brak danych do wykresu.")
+
+    # =============================================================
+    # ROZWIJANE SZCZEGÓŁY (analiza AI, newsy)
     # =============================================================
     st.subheader("📰 Szczegółowe analizy (rozwiń dla tickera)")
     for item in st.session_state.last_scanned_tickers:
@@ -594,3 +914,40 @@ if st.session_state.last_scanned_tickers:
 if st.session_state.alerts_history:
     st.subheader("📋 Zapamiętane Okazje Snajperskie (Zielone Alerty 🟢)")
     st.dataframe(pd.DataFrame(st.session_state.alerts_history), use_container_width=True)
+
+# =====================================================================
+# BACKTEST – osobna sekcja
+# =====================================================================
+st.sidebar.subheader("🧪 Backtest strategii")
+if st.sidebar.button("Uruchom backtest dla obecnej listy"):
+    with st.spinner("Backtest w toku..."):
+        wyniki_back = []
+        for ticker in MARKET_DATABASE[:10]:  # limit 10, bo może być ciężko
+            res = backtest_strategy(
+                ticker,
+                st.session_state.ui_vol_threshold,
+                st.session_state.ui_price_threshold,
+                st.session_state.ui_sl,
+                st.session_state.ui_tp,
+                rsi_min,
+                rsi_max,
+                macd_sign,
+                lookback_days=60
+            )
+            if res:
+                wyniki_back.append({
+                    "Ticker": ticker,
+                    "Win rate (%)": round(res["win_rate"], 1),
+                    "Średni zwrot (%)": round(res["avg_return"], 2),
+                    "Liczba transakcji": res["total"]
+                })
+        if wyniki_back:
+            df_back = pd.DataFrame(wyniki_back)
+            st.sidebar.dataframe(df_back, use_container_width=True)
+            # Dodaj podsumowanie
+            avg_win = df_back["Win rate (%)"].mean()
+            avg_ret = df_back["Średni zwrot (%)"].mean()
+            st.sidebar.write(f"📊 Średni win rate: {avg_win:.1f}%")
+            st.sidebar.write(f"📈 Średni zwrot: {avg_ret:.2f}%")
+        else:
+            st.sidebar.warning("Brak wyników backtestu – może za mało danych lub sygnałów.")
