@@ -17,7 +17,7 @@ st.set_page_config(page_title="Snajper Rynkowy Custom", page_icon="🎯", layout
 st.title("🎯 Twój Autorski Skaner Groszówek: Market Sniper")
 
 # =====================================================================
-# SESJA – przechowywanie ustawień i historii
+# SESJA – przechowywanie ustawień i historii (z zabezpieczeniem)
 # =====================================================================
 if "alerts_history" not in st.session_state:
     st.session_state.alerts_history = []
@@ -30,7 +30,7 @@ if "skan_w_toku" not in st.session_state:
 if "last_auto_scan" not in st.session_state:
     st.session_state.last_auto_scan = datetime.now()
 
-# Ustawienia zapisywane w sesji (z niższymi progami na start)
+# Ustawienia zapisywane w sesji (z domyślnymi)
 if "ui_interval" not in st.session_state:
     st.session_state.ui_interval = "30m"
 if "ui_vol_threshold" not in st.session_state:
@@ -156,7 +156,7 @@ with col_c2:
     rsi_max = st.slider("Max RSI", 20, 90, st.session_state.rsi_max, step=5)
     st.session_state.rsi_max = rsi_max
 with col_c3:
-    macd_sign = st.selectbox("MACD", ["Dowolny", ">0", "<0"],
+    macd_sign = st.selectbox("MACD", ["Dowolny", ">0", "<0"], 
                              index=["Dowolny", ">0", "<0"].index(st.session_state.macd_sign))
     st.session_state.macd_sign = macd_sign
 
@@ -388,8 +388,8 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
                           sl_pct, tp_pct, deep_analysis,
                           rsi_min, rsi_max, macd_sign):
     try:
-        # Dynamiczny okres pobierania
-        interval = st.session_state.ui_interval
+        # Pobieramy interval z session_state – bezpiecznie
+        interval = st.session_state.get("ui_interval", "30m")
         if interval in ["1m", "5m", "15m", "30m"]:
             period = "5d"
         elif interval == "1h":
@@ -459,7 +459,6 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
         obv_val = pobierz_wartosc(ostatnia["OBV"])
         adx_val = pobierz_wartosc(ostatnia["ADX"])
 
-        # Sprawdzenie, czy wszystkie potrzebne wartości są dostępne
         if any(v is None for v in [aktualna_cena, cena_poprzednia, aktualny_wolumen, sredni_wolumen, current_rsi]):
             return {
                 "Ticker": ticker,
@@ -478,7 +477,6 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
         is_gpw = ticker.endswith(".WA")
         waluta = "PLN" if is_gpw else "USD"
 
-        # Filtry cenowe
         if is_gpw and aktualna_cena > MAX_PRICE_PLN:
             return {
                 "Ticker": ticker,
@@ -497,7 +495,6 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
         zmiana_ceny = ((aktualna_cena - cena_poprzednia) / cena_poprzednia) * 100.0
         skok_wolumenu = aktualny_wolumen / sredni_wolumen
 
-        # Sygnał
         sygnal_techniczny = (zmiana_ceny >= price_threshold and skok_wolumenu >= vol_threshold)
         rsi_warunek = (rsi_min <= current_rsi <= rsi_max)
         macd_warunek = True
@@ -508,7 +505,6 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
 
         sygnal_trafiony = sygnal_techniczny and rsi_warunek and macd_warunek
 
-        # Ustalamy status
         if sygnal_trafiony:
             ocena_trendu = "🟢 Kupuj (Up)"
             sort_score = 3
@@ -731,7 +727,6 @@ def job_skanera(status_placeholder=None, progress_bar=None):
             if progress_bar:
                 progress_bar.progress(przetworzone / total_spolki)
 
-    # Sortowanie wyników (najpierw sygnały, potem reszta)
     lista_podgladu.sort(key=lambda x: x.get("score", 0), reverse=True)
     st.session_state.last_scanned_tickers = lista_podgladu
     st.session_state.skan_w_toku = False
@@ -813,27 +808,22 @@ if st.session_state.last_scanned_tickers:
 
     df_wyniki = pd.DataFrame(st.session_state.last_scanned_tickers)
 
-    # Jeśli brak kolumny "Status", dodaj domyślną
     if "Status" not in df_wyniki.columns:
         df_wyniki["Status"] = "Brak danych"
 
-    # Sortowanie po score (jeśli istnieje)
     if "score" in df_wyniki.columns:
         df_wyniki = df_wyniki.sort_values(by="score", ascending=False)
         df_wyniki = df_wyniki.drop(columns=["score"])
 
-    # Bezpieczne usuwanie kolumn – sprawdzamy, czy istnieją
     for col in ["Sygnał", "_df", "_cena_akt", "_waluta"]:
         if col in df_wyniki.columns:
             df_wyniki = df_wyniki.drop(columns=[col])
 
-    # Skracanie długich tekstów
     if "Analiza AI" in df_wyniki.columns:
         df_wyniki["Analiza AI"] = df_wyniki["Analiza AI"].apply(
             lambda x: x[:150] + "..." if isinstance(x, str) and len(x) > 150 else x
         )
 
-    # Funkcje kolorowania
     def koloruj_zmiane(val):
         try:
             if isinstance(val, (int, float)):
@@ -884,10 +874,8 @@ if st.session_state.last_scanned_tickers:
                 return 'background-color: #f5c6cb; color: #721c24;'
         return ''
 
-    # Rozpocznij stylizację – tylko dla istniejących kolumn
     styled = df_wyniki.style
 
-    # Stosuj map tylko jeśli kolumna istnieje
     if "Zmiana %" in df_wyniki.columns:
         styled = styled.map(koloruj_zmiane, subset=['Zmiana %'])
     if "Wolumen (x śr.)" in df_wyniki.columns:
