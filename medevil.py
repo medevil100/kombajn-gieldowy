@@ -5,16 +5,10 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from openai import OpenAI
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tavily import TavilyClient
-
-# Próba zaimportowania OpenAI – jeśli brak klucza, wyłączamy analizę AI
-try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
 
 # =====================================================================
 # KONFIGURACJA STRONY
@@ -23,7 +17,7 @@ st.set_page_config(page_title="Snajper Rynkowy Custom", page_icon="🎯", layout
 st.title("🎯 Twój Autorski Skaner Groszówek: Market Sniper")
 
 # =====================================================================
-# INICJALIZACJA SESSION_STATE – WSZYSTKIE ZMIENNE
+# INICJALIZACJA SESJI – WSZYSTKIE ATRYBUTY PRZED UŻYCIEM
 # =====================================================================
 if "alerts_history" not in st.session_state:
     st.session_state.alerts_history = []
@@ -36,7 +30,7 @@ if "skan_w_toku" not in st.session_state:
 if "last_auto_scan" not in st.session_state:
     st.session_state.last_auto_scan = datetime.now()
 
-# Ustawienia domyślne
+# Inicjalizacja UI – KLUCZOWE, aby uniknąć błędu "no attribute"
 if "ui_interval" not in st.session_state:
     st.session_state.ui_interval = "30m"
 if "ui_vol_threshold" not in st.session_state:
@@ -48,7 +42,7 @@ if "ui_sl" not in st.session_state:
 if "ui_tp" not in st.session_state:
     st.session_state.ui_tp = 0.15
 if "use_deep_analysis" not in st.session_state:
-    st.session_state.use_deep_analysis = False  # domyślnie wyłączone, bo często brak kluczy
+    st.session_state.use_deep_analysis = True
 if "auto_scan" not in st.session_state:
     st.session_state.auto_scan = "Tylko ręcznie"
 if "market_database" not in st.session_state:
@@ -65,42 +59,33 @@ if "macd_sign" not in st.session_state:
     st.session_state.macd_sign = "Dowolny"
 
 # =====================================================================
-# ŁADOWANIE KLUCZY Z SECRETS (jeśli istnieją)
+# ŁADOWANIE KLUCZY
 # =====================================================================
 try:
-    OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", None)
-    TELEGRAM_TOKEN = st.secrets.get("TELEGRAM_TOKEN", None)
-    TELEGRAM_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", None)
-    TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY", None)
+    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+    TELEGRAM_TOKEN = st.secrets["TELEGRAM_TOKEN"]
+    TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
+    TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
 
     MAX_PRICE_PLN = float(st.secrets.get("MAX_PRICE_PLN", 50.0))
     MAX_PRICE_USD = float(st.secrets.get("MAX_PRICE_USD", 5.0))
     VOLUME_THRESHOLD = float(st.secrets.get("VOLUME_THRESHOLD", 3.0))
     PRICE_THRESHOLD = float(st.secrets.get("PRICE_THRESHOLD", 1.0))
-except Exception:
-    # Jeśli nie ma secrets.toml, ustawiamy domyślne wartości
-    OPENAI_API_KEY = None
-    TELEGRAM_TOKEN = None
-    TELEGRAM_CHAT_ID = None
-    TAVILY_API_KEY = None
-    MAX_PRICE_PLN = 50.0
-    MAX_PRICE_USD = 5.0
-    VOLUME_THRESHOLD = 3.0
-    PRICE_THRESHOLD = 1.0
+except KeyError as e:
+    st.error(f"❌ Brak kluczowych zmiennych autoryzacyjnych w secrets.toml: {e}")
+    st.stop()
+except Exception as e:
+    st.error(f"❌ Błąd kluczy w secrets.toml: {e}")
+    st.stop()
 
-# Inicjalizacja klientów tylko jeśli klucze istnieją
-client = None
-tavily = None
-if OPENAI_AVAILABLE and OPENAI_API_KEY:
-    try:
-        client = OpenAI(api_key=OPENAI_API_KEY)
-    except Exception:
-        client = None
-if TAVILY_API_KEY:
-    try:
-        tavily = TavilyClient(api_key=TAVILY_API_KEY)
-    except Exception:
-        tavily = None
+# Inicjalizacja klientów – jeśli klucz OpenAI jest nieprawidłowy, aplikacja nie padnie
+try:
+    client = OpenAI(api_key=OPENAI_API_KEY)
+except Exception as e:
+    st.warning(f"⚠️ Nie udało się zainicjalizować OpenAI: {e}. Analiza AI będzie wyłączona.")
+    client = None
+
+tavily = TavilyClient(api_key=TAVILY_API_KEY)
 
 # =====================================================================
 # LISTA OBSERWACYJNA
@@ -166,7 +151,7 @@ with col_p5:
     ) / 100.0
 
 # =====================================================================
-# DODATKOWE WARUNKI
+# DODATKOWE WARUNKI SYGNAŁU
 # =====================================================================
 st.subheader("⚙️ Dodatkowe warunki sygnału")
 col_c1, col_c2, col_c3 = st.columns(3)
@@ -184,34 +169,38 @@ with col_c3:
 # =====================================================================
 # OPCJA ANALIZY Z NEWSAMI
 # =====================================================================
-use_deep = st.checkbox(
+st.session_state.use_deep_analysis = st.checkbox(
     "🧠 Włącz analizę z użyciem newsów (Tavily)",
     value=st.session_state.use_deep_analysis
 )
-st.session_state.use_deep_analysis = use_deep
 
 # =====================================================================
-# TELEGRAM – funkcja pomocnicza
+# TELEGRAM
 # =====================================================================
 def send_telegram_message(message: str) -> bool:
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    czysty_token = str(TELEGRAM_TOKEN).strip()
+    czysty_chat_id = str(TELEGRAM_CHAT_ID).strip()
+    url = f"https://api.telegram.org/bot{czysty_token}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": czysty_chat_id,
         "text": message,
         "parse_mode": "HTML"
     }
     try:
         resp = requests.post(url, json=payload, timeout=5)
-        return resp.status_code == 200
-    except Exception:
+        if resp.status_code == 200:
+            return True
+        else:
+            st.sidebar.error(f"Telegram błąd {resp.status_code}: {resp.text}")
+            return False
+    except Exception as e:
+        st.sidebar.error(f"Telegram błąd połączenia: {e}")
         return False
 
 # =====================================================================
-# WSKAŹNIKI TECHNICZNE
+# WSKAŹNIKI TECHNICZNE – wszystkie z zabezpieczeniami
 # =====================================================================
-def oblicz_rsi(df, period=14):
+def oblicz_rsi(df: pd.DataFrame, period: int = 14):
     try:
         delta = df["Close"].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -222,10 +211,13 @@ def oblicz_rsi(df, period=14):
     except Exception:
         return None
 
-def oblicz_sma(df, period):
-    return df["Close"].rolling(window=period).mean()
+def oblicz_sma(df: pd.DataFrame, period: int):
+    try:
+        return df["Close"].rolling(window=period).mean()
+    except Exception:
+        return None
 
-def oblicz_macd(df):
+def oblicz_macd(df: pd.DataFrame):
     try:
         exp12 = df["Close"].ewm(span=12, adjust=False).mean()
         exp26 = df["Close"].ewm(span=26, adjust=False).mean()
@@ -235,7 +227,7 @@ def oblicz_macd(df):
     except Exception:
         return None, None
 
-def oblicz_atr(df, period=14):
+def oblicz_atr(df: pd.DataFrame, period: int = 14):
     try:
         high = df["High"]
         low = df["Low"]
@@ -249,13 +241,13 @@ def oblicz_atr(df, period=14):
     except Exception:
         return None
 
-def oblicz_momentum(df, period=5):
+def oblicz_momentum(df: pd.DataFrame, period: int = 5):
     try:
         return (df["Close"] / df["Close"].shift(period) - 1) * 100
     except Exception:
         return None
 
-def oblicz_bollinger(df, period=20, std=2):
+def oblicz_bollinger(df: pd.DataFrame, period: int = 20, std: int = 2):
     try:
         sma = df["Close"].rolling(period).mean()
         std_dev = df["Close"].rolling(period).std()
@@ -265,14 +257,14 @@ def oblicz_bollinger(df, period=20, std=2):
     except Exception:
         return None, None, None
 
-def oblicz_obv(df):
+def oblicz_obv(df: pd.DataFrame):
     try:
         obv = (np.sign(df["Close"].diff()) * df["Volume"]).fillna(0).cumsum()
         return obv
     except Exception:
         return None
 
-def oblicz_adx(df, period=14):
+def oblicz_adx(df: pd.DataFrame, period: int = 14):
     try:
         high = df["High"]
         low = df["Low"]
@@ -292,6 +284,9 @@ def oblicz_adx(df, period=14):
     except Exception:
         return None
 
+# =====================================================================
+# POMOCNICZA FUNKCJA DO POBRANIA WARTOŚCI
+# =====================================================================
 def pobierz_wartosc(series_or_float):
     try:
         if isinstance(series_or_float, (pd.Series, pd.DataFrame)):
@@ -308,11 +303,9 @@ def pobierz_wartosc(series_or_float):
         return None
 
 # =====================================================================
-# Pobieranie newsów (jeśli Tavily dostępny)
+# TAVILY – NEWS + SENTYMENT
 # =====================================================================
-def pobierz_newsy_tavily(ticker: str):
-    if not tavily:
-        return "", 0
+def pobierz_newsy_tavily(ticker: str) -> tuple:
     try:
         query = f"{ticker} stock news OR akcje"
         response = tavily.search(
@@ -340,17 +333,24 @@ def pobierz_newsy_tavily(ticker: str):
                     sent_score -= 1
         sentiment = 1 if sent_score > 0 else (-1 if sent_score < 0 else 0)
         return news_text.strip(), sentiment
-    except Exception:
+    except Exception as e:
+        st.sidebar.warning(f"Tavily błąd dla {ticker}: {e}")
         return "", 0
 
 # =====================================================================
-# Analiza AI (tylko jeśli klient OpenAI dostępny)
+# ANALIZA AI – z zabezpieczeniem przed brakiem klienta
 # =====================================================================
-def analizuj_rynkowo_ai(ticker, cena, waluta, zmiana, wolumen_x, rsi, sl, tp,
-                        sygnal, sma20, sma50, macd, atr, momentum,
-                        bb_upper, bb_mid, bb_lower, obv, adx, news="", sentiment=0):
-    if not client:
-        return "⚠️ Analiza AI wyłączona – brak klucza OpenAI."
+def analizuj_rynkowo_ai(ticker: str, cena: float, waluta: str, zmiana: float,
+                        wolumen_x: float, rsi: float, sl: float, tp: float,
+                        sygnal: bool, sma20: float, sma50: float,
+                        macd: float, atr: float, momentum: float,
+                        bb_upper: float, bb_mid: float, bb_lower: float,
+                        obv: float, adx: float, news: str = "", sentiment: int = 0) -> str:
+    
+    # Jeśli klient OpenAI nie został zainicjalizowany – pomiń analizę
+    if client is None:
+        return "🔒 Analiza AI wyłączona – brak poprawnego klucza OpenAI."
+    
     sygnal_str = "TAK" if sygnal else "NIE"
     sent_str = "pozytywny" if sentiment > 0 else ("negatywny" if sentiment < 0 else "neutralny")
     prompt = (
@@ -393,12 +393,12 @@ def analizuj_rynkowo_ai(ticker, cena, waluta, zmiana, wolumen_x, rsi, sl, tp,
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        return f"⚠️ Błąd analizy AI: {e}"
+        return f"❌ Błąd analizy AI: {e}"
 
 # =====================================================================
 # ANALIZA POJEDYNCZEJ SPÓŁKI
 # =====================================================================
-def analizuj_jedna_spolke(ticker, now, vol_threshold, price_threshold,
+def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
                           sl_pct, tp_pct, deep_analysis,
                           rsi_min, rsi_max, macd_sign):
     try:
@@ -416,7 +416,7 @@ def analizuj_jedna_spolke(ticker, now, vol_threshold, price_threshold,
                 "Ticker": ticker,
                 "Status": "❌ Brak danych",
                 "score": 0,
-                "Analiza AI": "Brak danych z Yahoo Finance."
+                "Analiza AI": "Brak danych z Yahoo Finance. Sprawdź poprawność tickera."
             }
         if len(df) < 20:
             return {
@@ -429,7 +429,7 @@ def analizuj_jedna_spolke(ticker, now, vol_threshold, price_threshold,
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Oblicz wskaźniki
+        # Oblicz wszystkie wskaźniki – każde osobno zabezpieczone
         df["RSI"] = oblicz_rsi(df)
         df["SMA20"] = oblicz_sma(df, 20)
         df["SMA50"] = oblicz_sma(df, 50) if len(df) >= 50 else None
@@ -484,7 +484,7 @@ def analizuj_jedna_spolke(ticker, now, vol_threshold, price_threshold,
                 "Ticker": ticker,
                 "Status": "❌ Nieprawidłowe wartości",
                 "score": 0,
-                "Analiza AI": "Cena lub wolumen są zerowe."
+                "Analiza AI": "Cena lub wolumen są zerowe – dane niepoprawne."
             }
 
         is_gpw = ticker.endswith(".WA")
@@ -580,7 +580,7 @@ def analizuj_jedna_spolke(ticker, now, vol_threshold, price_threshold,
             "_waluta": waluta
         }
 
-        if sygnal_trafiony and TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+        if sygnal_trafiony:
             flag_rynek = "🇵🇱" if is_gpw else "🇺🇸"
             wiadomosc = (
                 f"🚨 <b>ALERT SNAJPERA AKCJI {flag_rynek}: {ticker}</b>\n"
@@ -617,10 +617,10 @@ def analizuj_jedna_spolke(ticker, now, vol_threshold, price_threshold,
         }
 
 # =====================================================================
-# BACKTEST (uproszczony)
+# BACKTEST STRATEGII
 # =====================================================================
 def backtest_strategy(ticker, vol_threshold, price_threshold, sl_pct, tp_pct,
-                      rsi_min, rsi_max, macd_sign):
+                      rsi_min, rsi_max, macd_sign, lookback_days=60):
     try:
         df = yf.download(ticker, period="3mo", interval="1d", progress=False)
         if df.empty or len(df) < 20:
@@ -632,6 +632,8 @@ def backtest_strategy(ticker, vol_threshold, price_threshold, sl_pct, tp_pct,
         df["SMA20"] = oblicz_sma(df, 20)
         macd, signal = oblicz_macd(df)
         df["MACD"] = macd
+        df["ATR"] = oblicz_atr(df, 14)
+        df["Momentum"] = oblicz_momentum(df, 5)
         df["Volume_Avg"] = df["Volume"].rolling(20).mean()
 
         trades = []
@@ -675,7 +677,7 @@ def backtest_strategy(ticker, vol_threshold, price_threshold, sl_pct, tp_pct,
         win_rate = wins / len(trades) * 100
         avg_return = np.mean(trades) * 100
         return {"win_rate": win_rate, "avg_return": avg_return, "total": len(trades)}
-    except Exception:
+    except Exception as e:
         return None
 
 # =====================================================================
@@ -760,6 +762,7 @@ if st.sidebar.button("🔌 Wyślij testowy alert"):
 st.sidebar.info(f"⏱️ Ostatni udany skan: {st.session_state.last_scan_time}")
 
 if st.sidebar.button("🗑️ Wyczyść cache danych"):
+    yf.pdr_override()
     st.sidebar.success("Cache wyczyszczony (jeśli był).")
 
 # =====================================================================
@@ -834,7 +837,7 @@ if st.session_state.last_scanned_tickers:
             lambda x: x[:150] + "..." if isinstance(x, str) and len(x) > 150 else x
         )
 
-    # Kolorowanie (tylko dla istniejących kolumn)
+    # Funkcje kolorowania
     def koloruj_zmiane(val):
         try:
             if isinstance(val, (int, float)):
@@ -885,6 +888,7 @@ if st.session_state.last_scanned_tickers:
                 return 'background-color: #f5c6cb; color: #721c24;'
         return ''
 
+    # Stylizacja – tylko dla istniejących kolumn
     styled = df_wyniki.style
     if "Zmiana %" in df_wyniki.columns:
         styled = styled.map(koloruj_zmiane, subset=['Zmiana %'])
@@ -900,7 +904,7 @@ if st.session_state.last_scanned_tickers:
 
     st.dataframe(styled, use_container_width=True)
 
-    # Wykresy
+    # MINI-WYKRESY
     st.subheader("📈 Wykresy cenowe i wskaźniki (rozwiń)")
     for item in st.session_state.last_scanned_tickers:
         with st.expander(f"📊 {item['Ticker']} – wykres"):
@@ -946,7 +950,7 @@ if st.session_state.last_scanned_tickers:
             else:
                 st.write("Brak danych do wykresu.")
 
-    # Szczegóły
+    # SZCZEGÓŁY
     st.subheader("📰 Szczegółowe analizy (rozwiń dla tickera)")
     for item in st.session_state.last_scanned_tickers:
         with st.expander(f"{item['Ticker']} – szczegóły analizy"):
@@ -978,7 +982,8 @@ if st.sidebar.button("Uruchom backtest dla obecnej listy"):
                 st.session_state.ui_tp,
                 st.session_state.rsi_min,
                 st.session_state.rsi_max,
-                st.session_state.macd_sign
+                st.session_state.macd_sign,
+                lookback_days=60
             )
             if res:
                 wyniki_back.append({
