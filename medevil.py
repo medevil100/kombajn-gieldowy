@@ -17,7 +17,7 @@ st.set_page_config(page_title="Snajper Rynkowy Custom", page_icon="🎯", layout
 st.title("🎯 Twój Autorski Skaner Groszówek: Market Sniper")
 
 # =====================================================================
-# INICJALIZACJA SESJI – WSZYSTKIE ATRYBUTY PRZED UŻYCIEM
+# INICJALIZACJA SESJI
 # =====================================================================
 if "alerts_history" not in st.session_state:
     st.session_state.alerts_history = []
@@ -30,7 +30,6 @@ if "skan_w_toku" not in st.session_state:
 if "last_auto_scan" not in st.session_state:
     st.session_state.last_auto_scan = datetime.now()
 
-# Inicjalizacja UI – KLUCZOWE, aby uniknąć błędu "no attribute"
 if "ui_interval" not in st.session_state:
     st.session_state.ui_interval = "30m"
 if "ui_vol_threshold" not in st.session_state:
@@ -78,7 +77,6 @@ except Exception as e:
     st.error(f"❌ Błąd kluczy w secrets.toml: {e}")
     st.stop()
 
-# Inicjalizacja klientów – jeśli klucz OpenAI jest nieprawidłowy, aplikacja nie padnie
 try:
     client = OpenAI(api_key=OPENAI_API_KEY)
 except Exception as e:
@@ -99,9 +97,6 @@ user_input = st.text_area(
 )
 st.session_state.market_database = [t.strip().upper() for t in user_input.split(",") if t.strip()]
 
-# =====================================================================
-# FILTRY RYNKOWE
-# =====================================================================
 col_f1, col_f2 = st.columns(2)
 with col_f1:
     st.session_state.filter_gpw = st.checkbox("🇵🇱 GPW (z .WA)", value=st.session_state.filter_gpw)
@@ -198,7 +193,7 @@ def send_telegram_message(message: str) -> bool:
         return False
 
 # =====================================================================
-# WSKAŹNIKI TECHNICZNE – wszystkie z zabezpieczeniami
+# WSKAŹNIKI TECHNICZNE
 # =====================================================================
 def oblicz_rsi(df: pd.DataFrame, period: int = 14):
     try:
@@ -338,7 +333,7 @@ def pobierz_newsy_tavily(ticker: str) -> tuple:
         return "", 0
 
 # =====================================================================
-# ANALIZA AI – z zabezpieczeniem przed brakiem klienta
+# ANALIZA AI
 # =====================================================================
 def analizuj_rynkowo_ai(ticker: str, cena: float, waluta: str, zmiana: float,
                         wolumen_x: float, rsi: float, sl: float, tp: float,
@@ -347,7 +342,6 @@ def analizuj_rynkowo_ai(ticker: str, cena: float, waluta: str, zmiana: float,
                         bb_upper: float, bb_mid: float, bb_lower: float,
                         obv: float, adx: float, news: str = "", sentiment: int = 0) -> str:
     
-    # Jeśli klient OpenAI nie został zainicjalizowany – pomiń analizę
     if client is None:
         return "🔒 Analiza AI wyłączona – brak poprawnego klucza OpenAI."
     
@@ -396,13 +390,13 @@ def analizuj_rynkowo_ai(ticker: str, cena: float, waluta: str, zmiana: float,
         return f"❌ Błąd analizy AI: {e}"
 
 # =====================================================================
-# ANALIZA POJEDYNCZEJ SPÓŁKI
+# ANALIZA POJEDYNCZEJ SPÓŁKI (przyjmuje interval jako argument)
 # =====================================================================
-def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
+def analizuj_jedna_spolke(ticker: str, now: str, interval: str, vol_threshold, price_threshold,
                           sl_pct, tp_pct, deep_analysis,
                           rsi_min, rsi_max, macd_sign):
     try:
-        interval = st.session_state.ui_interval
+        # Używamy przekazanego interval zamiast st.session_state.ui_interval
         if interval in ["1m", "5m", "15m", "30m"]:
             period = "5d"
         elif interval == "1h":
@@ -429,7 +423,6 @@ def analizuj_jedna_spolke(ticker: str, now: str, vol_threshold, price_threshold,
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Oblicz wszystkie wskaźniki – każde osobno zabezpieczone
         df["RSI"] = oblicz_rsi(df)
         df["SMA20"] = oblicz_sma(df, 20)
         df["SMA50"] = oblicz_sma(df, 50) if len(df) >= 50 else None
@@ -681,7 +674,7 @@ def backtest_strategy(ticker, vol_threshold, price_threshold, sl_pct, tp_pct,
         return None
 
 # =====================================================================
-# GŁÓWNY JOB SKANERA
+# GŁÓWNY JOB SKANERA (przekazuje interval do wątku)
 # =====================================================================
 def job_skanera(status_placeholder=None, progress_bar=None):
     if st.session_state.skan_w_toku:
@@ -701,6 +694,7 @@ def job_skanera(status_placeholder=None, progress_bar=None):
     rsi_min = st.session_state.rsi_min
     rsi_max = st.session_state.rsi_max
     macd_sign = st.session_state.macd_sign
+    interval = st.session_state.ui_interval  # pobieramy interval
 
     total_spolki = len(MARKET_DATABASE)
     lista_podgladu = []
@@ -718,6 +712,7 @@ def job_skanera(status_placeholder=None, progress_bar=None):
                 analizuj_jedna_spolke,
                 ticker,
                 now,
+                interval,          # <-- przekazujemy interval
                 vol_thr,
                 price_thr,
                 sl_pct,
@@ -837,7 +832,6 @@ if st.session_state.last_scanned_tickers:
             lambda x: x[:150] + "..." if isinstance(x, str) and len(x) > 150 else x
         )
 
-    # Funkcje kolorowania
     def koloruj_zmiane(val):
         try:
             if isinstance(val, (int, float)):
@@ -888,7 +882,6 @@ if st.session_state.last_scanned_tickers:
                 return 'background-color: #f5c6cb; color: #721c24;'
         return ''
 
-    # Stylizacja – tylko dla istniejących kolumn
     styled = df_wyniki.style
     if "Zmiana %" in df_wyniki.columns:
         styled = styled.map(koloruj_zmiane, subset=['Zmiana %'])
