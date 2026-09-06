@@ -611,14 +611,21 @@ def render_dashboard():
                 t = item["ticker"]; shares = item["shares"]; avg_price = item["avg_price"]
                 price_live = None; change_pct = 0
                 try:
-                    d = yf.download(t, period="5d", interval="1d", progress=False)
+                    d = yf.download(t, period="1mo", interval="1d", progress=False)
                     if not d.empty:
                         c = d["Close"].iloc[:, 0] if isinstance(d.columns, pd.MultiIndex) else d["Close"]
                         price_live = to_scalar(c.iloc[-1])
                         if len(c) > 1:
                             change_pct = (price_live - to_scalar(c.iloc[-2])) / (to_scalar(c.iloc[-2]) + 1e-9) * 100
                 except: pass
-                if price_live is None or np.isnan(price_live): price_live = avg_price
+                if price_live is None or np.isnan(price_live):
+                    # fallback: last_scan + avg_price
+                    cached_price = last_scan.get(t, {}).get("price", None)
+                    if cached_price is not None and not np.isnan(cached_price):
+                        price_live = cached_price
+                    else:
+                        price_live = avg_price
+                    change_pct = 0
                 cur_val = price_live * shares
                 cost_val = avg_price * shares
                 pnl = cur_val - cost_val
@@ -659,7 +666,7 @@ def render_dashboard():
         for t in user_tickers:
             c = last_scan.get(t, {}); pl = None; cp = 0
             try:
-                d = yf.download(t, period="5d", interval="1d", progress=False)
+                d = yf.download(t, period="1mo", interval="1d", progress=False)
                 if not d.empty:
                     cl = d["Close"].iloc[:, 0] if isinstance(d.columns, pd.MultiIndex) else d["Close"]
                     pl = to_scalar(cl.iloc[-1])
@@ -1296,9 +1303,14 @@ def render_ai_chat():
 
     try:
         system_prompt = (
-            "Jesteś analitykiem finansowym. Masz dwa źródła: Trading Engine (dane techniczne) i Tavily (fundamenty/newsy). "
-            "Nie zgaduj – odpowiadaj tylko na podstawie podanych danych. Jeśli brak danych, powiedz to wprost. "
-            "Odpowiadaj po polsku, konkretnie."
+            "Jesteś analitykiem finansowym. Masz dwa źródła: "
+            "1) Trading Engine (dane techniczne/wskaźniki) - zawsze dostępne, "
+            "2) Tavily (fundamenty/newsy/ratingi) - może być puste.\n\n"
+            "ZASADY:\n"
+            "- Jeśli Tavily zwrócił 'Brak danych' - analizuj WYŁĄCZNIE na podstawie Trading Engine.\n"
+            "- Nie mów 'brak danych' ani 'nie mam informacji' - po prostu analizuj technicznie.\n"
+            "- Podaj konkretne wartości: trend, RSI, ADX, typ ruchu, scoring i co oznaczają.\n"
+            "- Odpowiadaj po polsku, konkretnie, bez ogólników."
         )
         def ask_gpt():
             return requests.post("https://api.openai.com/v1/chat/completions",
