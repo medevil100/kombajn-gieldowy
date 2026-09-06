@@ -736,14 +736,63 @@ def render_dashboard():
     elif not portfolio:
         st.info("📌 Dodaj spółki do portfela powyżej lub zapisz tickery w skanerze.")
 
+# ------------------ ANALIZA MULTI-INTERWAŁ ------------------
+def analyze_multi_tf(ticker: str):
+    """Pobiera dane dla 1d, 1h, 15m i zwraca DataFrame z wskaźnikami."""
+    configs = [
+        ("1d (długi)", "3mo", "1d"),
+        ("1h (średni)", "1mo", "1h"),
+        ("15m (krótki)", "5d", "15m"),
+    ]
+    rows = []
+    for label, period, interval in configs:
+        try:
+            d = yf.download(ticker, period=period, interval=interval, progress=False)
+            if d.empty or len(d) < 30:
+                rows.append({"Interwał": label, "Okres": period, "Cena": None, "Trend": "Brak danych",
+                             "RSI": None, "ADX": None, "RVOL": None, "Sygnał": "N/A", "Scoring": None,
+                             "Ruch": "?"})
+                continue
+            if isinstance(d.columns, pd.MultiIndex):
+                close = d["Close"].iloc[:, 0]
+                volume = d["Volume"].iloc[:, 0]
+            else:
+                close = d["Close"]
+                volume = d["Volume"]
+            price = to_scalar(close.iloc[-1])
+            ind = compute_indicators(close, volume)
+            sentiment, _, _ = fetch_news_sentiment(ticker)
+            signal, _ = generate_signal(price, ind)
+            scoring = compute_scoring_pro(ind, sentiment)
+            _, movement_short, _ = classify_movement(close, price, ind)
+            rows.append({
+                "Interwał": label,
+                "Okres": period,
+                "Cena": price,
+                "Trend": ind["trend"],
+                "RSI": ind["rsi"],
+                "ADX": ind["adx"],
+                "RVOL": ind["rvol"],
+                "Sygnał": signal,
+                "Scoring": scoring,
+                "Ruch": movement_short
+            })
+        except:
+            rows.append({"Interwał": label, "Okres": period, "Cena": None, "Trend": "Błąd",
+                         "RSI": None, "ADX": None, "RVOL": None, "Sygnał": "N/A",
+                         "Scoring": None, "Ruch": "?"})
+    return pd.DataFrame(rows)
+
 # ------------------ MODUŁ: TRADING ------------------
 def render_trading():
     st.title("📈 Kombajn tradingowy – pełny panel")
     ticker = st.text_input("Ticker (np. AAPL, MSFT, STX.WA):", "",
                            placeholder="Wpisz ticker, np. STX.WA")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns([2, 2, 1])
     period = col1.selectbox("Okres:", ["5d", "1mo", "3mo", "6mo", "1y"], index=1)
     interval = col2.selectbox("Interwał:", ["15m", "30m", "1h", "1d"], index=3)
+    multi_tf = col3.checkbox("🔬 Multi-TF", value=False,
+                             help="Analiza 1d + 1h + 15m jednocześnie")
 
     if st.button("Pobierz dane i policz sygnały", use_container_width=True):
         try:
@@ -824,6 +873,81 @@ def render_trading():
                     "movement_label": movement_label, "movement_short": movement_short
                 }
                 st.success("✅ Analiza zapisana.")
+
+                # --- Analiza multi-interwał ---
+                if multi_tf:
+                    st.divider()
+                    st.subheader("🔬 Analiza multi-interwał (1d + 1h + 15m)")
+                    with st.spinner("Pobieram dane dla 1d, 1h, 15m..."):
+                        df_multi = analyze_multi_tf(ticker)
+                    if df_multi is not None and not df_multi.empty:
+                        # Tabela
+                        cols_m = st.columns([2, 1, 1, 1, 1, 1, 1, 1, 1])
+                        cols_m[0].markdown("**Interwał**")
+                        cols_m[1].markdown("**Cena**")
+                        cols_m[2].markdown("**Trend**")
+                        cols_m[3].markdown("**RSI**")
+                        cols_m[4].markdown("**ADX**")
+                        cols_m[5].markdown("**RVOL**")
+                        cols_m[6].markdown("**Ruch**")
+                        cols_m[7].markdown("**Sygnał**")
+                        cols_m[8].markdown("**Score**")
+
+                        trends = []
+                        signals = []
+                        for _, r in df_multi.iterrows():
+                            color_row = ""
+                            if r["Sygnał"] == "BUY": color_row = "rgba(34,197,94,0.15)"
+                            elif r["Sygnał"] == "SELL": color_row = "rgba(239,68,68,0.15)"
+                            c = st.columns([2, 1, 1, 1, 1, 1, 1, 1, 1])
+                            c[0].write(f"**{r['Interwał']}**")
+                            c[1].write(fmt_price_short(r["Cena"]) if r["Cena"] is not None and not np.isnan(r["Cena"]) else "?")
+                            tr = r["Trend"]
+                            em = "🟢" if tr == "Uptrend" else ("🔴" if tr == "Downtrend" else "⚪")
+                            c[2].write(f"{em} {tr}")
+                            c[3].write(f"{r['RSI']:.1f}" if r["RSI"] is not None and not np.isnan(r["RSI"]) else "?")
+                            c[4].write(f"{r['ADX']:.1f}" if r["ADX"] is not None and not np.isnan(r["ADX"]) else "?")
+                            c[5].write(f"{r['RVOL']:.2f}" if r["RVOL"] is not None and not np.isnan(r["RVOL"]) else "?")
+                            c[6].write(r["Ruch"])
+                            c[7].write(f"**{r['Sygnał']}**" if r["Sygnał"] in ("BUY", "SELL") else r["Sygnał"])
+                            c[8].write(f"{int(r['Scoring'])}/100" if r["Scoring"] is not None and not np.isnan(r["Scoring"]) else "?")
+                            trends.append(tr)
+                            signals.append(r["Sygnał"])
+
+                        # Konsensus
+                        st.divider()
+                        buy_count = signals.count("BUY")
+                        sell_count = signals.count("SELL")
+                        hold_count = signals.count("HOLD")
+                        uptrends = trends.count("Uptrend")
+                        downtrends = trends.count("Downtrend")
+
+                        verdict_parts = []
+                        if uptrends >= 2:
+                            verdict_parts.append("📈 Trend zgodny: **WZROSTOWY**")
+                        elif downtrends >= 2:
+                            verdict_parts.append("📉 Trend zgodny: **SPADKOWY**")
+                        else:
+                            verdict_parts.append("➡️ Trend mieszany")
+
+                        if buy_count >= 2:
+                            verdict_parts.append(f"🟢 Sygnały: **{buy_count}/3 BUY** 🔥")
+                        elif sell_count >= 2:
+                            verdict_parts.append(f"🔴 Sygnały: **{sell_count}/3 SELL** ⚠️")
+                        else:
+                            verdict_parts.append(f"⏸️ Sygnały: BUY {buy_count} / SELL {sell_count} / HOLD {hold_count}")
+
+                        st.info(" | ".join(verdict_parts))
+
+                        # Telegram z multi-TF
+                        if st.session_state.get("telegram_enabled", True) and (buy_count >= 2 or sell_count >= 2):
+                            tg_tf_lines = [
+                                f"<b>🔬 Multi-TF {ticker}</b>",
+                                f"📊 {' | '.join(verdict_parts)}"
+                            ]
+                            for _, r in df_multi.iterrows():
+                                tg_tf_lines.append(f"• {r['Interwał']}: {r['Trend']} | RSI:{r['RSI']:.1f if r['RSI'] is not None and not np.isnan(r['RSI']) else '?'} | {r['Sygnał']}")
+                            send_telegram("\n".join(tg_tf_lines))
 
                 if st.session_state.get("telegram_enabled", True) and signal in ("BUY", "SELL"):
                     tg_msg = (
