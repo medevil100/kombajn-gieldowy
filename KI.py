@@ -86,6 +86,20 @@ def _save_portfolio(portfolio: list):
     d["portfolio"] = portfolio
     _save_state(d)
 
+def _has_changed(ticker: str, price_now: float, rvol_now: float) -> bool:
+    """Sprawdza czy cena zmieniła się >1% lub wolumen >2% od ostatniego skanu."""
+    last_scan = _load_last_scan()
+    old = last_scan.get(ticker, {})
+    old_price = old.get("price", None)
+    old_vol = old.get("rvol", None)
+    price_changed = old_price is None or (
+        old_price != 0 and abs(price_now - old_price) / max(abs(old_price), 0.0001) > 0.01
+    )
+    vol_changed = old_vol is None or (
+        old_vol != 0 and abs(rvol_now - old_vol) / max(abs(rvol_now), 0.0001) > 0.02
+    )
+    return price_changed or vol_changed
+
 # ------------------ KONFIGURACJA ------------------
 st.set_page_config(page_title="CYBER DESK PRO", page_icon="💠", layout="wide")
 
@@ -596,49 +610,75 @@ def render_dashboard():
         if portfolio:
             st.divider()
             st.markdown("**📋 Twoje pozycje:**")
-            cols_tab = st.columns([3, 2, 2, 2, 2, 2, 1])
-            cols_tab[0].markdown("**Spółka**")
-            cols_tab[1].markdown("**Akcje**")
-            cols_tab[2].markdown("**Śr. cena**")
-            cols_tab[3].markdown("**Kurs**")
-            cols_tab[4].markdown("**Wartość**")
-            cols_tab[5].markdown("**Zysk/Strata**")
-            cols_tab[6].markdown("")
+
+            # Nagłówek tabeli
+            st.markdown("""
+            <div style="display:flex; align-items:center; gap:10px; padding:6px 0; font-size:13px; color:#94a3b8; border-bottom:2px solid #334155;">
+                <div style="flex:3;"><b>Spółka</b></div>
+                <div style="flex:2;"><b>Akcje</b></div>
+                <div style="flex:2;"><b>Śr. cena</b></div>
+                <div style="flex:2;"><b>Kurs</b></div>
+                <div style="flex:2;"><b>Wartość</b></div>
+                <div style="flex:2;"><b>Zysk/Strata</b></div>
+                <div style="flex:1;"></div>
+            </div>
+            """, unsafe_allow_html=True)
 
             total_value = 0
             total_cost = 0
             for item in portfolio[:25]:
                 t = item["ticker"]; shares = item["shares"]; avg_price = item["avg_price"]
                 price_live = None; change_pct = 0
-                try:
-                    d = yf.download(t, period="1mo", interval="1d", progress=False)
-                    if not d.empty:
-                        c = d["Close"].iloc[:, 0] if isinstance(d.columns, pd.MultiIndex) else d["Close"]
-                        price_live = to_scalar(c.iloc[-1])
-                        if len(c) > 1:
-                            change_pct = (price_live - to_scalar(c.iloc[-2])) / (to_scalar(c.iloc[-2]) + 1e-9) * 100
-                except: pass
+
+                # Pobierz aktualną cenę z yfinance (próbuj różne okresy)
+                for period_try in ["1mo", "3mo", "6mo"]:
+                    try:
+                        d = yf.download(t, period=period_try, interval="1d", progress=False)
+                        if not d.empty:
+                            c = d["Close"].iloc[:, 0] if isinstance(d.columns, pd.MultiIndex) else d["Close"]
+                            price_live = to_scalar(c.iloc[-1])
+                            if len(c) > 1:
+                                change_pct = (price_live - to_scalar(c.iloc[-2])) / (to_scalar(c.iloc[-2]) + 1e-9) * 100
+                            break
+                    except: continue
+
+                # Fallback: last_scan → avg_price
                 if price_live is None or np.isnan(price_live):
-                    # fallback: last_scan + avg_price
                     cached_price = last_scan.get(t, {}).get("price", None)
                     if cached_price is not None and not np.isnan(cached_price):
                         price_live = cached_price
                     else:
                         price_live = avg_price
                     change_pct = 0
+
                 cur_val = price_live * shares
                 cost_val = avg_price * shares
                 pnl = cur_val - cost_val
                 pnl_pct = (pnl / cost_val) * 100 if cost_val > 0 else 0
                 total_value += cur_val; total_cost += cost_val
+
+                # Kolory
                 pnl_color = "#22c55e" if pnl >= 0 else "#ef4444"
-                cols_tab[0].write("**" + t + "**")
-                cols_tab[1].write(str(int(shares) if shares == int(shares) else f"{shares:.1f}"))
-                cols_tab[2].write(fmt_price_short(avg_price))
-                cols_tab[3].write(fmt_price_short(price_live) + (" <span style='color:#22c55e'>▲</span>" if change_pct > 0 else " <span style='color:#ef4444'>▼</span>" if change_pct < 0 else ""), unsafe_allow_html=True)
-                cols_tab[4].write(fmt_price_short(cur_val))
-                cols_tab[5].write(f"<span style='color:{pnl_color}'>{'📈' if pnl >= 0 else '📉'} {fmt_price_short(abs(pnl))} ({pnl_pct:+.1f}%)</span>", unsafe_allow_html=True)
-                if cols_tab[6].button("🗑️", key="del_" + t):
+                pnl_arrow = "📈" if pnl >= 0 else "📉"
+                change_arrow = ("<span style='color:#22c55e'>▲</span>" if change_pct > 0
+                               else "<span style='color:#ef4444'>▼</span>" if change_pct < 0
+                               else "")
+
+                # HTML dla każdego wiersza
+                st.markdown(f"""
+                <div style="display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid #1e293b; font-size:14px;">
+                    <div style="flex:3;"><b>{t}</b></div>
+                    <div style="flex:2;">{int(shares) if shares == int(shares) else f'{shares:.1f}'} szt.</div>
+                    <div style="flex:2;">{fmt_price_short(avg_price)}</div>
+                    <div style="flex:2;">{fmt_price_short(price_live)} {change_arrow}</div>
+                    <div style="flex:2;">{fmt_price_short(cur_val)}</div>
+                    <div style="flex:2;color:{pnl_color};font-weight:bold;">{pnl_arrow} {fmt_price_short(abs(pnl))} ({pnl_pct:+.1f}%)</div>
+                    {"<div style='flex:1;'><span style='cursor:pointer;' onclick=''>🗑️</span></div>"}
+                </div>
+                """, unsafe_allow_html=True)
+
+                # Przycisk usuwania (potrzebuje osobnego wiersza by działał)
+                if st.button("🗑️ Usuń " + t, key="del_" + t):
                     portfolio = [p for p in portfolio if p["ticker"] != t]
                     _save_portfolio(portfolio)
                     st.rerun()
@@ -933,12 +973,12 @@ def render_scanner():
                 old = last_scan.get(ticker, {})
                 old_price = old.get("price", None)
                 old_vol = old.get("rvol", None)
-                # porównaj z pewnym progiem (0.5% zmiany ceny lub 10% zmiany RVOL)
+                # porównaj z progiem (1% zmiany ceny lub 2% zmiany RVOL)
                 price_changed = old_price is None or (
-                    old_price != 0 and abs(price_now - old_price) / max(abs(old_price), 0.0001) > 0.005
+                    old_price != 0 and abs(price_now - old_price) / max(abs(old_price), 0.0001) > 0.01
                 )
                 vol_changed = old_vol is None or (
-                    old_vol != 0 and abs(vol_now - old_vol) / max(abs(vol_now), 0.0001) > 0.10
+                    old_vol != 0 and abs(vol_now - old_vol) / max(abs(vol_now), 0.0001) > 0.02
                 )
                 if price_changed or vol_changed:
                     changes.append(ticker)
@@ -1299,36 +1339,54 @@ def render_ai_chat():
             lines.append(f"Typ ruchu: {trading_data['movement_label']}")
         trading_summary = "\n".join(lines)
 
-    research_text, has_fund = tavily_research(tavily_key, ticker, question)
+    # Sprawdź czy dane się zmieniły od ostatniego skanu – jeśli nie, pomiń Tavily i GPT
+    skip_ai = False
+    if ticker and trading_data is not None:
+        try:
+            price_val = float(trading_data["price"])
+            rvol_val = float(trading_data["indicators"]["rvol"])
+            if not _has_changed(ticker, price_val, rvol_val):
+                skip_ai = True
+        except:
+            pass
 
-    try:
-        system_prompt = (
-            "Jesteś analitykiem finansowym. Masz dwa źródła: "
-            "1) Trading Engine (dane techniczne/wskaźniki) - zawsze dostępne, "
-            "2) Tavily (fundamenty/newsy/ratingi) - może być puste.\n\n"
-            "ZASADY:\n"
-            "- Jeśli Tavily zwrócił 'Brak danych' - analizuj WYŁĄCZNIE na podstawie Trading Engine.\n"
-            "- Nie mów 'brak danych' ani 'nie mam informacji' - po prostu analizuj technicznie.\n"
-            "- Podaj konkretne wartości: trend, RSI, ADX, typ ruchu, scoring i co oznaczają.\n"
-            "- Odpowiadaj po polsku, konkretnie, bez ogólników."
+    if skip_ai:
+        ai_msg = (
+            f"📊 **{ticker} – brak znaczących zmian od ostatniego skanu.**\n\n"
+            f"{trading_summary}\n\n"
+            f"⚠️ Oszczędność: nie wysyłano zapytania do GPT/Tavily (brak zmian >1% ceny lub >2% wolumenu)."
         )
-        def ask_gpt():
-            return requests.post("https://api.openai.com/v1/chat/completions",
-                                 headers={"Authorization": f"Bearer {openai_key}"},
-                                 json={"model": "gpt-4.1", "messages": [
-                                     {"role": "system", "content": system_prompt},
-                                     {"role": "system", "content": f"Dane z Trading Engine:\n{trading_summary}"},
-                                     {"role": "system", "content": f"Research Tavily:\n{research_text}"}
-                                 ] + [{"role": "user" if s=="Ty" else "assistant", "content": c}
-                                      for s,c in st.session_state.chat_history],
-                                      "temperature": 0.1}, timeout=60)
-        resp = ask_gpt()
-        if resp.status_code != 200:
+    else:
+        research_text, has_fund = tavily_research(tavily_key, ticker, question)
+
+        try:
+            system_prompt = (
+                "Jesteś analitykiem finansowym. Masz dwa źródła: "
+                "1) Trading Engine (dane techniczne/wskaźniki) - zawsze dostępne, "
+                "2) Tavily (fundamenty/newsy/ratingi) - może być puste.\n\n"
+                "ZASADY:\n"
+                "- Jeśli Tavily zwrócił 'Brak danych' - analizuj WYŁĄCZNIE na podstawie Trading Engine.\n"
+                "- Nie mów 'brak danych' ani 'nie mam informacji' - po prostu analizuj technicznie.\n"
+                "- Podaj konkretne wartości: trend, RSI, ADX, typ ruchu, scoring i co oznaczają.\n"
+                "- Odpowiadaj po polsku, konkretnie, bez ogólników."
+            )
+            def ask_gpt():
+                return requests.post("https://api.openai.com/v1/chat/completions",
+                                     headers={"Authorization": f"Bearer {openai_key}"},
+                                     json={"model": "gpt-4.1", "messages": [
+                                         {"role": "system", "content": system_prompt},
+                                         {"role": "system", "content": f"Dane z Trading Engine:\n{trading_summary}"},
+                                         {"role": "system", "content": f"Research Tavily:\n{research_text}"}
+                                     ] + [{"role": "user" if s=="Ty" else "assistant", "content": c}
+                                          for s,c in st.session_state.chat_history],
+                                          "temperature": 0.1}, timeout=60)
             resp = ask_gpt()
-        resp.raise_for_status()
-        ai_msg = resp.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        ai_msg = f"[Błąd GPT] {e}"
+            if resp.status_code != 200:
+                resp = ask_gpt()
+            resp.raise_for_status()
+            ai_msg = resp.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            ai_msg = f"[Błąd GPT] {e}"
 
     st.session_state.chat_history.append(("AI", ai_msg))
 
