@@ -1962,6 +1962,8 @@ def run_self_tests():
     import unittest
     import tempfile
     import subprocess
+    # Exercise real children with a Windows-style legacy pipe encoding.
+    child_env = dict(os.environ, PYTHONUTF8='0', PYTHONIOENCODING='cp1252')
     import io
     from contextlib import redirect_stdout
 
@@ -2057,7 +2059,7 @@ def run_self_tests():
         def test_08_concurrent_processes_keep_independent_settings(self):
             processes = [subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
                          '--storage-probe', '--db', str(self.db), '--probe-key', k],
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', env=child_env)
                          for k in ('scanner_probe', 'ui_probe')]
             for p in processes:
                 stdout, stderr = p.communicate(timeout=30)
@@ -2069,11 +2071,11 @@ def run_self_tests():
             with ScannerLock(self.db):
                 p = subprocess.run([sys.executable, str(Path(__file__).resolve()),
                      '--scanner', '--diagnostic', '--cycles', '1', '--db', str(self.db)],
-                     capture_output=True, text=True, timeout=15)
+                     capture_output=True, text=True, encoding='utf-8', env=child_env, timeout=15)
                 self.assertEqual(p.returncode, 3, p.stdout + p.stderr)
             p = subprocess.run([sys.executable, str(Path(__file__).resolve()),
                  '--scanner', '--diagnostic', '--cycles', '1', '--db', str(self.db)],
-                 capture_output=True, text=True, timeout=15)
+                 capture_output=True, text=True, encoding='utf-8', env=child_env, timeout=15)
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
         def test_10_restart_preserves_baselines_and_outbox(self):
@@ -2121,19 +2123,19 @@ def run_self_tests():
         def test_15_crash_releases_os_lock(self):
             p = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
                  '--scanner', '--diagnostic', '--db', str(self.db)],
-                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', env=child_env)
             try:
                 self.assertIn('DIAGNOSTYKA', p.stdout.readline())
                 blocked = subprocess.run([sys.executable, str(Path(__file__).resolve()),
                           '--scanner', '--diagnostic', '--cycles', '1', '--db', str(self.db)],
-                          capture_output=True, text=True, timeout=15)
+                          capture_output=True, text=True, encoding='utf-8', env=child_env, timeout=15)
                 self.assertEqual(blocked.returncode, 3, blocked.stdout + blocked.stderr)
             finally:
                 p.kill()
                 p.communicate(timeout=15)
             restarted = subprocess.run([sys.executable, str(Path(__file__).resolve()),
                          '--scanner', '--diagnostic', '--cycles', '1', '--db', str(self.db)],
-                         capture_output=True, text=True, timeout=15)
+                         capture_output=True, text=True, encoding='utf-8', env=child_env, timeout=15)
             self.assertEqual(restarted.returncode, 0, restarted.stdout + restarted.stderr)
 
         def test_16_normal_scanner_is_not_silently_simulated(self):
@@ -2141,10 +2143,27 @@ def run_self_tests():
                 scanner_main(self.root / 'unused.db', diagnostic=False, cycles=1)
             self.assertFalse((self.root / 'unused.db').exists())
 
+        def test_17_cli_outputs_utf8_with_legacy_environment(self):
+            p = subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                 '--scanner', '--db', str(self.db)], capture_output=True,
+                 text=True, encoding='utf-8', env=child_env, timeout=15)
+            self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+            self.assertIn('Błąd:', p.stderr)
+            self.assertIn('Pobieranie i detekcja', p.stderr)
+
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(StageOneTests)
     return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
 
+def configure_cli_output():
+    """Use UTF-8 for terminal and pipe output, independent of Windows locale."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, 'reconfigure', None)
+        if reconfigure is not None:
+            reconfigure(encoding='utf-8')
+
+
 def main(argv=None):
+    configure_cli_output()
     parser = argparse.ArgumentParser(description='KI.py — etap 1: SQLite i diagnostyka procesów')
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument('--ui',action='store_true')
