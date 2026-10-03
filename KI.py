@@ -2221,6 +2221,35 @@ def session_summary_from_rows(rows,session_date):
             'status':'CLOSED'}
 
 
+def atr_risk_levels(entry,atr,sl_multiplier=2.,tp_multiplier=3.):
+    if not finite_number(entry,True) or not all(finite_number(v,True) for v in (sl_multiplier,tp_multiplier)):
+        raise ValueError('Cena wejścia i mnożniki ATR muszą być dodatnie i skończone.')
+    result={'entry':entry,'atr':atr,'sl_multiplier':sl_multiplier,'tp_multiplier':tp_multiplier,
+            'sl':None,'tp':None,'reward_risk':None,'reason':None}
+    if atr is None or atr==0:
+        result['reason']='Brak dodatniego ATR do wyliczenia poziomów.';return result
+    if not finite_number(atr,True):raise ValueError('Niepoprawny ATR.')
+    sl=entry-sl_multiplier*atr;tp=entry+tp_multiplier*atr
+    if sl<=0:
+        result['reason']='Wyliczony SL jest niedodatni. Zmień cenę wejścia lub mnożnik.';return result
+    result.update(sl=sl,tp=tp,reward_risk=tp_multiplier/sl_multiplier)
+    return result
+
+
+def build_chart_history(rows,limit=120):
+    validate_market_rows(rows)
+    close=[r.get('close') for r in rows]
+    mid=rolling_mean(close,20);fast=rolling_mean(close,10);slow=rolling_mean(close,30)
+    chart=[]
+    for i in range(max(0,len(rows)-limit),len(rows)):
+        row={k:rows[i].get(k) for k in ('time','open','high','low','close','volume','status','price_origin')}
+        deviation=math.sqrt(sum((v-mid[i])**2 for v in close[i-19:i+1])/20) if mid[i] is not None else None
+        row.update(bb_middle=mid[i],bb_upper=mid[i]+2*deviation if deviation is not None else None,
+                   bb_lower=mid[i]-2*deviation if deviation is not None else None,sma10=fast[i],sma30=slow[i])
+        chart.append(row)
+    return chart
+
+
 def fetch_market(ticker,interval):
     import yfinance as yf
     if not valid_ticker(ticker) or interval not in MARKET_INTERVALS:raise ValueError('Błędny ticker lub interwał.')
@@ -2275,6 +2304,8 @@ def fetch_market(ticker,interval):
           'candle_time':last['time'],'candle_end':last['end'],'candle_status':last['status'],
           'status_basis':last['status_basis'],'price':last['close'],'volume':last['volume'],
           'rvol':ind['rvol'],'rvol_incomplete':last['status']!='CLOSED','indicators':ind,
+          'ohlc':{k:last.get(k) for k in ('open','high','low','close')},
+          'chart_history':build_chart_history(rows),
           'scoring':market_score(ind,last['close']),'direction':market_direction(ind,last['close']),
           'currency':metadata.get('currency'),'rows':len(rows),'history_attempts':attempts,
           'empty_trailing_source_candles':accepted_empty_tail,
@@ -2415,22 +2446,24 @@ def run_streamlit(db):
     import streamlit as st
     import html
     store=Store(db)
-    st.set_page_config(page_title='KI — kontrola rynku',page_icon='📈',layout='wide')
+    st.set_page_config(page_title='KI — rynek i detekcja',page_icon='📈',layout='wide')
     st.markdown('''<style>
     .stApp{background:#101720;color:#edf2f7} section[data-testid="stSidebar"]{background:#182330;color:#edf2f7}
     h1,h2,h3,p,label,[data-testid="stMetricValue"],[data-testid="stWidgetLabel"]{color:#edf2f7!important}
     .stButton>button,.stFormSubmitButton>button{background:#274d70;color:#fff;border:1px solid #7c9ab8}
     input,textarea{background:#182330!important;color:#fff!important}
     [data-baseweb="select"]>div{background:#182330!important;color:#fff!important}
-    .ki-card{background:#182330;border:1px solid #61758b;border-radius:8px;padding:14px;margin:10px 0}
+    .ki-card{background:#182330;border:1px solid #61758b;border-radius:10px;padding:18px;margin:12px 0}
     .ki-green{color:#6ee7a0}.ki-yellow{color:#ffe082}.ki-red{color:#ff9292}.ki-gray{color:#c6d0dc}
+    .ki-score{font-size:26px;font-weight:700}.ki-label{font-size:14px;color:#c6d0dc}
+    .ki-table{width:100%;border-collapse:collapse;background:#182330;color:#edf2f7}
+    .ki-table td,.ki-table th{padding:9px 12px;text-align:left;border-bottom:1px solid #43566c}
+    .ki-table th{color:#c6d0dc}.ki-table td:last-child{text-align:right;font-variant-numeric:tabular-nums}
     </style>''',unsafe_allow_html=True)
-    st.title('KI — dane rynku i detekcja')
-    st.info('Etap 2. Yahoo i detekcja mogą działać w osobnym skanerze. AI, Tavily i Telegram nie są podłączone.')
-    settings=store.load_section('settings',{});cfg=market_config(settings)
-    ticks=store.load_section('tickers',[])
+    st.title('KI — rynek i detekcja')
+    settings=store.load_section('settings',{});cfg=market_config(settings);ticks=store.load_section('tickers',[])
     with st.sidebar:
-        st.header('Ustawienia skanera')
+        st.header('Automatyczny skaner')
         with st.form('market_settings'):
             text=st.text_area('Tickery — spacja, przecinek lub nowa linia',value=' '.join(ticks))
             iv=st.selectbox('Interwał świecy',list(MARKET_INTERVALS),index=list(MARKET_INTERVALS).index(cfg['market_interval']))
@@ -2438,68 +2471,121 @@ def run_streamlit(db):
             pt=st.number_input('Próg zmiany ceny (%)',min_value=.01,value=float(cfg['price_threshold_pct']),step=.1)
             rt=st.number_input('Próg względnej zmiany RVOL (%)',min_value=.01,value=float(cfg['rvol_threshold_pct']),step=.1)
             retention=st.number_input('Historia obserwacji (dni)',min_value=1,value=cfg['observation_retention_days'],step=1)
+            st.markdown('**SL / TP dla pozycji kupna — ATR**')
+            slm=st.number_input('Mnożnik ATR dla SL',min_value=.1,value=float(settings.get('sl_atr_multiplier',2.)),step=.1)
+            tpm=st.number_input('Mnożnik ATR dla TP',min_value=.1,value=float(settings.get('tp_atr_multiplier',3.)),step=.1)
             saved=st.form_submit_button('Zapisz ustawienia')
         if saved:
             import re
             new_ticks=list(dict.fromkeys(t.upper() for t in re.split(r'[,\s]+',text.strip()) if t))
-            proposed={'market_interval':iv,'auto_scan_interval':cadence,'price_threshold_pct':pt,'rvol_threshold_pct':rt,'observation_retention_days':int(retention)}
-            market_config(proposed)
-            # settings + watchlist are committed together, not as two partial writes.
+            proposed={'market_interval':iv,'auto_scan_interval':cadence,'price_threshold_pct':pt,'rvol_threshold_pct':rt,'observation_retention_days':int(retention),'sl_atr_multiplier':slm,'tp_atr_multiplier':tpm}
+            market_config(proposed);atr_risk_levels(1.,None,slm,tpm)
             if any(not valid_ticker(t) for t in new_ticks):st.error('Błędny ticker.')
             else:
                 with store.transaction() as c:
                     current=store.load_section('settings',{});current.update(proposed)
                     store._write_section(c,'settings',current);store._write_section(c,'tickers',new_ticks)
-                st.success('Zapisano. Skaner odczyta ustawienia; zmiana interwału tworzy osobny punkt odniesienia.')
                 st.rerun()
-    st.caption('Baza: '+str(store.path))
-    st.button('Odśwież diagnostykę',help='Odczytuje aktualny zapis SQLite; nie uruchamia skanu rynku.')
-    with store.connection() as c:
-        runtime=c.execute("SELECT payload,updated_at FROM runtime WHERE key='scanner'").fetchone()
-        counts={t:c.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0] for t in ('watchlist','observations','baselines','events','cycles')}
-        recent=[dict(r) for r in c.execute('SELECT started_at,finished_at,status,payload FROM cycles ORDER BY started_at DESC LIMIT 10')]
-        latest=list(c.execute('SELECT o.payload FROM observations o WHERE o.id=(SELECT MAX(x.id) FROM observations x WHERE x.ticker=o.ticker AND x.interval=o.interval) ORDER BY o.ticker,o.interval'))
-        bases={(r['ticker'],r['interval']):json.loads(r['payload']) for r in c.execute('SELECT * FROM baselines')}
-        events=[dict(r) for r in c.execute('SELECT id,ticker,interval,created_at,payload FROM events ORDER BY created_at DESC LIMIT 30')]
-    st.subheader('Proces skanera')
-    if runtime:
-        st.json({'ostatni_stan_procesu':json.loads(runtime[0]),'czas_zapisu_UTC':runtime[1]})
-        if (datetime.now(timezone.utc)-parse_market_time(runtime[1])).total_seconds()>15:st.warning('Brak świeżego heartbeat — zapis nie potwierdza aktywnego procesu.')
-    else:st.info('Brak uruchomionego skanera w tej bazie.')
-    st.write('Liczba zapisanych rekordów',counts)
-    st.subheader('Ostatnie obserwacje automatyczne')
-    st.caption('Cena i RVOL pochodzą z ostatniej świecy Yahoo. Otwartą świecę i wiek danych pokazujemy jawnie. Czerwony scoring oznacza słaby układ wzrostowy, a nie dowód spadku.')
-    def card(s):
-        sc=s['scoring'];escape=lambda v:html.escape(str(v));fmt=lambda v:'Brak danych' if v is None else f'{v:.4f}'
-        color=sc['color'];number='Niedostępny' if sc['score'] is None else str(sc['score'])+'/100'
-        st.markdown('<div class="ki-card"><b>'+escape(s['ticker'])+' · '+escape(s['interval'])+'</b><br>'+
-                    'Cena: '+escape(fmt(s['price']))+' '+escape(s.get('currency') or 'waluta nieznana')+
-                    ' · RVOL: '+escape(fmt(s['rvol']))+'<br><span class="ki-'+color+'">'+escape(number+' — '+sc['label'])+'</span><br>'+
-                    escape(s['direction'])+' · Świeca: '+escape(s['candle_status'])+'<br>'+
-                    'Świeca: '+escape(s['candle_time'])+' · Pobranie: '+escape(s['acquired_at'])+'</div>',unsafe_allow_html=True)
-        if s.get('empty_trailing_source_candles'):st.warning('Yahoo zwróciło puste końcowe OHLC: '+str(len(s['empty_trailing_source_candles']))+'. Przedziały zachowano; pochodzenie ceny pokazujemy poniżej.')
-        if s.get('carried_price_candles'):st.caption('Przedziały bez cen OHLC w źródle, z wolumenem 0: '+str(len(s['carried_price_candles']))+'. Zachowano godziny i przeniesiono poprzednią cenę zamknięcia jako O=H=L=C. Szczegóły pochodzenia poniżej.')
-        if s.get('latest_price_origin')=='carried_previous_close':st.warning('Cena tej świecy przeniesiona z '+str(s.get('latest_price_reference_time'))+'; Yahoo zwróciło puste OHLC i wolumen 0.')
-        summary=s.get('session_summary')
-        if summary:
-            st.info('Zamknięcie sesji '+summary['session_date']+': '+fmt(summary['close'])+' '+str(summary.get('currency') or '')+
-                    ' · Wolumen całej sesji: '+str(summary['session_volume'])+' · Źródło: Yahoo, 1d. Dane te nie zastępują świecy '+s['interval']+'.')
-        if s.get('session_summary_warning'):st.warning('Podsumowanie sesji niedostępne: '+s['session_summary_warning'])
-        if s['rvol_incomplete']:st.caption('RVOL niepełny — wolumen świecy nie jest końcowy.')
-        with st.expander('Wskaźniki, braki i pochodzenie danych: '+s['ticker']+' '+s['interval']):st.json(s)
-    if not latest:st.info('Brak obserwacji. Dodaj tickery, zapisz ustawienia i uruchom osobny skaner rynku.')
-    for row in latest:
-        s=json.loads(row[0]);card(s)
-        st.write('Punkt odniesienia',bases.get((s['ticker'],s['interval']),{}))
-    st.subheader('Wykryte zdarzenia')
-    if not events:st.caption('Brak zdarzeń. Pierwszy odczyt jest wyłącznie punktem odniesienia.')
-    for event in events:
-        ev=json.loads(event['payload']);delta=ev.get('price_change_pct');sign='ki-red' if delta is not None and delta<0 else 'ki-green'
-        st.markdown('<div class="'+sign+'">'+html.escape(event['ticker']+' '+event['interval']+' · '+event['created_at']+' · '+', '.join(ev.get('reasons',[])))+'</div>',unsafe_allow_html=True)
-        with st.expander('Dowody zdarzenia '+event['id']):st.json(ev)
-    st.subheader('Ostatnie cykle i błędy pobierania')
-    st.dataframe([{k:r[k] for k in ('started_at','finished_at','status')} for r in recent],use_container_width=True)
-    with st.expander('Szczegóły cykli'):st.json([{**r,'payload':json.loads(r['payload'])} for r in recent])
+        auto_refresh=st.checkbox('Automatyczne odświeżanie panelu',value=True)
+        st.caption('Odczyt zapisanych wyników co 10 sekund. Skaner pobiera Yahoo według ustawionego cyklu.')
+        st.caption('Etap 2 · AI, Tavily i Telegram wyłączone.')
+    def fmt(value,places=2):
+        if not finite_number(value):return 'Brak danych'
+        return f'{value:,.{places}f}'.replace(',',' ').replace('.',',')
+    def when(value):
+        if not value:return 'Brak danych'
+        return parse_market_time(value).astimezone().strftime('%d.%m.%Y %H:%M %Z')
+    def table(items):
+        st.markdown('<table class="ki-table"><tr><th>Wskaźnik / dane</th><th>Wartość</th></tr>'+''.join('<tr><td>'+html.escape(str(k))+'</td><td>'+('<span class="ki-red">'+html.escape(str(v))+'</span>' if str(v).startswith('-') else html.escape(str(v)))+'</td></tr>' for k,v in items)+'</table>',unsafe_allow_html=True)
+    def card(s,view):
+        ind=s['indicators'];sc=s['scoring'];currency=s.get('currency') or ''
+        key=view+'_'+s['ticker']+'_'+s['interval'];summary=s.get('session_summary')
+        score='Brak danych' if sc['score'] is None else str(sc['score'])+'/100'
+        direction=s.get('direction','Brak danych').replace('Układ wzrostowy','Wzrostowy').replace('Układ spadkowy','Spadkowy')
+        st.subheader(s['ticker']+' · '+s['interval'])
+        st.markdown('<div class="ki-card"><span class="ki-label">Ocena układu wzrostowego</span><br><span class="ki-score ki-'+html.escape(sc['color'])+'">'+html.escape(score+' — '+sc['label'])+'</span><br>Trend według SMA: '+html.escape(direction)+'</div>',unsafe_allow_html=True)
+        cols=st.columns(4)
+        for col,label,value in zip(cols,['Cena','Wolumen przedziału','RVOL','Wolumen sesji (1d)'],[fmt(s['price'])+' '+currency,fmt(s.get('volume'),0),fmt(s.get('rvol')),fmt(summary.get('session_volume'),0) if summary else 'Brak danych']):col.metric(label,value)
+        status={'CLOSED':'Zamknięta','OPEN':'W trakcie','UNKNOWN':'Nieustalona'}.get(s['candle_status'],s['candle_status'])
+        st.caption('Świeca: '+when(s['candle_time'])+' → '+when(s.get('candle_end'))+' · '+status)
+        st.caption('Pobrano: '+when(s['acquired_at'])+' · Yahoo Finance · czerwony scoring oznacza słaby układ wzrostowy.')
+        if s.get('latest_price_origin')=='carried_previous_close':st.caption('Cena bez zmiany — zachowano poprzednie zamknięcie. Wolumen przedziału: 0.')
+        if summary:st.caption('Zamknięcie sesji '+summary['session_date']+': '+fmt(summary['close'])+' '+currency+' · koniec według Yahoo: '+when(summary.get('session_end')))
+        if s.get('rvol_incomplete'):st.caption('RVOL świecy w trakcie — wolumen jeszcze nie jest końcowy.')
+        mode=st.selectbox('Cena odniesienia dla SL / TP',['Ostatnia cena','Własna cena wejścia'],key=key+'_entry_mode')
+        entry=s['price']
+        if mode=='Własna cena wejścia':entry=st.number_input('Cena wejścia '+s['ticker'],min_value=.0001,value=float(s['price']),step=.01,format='%.4f',key=key+'_entry')
+        risk=atr_risk_levels(entry,ind.get('atr'),float(settings.get('sl_atr_multiplier',2.)),float(settings.get('tp_atr_multiplier',3.)))
+        rcols=st.columns(4)
+        values=[('Cena odniesienia',fmt(entry)+' '+currency),('ATR (14)',fmt(ind.get('atr'),4)),('SL · '+fmt(risk['sl_multiplier'])+' × ATR',fmt(risk['sl'])+' '+currency),('TP · '+fmt(risk['tp_multiplier'])+' × ATR',fmt(risk['tp'])+' '+currency)]
+        for i,(label,value) in enumerate(values):
+            color='ki-red' if i==2 else 'ki-green' if i==3 else 'ki-gray'
+            rcols[i].markdown('<div class="ki-card"><span class="ki-label">'+html.escape(label)+'</span><br><b class="ki-score '+color+'">'+html.escape(value)+'</b></div>',unsafe_allow_html=True)
+        if risk['reason']:st.warning(risk['reason'])
+        else:st.caption('Poziomy dla pozycji kupna: SL = wejście − mnożnik × ATR; TP = wejście + mnożnik × ATR. Stosunek zysku do ryzyka: '+fmt(risk['reward_risk'])+'.')
+        left,right=st.columns(2)
+        with left:
+            st.markdown('**Cena, trend i Bollinger Bands**')
+            o=s.get('ohlc',{})
+            table([('Otwarcie',fmt(o.get('open'))),('Maksimum',fmt(o.get('high'))),('Minimum',fmt(o.get('low'))),('Zamknięcie',fmt(o.get('close',s['price']))),('SMA 10',fmt(ind.get('ma_fast'),4)),('SMA 30',fmt(ind.get('ma_slow'),4)),('BB górne · 20 / 2σ',fmt(ind.get('last_upper_bb'),4)),('BB środek · SMA 20',fmt(ind.get('bb_sma'),4)),('BB dolne · 20 / 2σ',fmt(ind.get('last_lower_bb'),4)),('VWMA 20',fmt(ind.get('vwma'),4))])
+        with right:
+            st.markdown('**Momentum i aktywność**')
+            labels=[('RSI 14','rsi'),('MACD 12 / 26','last_macd'),('Sygnał MACD 9','last_macd_signal'),('Histogram MACD','last_macd_hist'),('Stochastic %K','stoch_k'),('Stochastic %D','stoch_d'),('ADX 14','adx'),('+DI','plus_di'),('−DI','minus_di'),('ROC 10 (%)','roc'),('OBV','obv'),('RVOL · poprzednie 20 świec','rvol')]
+            table([(label,fmt(ind.get(k),0 if k=='obv' else 4 if 'macd' in k else 2)) for label,k in labels])
+        history=s.get('chart_history',[])
+        if history:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+            fig=make_subplots(rows=2,cols=1,shared_xaxes=True,vertical_spacing=.08,row_heights=[.72,.28],subplot_titles=('Cena · BB · SMA · SL / TP','Wolumen przedziałów'))
+            times=[r['time'] for r in history]
+            fig.add_trace(go.Candlestick(x=times,open=[r['open'] for r in history],high=[r['high'] for r in history],low=[r['low'] for r in history],close=[r['close'] for r in history],name='OHLC',increasing_line_color='#6ee7a0',decreasing_line_color='#ff9292'),row=1,col=1)
+            for field,name,color in [('bb_upper','BB górne','#9dc8ff'),('bb_middle','BB SMA20','#d8e7ff'),('bb_lower','BB dolne','#9dc8ff'),('sma10','SMA10','#ffe082'),('sma30','SMA30','#cdadff')]:
+                fig.add_trace(go.Scatter(x=times,y=[r[field] for r in history],name=name,line={'color':color,'width':1.5},connectgaps=False),row=1,col=1)
+            colors=['#6ee7a0' if finite_number(r['close']) and finite_number(r['open']) and r['close']>r['open'] else '#ff9292' if finite_number(r['close']) and finite_number(r['open']) and r['close']<r['open'] else '#a4b4c6' for r in history]
+            fig.add_trace(go.Bar(x=times,y=[r['volume'] for r in history],name='Wolumen',marker_color=colors),row=2,col=1)
+            for value,label,color in [(risk['sl'],'SL','#ff9292'),(risk['tp'],'TP','#6ee7a0')]:
+                if value is not None:fig.add_hline(y=value,line_color=color,line_dash='dash',annotation_text=label,row=1,col=1)
+            fig.update_layout(height=600,paper_bgcolor='#182330',plot_bgcolor='#182330',font={'color':'#edf2f7'},legend={'orientation':'h','y':1.13},margin={'t':80,'b':25,'l':45,'r':25},xaxis_rangeslider_visible=False,hovermode='x unified')
+            fig.update_xaxes(gridcolor='#34485e');fig.update_yaxes(gridcolor='#34485e')
+            st.plotly_chart(fig,width='stretch',key=key+'_chart')
+            st.caption('Ostatnie '+str(len(history))+' przedziałów otrzymanych z Yahoo. Uzupełnione ceny i otwarte świece opisano w szczegółach.')
+        else:st.info('Wykres pojawi się po następnym odczycie skanera lub pobraniu ręcznym w tej wersji KI.')
+        with st.expander('Szczegóły danych i scoringu · '+s['ticker']+' '+s['interval'],expanded=False):
+            st.write('Punkty za składniki',sc.get('components',{}))
+            if ind.get('missing'):st.write('Brakujące wskaźniki',ind['missing'])
+            st.json(s)
+    @st.fragment(run_every=10 if auto_refresh else None)
+    def live_view():
+        st.button('Odśwież diagnostykę',help='Odczytuje zapisane wyniki; nie pobiera Yahoo.')
+        with store.connection() as c:
+            runtime=c.execute("SELECT payload,updated_at FROM runtime WHERE key='scanner'").fetchone()
+            latest=list(c.execute('SELECT o.payload FROM observations o WHERE o.id=(SELECT MAX(x.id) FROM observations x WHERE x.ticker=o.ticker AND x.interval=o.interval) ORDER BY o.ticker,o.interval'))
+            events=[dict(r) for r in c.execute('SELECT id,ticker,interval,created_at,payload FROM events ORDER BY created_at DESC LIMIT 30')]
+            recent=[dict(r) for r in c.execute('SELECT started_at,finished_at,status,payload FROM cycles ORDER BY started_at DESC LIMIT 10')]
+            counts={t:c.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0] for t in ('watchlist','observations','baselines','events','cycles')}
+            bases={(r['ticker'],r['interval']):json.loads(r['payload']) for r in c.execute('SELECT * FROM baselines')}
+        runtime_data=json.loads(runtime[0]) if runtime else {}
+        age=(datetime.now(timezone.utc)-parse_market_time(runtime[1])).total_seconds() if runtime else None
+        status=runtime_data.get('status','NOT_STARTED')
+        active=age is not None and age<=15 and status in ('RUNNING','WAITING')
+        st.caption(('Skaner aktywny' if active else 'Skaner zatrzymany lub brak aktualnego potwierdzenia')+' · panel odczytano: '+datetime.now().strftime('%H:%M:%S')+' · odświeżanie '+('co 10 s' if auto_refresh else 'wyłączone'))
+        st.subheader('Automatyczne wyniki rynku')
+        if not latest:st.info('Brak wyników automatu. Zapisz tickery i uruchom skaner: python KI.py --scanner')
+        for row in latest:
+            snap=json.loads(row[0]);card(snap,'auto')
+            with st.expander('Punkt odniesienia · '+snap['ticker']+' '+snap['interval']):st.json(bases.get((snap['ticker'],snap['interval']),{}))
+        st.subheader('Wykryte zdarzenia')
+        if not events:st.caption('Brak zdarzeń. Pierwszy odczyt tworzy punkt odniesienia; niezmieniona cena nie tworzy zdarzenia cenowego.')
+        for event in events:
+            ev=json.loads(event['payload']);delta=ev.get('price_change_pct');color='ki-red' if delta is not None and delta<0 else 'ki-green' if delta is not None and delta>0 else 'ki-yellow'
+            st.markdown('<div class="ki-card '+color+'">'+html.escape(event['ticker']+' · '+when(event['created_at'])+' · cena '+fmt(delta)+'% · RVOL '+fmt(ev.get('rvol_change_pct'))+'%')+'</div>',unsafe_allow_html=True)
+            with st.expander('Dowody zdarzenia '+event['id']):st.json(ev)
+        with st.expander('Diagnostyka procesu, baza i cykle',expanded=False):
+            st.caption('Baza: '+str(store.path));st.write('Liczba zapisanych rekordów',counts)
+            if runtime:st.json({'ostatni_stan_procesu':runtime_data,'czas_zapisu_UTC':runtime[1]})
+            st.dataframe([{k:r[k] for k in ('started_at','finished_at','status')} for r in recent],width='stretch')
+            st.json([{**r,'payload':json.loads(r['payload'])} for r in recent])
+    live_view()
     st.subheader('Ręczny odczyt — niezależny od automatu')
     with st.form('manual_market'):
         mt=st.text_input('Ticker ręczny').strip().upper();mi=st.selectbox('Interwał ręczny',list(MARKET_INTERVALS),index=2)
@@ -2509,8 +2595,8 @@ def run_streamlit(db):
             with st.spinner('Pobieranie Yahoo…'):st.session_state['manual_market_snapshot']=fetch_market(mt,mi)
         except Exception as exc:st.session_state.pop('manual_market_snapshot',None);st.error(type(exc).__name__+': '+str(exc))
     if 'manual_market_snapshot' in st.session_state:
-        st.caption('Wynik ręczny — nie zapisuje obserwacji, zdarzeń ani punktów odniesienia automatu.')
-        card(st.session_state['manual_market_snapshot'])
+        st.caption('Wynik ręczny — niezależny od zapisów i punktów odniesienia automatu.')
+        card(st.session_state['manual_market_snapshot'],'manual')
 
 
 def run_market_tests():
@@ -2814,6 +2900,25 @@ def run_market_tests():
             self.assertEqual(filled[-1]['time'],rows[-1]['time'])
             self.assertEqual(market_indicators(filled)['rvol'],0)
 
+        def test_36_atr_sl_tp_use_entry_and_approved_multipliers(self):
+            risk=atr_risk_levels(6.,.1,2.,3.)
+            self.assertAlmostEqual(risk['sl'],5.8);self.assertAlmostEqual(risk['tp'],6.3)
+            self.assertAlmostEqual(risk['reward_risk'],1.5)
+            self.assertIsNone(atr_risk_levels(6.,None)['sl'])
+            self.assertIsNone(atr_risk_levels(6.,0)['tp'])
+            self.assertIsNone(atr_risk_levels(.1,.1,2.,3.)['sl'])
+
+        def test_37_atr_risk_rejects_bad_input(self):
+            for args in ((0,.1),(6,-.1),(6,.1,0,3),(6,.1,2,float('nan'))):
+                with self.assertRaises(ValueError):atr_risk_levels(*args)
+
+        def test_38_chart_bb_and_sma_match_latest_indicators(self):
+            rows=self.rows();chart=build_chart_history(rows,limit=25);ind=market_indicators(rows)
+            self.assertEqual(len(chart),25);self.assertEqual(chart[-1]['time'],rows[-1]['time'])
+            for key,target in (('bb_upper','last_upper_bb'),('bb_lower','last_lower_bb'),('bb_middle','bb_sma'),('sma10','ma_fast'),('sma30','ma_slow')):
+                self.assertAlmostEqual(chart[-1][key],ind[target])
+            self.assertEqual(chart[-1]['volume'],rows[-1]['volume']);self.assertNotIn('sma10',rows[-1])
+
     return 0 if unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(MarketTests)).wasSuccessful() else 1
 
 
@@ -2852,6 +2957,33 @@ def run_panel_tests():
             self.assertEqual(len(self.app.exception),0)
             with self.store.connection() as c:
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM observations').fetchone()[0],0)
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)
+
+        def test_03_full_dashboard_charts_and_entry_change_do_not_modify_detection(self):
+            from datetime import timedelta
+            start=datetime(2026,9,1,8,tzinfo=timezone.utc)
+            rows=[{'time':(start+timedelta(hours=i)).isoformat(),'open':6.,'high':6.1,'low':5.9,'close':6.,'volume':100.,'status':'CLOSED'} for i in range(50)]
+            ind=market_indicators(rows)
+            snap={'ticker':'AAA','interval':'1h','price':6.,'volume':100.,'rvol':ind['rvol'],
+                  'candle_time':rows[-1]['time'],'candle_end':None,'candle_status':'CLOSED','acquired_at':utc_now(),
+                  'currency':'PLN','indicators':ind,'scoring':market_score(ind,6.),'direction':market_direction(ind,6.),
+                  'rvol_incomplete':False,'ohlc':{k:rows[-1][k] for k in ('open','high','low','close')},
+                  'chart_history':build_chart_history(rows),'latest_price_origin':'Yahoo OHLC'}
+            detect_market(self.store,snap);baseline=self.store.get_baseline('AAA','1h')
+            self.button('Odśwież diagnostykę').click().run(timeout=30)
+            self.assertEqual(len(self.app.exception),0)
+            self.assertEqual(len(self.app.get('plotly_chart')),1)
+            content=' '.join(m.value for m in self.app.markdown)
+            self.assertIn('BB górne',content);self.assertIn('5,60',content);self.assertIn('6,60',content)
+            mode=next(x for x in self.app.selectbox if x.label=='Cena odniesienia dla SL / TP')
+            mode.set_value('Własna cena wejścia').run(timeout=30)
+            next(x for x in self.app.number_input if x.label=='Cena wejścia AAA').set_value(7.).run(timeout=30)
+            self.assertEqual(len(self.app.exception),0)
+            self.assertIn('6,60',' '.join(m.value for m in self.app.markdown))
+            self.assertIn('7,60',' '.join(m.value for m in self.app.markdown))
+            self.assertEqual(self.store.get_baseline('AAA','1h'),baseline)
+            with self.store.connection() as c:
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM observations').fetchone()[0],1)
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)
 
     return 0 if unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(PanelTests)).wasSuccessful() else 1
