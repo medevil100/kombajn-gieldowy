@@ -2172,6 +2172,32 @@ def normalize_yahoo_frame(frame,ticker,interval,now,metadata):
     return rows
 
 
+def trim_empty_yahoo_tail(rows):
+    """Ignore only trailing placeholders; retain partial candles and internal gaps."""
+    end=len(rows)
+    while end:
+        row=rows[end-1]
+        if not (all(row.get(k) is None for k in ('open','high','low','close'))
+                and row.get('volume') in (None,0)):
+            break
+        end-=1
+    if end==0:raise ValueError('Yahoo zwróciło wyłącznie puste świece; brak ceny do analizy.')
+    return rows[:end], [{'time':r['time'],'reason':'empty_ohlc_without_volume'} for r in rows[end:]]
+
+
+def session_summary_from_rows(rows,session_date):
+    """Daily session totals are separate from intraday indicator input."""
+    matching=[r for r in rows if parse_market_time(r['time']).date().isoformat()==session_date]
+    if len(matching)!=1:raise ValueError('Brak jednoznacznego podsumowania sesji '+session_date)
+    row=matching[0]
+    if row['status']!='CLOSED':raise ValueError('Dzienna świeca sesji nie jest potwierdzona jako zamknięta.')
+    if not finite_number(row['close'],True):raise ValueError('Brak ceny zamknięcia sesji.')
+    return {'session_date':session_date,'close':row['close'],'session_volume':row['volume'],
+            'source':'Yahoo Finance','source_interval':'1d','source_candle_time':row['time'],
+            'session_end':row.get('end'),'status_basis':row.get('status_basis'),
+            'status':'CLOSED'}
+
+
 def fetch_market(ticker,interval):
     import yfinance as yf
     if not valid_ticker(ticker) or interval not in MARKET_INTERVALS:raise ValueError('Błędny ticker lub interwał.')
@@ -2189,6 +2215,7 @@ def fetch_market(ticker,interval):
                 if type(exc).__name__=='YFRateLimitError':raise
                 metadata_warning=type(exc).__name__+': '+str(exc)
             candidate=normalize_yahoo_frame(frame,ticker,interval,now,metadata)
+            candidate,ignored_tail=trim_empty_yahoo_tail(candidate)
         except Exception as exc:
             if type(exc).__name__=='YFRateLimitError':
                 raise MarketRateLimitError('Yahoo HTTP 429: przerwano cykl; bez dalszych zapytań do następnego slotu.') from exc
@@ -2199,9 +2226,24 @@ def fetch_market(ticker,interval):
         rows=candidate
         accepted_at=now
         accepted_metadata=metadata
+        accepted_ignored_tail=ignored_tail
         attempts.append({'period':period,'rows':len(rows),'interval':interval})
         if len(rows)>=34:break
     now=accepted_at;metadata=accepted_metadata
+    session_summary=None;session_summary_warning=None
+    if interval!='1d' and accepted_ignored_tail:
+        session_date=parse_market_time(accepted_ignored_tail[-1]['time']).date().isoformat()
+        try:
+            daily_frame=provider.history(period='5d',interval='1d',prepost=False,auto_adjust=False,
+                                         actions=False,repair=False,keepna=True,timeout=20,raise_errors=True)
+            summary_at=datetime.now(timezone.utc)
+            daily_rows=normalize_yahoo_frame(daily_frame,ticker,'1d',summary_at,metadata)
+            session_summary=session_summary_from_rows(daily_rows,session_date)
+            session_summary.update(acquired_at=summary_at.isoformat(),currency=metadata.get('currency'))
+        except Exception as exc:
+            if type(exc).__name__=='YFRateLimitError':
+                raise MarketRateLimitError('Yahoo HTTP 429: przerwano pobieranie podsumowania sesji.') from exc
+            session_summary_warning=type(exc).__name__+': '+str(exc)
     ind=market_indicators(rows);last=rows[-1]
     if not finite_number(last['close'],True):raise ValueError('Brak poprawnej ceny ostatniej świecy.')
     snap={'ticker':ticker,'interval':interval,'source':'Yahoo Finance','acquired_at':now.isoformat(),
@@ -2210,6 +2252,8 @@ def fetch_market(ticker,interval):
           'rvol':ind['rvol'],'rvol_incomplete':last['status']!='CLOSED','indicators':ind,
           'scoring':market_score(ind,last['close']),'direction':market_direction(ind,last['close']),
           'currency':metadata.get('currency'),'rows':len(rows),'history_attempts':attempts,
+          'ignored_trailing_empty_candles':accepted_ignored_tail,
+          'session_summary':session_summary,'session_summary_warning':session_summary_warning,
           'missing_latest_fields':[k for k in ('open','high','low','volume') if last[k] is None],
           'metadata_warning':metadata_warning,'history_warning':history_warning,
           'candle_age_seconds':max(0,(now-parse_market_time(last['time'])).total_seconds())}
@@ -2405,6 +2449,12 @@ def run_streamlit(db):
                     ' · RVOL: '+escape(fmt(s['rvol']))+'<br><span class="ki-'+color+'">'+escape(number+' — '+sc['label'])+'</span><br>'+
                     escape(s['direction'])+' · Świeca: '+escape(s['candle_status'])+'<br>'+
                     'Świeca: '+escape(s['candle_time'])+' · Pobranie: '+escape(s['acquired_at'])+'</div>',unsafe_allow_html=True)
+        if s.get('ignored_trailing_empty_candles'):st.warning('Pominięto puste końcowe wiersze Yahoo: '+str(len(s['ignored_trailing_empty_candles']))+'. Cena pochodzi ze świecy wskazanej powyżej.')
+        summary=s.get('session_summary')
+        if summary:
+            st.info('Zamknięcie sesji '+summary['session_date']+': '+fmt(summary['close'])+' '+str(summary.get('currency') or '')+
+                    ' · Wolumen całej sesji: '+str(summary['session_volume'])+' · Źródło: Yahoo, 1d. Dane te nie zastępują świecy '+s['interval']+'.')
+        if s.get('session_summary_warning'):st.warning('Podsumowanie sesji niedostępne: '+s['session_summary_warning'])
         if s['rvol_incomplete']:st.caption('RVOL niepełny — wolumen świecy nie jest końcowy.')
         with st.expander('Wskaźniki, braki i pochodzenie danych: '+s['ticker']+' '+s['interval']):st.json(s)
     if not latest:st.info('Brak obserwacji. Dodaj tickery, zapisz ustawienia i uruchom osobny skaner rynku.')
@@ -2650,6 +2700,41 @@ def run_market_tests():
                 for p in children:
                     out,err=p.communicate(timeout=20);self.assertEqual(p.returncode,0,out+err)
                 with st.connection() as c:self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0],1)
+
+        def test_27_empty_yahoo_tail_preserves_last_price_time(self):
+            good={'time':'2026-10-02T16:00:00+02:00','open':5.9,'high':6.,'low':5.86,'close':6.,'volume':4230}
+            empty={'time':'2026-10-02T17:00:00+02:00','open':None,'high':None,'low':None,'close':None,'volume':0}
+            rows=[good,empty];kept,ignored=trim_empty_yahoo_tail(rows)
+            self.assertEqual(kept,[good]);self.assertEqual(ignored[0]['time'],empty['time'])
+            self.assertEqual(len(rows),2)
+
+        def test_28_partial_and_internal_missing_rows_are_retained(self):
+            empty={'time':'2026-10-02T15:00:00+02:00','open':None,'high':None,'low':None,'close':None,'volume':0}
+            partial={**empty,'time':'2026-10-02T16:00:00+02:00','open':6.}
+            kept,ignored=trim_empty_yahoo_tail([empty,partial])
+            self.assertEqual(kept,[empty,partial]);self.assertEqual(ignored,[])
+            with self.assertRaises(ValueError):trim_empty_yahoo_tail([empty])
+            with_volume={**empty,'volume':10}
+            self.assertEqual(trim_empty_yahoo_tail([with_volume]),([with_volume],[]))
+
+        def test_29_session_summary_is_separate_from_hourly_candle(self):
+            daily={'time':'2026-10-02T00:00:00+02:00','open':5.95,'high':6.14,'low':5.86,
+                   'close':6.,'volume':53110,'status':'CLOSED','end':None,'status_basis':'previous_exchange_date'}
+            summary=session_summary_from_rows([daily],'2026-10-02')
+            self.assertEqual(summary['close'],6.);self.assertEqual(summary['session_volume'],53110)
+            self.assertEqual(summary['source_interval'],'1d');self.assertEqual(summary['source_candle_time'],daily['time'])
+            self.assertIsNone(summary['session_end']);self.assertNotIn('rvol',summary)
+            self.assertEqual(daily['volume'],53110)
+
+        def test_30_session_summary_rejects_open_missing_or_wrong_date(self):
+            daily={'time':'2026-10-02T00:00:00+02:00','close':6.,'volume':53110,'status':'OPEN'}
+            with self.assertRaises(ValueError):session_summary_from_rows([daily],'2026-10-02')
+            daily['status']='UNKNOWN'
+            with self.assertRaises(ValueError):session_summary_from_rows([daily],'2026-10-02')
+            daily['status']='CLOSED'
+            with self.assertRaises(ValueError):session_summary_from_rows([daily],'2026-10-01')
+            daily['close']=None
+            with self.assertRaises(ValueError):session_summary_from_rows([daily],'2026-10-02')
 
     return 0 if unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(MarketTests)).wasSuccessful() else 1
 
