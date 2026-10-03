@@ -1,6 +1,7 @@
 """KI.py — etap 3: detekcja → kontekst Tavily → GPT → podgląd/Telegram.
 
 Interfejs: python -m streamlit run KI.py -- --ui --db KI.stage1.sqlite3
+Panel i skaner jednym poleceniem: python KI.py --start
 Diagnostyka: python KI.py --scanner --diagnostic --db KI.stage1.sqlite3
 Testy: python KI.py --self-test
 Raport migracji: python KI.py --migration-report state.json
@@ -36,6 +37,10 @@ _STORE = None
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat(timespec='microseconds')
+
+
+def termination_signals():
+    return (signal.SIGINT,signal.SIGTERM)+((signal.SIGBREAK,) if hasattr(signal,'SIGBREAK') else ())
 
 
 def json_text(value):
@@ -402,7 +407,7 @@ def scanner_diagnostic_main(db, diagnostic=False, cycles=None):
     stop = threading.Event()
     previous_handlers = {}
     if threading.current_thread() is threading.main_thread():
-        for sig in (signal.SIGINT,signal.SIGTERM):
+        for sig in termination_signals():
             previous_handlers[sig] = signal.signal(sig,lambda *_:stop.set())
     try:
         with ScannerLock(db):
@@ -2823,7 +2828,7 @@ def scanner_main(db,diagnostic=False,cycles=None):
     if diagnostic:return scanner_diagnostic_main(db,True,cycles)
     stop=threading.Event();handlers={}
     if threading.current_thread() is threading.main_thread():
-        for sig in (signal.SIGINT,signal.SIGTERM):handlers[sig]=signal.signal(sig,lambda *_:stop.set())
+        for sig in termination_signals():handlers[sig]=signal.signal(sig,lambda *_:stop.set())
     try:
         with ScannerLock(db):
             store=Store(db);status={'pid':os.getpid(),'mode':'MARKET','stage':STAGE,'status':'RUNNING','cycles_this_run':0,'skipped_slots':0}
@@ -4001,11 +4006,178 @@ def run_service_tests():
     return 0 if unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(ServiceTests)).wasSuccessful() else 1
 
 
+def app_commands(db,port,diagnostic=False):
+    source=str(Path(__file__).resolve());database=str(Path(db).expanduser().resolve())
+    scanner=[sys.executable,source,'--scanner','--db',database]+(['--diagnostic'] if diagnostic else [])
+    panel=[sys.executable,'-m','streamlit','run',source,'--server.address=127.0.0.1',
+           '--server.port='+str(port),'--server.headless=true','--server.baseUrlPath=',
+           '--browser.gatherUsageStats=false','--','--ui','--db',database]
+    return scanner,panel
+
+
+def stop_app_children(children):
+    import subprocess
+    for child in children:
+        if child.poll() is None:
+            try:
+                if os.name=='nt':child.send_signal(signal.CTRL_BREAK_EVENT)
+                else:os.killpg(child.pid,signal.SIGTERM)
+            except (OSError,ProcessLookupError):
+                try:child.terminate()
+                except OSError:pass
+    deadline=time.monotonic()+8
+    for child in children:
+        try:child.wait(timeout=max(.1,deadline-time.monotonic()))
+        except subprocess.TimeoutExpired:
+            child.kill();child.wait(timeout=5)
+
+
+def launcher_status(store,payload):
+    with store.transaction() as c:
+        c.execute('INSERT INTO runtime VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',
+                  ('launcher',json_text(payload),utc_now()))
+
+
+def app_ready(store,scanner,panel,url):
+    from urllib.request import urlopen
+    from urllib.error import URLError
+    if scanner.poll() is not None or panel.poll() is not None:return False
+    with store.connection() as c:row=c.execute("SELECT payload FROM runtime WHERE key='scanner'").fetchone()
+    if not row or json.loads(row[0]).get('pid')!=scanner.pid:return False
+    try:
+        with urlopen(url+'/_stcore/health',timeout=.5) as response:return response.status==200
+    except (URLError,OSError):return False
+
+
+def start_application(db,port=8501,diagnostic=False,no_browser=False,smoke_seconds=None):
+    import importlib.util
+    import socket
+    import subprocess
+    import webbrowser
+    if importlib.util.find_spec('streamlit') is None:raise RuntimeError('Brak Streamlit. Zainstaluj: python -m pip install streamlit')
+    db=Path(db).expanduser().resolve();db.parent.mkdir(parents=True,exist_ok=True)
+    children=[];logs=[];stop=threading.Event();handlers={};state=None;store=None
+    url='http://127.0.0.1:'+str(port)
+    if threading.current_thread() is threading.main_thread():
+        for sig in termination_signals():handlers[sig]=signal.signal(sig,lambda *_:stop.set())
+    try:
+        with ScannerLock(str(db)+'.launcher'):
+            # Do not adopt or terminate processes launched independently by the user.
+            with ScannerLock(db):pass
+            try:
+                with socket.socket() as sock:sock.bind(('127.0.0.1',port))
+            except OSError:raise RuntimeError('Port '+str(port)+' jest zajęty. Zatrzymaj poprzedni panel albo wybierz --port 8502.') from None
+            store=Store(db);commands=app_commands(db,port,diagnostic)
+            paths=[db.with_suffix('.scanner.log'),db.with_suffix('.panel.log')]
+            env={**os.environ,'PYTHONUTF8':'1','PYTHONIOENCODING':'utf-8'}
+            options={'creationflags':subprocess.CREATE_NEW_PROCESS_GROUP} if os.name=='nt' else {'start_new_session':True}
+            try:
+                for command,path in zip(commands,paths):
+                    log=path.open('ab');logs.append(log)
+                    children.append(subprocess.Popen(command,cwd=Path(__file__).resolve().parent,
+                        stdout=log,stderr=subprocess.STDOUT,env=env,**options))
+                scanner,panel=children
+                state={'pid':os.getpid(),'scanner_pid':scanner.pid,'panel_pid':panel.pid,
+                       'status':'STARTING','url':url,'diagnostic':diagnostic,'started_at':utc_now()}
+                launcher_status(store,state);deadline=time.monotonic()+40
+                while not stop.is_set():
+                    if any(child.poll() is not None for child in children):raise RuntimeError('Proces zakończył się podczas startu. Sprawdź logi: '+', '.join(str(p) for p in paths))
+                    if app_ready(store,scanner,panel,url):break
+                    if time.monotonic()>=deadline:raise RuntimeError('Start niepotwierdzony w czasie oczekiwania. Sprawdź logi: '+', '.join(str(p) for p in paths))
+                    stop.wait(.2)
+                if stop.is_set():return 0
+                state['status']='RUNNING';launcher_status(store,state)
+                print('PANEL I SKANER GOTOWE: '+url,flush=True)
+                print('Baza: '+str(db),flush=True)
+                print('Log skanera: '+str(paths[0])+'\nLog panelu: '+str(paths[1]),flush=True)
+                cfg=service_config(store.load_section('settings',{}))
+                print('Tavily + GPT: '+('włączone' if cfg['pipeline_enabled'] and not diagnostic else 'wyłączone')+
+                      ' · Telegram: '+('włączony' if cfg['telegram_enabled'] and cfg['pipeline_enabled'] and not diagnostic else 'wyłączony'),flush=True)
+                print('Zostaw to okno otwarte. Ctrl+C zatrzymuje panel i skaner.',flush=True)
+                if not no_browser:webbrowser.open(url)
+                smoke_deadline=time.monotonic()+smoke_seconds if smoke_seconds is not None else None
+                while not stop.wait(.5):
+                    if any(child.poll() is not None for child in children):raise RuntimeError('Panel lub skaner zakończył pracę; drugi proces zostanie zatrzymany. Sprawdź logi.')
+                    if smoke_deadline is not None and time.monotonic()>=smoke_deadline:break
+            finally:
+                stop_app_children(children)
+                for log in logs:log.close()
+                if state:
+                    state.update(status='STOPPED',stopped_at=utc_now());launcher_status(store,state)
+                    print('Panel i skaner zatrzymane.',flush=True)
+    finally:
+        for sig,handler in handlers.items():signal.signal(sig,handler)
+    return 0
+
+
+def run_launch_tests():
+    import socket
+    import subprocess
+    import tempfile
+    import unittest
+
+    class LaunchTests(unittest.TestCase):
+        def setUp(self):
+            self.temp=tempfile.TemporaryDirectory();self.db=Path(self.temp.name)/'launcher.db'
+            with socket.socket() as sock:sock.bind(('127.0.0.1',0));self.port=sock.getsockname()[1]
+            self.command=[sys.executable,str(Path(__file__).resolve()),'--start','--diagnostic','--no-browser','--db',str(self.db),'--port',str(self.port)]
+        def tearDown(self):self.temp.cleanup()
+        def test_01_launch_commands_use_same_interpreter_file_database_and_loopback(self):
+            scanner,panel=app_commands(self.db,self.port,True)
+            self.assertEqual(scanner[0],sys.executable);self.assertEqual(panel[0],sys.executable)
+            self.assertIn(str(self.db.resolve()),scanner);self.assertIn(str(self.db.resolve()),panel)
+            self.assertIn('--diagnostic',scanner);self.assertIn('--server.address=127.0.0.1',panel)
+        def test_02_real_panel_and_diagnostic_scanner_start_and_stop(self):
+            p=subprocess.run(self.command+['--launch-smoke-seconds','2'],capture_output=True,text=True,encoding='utf-8',timeout=50)
+            self.assertEqual(p.returncode,0,p.stdout+p.stderr);self.assertIn('PANEL I SKANER GOTOWE',p.stdout)
+            store=Store(self.db)
+            with store.connection() as c:
+                runtime=json.loads(c.execute("SELECT payload FROM runtime WHERE key='launcher'").fetchone()[0])
+                self.assertEqual(runtime['status'],'STOPPED')
+                self.assertEqual(json.loads(c.execute("SELECT payload FROM runtime WHERE key='scanner'").fetchone()[0])['status'],'STOPPED')
+                self.assertGreater(c.execute('SELECT COUNT(*) FROM cycles').fetchone()[0],0)
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)
+            with self.assertRaises(OSError):socket.create_connection(('127.0.0.1',self.port),timeout=.5)
+        def test_03_occupied_port_is_reported_before_starting_children(self):
+            with socket.socket() as sock:
+                sock.bind(('127.0.0.1',self.port));sock.listen(1)
+                p=subprocess.run(self.command,capture_output=True,text=True,encoding='utf-8',timeout=10)
+            self.assertNotEqual(p.returncode,0);self.assertIn('Port',p.stderr)
+        def test_04_existing_scanner_is_not_stopped_or_duplicated(self):
+            with ScannerLock(self.db):
+                p=subprocess.run(self.command,capture_output=True,text=True,encoding='utf-8',timeout=10)
+            self.assertNotEqual(p.returncode,0);self.assertIn('skaner',p.stderr.lower())
+        def test_05_second_launcher_is_blocked_without_stopping_first(self):
+            options={'creationflags':subprocess.CREATE_NEW_PROCESS_GROUP} if os.name=='nt' else {'start_new_session':True}
+            store=Store(self.db)
+            first=subprocess.Popen(self.command+['--launch-smoke-seconds','3'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding='utf-8',**options)
+            try:
+                deadline=time.monotonic()+35
+                while time.monotonic()<deadline:
+                    if first.poll() is not None:self.fail('Pierwszy launcher zakończył start: '+''.join(first.communicate()))
+                    with store.connection() as c:row=c.execute("SELECT payload FROM runtime WHERE key='launcher'").fetchone()
+                    if row and json.loads(row[0])['status']=='RUNNING':break
+                    time.sleep(.1)
+                else:self.fail('Brak potwierdzenia startu pierwszego launchera.')
+                second=subprocess.run(self.command,capture_output=True,text=True,encoding='utf-8',timeout=10)
+                self.assertNotEqual(second.returncode,0);self.assertIsNone(first.poll())
+                output,error=first.communicate(timeout=20)
+                self.assertEqual(first.returncode,0,output+error)
+            finally:
+                if first.poll() is None:
+                    first.send_signal(signal.CTRL_BREAK_EVENT if os.name=='nt' else signal.SIGTERM)
+                    first.communicate(timeout=20)
+
+    return 0 if unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(LaunchTests)).wasSuccessful() else 1
+
+
 def main(argv=None):
     configure_cli_output()
     parser = argparse.ArgumentParser(description='KI.py — etap 3: Yahoo, detekcja, Tavily, GPT i Telegram')
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument('--ui',action='store_true')
+    modes.add_argument('--start',action='store_true',help='Uruchom panel i skaner razem; Ctrl+C zatrzymuje oba.')
+    modes.add_argument('--launch-test',action='store_true',help='Sprawdź prawdziwe uruchamianie panelu i skanera diagnostycznego.')
     modes.add_argument('--scanner',action='store_true')
     modes.add_argument('--migration-report',metavar='JSON')
     modes.add_argument('--migrate',metavar='JSON')
@@ -4022,14 +4194,25 @@ def main(argv=None):
     parser.add_argument('--cycles',type=int)
     parser.add_argument('--probe-key',help=argparse.SUPPRESS)
     parser.add_argument('--interval',choices=list(MARKET_INTERVALS),default='1h')
+    parser.add_argument('--port',type=int,default=8501)
+    parser.add_argument('--no-browser',action='store_true')
+    parser.add_argument('--launch-smoke-seconds',type=float,help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.cycles is not None and args.cycles<1:
         parser.error('--cycles musi być dodatnie.')
-    if args.diagnostic and not args.scanner:
-        parser.error('--diagnostic wymaga --scanner.')
+    if args.diagnostic and not (args.scanner or args.start):
+        parser.error('--diagnostic wymaga --scanner lub --start.')
+    if not 1<=args.port<=65535:parser.error('--port musi być w zakresie 1..65535.')
+    if args.no_browser and not args.start:parser.error('--no-browser wymaga --start.')
+    if args.launch_smoke_seconds is not None and (not args.start or not args.diagnostic or args.launch_smoke_seconds<=0):
+        parser.error('Test czasowy uruchomienia wymaga --start --diagnostic i dodatniego czasu.')
     if args.cycles is not None and not args.scanner:
         parser.error('--cycles wymaga --scanner.')
     try:
+        if args.start:
+            return start_application(args.db,args.port,args.diagnostic,args.no_browser,args.launch_smoke_seconds)
+        if args.launch_test:
+            return run_launch_tests()
         if args.self_test:
             foundation_result = run_self_tests()
             market_result = run_market_tests()
