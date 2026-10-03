@@ -1,4 +1,4 @@
-"""KI.py — etap 1: procesy, SQLite, jawna migracja i diagnostyka.
+"""KI.py — etap 2: Yahoo OHLCV, wskaźniki, scoring i trwała detekcja.
 
 Interfejs: python -m streamlit run KI.py -- --ui --db KI.stage1.sqlite3
 Diagnostyka: python KI.py --scanner --diagnostic --db KI.stage1.sqlite3
@@ -6,8 +6,9 @@ Testy: python KI.py --self-test
 Raport migracji: python KI.py --migration-report state.json
 Import: python KI.py --migrate state.json --approve-sha <SHA256_Z_RAPORTU>
 
-Etap 1 nie podłącza automatycznego pobierania danych ani usług zewnętrznych.
-Istniejące ręczne moduły UI zostają zachowane do kolejnych etapów naprawy.
+Skaner rynku: python KI.py --scanner
+Test Yahoo bez zapisu: python KI.py --market-probe AAA --interval 1h
+AI, Tavily i Telegram pozostają wyłączone. Stare moduły zachowano do dalszych napraw.
 """
 from pathlib import Path
 from contextlib import contextmanager
@@ -24,7 +25,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-STAGE = 1
+STAGE = 2
 SCHEMA_VERSION = 1
 DEFAULT_DB = Path(__file__).resolve().with_name('KI.stage1.sqlite3')
 _STORE = None
@@ -221,6 +222,9 @@ def validate_state(data):
         else:
             if 'telegram' in settings and not isinstance(settings['telegram'],bool):
                 errors.append('settings.telegram: wymagana wartość logiczna.')
+            if any(k in settings for k in ('market_interval','price_threshold_pct','rvol_threshold_pct','observation_retention_days')):
+                try:market_config(settings)
+                except ValueError as exc:errors.append(str(exc))
             v = settings.get('auto_scan_interval',0)
             if isinstance(v,bool) or not isinstance(v,int) or v not in (0,15,30,60):
                 errors.append('settings.auto_scan_interval: dozwolone 0,15,30,60.')
@@ -379,7 +383,7 @@ def next_slot(now, seconds):
     return (math.floor(now/seconds)+1)*seconds
 
 
-def scanner_main(db, diagnostic=False, cycles=None):
+def scanner_diagnostic_main(db, diagnostic=False, cycles=None):
     if not diagnostic:
         raise ValueError('Etap 1: dostępny tylko --scanner --diagnostic. Pobieranie i detekcja nie są jeszcze podłączone.')
     stop = threading.Event()
@@ -493,7 +497,7 @@ def _has_changed(ticker: str, price_now: float, rvol_now: float) -> bool:
     return price_changed or vol_changed
 
 
-def run_streamlit(db):
+def run_legacy_streamlit(db):
     global _STORE
     try:
         import re
@@ -1958,6 +1962,738 @@ def run_streamlit(db):
     else:
         render_scanner()
 
+# ------------------ ETAP 2: DANE, WSKAŹNIKI I DETEKCJA ------------------
+class MarketRateLimitError(ValueError):
+    pass
+
+
+MARKET_INTERVALS = {'15m':900, '30m':1800, '1h':3600, '1d':86400}
+
+
+def market_config(settings):
+    defaults = {'market_interval':'1h', 'auto_scan_interval':15,
+                'price_threshold_pct':1.0, 'rvol_threshold_pct':2.0,
+                'observation_retention_days':90}
+    cfg = {k:settings.get(k,v) for k,v in defaults.items()}
+    if cfg['market_interval'] not in MARKET_INTERVALS:
+        raise ValueError('Interwał rynku: dozwolone 15m, 30m, 1h, 1d.')
+    if type(cfg['auto_scan_interval']) is not int or cfg['auto_scan_interval'] not in (0,15,30,60):
+        raise ValueError('Kadencja: dozwolone 0,15,30,60 minut.')
+    for k in ('price_threshold_pct','rvol_threshold_pct'):
+        if not finite_number(cfg[k],True):
+            raise ValueError('Progi muszą być dodatnimi skończonymi liczbami.')
+    if type(cfg['observation_retention_days']) is not int or cfg['observation_retention_days']<1:
+        raise ValueError('Retencja obserwacji musi być dodatnią liczbą dni.')
+    return cfg
+
+
+def parse_market_time(value):
+    dt = datetime.fromisoformat(str(value))
+    if dt.tzinfo is None:
+        raise ValueError('Czas świecy musi zawierać strefę czasową.')
+    return dt
+
+
+def validate_market_rows(rows):
+    if not rows:
+        raise ValueError('Brak OHLCV z Yahoo.')
+    previous = None
+    for row in rows:
+        moment = parse_market_time(row['time'])
+        if previous is not None and moment<=previous:
+            raise ValueError('Nieuporządkowane lub powtórzone czasy świec.')
+        previous = moment
+        for key in ('open','high','low','close','volume'):
+            v = row.get(key)
+            if v is not None and (not finite_number(v) or (v<0 if key=='volume' else v<=0)):
+                raise ValueError('Błędne OHLCV: '+key+' @ '+row['time'])
+        h,l = row.get('high'),row.get('low')
+        if h is not None and l is not None:
+            if h<l or any(row.get(k) is not None and not l<=row[k]<=h for k in ('open','close')):
+                raise ValueError('Sprzeczne OHLC @ '+row['time'])
+    return rows
+
+
+def rolling_mean(values,n):
+    return [sum(values[i-n+1:i+1])/n if i>=n-1 and all(v is not None for v in values[i-n+1:i+1]) else None
+            for i in range(len(values))]
+
+
+def smooth(values,n,alpha):
+    result=[]; window=[]; previous=None
+    for value in values:
+        if value is None:
+            previous=None;window=[];result.append(None);continue
+        if previous is None:
+            window.append(value)
+            if len(window)<n:result.append(None);continue
+            previous=sum(window[-n:])/n
+        else:
+            previous=previous+alpha*(value-previous)
+        result.append(previous)
+    return result
+
+
+def wilder(values,n):
+    return smooth(values,n,1/n)
+
+
+def market_indicators(rows):
+    validate_market_rows(rows)
+    close=[r.get('close') for r in rows]; high=[r.get('high') for r in rows]
+    low=[r.get('low') for r in rows]; volume=[r.get('volume') for r in rows]
+    n=len(rows); gains=[None];losses=[None];tr=[];plus=[None];minus=[None]
+    for i in range(n):
+        if high[i] is None or low[i] is None or (i and close[i-1] is None):tr.append(None)
+        else:tr.append(max(high[i]-low[i],abs(high[i]-close[i-1]),abs(low[i]-close[i-1])) if i else high[i]-low[i])
+        if i:
+            d=close[i]-close[i-1] if close[i] is not None and close[i-1] is not None else None
+            gains.append(max(d,0) if d is not None else None);losses.append(max(-d,0) if d is not None else None)
+            if any(v is None for v in (high[i],high[i-1],low[i],low[i-1])):
+                plus.append(None);minus.append(None)
+            else:
+                up=high[i]-high[i-1];down=low[i-1]-low[i]
+                plus.append(up if up>down and up>0 else 0)
+                minus.append(down if down>up and down>0 else 0)
+    ag,al=wilder(gains,14),wilder(losses,14)
+    rsi=[None if g is None or l is None else (50.0 if g==l==0 else 100.0 if l==0 else 100-100/(1+g/l)) for g,l in zip(ag,al)]
+    atr=wilder(tr,14);dtr=wilder([None]+tr[1:],14)
+    pdm,mdm=wilder(plus,14),wilder(minus,14)
+    pdi=[None if t is None or p is None else (100*p/t if t else 0.0) for p,t in zip(pdm,dtr)]
+    mdi=[None if t is None or m is None else (100*m/t if t else 0.0) for m,t in zip(mdm,dtr)]
+    dx=[None if p is None or m is None else (100*abs(p-m)/(p+m) if p+m else 0.0) for p,m in zip(pdi,mdi)]
+    adx=wilder(dx,14)
+    ema12,ema26=smooth(close,12,2/13),smooth(close,26,2/27)
+    macd=[a-b if a is not None and b is not None else None for a,b in zip(ema12,ema26)]
+    sig=smooth(macd,9,2/10)
+    bb=rolling_mean(close,20);upper=[];lower=[];raw_k=[]
+    for i in range(n):
+        std=math.sqrt(sum((v-bb[i])**2 for v in close[i-19:i+1])/20) if bb[i] is not None else None
+        upper.append(bb[i]+2*std if std is not None else None);lower.append(bb[i]-2*std if std is not None else None)
+        hs,ls=high[max(0,i-13):i+1],low[max(0,i-13):i+1]
+        if i<13 or close[i] is None or any(v is None for v in hs+ls) or max(hs)==min(ls):raw_k.append(None)
+        else:raw_k.append(100*(close[i]-min(ls))/(max(hs)-min(ls)))
+    k=rolling_mean(raw_k,3);d=rolling_mean(k,3)
+    vwma=None
+    if n>=20 and all(v is not None for v in close[-20:]+volume[-20:]) and sum(volume[-20:])>0:
+        vwma=sum(c*v for c,v in zip(close[-20:],volume[-20:]))/sum(volume[-20:])
+    prior=rows[-21:-1]
+    rvol=None
+    if n>=21 and volume[-1] is not None and len(prior)==20 and all(r.get('status')=='CLOSED' and r.get('volume') is not None for r in prior):
+        avg=sum(r['volume'] for r in prior)/20
+        if avg>0:rvol=volume[-1]/avg
+    obv=0.0
+    for i in range(1,n):
+        if obv is None or any(v is None for v in (close[i],close[i-1],volume[i])):obv=None
+        elif close[i]>close[i-1]:obv+=volume[i]
+        elif close[i]<close[i-1]:obv-=volume[i]
+    roc=(close[-1]/close[-11]-1)*100 if n>=11 and close[-1] is not None and close[-11] is not None else None
+    result={'rsi':rsi[-1],'ma_fast':rolling_mean(close,10)[-1], 'ma_slow':rolling_mean(close,30)[-1],
+            'atr':atr[-1],'adx':adx[-1],'plus_di':pdi[-1],'minus_di':mdi[-1],
+            'last_macd':macd[-1],'last_macd_signal':sig[-1],
+            'last_macd_hist':macd[-1]-sig[-1] if macd[-1] is not None and sig[-1] is not None else None,
+            'last_upper_bb':upper[-1],'last_lower_bb':lower[-1],'bb_sma':bb[-1],
+            'stoch_k':k[-1],'stoch_d':d[-1],'rvol':rvol,'vwma':vwma,'roc':roc,'obv':obv}
+    result['missing']=[key for key,v in result.items() if v is None]
+    return result
+
+
+def market_score(ind,price):
+    required=('ma_fast','ma_slow','last_macd','last_macd_signal','rsi','stoch_k','stoch_d','rvol','adx','plus_di','minus_di')
+    missing=[key for key in required if not finite_number(ind.get(key))]
+    if not finite_number(price,True):missing.append('price')
+    if missing:return {'score':None,'label':'Brak danych','color':'gray','missing':missing,'components':{}}
+    c={'SMA':20 if ind['ma_fast']>ind['ma_slow'] and price>ind['ma_slow'] else 0,
+       'MACD':20 if ind['last_macd']>ind['last_macd_signal'] else 0,
+       'RSI':15 if 30<=ind['rsi']<=50 else 5 if 50<ind['rsi']<=70 else 0,
+       'Stochastic':15 if ind['stoch_k']>ind['stoch_d'] and ind['stoch_k']<80 else 0,
+       'RVOL':20 if ind['rvol']>=2 else 10 if ind['rvol']>=1.5 else 5 if ind['rvol']>=1 else 0,
+       'ADX':10 if ind['adx']>=25 and ind['plus_di']>ind['minus_di'] else 0}
+    score=sum(c.values())
+    return {'score':score,'label':'Silny układ wzrostowy' if score>=70 else 'Średni układ wzrostowy' if score>=40 else 'Słaby układ wzrostowy',
+            'color':'green' if score>=70 else 'yellow' if score>=40 else 'red','missing':[],'components':c}
+
+
+def market_direction(ind,price):
+    if any(not finite_number(ind.get(k)) for k in ('ma_fast','ma_slow')) or not finite_number(price,True):return 'Brak danych'
+    if ind['ma_fast']>ind['ma_slow'] and price>ind['ma_slow']:return 'Układ wzrostowy'
+    if ind['ma_fast']<ind['ma_slow'] and price<ind['ma_slow']:return 'Układ spadkowy'
+    return 'Brak sygnału'
+
+
+def candle_state(row,interval,now,metadata):
+    from datetime import timedelta
+    start=parse_market_time(row['time']);end=None;basis=''
+    regular=metadata.get('currentTradingPeriod',{}).get('regular',{})
+    session_end=None
+    if isinstance(regular,dict) and finite_number(regular.get('end')):
+        candidate=datetime.fromtimestamp(regular['end'],timezone.utc)
+        if candidate.astimezone(start.tzinfo).date()==start.date():session_end=candidate
+    # Recent metadata also may expose exact per-session bounds as a DataFrame.
+    periods=metadata.get('tradingPeriods')
+    if hasattr(periods,'iterrows'):
+        for _,p in periods.iterrows():
+            e=p.get('end')
+            if hasattr(e,'to_pydatetime'):
+                e=e.to_pydatetime()
+                if e.tzinfo and e.astimezone(start.tzinfo).date()==start.date():session_end=e
+    if interval!='1d':
+        end=start+timedelta(seconds=MARKET_INTERVALS[interval]);basis='interval'
+        if session_end is not None and start<session_end<end:end=session_end;basis='session_end'
+    elif session_end is not None:
+        end=session_end;basis='session_end'
+    elif start.date()<now.astimezone(start.tzinfo).date():
+        return {'status':'CLOSED','end':None,'basis':'previous_exchange_date'}
+    if start>now:raise ValueError('Yahoo zwróciło świecę z przyszłości.')
+    return {'status':('CLOSED' if now>=end else 'OPEN') if end else 'UNKNOWN',
+            'end':end.isoformat() if end else None,'basis':basis or 'missing_session_end'}
+
+
+def normalize_yahoo_frame(frame,ticker,interval,now,metadata):
+    import pandas as pd
+    if frame is None or frame.empty:raise ValueError('Brak OHLCV z Yahoo dla '+ticker)
+    if isinstance(frame.columns,pd.MultiIndex):
+        if ticker in frame.columns.get_level_values(-1):frame=frame.xs(ticker,axis=1,level=-1)
+        elif ticker in frame.columns.get_level_values(0):frame=frame.xs(ticker,axis=1,level=0)
+        else:raise ValueError('Kolumny Yahoo nie odpowiadają tickerowi '+ticker)
+    if frame.columns.duplicated().any():raise ValueError('Powtórzone kolumny Yahoo.')
+    if frame.index.tz is None:raise ValueError('Yahoo: brak strefy czasowej indeksu.')
+    if 'Close' not in frame:raise ValueError('Yahoo: brak kolumny Close.')
+    rows=[]
+    for t,r in frame.iterrows():
+        row={'time':t.to_pydatetime().isoformat()}
+        for label,key in (('Open','open'),('High','high'),('Low','low'),('Close','close'),('Volume','volume')):
+            v=r.get(label)
+            row[key]=float(v) if v is not None and pd.notna(v) and math.isfinite(float(v)) else None
+        state=candle_state(row,interval,now,metadata)
+        row.update(status=state['status'],end=state['end'],status_basis=state['basis'])
+        rows.append(row)
+    validate_market_rows(rows)
+    return rows
+
+
+def fetch_market(ticker,interval):
+    import yfinance as yf
+    if not valid_ticker(ticker) or interval not in MARKET_INTERVALS:raise ValueError('Błędny ticker lub interwał.')
+    provider=yf.Ticker(ticker)
+    periods=('3mo','1y') if interval=='1d' else ('1mo','3mo') if interval=='1h' else ('1mo','59d')
+    attempts=[];rows=None;metadata={};metadata_warning=None
+    history_warning=None
+    for period in periods:
+        try:
+            frame=provider.history(period=period,interval=interval,prepost=False,auto_adjust=False,
+                                   actions=False,repair=False,keepna=True,timeout=20,raise_errors=True)
+            now=datetime.now(timezone.utc)
+            try:metadata=provider.get_history_metadata()
+            except Exception as exc:
+                if type(exc).__name__=='YFRateLimitError':raise
+                metadata_warning=type(exc).__name__+': '+str(exc)
+            candidate=normalize_yahoo_frame(frame,ticker,interval,now,metadata)
+        except Exception as exc:
+            if type(exc).__name__=='YFRateLimitError':
+                raise MarketRateLimitError('Yahoo HTTP 429: przerwano cykl; bez dalszych zapytań do następnego slotu.') from exc
+            if rows is None:raise ValueError('Yahoo '+ticker+': '+type(exc).__name__+': '+str(exc)) from exc
+            history_warning='Nie udało się rozszerzyć historii: '+type(exc).__name__+': '+str(exc)
+            attempts.append({'period':period,'interval':interval,'error':history_warning})
+            break
+        rows=candidate
+        accepted_at=now
+        accepted_metadata=metadata
+        attempts.append({'period':period,'rows':len(rows),'interval':interval})
+        if len(rows)>=34:break
+    now=accepted_at;metadata=accepted_metadata
+    ind=market_indicators(rows);last=rows[-1]
+    if not finite_number(last['close'],True):raise ValueError('Brak poprawnej ceny ostatniej świecy.')
+    snap={'ticker':ticker,'interval':interval,'source':'Yahoo Finance','acquired_at':now.isoformat(),
+          'candle_time':last['time'],'candle_end':last['end'],'candle_status':last['status'],
+          'status_basis':last['status_basis'],'price':last['close'],'volume':last['volume'],
+          'rvol':ind['rvol'],'rvol_incomplete':last['status']!='CLOSED','indicators':ind,
+          'scoring':market_score(ind,last['close']),'direction':market_direction(ind,last['close']),
+          'currency':metadata.get('currency'),'rows':len(rows),'history_attempts':attempts,
+          'missing_latest_fields':[k for k in ('open','high','low','volume') if last[k] is None],
+          'metadata_warning':metadata_warning,'history_warning':history_warning,
+          'candle_age_seconds':max(0,(now-parse_market_time(last['time'])).total_seconds())}
+    return snap
+
+
+def detect_market(store,snapshot,config=None):
+    cfg=market_config(config or {})
+    t,interval=snapshot['ticker'],snapshot['interval']
+    if not valid_ticker(t) or interval not in MARKET_INTERVALS or not finite_number(snapshot.get('price'),True):
+        raise ValueError('Niepoprawna obserwacja detektora.')
+    parse_market_time(snapshot['candle_time']);parse_market_time(snapshot['acquired_at'])
+    rv=snapshot.get('rvol')
+    if rv is not None and (not finite_number(rv) or rv<0):raise ValueError('Niepoprawny RVOL.')
+    if snapshot['candle_status'] not in ('OPEN','CLOSED'):
+        return {'status':'INCOMPLETE_CANDLE_STATUS','reasons':[]}
+    encoded=json_text(snapshot);now=snapshot['acquired_at']
+    with store.transaction() as c:
+        raw=c.execute('SELECT payload FROM baselines WHERE ticker=? AND interval=?',(t,interval)).fetchone()
+        old=json.loads(raw[0]) if raw else None
+        if old and (parse_market_time(snapshot['candle_time'])<parse_market_time(old['candle_time']) or
+                    parse_market_time(now)<parse_market_time(old.get('acquired_at',now))):
+            return {'status':'OUT_OF_ORDER','reasons':[]}
+        c.execute('INSERT INTO observations(ticker,interval,candle_time,acquired_at,candle_status,payload) VALUES(?,?,?,?,?,?)',
+                  (t,interval,snapshot['candle_time'],now,snapshot['candle_status'],encoded))
+        price=snapshot['price'];reasons=[];dprice=None;drvol=None;event_id=None
+        if old is None:
+            baseline={'price':price,'rvol':rv,'candle_time':snapshot['candle_time'],'acquired_at':now,'last_event_id':None}
+            status='BASELINE_CREATED'
+        else:
+            baseline=dict(old);new_candle=parse_market_time(snapshot['candle_time'])!=parse_market_time(old['candle_time'])
+            if new_candle:baseline['rvol']=rv
+            if baseline.get('rvol') is None and rv is not None:baseline['rvol']=rv
+            # Zero is a real value; relative change from zero has no defined denominator.
+            if baseline.get('rvol')==0 and rv is not None and rv>0:baseline['rvol']=rv
+            dprice=(price-old['price'])/abs(old['price'])*100
+            if abs(dprice)>cfg['price_threshold_pct'] and not math.isclose(abs(dprice),cfg['price_threshold_pct'],abs_tol=1e-10,rel_tol=1e-12):reasons.append('PRICE')
+            reference=baseline.get('rvol')
+            if not new_candle and rv is not None and reference is not None and reference>0:
+                drvol=(rv-reference)/reference*100
+                if abs(drvol)>cfg['rvol_threshold_pct'] and not math.isclose(abs(drvol),cfg['rvol_threshold_pct'],abs_tol=1e-10,rel_tol=1e-12):reasons.append('RVOL')
+            status='EVENT' if reasons else 'UNCHANGED'
+            if reasons:
+                event_id=uuid.uuid4().hex
+                evidence={'snapshot':snapshot,'reference':{**old,'rvol':reference},'reasons':reasons,'price_change_pct':dprice,
+                          'rvol_change_pct':drvol,'thresholds':{k:cfg[k] for k in ('price_threshold_pct','rvol_threshold_pct')},
+                          'ai_status':'NOT_CONNECTED_STAGE_2','telegram_status':'NOT_CONNECTED_STAGE_2'}
+                c.execute('INSERT INTO events VALUES(?,?,?,?,?)',(event_id,t,interval,now,json_text(evidence)))
+                baseline.update(price=price,rvol=rv,last_event_id=event_id)
+            baseline.update(candle_time=snapshot['candle_time'],acquired_at=now)
+        c.execute('INSERT INTO baselines VALUES(?,?,?,?) ON CONFLICT(ticker,interval) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',
+                  (t,interval,json_text(baseline),now))
+    return {'status':status,'event_id':event_id,'reasons':reasons,'price_change_pct':dprice,
+            'rvol_change_pct':drvol,'baseline':baseline}
+
+
+def run_market_cycle(store,stop=None):
+    from datetime import timedelta
+    cfg=market_config(store.load_section('settings',{}))
+    tickers=store.load_section('tickers',[])
+    cid=uuid.uuid4().hex;started=utc_now();results=[]
+    with store.transaction() as c:c.execute('INSERT INTO cycles VALUES(?,?,?,?,?)',(cid,started,None,'RUNNING',json_text({'mode':'MARKET'})))
+    for t in tickers:
+        if stop is not None and stop.is_set():break
+        try:
+            snap=fetch_market(t,cfg['market_interval'])
+            result=detect_market(store,snap,cfg);results.append({'ticker':t,**result})
+            print(json_text({'ticker':t,'interval':cfg['market_interval'],'result':result['status'],'reasons':result['reasons']}),flush=True)
+        except MarketRateLimitError as exc:
+            results.append({'ticker':t,'status':'RATE_LIMITED','error':str(exc)})
+            print(json_text(results[-1]),flush=True)
+            break
+        except Exception as exc:
+            results.append({'ticker':t,'status':'ERROR','error':type(exc).__name__+': '+str(exc)})
+            print(json_text(results[-1]),flush=True)
+    status='RATE_LIMITED' if any(r['status']=='RATE_LIMITED' for r in results) else 'EMPTY_WATCHLIST' if not tickers else 'INTERRUPTED' if stop is not None and stop.is_set() else 'ERROR' if all(r['status']=='ERROR' for r in results) else 'PARTIAL' if any(r['status']=='ERROR' for r in results) else 'OK'
+    payload={'mode':'MARKET','interval':cfg['market_interval'],'results':results,'unprocessed_tickers':tickers[len(results):],'ai_called':False,'telegram_sent':False}
+    with store.transaction() as c:
+        c.execute('UPDATE cycles SET finished_at=?,status=?,payload=? WHERE id=?',(utc_now(),status,json_text(payload),cid))
+        cutoff=(datetime.now(timezone.utc)-timedelta(days=cfg['observation_retention_days'])).isoformat()
+        c.execute('DELETE FROM observations WHERE acquired_at<?',(cutoff,))
+    return {'id':cid,'status':status,'results':results}
+
+
+def scanner_main(db,diagnostic=False,cycles=None):
+    if diagnostic:return scanner_diagnostic_main(db,True,cycles)
+    stop=threading.Event();handlers={}
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGINT,signal.SIGTERM):handlers[sig]=signal.signal(sig,lambda *_:stop.set())
+    try:
+        with ScannerLock(db):
+            store=Store(db);status={'pid':os.getpid(),'mode':'MARKET','stage':STAGE,'status':'RUNNING','cycles_this_run':0,'skipped_slots':0}
+            store.runtime_status(status)
+            def heartbeat():
+                while not stop.wait(5):
+                    try:store.runtime_status(dict(status))
+                    except (OSError,sqlite3.Error) as exc:print('Heartbeat: '+str(exc),file=sys.stderr,flush=True)
+            worker=threading.Thread(target=heartbeat,daemon=True);worker.start()
+            print('SKANER RYNKU: Yahoo → wskaźniki → detekcja → SQLite. AI i Telegram wyłączone.',flush=True)
+            try:
+                while not stop.is_set() and (cycles is None or status['cycles_this_run']<cycles):
+                    cfg=market_config(store.load_section('settings',{}))
+                    if cfg['auto_scan_interval']==0:
+                        status['status']='PAUSED';store.runtime_status(dict(status))
+                        if cycles is not None:break
+                        stop.wait(1);continue
+                    status['status']='RUNNING'
+                    cycle_start=time.time()
+                    result=run_market_cycle(store,stop)
+                    elapsed_slots=max(0,math.floor(time.time()/(cfg['auto_scan_interval']*60))-math.floor(cycle_start/(cfg['auto_scan_interval']*60)))
+                    if elapsed_slots:
+                        status['skipped_slots']+=elapsed_slots
+                        print(json_text({'skipped_slots':elapsed_slots,'reason':'cycle_overrun'}),flush=True)
+                    status['cycles_this_run']+=1;status['last_cycle_status']=result['status'];store.runtime_status(dict(status))
+                    if cycles is not None and status['cycles_this_run']>=cycles:break
+                    target=next_slot(time.time(),cfg['auto_scan_interval']*60)
+                    status['next_cycle_UTC']=datetime.fromtimestamp(target,timezone.utc).isoformat()
+                    while time.time()<target and not stop.is_set():
+                        stop.wait(min(1,max(0,target-time.time())))
+                        changed=market_config(store.load_section('settings',{}))['auto_scan_interval']
+                        if changed!=cfg['auto_scan_interval']:
+                            break  # explicit schedule reconfiguration; no overlapping cycle
+            finally:
+                stop.set();worker.join(timeout=20);status['status']='STOPPED';store.runtime_status(dict(status))
+    finally:
+        for sig,handler in handlers.items():signal.signal(sig,handler)
+    return 0
+
+
+def run_streamlit(db):
+    import streamlit as st
+    import html
+    store=Store(db)
+    st.set_page_config(page_title='KI — kontrola rynku',page_icon='📈',layout='wide')
+    st.markdown('''<style>
+    .stApp{background:#101720;color:#edf2f7} section[data-testid="stSidebar"]{background:#182330;color:#edf2f7}
+    h1,h2,h3,p,label,[data-testid="stMetricValue"],[data-testid="stWidgetLabel"]{color:#edf2f7!important}
+    .stButton>button,.stFormSubmitButton>button{background:#274d70;color:#fff;border:1px solid #7c9ab8}
+    input,textarea{background:#182330!important;color:#fff!important}
+    [data-baseweb="select"]>div{background:#182330!important;color:#fff!important}
+    .ki-card{background:#182330;border:1px solid #61758b;border-radius:8px;padding:14px;margin:10px 0}
+    .ki-green{color:#6ee7a0}.ki-yellow{color:#ffe082}.ki-red{color:#ff9292}.ki-gray{color:#c6d0dc}
+    </style>''',unsafe_allow_html=True)
+    st.title('KI — dane rynku i detekcja')
+    st.info('Etap 2. Yahoo i detekcja mogą działać w osobnym skanerze. AI, Tavily i Telegram nie są podłączone.')
+    settings=store.load_section('settings',{});cfg=market_config(settings)
+    ticks=store.load_section('tickers',[])
+    with st.sidebar:
+        st.header('Ustawienia skanera')
+        with st.form('market_settings'):
+            text=st.text_area('Tickery — spacja, przecinek lub nowa linia',value=' '.join(ticks))
+            iv=st.selectbox('Interwał świecy',list(MARKET_INTERVALS),index=list(MARKET_INTERVALS).index(cfg['market_interval']))
+            cadence=st.selectbox('Skanuj co (minuty)',[0,15,30,60],index=[0,15,30,60].index(cfg['auto_scan_interval']),format_func=lambda v:'Wyłączony' if v==0 else str(v))
+            pt=st.number_input('Próg zmiany ceny (%)',min_value=.01,value=float(cfg['price_threshold_pct']),step=.1)
+            rt=st.number_input('Próg względnej zmiany RVOL (%)',min_value=.01,value=float(cfg['rvol_threshold_pct']),step=.1)
+            retention=st.number_input('Historia obserwacji (dni)',min_value=1,value=cfg['observation_retention_days'],step=1)
+            saved=st.form_submit_button('Zapisz ustawienia')
+        if saved:
+            import re
+            new_ticks=list(dict.fromkeys(t.upper() for t in re.split(r'[,\s]+',text.strip()) if t))
+            proposed={'market_interval':iv,'auto_scan_interval':cadence,'price_threshold_pct':pt,'rvol_threshold_pct':rt,'observation_retention_days':int(retention)}
+            market_config(proposed)
+            # settings + watchlist are committed together, not as two partial writes.
+            if any(not valid_ticker(t) for t in new_ticks):st.error('Błędny ticker.')
+            else:
+                with store.transaction() as c:
+                    current=store.load_section('settings',{});current.update(proposed)
+                    store._write_section(c,'settings',current);store._write_section(c,'tickers',new_ticks)
+                st.success('Zapisano. Skaner odczyta ustawienia; zmiana interwału tworzy osobny punkt odniesienia.')
+                st.rerun()
+    st.caption('Baza: '+str(store.path))
+    st.button('Odśwież diagnostykę',help='Odczytuje aktualny zapis SQLite; nie uruchamia skanu rynku.')
+    with store.connection() as c:
+        runtime=c.execute("SELECT payload,updated_at FROM runtime WHERE key='scanner'").fetchone()
+        counts={t:c.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0] for t in ('watchlist','observations','baselines','events','cycles')}
+        recent=[dict(r) for r in c.execute('SELECT started_at,finished_at,status,payload FROM cycles ORDER BY started_at DESC LIMIT 10')]
+        latest=list(c.execute('SELECT o.payload FROM observations o WHERE o.id=(SELECT MAX(x.id) FROM observations x WHERE x.ticker=o.ticker AND x.interval=o.interval) ORDER BY o.ticker,o.interval'))
+        bases={(r['ticker'],r['interval']):json.loads(r['payload']) for r in c.execute('SELECT * FROM baselines')}
+        events=[dict(r) for r in c.execute('SELECT id,ticker,interval,created_at,payload FROM events ORDER BY created_at DESC LIMIT 30')]
+    st.subheader('Proces skanera')
+    if runtime:
+        st.json({'ostatni_stan_procesu':json.loads(runtime[0]),'czas_zapisu_UTC':runtime[1]})
+        if (datetime.now(timezone.utc)-parse_market_time(runtime[1])).total_seconds()>15:st.warning('Brak świeżego heartbeat — zapis nie potwierdza aktywnego procesu.')
+    else:st.info('Brak uruchomionego skanera w tej bazie.')
+    st.write('Liczba zapisanych rekordów',counts)
+    st.subheader('Ostatnie obserwacje automatyczne')
+    st.caption('Cena i RVOL pochodzą z ostatniej świecy Yahoo. Otwartą świecę i wiek danych pokazujemy jawnie. Czerwony scoring oznacza słaby układ wzrostowy, a nie dowód spadku.')
+    def card(s):
+        sc=s['scoring'];escape=lambda v:html.escape(str(v));fmt=lambda v:'Brak danych' if v is None else f'{v:.4f}'
+        color=sc['color'];number='Niedostępny' if sc['score'] is None else str(sc['score'])+'/100'
+        st.markdown('<div class="ki-card"><b>'+escape(s['ticker'])+' · '+escape(s['interval'])+'</b><br>'+
+                    'Cena: '+escape(fmt(s['price']))+' '+escape(s.get('currency') or 'waluta nieznana')+
+                    ' · RVOL: '+escape(fmt(s['rvol']))+'<br><span class="ki-'+color+'">'+escape(number+' — '+sc['label'])+'</span><br>'+
+                    escape(s['direction'])+' · Świeca: '+escape(s['candle_status'])+'<br>'+
+                    'Świeca: '+escape(s['candle_time'])+' · Pobranie: '+escape(s['acquired_at'])+'</div>',unsafe_allow_html=True)
+        if s['rvol_incomplete']:st.caption('RVOL niepełny — wolumen świecy nie jest końcowy.')
+        with st.expander('Wskaźniki, braki i pochodzenie danych: '+s['ticker']+' '+s['interval']):st.json(s)
+    if not latest:st.info('Brak obserwacji. Dodaj tickery, zapisz ustawienia i uruchom osobny skaner rynku.')
+    for row in latest:
+        s=json.loads(row[0]);card(s)
+        st.write('Punkt odniesienia',bases.get((s['ticker'],s['interval']),{}))
+    st.subheader('Wykryte zdarzenia')
+    if not events:st.caption('Brak zdarzeń. Pierwszy odczyt jest wyłącznie punktem odniesienia.')
+    for event in events:
+        ev=json.loads(event['payload']);delta=ev.get('price_change_pct');sign='ki-red' if delta is not None and delta<0 else 'ki-green'
+        st.markdown('<div class="'+sign+'">'+html.escape(event['ticker']+' '+event['interval']+' · '+event['created_at']+' · '+', '.join(ev.get('reasons',[])))+'</div>',unsafe_allow_html=True)
+        with st.expander('Dowody zdarzenia '+event['id']):st.json(ev)
+    st.subheader('Ostatnie cykle i błędy pobierania')
+    st.dataframe([{k:r[k] for k in ('started_at','finished_at','status')} for r in recent],use_container_width=True)
+    with st.expander('Szczegóły cykli'):st.json([{**r,'payload':json.loads(r['payload'])} for r in recent])
+    st.subheader('Ręczny odczyt — niezależny od automatu')
+    with st.form('manual_market'):
+        mt=st.text_input('Ticker ręczny').strip().upper();mi=st.selectbox('Interwał ręczny',list(MARKET_INTERVALS),index=2)
+        manual=st.form_submit_button('Pobierz dane ręcznie')
+    if manual:
+        try:
+            with st.spinner('Pobieranie Yahoo…'):st.session_state['manual_market_snapshot']=fetch_market(mt,mi)
+        except Exception as exc:st.session_state.pop('manual_market_snapshot',None);st.error(type(exc).__name__+': '+str(exc))
+    if 'manual_market_snapshot' in st.session_state:
+        st.caption('Wynik ręczny — nie zapisuje obserwacji, zdarzeń ani punktów odniesienia automatu.')
+        card(st.session_state['manual_market_snapshot'])
+
+
+def run_market_tests():
+    import unittest
+    import tempfile
+    import subprocess
+    from datetime import timedelta
+
+    class MarketTests(unittest.TestCase):
+        def rows(self,n=70,flat=False):
+            start=datetime(2026,9,1,8,tzinfo=timezone.utc)
+            return [{'time':(start+timedelta(hours=i)).isoformat(), 'open':100 if flat else 100+i,
+                     'high':101 if flat else 101+i,'low':99 if flat else 99+i,
+                     'close':100 if flat else 100+i,'volume':100.0,'status':'CLOSED'} for i in range(n)]
+
+        def snap(self,price=100,rvol=1,candle='2026-09-01T08:00:00+00:00'):
+            return {'ticker':'AAA','interval':'1h','candle_time':candle,'acquired_at':utc_now(),
+                    'candle_status':'OPEN','price':price,'rvol':rvol,'volume':100,
+                    'indicators':{},'scoring':{'score':None},'currency':'PLN'}
+
+        def test_01_true_hlc_atr_and_direction(self):
+            x=market_indicators(self.rows())
+            self.assertAlmostEqual(x['atr'],2)
+            self.assertAlmostEqual(x['adx'],100)
+            self.assertGreater(x['plus_di'],x['minus_di'])
+            self.assertEqual(x['rsi'],100)
+
+        def test_02_flat_rsi_and_obv_equal_close(self):
+            x=market_indicators(self.rows(flat=True))
+            self.assertEqual(x['rsi'],50)
+            self.assertEqual(x['obv'],0)
+            self.assertEqual(x['adx'],0)
+
+        def test_03_rvol_excludes_current_volume(self):
+            r=self.rows();r[-1]['volume']=200
+            self.assertEqual(market_indicators(r)['rvol'],2)
+            r[-1]['status']='OPEN'
+            self.assertEqual(market_indicators(r)['rvol'],2)
+
+        def test_04_minimums_and_no_points_for_missing(self):
+            x=market_indicators(self.rows(10))
+            self.assertIsNone(x['rsi']);self.assertIsNone(x['ma_slow'])
+            self.assertIsNone(market_score(x,109)['score'])
+            self.assertIsNotNone(x['ma_fast'])
+
+        def test_05_bb_population_std(self):
+            x=market_indicators(self.rows())
+            self.assertAlmostEqual(x['last_upper_bb'],159.5+2*math.sqrt(33.25))
+            self.assertAlmostEqual(x['vwma'],159.5)
+            self.assertAlmostEqual(x['roc'],(169/159-1)*100)
+
+        def test_06_stochastic_smoothing_and_range_zero(self):
+            x=market_indicators(self.rows())
+            self.assertAlmostEqual(x['stoch_k'],100*14/15)
+            self.assertAlmostEqual(x['stoch_d'],100*14/15)
+            r=self.rows(flat=True)
+            for row in r:row['high']=row['low']=row['close']
+            self.assertIsNone(market_indicators(r)['stoch_k'])
+
+        def test_07_missing_hlc_does_not_destroy_close_indicators(self):
+            r=self.rows();r[-1]['high']=None
+            x=market_indicators(r)
+            self.assertIsNone(x['atr']);self.assertIsNone(x['adx'])
+            self.assertIsNotNone(x['ma_slow']);self.assertIsNotNone(x['rsi'])
+
+        def test_08_macd_seed_and_wilder_recurrence(self):
+            self.assertEqual(wilder([1,2,3,4],3),[None,None,2,8/3])
+            x=market_indicators(self.rows())
+            self.assertAlmostEqual(x['last_macd'],7)
+            self.assertAlmostEqual(x['last_macd_signal'],7)
+
+        def test_09_scoring_exact_boundaries(self):
+            i={'ma_fast':11,'ma_slow':10,'last_macd':2,'last_macd_signal':1,
+               'rsi':50,'stoch_k':60,'stoch_d':50,'rvol':2,'adx':25,'plus_di':30,'minus_di':10}
+            self.assertEqual(market_score(i,12)['score'],100)
+            i['rsi']=50.01;i['rvol']=1.5
+            self.assertEqual(market_score(i,12)['score'],80)
+            i['adx']=None
+            self.assertIsNone(market_score(i,12)['score'])
+
+        def test_10_validation_rejects_contradictions(self):
+            r=self.rows();r[-1]['high']=1
+            with self.assertRaises(ValueError):validate_market_rows(r)
+            r=self.rows();r[-1]['volume']=-1
+            with self.assertRaises(ValueError):validate_market_rows(r)
+            r=self.rows();r[-1]['time']=r[-2]['time']
+            with self.assertRaises(ValueError):validate_market_rows(r)
+
+        def test_11_baseline_cumulative_price_and_no_duplicate(self):
+            with tempfile.TemporaryDirectory() as d:
+                st=Store(Path(d)/'x.db')
+                self.assertEqual(detect_market(st,self.snap())['status'],'BASELINE_CREATED')
+                self.assertEqual(detect_market(st,self.snap(100.6))['status'],'UNCHANGED')
+                self.assertEqual(detect_market(st,self.snap(101.2))['status'],'EVENT')
+                self.assertEqual(detect_market(Store(Path(d)/'x.db'),self.snap(101.2))['status'],'UNCHANGED')
+                with st.connection() as c:
+                    self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0],1)
+                    self.assertEqual(c.execute('SELECT COUNT(*) FROM outbox').fetchone()[0],0)
+
+        def test_12_new_candle_rvol_reset_price_still_triggers(self):
+            with tempfile.TemporaryDirectory() as d:
+                st=Store(Path(d)/'x.db');detect_market(st,self.snap())
+                s=self.snap(rvol=.1,candle='2026-09-01T09:00:00+00:00')
+                self.assertEqual(detect_market(st,s)['status'],'UNCHANGED')
+                s['price']=102
+                e=detect_market(st,s)
+                self.assertEqual(e['status'],'EVENT')
+                self.assertEqual(e['reasons'],['PRICE'])
+
+        def test_13_rvol_relative_threshold_and_missing(self):
+            with tempfile.TemporaryDirectory() as d:
+                st=Store(Path(d)/'x.db');detect_market(st,self.snap(rvol=2))
+                self.assertEqual(detect_market(st,self.snap(rvol=2.04))['status'],'UNCHANGED')
+                self.assertEqual(detect_market(st,self.snap(rvol=2.05))['reasons'],['RVOL'])
+                self.assertEqual(detect_market(st,self.snap(price=103,rvol=None))['reasons'],['PRICE'])
+
+        def test_14_ticker_interval_isolation_and_out_of_order(self):
+            with tempfile.TemporaryDirectory() as d:
+                st=Store(Path(d)/'x.db');detect_market(st,self.snap())
+                s=self.snap();s['interval']='15m'
+                self.assertEqual(detect_market(st,s)['status'],'BASELINE_CREATED')
+                s=self.snap(candle='2026-08-31T08:00:00+00:00')
+                self.assertEqual(detect_market(st,s)['status'],'OUT_OF_ORDER')
+
+        def test_15_event_baseline_observation_atomic(self):
+            with tempfile.TemporaryDirectory() as d:
+                st=Store(Path(d)/'x.db');detect_market(st,self.snap())
+                before=st.get_baseline('AAA','1h')
+                with st.connection() as c:
+                    c.execute("CREATE TRIGGER fail_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'constraint'); END")
+                with self.assertRaises(sqlite3.IntegrityError):detect_market(st,self.snap(102))
+                self.assertEqual(st.get_baseline('AAA','1h'),before)
+                with st.connection() as c:
+                    self.assertEqual(c.execute('SELECT COUNT(*) FROM observations').fetchone()[0],1)
+
+        def test_16_candle_status_uses_session_end(self):
+            now=datetime(2026,9,1,16,45,tzinfo=timezone.utc)
+            row={'time':'2026-09-01T16:30:00+00:00'}
+            end=datetime(2026,9,1,17,tzinfo=timezone.utc)
+            md={'currentTradingPeriod':{'regular':{'start':int(end.timestamp()-8*3600),'end':int(end.timestamp())}}}
+            self.assertEqual(candle_state(row,'1h',now,md)['status'],'OPEN')
+            self.assertEqual(candle_state(row,'1h',end,md)['status'],'CLOSED')
+
+        def test_17_daily_unknown_is_explicit(self):
+            row={'time':'2026-09-01T00:00:00+00:00'}
+            self.assertEqual(candle_state(row,'1d',datetime(2026,9,1,10,tzinfo=timezone.utc),{})['status'],'UNKNOWN')
+
+        def test_18_configuration_rejects_bad_values(self):
+            with self.assertRaises(ValueError):market_config({'market_interval':'5m'})
+            with self.assertRaises(ValueError):market_config({'price_threshold_pct':-1})
+            self.assertEqual(market_config({})['market_interval'],'1h')
+
+        def test_19_zero_reference_volume_is_not_divided(self):
+            r=self.rows()
+            for row in r:row['volume']=0
+            self.assertIsNone(market_indicators(r)['rvol'])
+            with tempfile.TemporaryDirectory() as d:
+                st=Store(Path(d)/'x.db');detect_market(st,self.snap(rvol=0))
+                self.assertEqual(detect_market(st,self.snap(rvol=1))['status'],'UNCHANGED')
+
+        def test_20_normalize_single_and_multiindex(self):
+            import pandas as pd
+            index=pd.date_range('2026-09-01',periods=40,freq='h',tz='UTC')
+            frame=pd.DataFrame({'Open':[100.]*40,'High':[101.]*40,'Low':[99.]*40,'Close':[100.]*40,'Volume':[10.]*40},index=index)
+            now=datetime(2026,9,5,tzinfo=timezone.utc)
+            rows=normalize_yahoo_frame(frame,'AAA','1h',now,{})
+            self.assertEqual(len(rows),40)
+            multi=frame.copy();multi.columns=pd.MultiIndex.from_product([multi.columns,['AAA']])
+            self.assertEqual(normalize_yahoo_frame(multi,'AAA','1h',now,{}),rows)
+            with self.assertRaises(ValueError):normalize_yahoo_frame(multi,'BBB','1h',now,{})
+            frame.index=frame.index.tz_localize(None)
+            with self.assertRaises(ValueError):normalize_yahoo_frame(frame,'AAA','1h',now,{})
+
+        def test_21_revised_volume_does_not_retrigger_price(self):
+            with tempfile.TemporaryDirectory() as d:
+                st=Store(Path(d)/'x.db');detect_market(st,self.snap())
+                detect_market(st,self.snap(102))
+                e=detect_market(st,self.snap(102,1.03))
+                self.assertEqual(e['reasons'],['RVOL'])
+                with st.connection() as c:self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0],2)
+
+        def test_22_closed_candle_zero_and_partial_volume(self):
+            r=self.rows();r[-3]['volume']=None
+            self.assertIsNone(market_indicators(r)['rvol'])
+            r=self.rows();r[-2]['status']='UNKNOWN'
+            self.assertIsNone(market_indicators(r)['rvol'])
+
+        def test_23_settings_validation_and_daily_close(self):
+            self.assertTrue(validate_state({'settings':{'market_interval':'5m'}}))
+            end=datetime(2026,9,1,16,tzinfo=timezone.utc)
+            md={'currentTradingPeriod':{'regular':{'start':int(end.timestamp()-8*3600),'end':int(end.timestamp())}}}
+            r={'time':'2026-09-01T00:00:00+00:00'}
+            self.assertEqual(candle_state(r,'1d',end,md)['status'],'CLOSED')
+            self.assertEqual(candle_state(r,'1d',end-timedelta(hours=1),md)['status'],'OPEN')
+
+        def test_24_same_moment_different_offset_not_new_candle(self):
+            with tempfile.TemporaryDirectory() as d:
+                st=Store(Path(d)/'x.db');detect_market(st,self.snap())
+                s=self.snap(rvol=1.1,candle='2026-09-01T10:00:00+02:00')
+                self.assertEqual(detect_market(st,s)['reasons'],['RVOL'])
+
+        def test_25_unknown_status_no_baseline_or_observation(self):
+            with tempfile.TemporaryDirectory() as d:
+                st=Store(Path(d)/'x.db');s=self.snap();s['candle_status']='UNKNOWN'
+                self.assertEqual(detect_market(st,s)['status'],'INCOMPLETE_CANDLE_STATUS')
+                self.assertIsNone(st.get_baseline('AAA','1h'))
+                with st.connection() as c:self.assertEqual(c.execute('SELECT COUNT(*) FROM observations').fetchone()[0],0)
+
+        def test_26_concurrent_detectors_one_event(self):
+            with tempfile.TemporaryDirectory() as d:
+                path=Path(d)/'x.db';st=Store(path);detect_market(st,self.snap())
+                source=Path(__file__).resolve()
+                code="import runpy,sys,json; m=runpy.run_path(sys.argv[1],run_name='ki'); m['detect_market'](m['Store'](sys.argv[2]),json.loads(sys.argv[3]))"
+                data=json.dumps(self.snap(102));children=[]
+                for _ in range(2):
+                    children.append(subprocess.Popen([sys.executable,'-c',code,str(source),str(path),data],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding='utf-8'))
+                for p in children:
+                    out,err=p.communicate(timeout=20);self.assertEqual(p.returncode,0,out+err)
+                with st.connection() as c:self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0],1)
+
+    return 0 if unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(MarketTests)).wasSuccessful() else 1
+
+
+def run_panel_tests():
+    import tempfile
+    import unittest
+    from streamlit.testing.v1 import AppTest
+
+    class PanelTests(unittest.TestCase):
+        def setUp(self):
+            self.temp=tempfile.TemporaryDirectory();self.db=Path(self.temp.name)/'panel.db';self.store=Store(self.db)
+            source=str(Path(__file__).resolve())
+            self.app=AppTest.from_string('import runpy\nfrom pathlib import Path\nm=runpy.run_path('+repr(source)+",run_name='ki_panel')\nm['run_streamlit'](Path("+repr(str(self.db))+'))\n').run(timeout=30)
+            self.assertEqual(len(self.app.exception),0)
+
+        def tearDown(self):self.temp.cleanup()
+
+        def button(self,label):return next(b for b in self.app.button if b.label==label)
+
+        def test_01_form_saves_real_sqlite_settings_and_watchlist(self):
+            self.app.text_area[0].set_value('AAA, BBB.WA AAA')
+            self.button('Zapisz ustawienia').click().run(timeout=30)
+            self.assertEqual(len(self.app.exception),0)
+            self.assertEqual(self.store.load_section('tickers',[]),['AAA','BBB.WA'])
+            self.assertEqual(self.store.load_section('settings',{})['market_interval'],'1h')
+            with self.store.connection() as c:self.assertEqual(c.execute('SELECT COUNT(*) FROM baselines').fetchone()[0],0)
+
+        def test_02_refresh_reads_changed_heartbeat_without_market_calls(self):
+            self.store.runtime_status({'pid':123,'status':'RUNNING','cycles_this_run':1})
+            self.button('Odśwież diagnostykę').click().run(timeout=30)
+            first=next(j.value for j in self.app.json if 'czas_zapisu_UTC' in j.value)
+            self.store.runtime_status({'pid':123,'status':'RUNNING','cycles_this_run':2})
+            self.button('Odśwież diagnostykę').click().run(timeout=30)
+            second=next(j.value for j in self.app.json if 'czas_zapisu_UTC' in j.value)
+            self.assertNotEqual(first,second)
+            self.assertEqual(len(self.app.exception),0)
+            with self.store.connection() as c:
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM observations').fetchone()[0],0)
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)
+
+    return 0 if unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(PanelTests)).wasSuccessful() else 1
+
+
 def run_self_tests():
     import unittest
     import tempfile
@@ -2138,18 +2874,19 @@ def run_self_tests():
                          capture_output=True, text=True, encoding='utf-8', env=child_env, timeout=15)
             self.assertEqual(restarted.returncode, 0, restarted.stdout + restarted.stderr)
 
-        def test_16_normal_scanner_is_not_silently_simulated(self):
-            with self.assertRaises(ValueError):
-                scanner_main(self.root / 'unused.db', diagnostic=False, cycles=1)
-            self.assertFalse((self.root / 'unused.db').exists())
+        def test_16_normal_scanner_reports_empty_watchlist(self):
+            scanner_main(self.db, diagnostic=False, cycles=1)
+            with self.store.connection() as c:
+                self.assertEqual(c.execute('SELECT status FROM cycles').fetchone()[0], 'EMPTY_WATCHLIST')
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM observations').fetchone()[0], 0)
 
         def test_17_cli_outputs_utf8_with_legacy_environment(self):
             p = subprocess.run([sys.executable, str(Path(__file__).resolve()),
-                 '--scanner', '--db', str(self.db)], capture_output=True,
+                 '--migrate', str(self.root / 'nieistniejący.json'), '--approve-sha', 'x', '--db', str(self.db)], capture_output=True,
                  text=True, encoding='utf-8', env=child_env, timeout=15)
             self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
             self.assertIn('Błąd:', p.stderr)
-            self.assertIn('Pobieranie i detekcja', p.stderr)
+            self.assertIn('Import niezatwierdzony', p.stderr)
 
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(StageOneTests)
     return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
@@ -2164,7 +2901,7 @@ def configure_cli_output():
 
 def main(argv=None):
     configure_cli_output()
-    parser = argparse.ArgumentParser(description='KI.py — etap 1: SQLite i diagnostyka procesów')
+    parser = argparse.ArgumentParser(description='KI.py — etap 2: Yahoo, wskaźniki i detekcja')
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument('--ui',action='store_true')
     modes.add_argument('--scanner',action='store_true')
@@ -2172,11 +2909,14 @@ def main(argv=None):
     modes.add_argument('--migrate',metavar='JSON')
     modes.add_argument('--self-test',action='store_true')
     modes.add_argument('--storage-probe',action='store_true',help=argparse.SUPPRESS)
+    modes.add_argument('--market-probe',metavar='TICKER')
+    modes.add_argument('--panel-test',action='store_true')
     parser.add_argument('--db',type=Path,default=DEFAULT_DB)
     parser.add_argument('--approve-sha')
     parser.add_argument('--diagnostic',action='store_true')
     parser.add_argument('--cycles',type=int)
     parser.add_argument('--probe-key',help=argparse.SUPPRESS)
+    parser.add_argument('--interval',choices=list(MARKET_INTERVALS),default='1h')
     args = parser.parse_args(argv)
     if args.cycles is not None and args.cycles<1:
         parser.error('--cycles musi być dodatnie.')
@@ -2186,7 +2926,9 @@ def main(argv=None):
         parser.error('--cycles wymaga --scanner.')
     try:
         if args.self_test:
-            return run_self_tests()
+            foundation_result = run_self_tests()
+            market_result = run_market_tests()
+            return 1 if foundation_result or market_result else 0
         if args.migration_report:
             plan = prepare_migration(args.migration_report)
             print(json.dumps(public_migration_report(plan),ensure_ascii=False,indent=2))
@@ -2197,6 +2939,11 @@ def main(argv=None):
                 print(json.dumps(public_migration_report(plan),ensure_ascii=False,indent=2))
                 raise ValueError('Import niezatwierdzony; użyj --approve-sha zgodnego z raportem.')
             print(json.dumps(import_migration(Store(args.db),plan,args.approve_sha),ensure_ascii=False,indent=2))
+            return 0
+        if args.panel_test:
+            return run_panel_tests()
+        if args.market_probe:
+            print(json.dumps(fetch_market(args.market_probe.strip().upper(),args.interval),ensure_ascii=False,indent=2))
             return 0
         if args.scanner:
             return scanner_main(args.db,args.diagnostic,args.cycles)
