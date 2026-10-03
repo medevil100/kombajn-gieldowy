@@ -2236,16 +2236,35 @@ def atr_risk_levels(entry,atr,sl_multiplier=2.,tp_multiplier=3.):
     return result
 
 
+def linear_price_trend(rows,window=30):
+    validate_market_rows(rows)
+    if not isinstance(window,int) or window<2:raise ValueError('Okno trendu musi zawierać co najmniej dwie świece.')
+    result={'window':window,'direction':'Brak danych','slope_per_candle':None,'points':[]}
+    if len(rows)<window:return result
+    part=rows[-window:];values=[r.get('close') for r in part]
+    if any(not finite_number(v,True) for v in values):return result
+    mx=(window-1)/2;my=sum(values)/window
+    slope=sum((i-mx)*(v-my) for i,v in enumerate(values))/sum((i-mx)**2 for i in range(window))
+    if math.isclose(slope,0.,rel_tol=0.,abs_tol=1e-12):slope=0.
+    result.update(direction='Wzrostowy' if slope>0 else 'Spadkowy' if slope<0 else 'Poziomy',
+                  slope_per_candle=slope,points=[{'time':r['time'],'price':my+slope*(i-mx)} for i,r in enumerate(part)])
+    return result
+
+
 def build_chart_history(rows,limit=120):
     validate_market_rows(rows)
     close=[r.get('close') for r in rows]
     mid=rolling_mean(close,20);fast=rolling_mean(close,10);slow=rolling_mean(close,30)
+    ema12,ema26=smooth(close,12,2/13),smooth(close,26,2/27)
+    macd=[a-b if a is not None and b is not None else None for a,b in zip(ema12,ema26)]
+    signal=smooth(macd,9,2/10)
     chart=[]
     for i in range(max(0,len(rows)-limit),len(rows)):
         row={k:rows[i].get(k) for k in ('time','open','high','low','close','volume','status','price_origin')}
         deviation=math.sqrt(sum((v-mid[i])**2 for v in close[i-19:i+1])/20) if mid[i] is not None else None
         row.update(bb_middle=mid[i],bb_upper=mid[i]+2*deviation if deviation is not None else None,
-                   bb_lower=mid[i]-2*deviation if deviation is not None else None,sma10=fast[i],sma30=slow[i])
+                   bb_lower=mid[i]-2*deviation if deviation is not None else None,sma10=fast[i],sma30=slow[i],
+                   macd=macd[i],macd_signal=signal[i],macd_hist=macd[i]-signal[i] if macd[i] is not None and signal[i] is not None else None)
         chart.append(row)
     return chart
 
@@ -2536,17 +2555,35 @@ def run_streamlit(db):
         if history:
             import plotly.graph_objects as go
             from plotly.subplots import make_subplots
-            fig=make_subplots(rows=2,cols=1,shared_xaxes=True,vertical_spacing=.08,row_heights=[.72,.28],subplot_titles=('Cena · BB · SMA · SL / TP','Wolumen przedziałów'))
+            fig=make_subplots(rows=3,cols=1,shared_xaxes=True,vertical_spacing=.07,row_heights=[.56,.20,.24],subplot_titles=('Cena · BB · SMA · trend 30 · SL / TP','Wolumen przedziałów','MACD 12 / 26 · sygnał 9 · histogram'))
             times=[r['time'] for r in history]
             fig.add_trace(go.Candlestick(x=times,open=[r['open'] for r in history],high=[r['high'] for r in history],low=[r['low'] for r in history],close=[r['close'] for r in history],name='OHLC',increasing_line_color='#6ee7a0',decreasing_line_color='#ff9292'),row=1,col=1)
-            for field,name,color in [('bb_upper','BB górne','#9dc8ff'),('bb_middle','BB SMA20','#d8e7ff'),('bb_lower','BB dolne','#9dc8ff'),('sma10','SMA10','#ffe082'),('sma30','SMA30','#cdadff')]:
-                fig.add_trace(go.Scatter(x=times,y=[r[field] for r in history],name=name,line={'color':color,'width':1.5},connectgaps=False),row=1,col=1)
+            fig.add_trace(go.Scatter(x=times,y=[r['bb_lower'] for r in history],name='BB dolne',line={'color':'#66ccff','width':3},connectgaps=False),row=1,col=1)
+            fig.add_trace(go.Scatter(x=times,y=[r['bb_upper'] for r in history],name='BB górne',line={'color':'#66ccff','width':3},fill='tonexty',fillcolor='rgba(102,204,255,0.10)',connectgaps=False),row=1,col=1)
+            for field,name,color,width,dash in [('bb_middle','BB SMA20','#edf2f7',2,'dot'),('sma10','SMA10','#ffe066',4,'solid'),('sma30','SMA30','#d99bff',4,'solid')]:
+                fig.add_trace(go.Scatter(x=times,y=[r[field] for r in history],name=name,line={'color':color,'width':width,'dash':dash},connectgaps=False),row=1,col=1)
+            trend=linear_price_trend(history)
+            if trend['points']:
+                trend_color='#6ee7a0' if trend['direction']=='Wzrostowy' else '#ff9292' if trend['direction']=='Spadkowy' else '#ffe082'
+                fig.add_trace(go.Scatter(x=[r['time'] for r in trend['points']],y=[r['price'] for r in trend['points']],name='Trend 30 · '+trend['direction'].lower(),line={'color':trend_color,'width':4,'dash':'longdash'}),row=1,col=1)
+                st.caption('Trend regresji 30 świec: '+trend['direction']+' · nachylenie '+fmt(trend['slope_per_candle'],4)+' '+currency+' / świecę. Trend nie zmienia scoringu.')
+            else:st.caption('Trend regresji 30 świec: brak wymaganych cen.')
             colors=['#6ee7a0' if finite_number(r['close']) and finite_number(r['open']) and r['close']>r['open'] else '#ff9292' if finite_number(r['close']) and finite_number(r['open']) and r['close']<r['open'] else '#a4b4c6' for r in history]
             fig.add_trace(go.Bar(x=times,y=[r['volume'] for r in history],name='Wolumen',marker_color=colors),row=2,col=1)
+            if any('macd' in r for r in history):
+                hist_values=[r.get('macd_hist') for r in history]
+                fig.add_trace(go.Bar(x=times,y=hist_values,name='Histogram MACD',marker_color=['#6ee7a0' if v is not None and v>0 else '#ff9292' if v is not None and v<0 else '#a4b4c6' for v in hist_values],opacity=.75),row=3,col=1)
+                for field,name,color in [('macd','MACD','#ffb457'),('macd_signal','Sygnał MACD','#56d8ff')]:
+                    fig.add_trace(go.Scatter(x=times,y=[r.get(field) for r in history],name=name,line={'color':color,'width':3},connectgaps=False),row=3,col=1)
+                fig.add_hline(y=0,line_color='#a4b4c6',line_width=1,row=3,col=1)
+            else:st.caption('Serie MACD pojawią się po nowym odczycie skanera lub pobraniu ręcznym.')
             for value,label,color in [(risk['sl'],'SL','#ff9292'),(risk['tp'],'TP','#6ee7a0')]:
                 if value is not None:fig.add_hline(y=value,line_color=color,line_dash='dash',annotation_text=label,row=1,col=1)
-            fig.update_layout(height=600,paper_bgcolor='#182330',plot_bgcolor='#182330',font={'color':'#edf2f7'},legend={'orientation':'h','y':1.13},margin={'t':80,'b':25,'l':45,'r':25},xaxis_rangeslider_visible=False,hovermode='x unified')
+            fig.update_layout(height=850,paper_bgcolor='#182330',plot_bgcolor='#182330',font={'color':'#edf2f7'},legend={'orientation':'h','y':1.16},margin={'t':125,'b':25,'l':45,'r':25},xaxis_rangeslider_visible=False,hovermode='x unified')
             fig.update_xaxes(gridcolor='#34485e');fig.update_yaxes(gridcolor='#34485e')
+            fig.update_yaxes(title_text='Cena '+currency,row=1,col=1)
+            fig.update_yaxes(title_text='Wolumen',row=2,col=1)
+            fig.update_yaxes(title_text='MACD',row=3,col=1)
             st.plotly_chart(fig,width='stretch',key=key+'_chart')
             st.caption('Ostatnie '+str(len(history))+' przedziałów otrzymanych z Yahoo. Uzupełnione ceny i otwarte świece opisano w szczegółach.')
         else:st.info('Wykres pojawi się po następnym odczycie skanera lub pobraniu ręcznym w tej wersji KI.')
@@ -2918,6 +2955,25 @@ def run_market_tests():
             for key,target in (('bb_upper','last_upper_bb'),('bb_lower','last_lower_bb'),('bb_middle','bb_sma'),('sma10','ma_fast'),('sma30','ma_slow')):
                 self.assertAlmostEqual(chart[-1][key],ind[target])
             self.assertEqual(chart[-1]['volume'],rows[-1]['volume']);self.assertNotIn('sma10',rows[-1])
+
+        def test_39_regression_trend_rising_falling_and_flat(self):
+            rows=self.rows();trend=linear_price_trend(rows)
+            self.assertEqual(trend['direction'],'Wzrostowy');self.assertAlmostEqual(trend['slope_per_candle'],1.)
+            self.assertEqual(len(trend['points']),30);self.assertAlmostEqual(trend['points'][-1]['price'],rows[-1]['close'])
+            self.assertEqual(linear_price_trend(self.rows(flat=True))['direction'],'Poziomy')
+            for i,r in enumerate(rows):r.update(open=200-i,high=201-i,low=199-i,close=200-i)
+            self.assertEqual(linear_price_trend(rows)['direction'],'Spadkowy')
+
+        def test_40_regression_needs_30_actual_time_slots_with_prices(self):
+            self.assertEqual(linear_price_trend(self.rows(29))['direction'],'Brak danych')
+            rows=self.rows();rows[-5]['close']=None
+            self.assertEqual(linear_price_trend(rows)['direction'],'Brak danych')
+
+        def test_41_chart_macd_matches_full_history_without_restart_at_chart_edge(self):
+            rows=self.rows();chart=build_chart_history(rows,limit=15);ind=market_indicators(rows)
+            for key,target in (('macd','last_macd'),('macd_signal','last_macd_signal'),('macd_hist','last_macd_hist')):
+                self.assertAlmostEqual(chart[-1][key],ind[target])
+            self.assertIsNotNone(chart[0]['macd_signal'])
 
     return 0 if unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(MarketTests)).wasSuccessful() else 1
 
