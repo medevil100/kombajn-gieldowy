@@ -76,6 +76,9 @@ CREATE TABLE IF NOT EXISTS analysis_jobs(
  event_id TEXT PRIMARY KEY REFERENCES events(id), state TEXT NOT NULL,
  context TEXT, result TEXT, attempts INTEGER NOT NULL DEFAULT 0,
  next_attempt_at TEXT, last_error TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS analysis_rejections(
+ id TEXT PRIMARY KEY, event_id TEXT NOT NULL REFERENCES events(id),
+ reason TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS delivery_receipts(
  outbox_id TEXT PRIMARY KEY REFERENCES outbox(id), destination TEXT NOT NULL,
  message_id INTEGER, delivered_at TEXT);
@@ -2377,6 +2380,12 @@ class ServiceError(RuntimeError):
         self.retry_after=min(86400,max(0,int(retry_after or 0)))
 
 
+class AnalysisRejected(ServiceError):
+    def __init__(self,reason,payload):
+        super().__init__('OpenAI: '+reason)
+        self.payload=payload
+
+
 def service_http(label,url,key=None,payload=None,uncertain=False):
     import requests
     headers={'Authorization':'Bearer '+key} if key else {}
@@ -2462,28 +2471,51 @@ def validate_event_analysis(result,snapshot,context):
     expected={'technical','context','hypotheses','risks','missing'}
     if not isinstance(result,dict) or set(result)!=expected:raise ValueError('Niepoprawne sekcje analizy AI.')
     sources={s['id']:s for s in context['sources']};metrics=snapshot.get('indicators',{})
-    def text(value,limit=400,free=True):
-        if not isinstance(value,str) or not value.strip() or len(value)>limit:raise ValueError('Niepoprawna długość tekstu AI.')
-        if free and (re.search(r'\d',value) or re.search(r'\b(buy|sell|kup|kupuj|sprzedaj|sprzedawaj)\b',value,re.I)):
-            raise ValueError('AI podało własne liczby lub polecenie transakcji.')
+    def text(value,limit=400,free=True,path='tekst'):
+        if not isinstance(value,str) or not value.strip():raise ValueError(path+': pusty tekst lub błędny typ.')
+        if len(value)>limit:raise ValueError(path+': przekroczony limit długości tekstu.')
+        if free and re.search(r'\d',value):raise ValueError(path+': cyfry w swobodnej interpretacji.')
+        if free and re.search(r'\b(buy|sell|kup|kupuj|sprzedaj|sprzedawaj)\b',value,re.I):
+            raise ValueError(path+': niedozwolone słowo BUY/SELL lub polecenie transakcji.')
         return value.strip()
     for key in expected:
-        if not isinstance(result[key],list) or len(result[key])>5:raise ValueError('Niepoprawna liczba punktów AI.')
+        if not isinstance(result[key],list) or len(result[key])>5:raise ValueError(key+': niepoprawna lista lub więcej niż pięć punktów.')
     seen=set()
-    for item in result['technical']:
-        if not isinstance(item,dict) or set(item)!={'metric','interpretation'}:raise ValueError('Niepoprawny punkt techniczny.')
+    for index,item in enumerate(result['technical']):
+        path='technical['+str(index)+']'
+        if not isinstance(item,dict) or set(item)!={'metric','interpretation'}:raise ValueError(path+': niepoprawne pola.')
         metric=item['metric']
-        if metric in seen or metric not in metrics or not finite_number(metrics[metric]):raise ValueError('AI użyło nieznanego lub brakującego wskaźnika.')
-        seen.add(metric);item['interpretation']=text(item['interpretation'],280)
+        if not isinstance(metric,str) or metric in seen or metric not in metrics or not finite_number(metrics[metric]):raise ValueError(path+'.metric: nieznany, powtórzony lub brakujący wskaźnik.')
+        seen.add(metric);item['interpretation']=text(item['interpretation'],280,path=path+'.interpretation')
     cited=set()
-    for item in result['context']:
-        if not isinstance(item,dict) or set(item)!={'source_id','fact'} or item['source_id'] not in sources:raise ValueError('AI użyło nieznanego źródła.')
-        fact=text(item['fact'],180,False)
-        if item['source_id'] in cited or fact not in sources[item['source_id']]['content'] or len(fact.split())>25:raise ValueError('Fakt nie jest pojedynczym fragmentem wskazanego źródła.')
+    for index,item in enumerate(result['context']):
+        path='context['+str(index)+']'
+        if not isinstance(item,dict) or set(item)!={'source_id','fact'} or not isinstance(item.get('source_id'),str) or item['source_id'] not in sources:raise ValueError(path+': nieznane źródło lub błędne pola.')
+        fact=text(item['fact'],180,False,path+'.fact')
+        if item['source_id'] in cited:raise ValueError(path+': powtórzone źródło.')
+        if fact not in sources[item['source_id']]['content']:raise ValueError(path+'.fact: tekst nie jest dosłownym fragmentem wskazanego źródła.')
+        if len(fact.split())>25:raise ValueError(path+'.fact: więcej niż dwadzieścia pięć słów.')
         cited.add(item['source_id'])
         item['fact']=fact
-    for key in ('hypotheses','risks','missing'):result[key]=[text(v) for v in result[key]]
+    for key in ('hypotheses','risks','missing'):result[key]=[text(v,path=key+'['+str(i)+']') for i,v in enumerate(result[key])]
     return result
+
+
+def parse_event_analysis_response(body,snapshot,context):
+    metadata={'model':body.get('model','gpt-4.1'),'response_id':body.get('id'),'usage':body.get('usage',{})}
+    draft={**metadata,'content':None,'finish_reason':None}
+    try:
+        choice=body['choices'][0];message=choice['message']
+        draft.update(content=message.get('content'),finish_reason=choice.get('finish_reason'))
+        if message.get('refusal'):raise ValueError('Model odmówił przygotowania analizy.')
+        if choice.get('finish_reason')=='length':raise ValueError('Odpowiedź urwana przez limit tokenów.')
+        if choice.get('finish_reason')!='stop':raise ValueError('Odpowiedź nie została normalnie zakończona.')
+        try:decoded=json.loads(message['content'])
+        except (ValueError,TypeError):raise ValueError('Niepoprawny JSON odpowiedzi.') from None
+        result=validate_event_analysis(decoded,snapshot,context)
+    except ValueError as exc:raise AnalysisRejected(str(exc),draft) from None
+    except (KeyError,TypeError,IndexError,AttributeError):raise AnalysisRejected('Niepoprawna struktura odpowiedzi API.',draft) from None
+    return result,metadata
 
 
 def analyze_event(evidence,context,keys):
@@ -2508,12 +2540,7 @@ def analyze_event(evidence,context,keys):
         'messages':[{'role':'system','content':instructions},
                     {'role':'user','content':json_text({'proved_event':evidence_data,'source_context':context})}],
         'response_format':{'type':'json_schema','json_schema':{'name':'ki_event_analysis','strict':True,'schema':analysis_schema()}}},uncertain=True)
-    try:
-        choice=body['choices'][0]
-        if choice['finish_reason']!='stop' or choice['message'].get('refusal'):raise ValueError()
-        result=validate_event_analysis(json.loads(choice['message']['content']),snap,context)
-    except (KeyError,ValueError,TypeError,IndexError):raise ServiceError('OpenAI: odpowiedź odrzucona przez walidację treści; sprawdź zdarzenie.') from None
-    return result,{'model':body.get('model','gpt-4.1'),'response_id':body.get('id'),'usage':body.get('usage',{})}
+    return parse_event_analysis_response(body,snap,context)
 
 
 def message_limit(text):
@@ -2595,6 +2622,9 @@ def fail_analysis(store,event_id,error):
     with store.transaction() as c:
         job=c.execute('SELECT * FROM analysis_jobs WHERE event_id=?',(event_id,)).fetchone()
         if not job or job['state'] not in ('BUSY_CONTEXT','BUSY_AI'):return
+        if isinstance(error,AnalysisRejected):
+            c.execute('INSERT INTO analysis_rejections VALUES(?,?,?,?,?)',
+                      (uuid.uuid4().hex,event_id,str(error),json_text(error.payload),utc_now()))
         retry=error.retryable and not error.uncertain and job['attempts']<3
         state=('PENDING_CONTEXT' if job['state']=='BUSY_CONTEXT' else 'PENDING_AI') if retry else 'REVIEW_REQUIRED' if error.uncertain else 'FAILED'
         due=(datetime.now(timezone.utc)+timedelta(seconds=max(error.retry_after,30*2**job['attempts']))).isoformat() if retry else None
@@ -3022,12 +3052,18 @@ def render_service_panel(store):
         jobs=[dict(r) for r in c.execute('SELECT j.*,e.ticker,e.payload FROM analysis_jobs j JOIN events e ON e.id=j.event_id ORDER BY e.created_at DESC LIMIT 30')]
         messages=[dict(r) for r in c.execute("SELECT * FROM outbox WHERE kind IN ('EVIDENCE','ANALYSIS') ORDER BY created_at DESC LIMIT 60")]
         errors=[json.loads(r[0]) for r in c.execute("SELECT payload FROM runtime WHERE key IN ('service_analysis','service_telegram')")]
+        rejections={r['event_id']:dict(r) for r in c.execute('SELECT r.* FROM analysis_rejections r WHERE r.rowid=(SELECT MAX(x.rowid) FROM analysis_rejections x WHERE x.event_id=r.event_id)')}
     st.subheader('Tavily · GPT · Telegram')
     if not jobs:st.caption('Analiza pojawi się po nowym potwierdzonym ruchu i włączeniu Tavily + GPT. Odczyt ręczny nie uruchamia usług.')
     for error in errors:st.error(error['error'])
     for job in jobs:
         with st.expander(job['ticker']+' · '+labels.get(job['state'],job['state'])+' · '+job['event_id']):
             if job['last_error']:st.error(job['last_error'])
+            rejection=rejections.get(job['event_id'])
+            if rejection:
+                st.caption('Odrzucona odpowiedź GPT została zachowana do diagnostyki. Nie jest zaakceptowaną analizą i nie jest wysyłana.')
+                if st.checkbox('Pokaż odrzuconą odpowiedź',key='rejected_'+job['event_id']):
+                    st.text(json.loads(rejection['payload']).get('content') or 'Brak tekstu odpowiedzi.')
             if job['next_attempt_at']:st.caption('Ponowienie po: '+job['next_attempt_at'])
             context=json.loads(job['context']) if job['context'] else None
             if context:
@@ -3121,8 +3157,12 @@ def resume_analysis(db,event_id):
     with store.connection() as c:
         job=c.execute('SELECT state,last_error FROM analysis_jobs WHERE event_id=?',(event_id,)).fetchone()
         messages=list(c.execute('SELECT id,message,status FROM outbox WHERE event_id=?',(event_id,)))
+        rejection=c.execute('SELECT payload FROM analysis_rejections WHERE event_id=? ORDER BY rowid DESC LIMIT 1',(event_id,)).fetchone()
     print('Stan analizy: '+job['state'])
     if job['last_error']:print(job['last_error'])
+    if job['state']!='DONE' and rejection:
+        print('ODRZUCONA ODPOWIEDŹ GPT — materiał diagnostyczny, nie zaakceptowana analiza:')
+        print(json.loads(rejection['payload']).get('content') or 'Brak tekstu odpowiedzi.')
     for item in messages:print('\n'+item['id']+' · '+item['status']+'\n'+item['message'])
     return 0 if job['state']=='DONE' else 2
 
@@ -3913,6 +3953,30 @@ def run_service_tests():
             with self.store.connection() as c:
                 self.assertEqual(c.execute('SELECT state FROM analysis_jobs').fetchone()[0],'BUSY_AI')
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM outbox').fetchone()[0],1)
+        def test_20_rejected_response_preserves_reason_and_draft_without_delivery(self):
+            eid=self.event();claim_analysis(self.store);save_analysis_context(self.store,eid,self.context());claim_analysis(self.store)
+            bad=self.analysis();bad['technical'][0]['interpretation']='RSI 55 wskazuje przewagę.'
+            body={'id':'response_contract','model':'gpt-4.1','choices':[{'finish_reason':'stop','message':{'content':json_text(bad)}}]}
+            with self.assertRaises(AnalysisRejected) as caught:parse_event_analysis_response(body,self.snap(),self.context())
+            self.assertIn('technical[0].interpretation',str(caught.exception))
+            fail_analysis(self.store,eid,caught.exception)
+            with self.store.connection() as c:
+                row=c.execute('SELECT reason,payload FROM analysis_rejections WHERE event_id=?',(eid,)).fetchone()
+                self.assertIn('cyfry',row['reason']);self.assertEqual(json.loads(row['payload'])['content'],json_text(bad))
+                self.assertEqual(c.execute('SELECT state FROM analysis_jobs').fetchone()[0],'FAILED')
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM outbox WHERE kind='ANALYSIS'").fetchone()[0],0)
+        def test_21_response_finish_reason_and_json_have_distinct_diagnostics(self):
+            body={'choices':[{'finish_reason':'length','message':{'content':'{'}}]}
+            with self.assertRaises(AnalysisRejected) as caught:parse_event_analysis_response(body,self.snap(),self.context())
+            self.assertIn('limit',str(caught.exception))
+            body['choices'][0]['finish_reason']='stop'
+            with self.assertRaises(AnalysisRejected) as caught:parse_event_analysis_response(body,self.snap(),self.context())
+            self.assertIn('JSON',str(caught.exception))
+        def test_22_valid_provider_response_keeps_analysis_and_usage(self):
+            body={'id':'response_contract','model':'gpt-4.1','usage':{'total_tokens':100},
+                  'choices':[{'finish_reason':'stop','message':{'content':json_text(self.analysis())}}]}
+            result,metadata=parse_event_analysis_response(body,self.snap(),self.context())
+            self.assertEqual(result,self.analysis());self.assertEqual(metadata['usage']['total_tokens'],100)
 
     return 0 if unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(ServiceTests)).wasSuccessful() else 1
 
