@@ -2172,8 +2172,8 @@ def normalize_yahoo_frame(frame,ticker,interval,now,metadata):
     return rows
 
 
-def trim_empty_yahoo_tail(rows):
-    """Ignore only trailing placeholders; retain partial candles and internal gaps."""
+def empty_yahoo_tail(rows):
+    """Report trailing empty source rows without removing their time slots."""
     end=len(rows)
     while end:
         row=rows[end-1]
@@ -2182,7 +2182,30 @@ def trim_empty_yahoo_tail(rows):
             break
         end-=1
     if end==0:raise ValueError('Yahoo zwróciło wyłącznie puste świece; brak ceny do analizy.')
-    return rows[:end], [{'time':r['time'],'reason':'empty_ohlc_without_volume'} for r in rows[end:]]
+    return [{'time':r['time'],'reason':'empty_ohlc_without_volume'} for r in rows[end:]]
+
+
+def carry_zero_volume_prices(rows):
+    """Retain time slots; carry only a known close across entirely empty zero-volume rows."""
+    result=[];report=[];previous_close=None;reference_time=None
+    for raw in rows:
+        row=dict(raw)
+        empty=all(row.get(k) is None for k in ('open','high','low','close'))
+        if empty and row.get('volume')==0 and previous_close is not None:
+            evidence={'time':row['time'],'reference_time':reference_time,'price':previous_close,
+                      'reason':'empty_source_ohlc_zero_volume','price_origin':'carried_previous_close'}
+            for key in ('open','high','low','close'):row[key]=previous_close
+            row.update(price_origin='carried_previous_close',price_reference_time=reference_time,
+                       source_ohlc={key:raw.get(key) for key in ('open','high','low','close')})
+            report.append(evidence)
+        elif finite_number(row.get('close'),True):
+            previous_close=row['close'];reference_time=row['time']
+        else:
+            # Unknown or partial data cannot establish continuity for carrying a price.
+            previous_close=None;reference_time=None
+        result.append(row)
+    validate_market_rows(result)
+    return result,report
 
 
 def session_summary_from_rows(rows,session_date):
@@ -2215,7 +2238,8 @@ def fetch_market(ticker,interval):
                 if type(exc).__name__=='YFRateLimitError':raise
                 metadata_warning=type(exc).__name__+': '+str(exc)
             candidate=normalize_yahoo_frame(frame,ticker,interval,now,metadata)
-            candidate,ignored_tail=trim_empty_yahoo_tail(candidate)
+            empty_tail=empty_yahoo_tail(candidate)
+            candidate,carried_prices=carry_zero_volume_prices(candidate)
         except Exception as exc:
             if type(exc).__name__=='YFRateLimitError':
                 raise MarketRateLimitError('Yahoo HTTP 429: przerwano cykl; bez dalszych zapytań do następnego slotu.') from exc
@@ -2226,13 +2250,14 @@ def fetch_market(ticker,interval):
         rows=candidate
         accepted_at=now
         accepted_metadata=metadata
-        accepted_ignored_tail=ignored_tail
+        accepted_empty_tail=empty_tail
+        accepted_carried_prices=carried_prices
         attempts.append({'period':period,'rows':len(rows),'interval':interval})
         if len(rows)>=34:break
     now=accepted_at;metadata=accepted_metadata
     session_summary=None;session_summary_warning=None
-    if interval!='1d' and accepted_ignored_tail:
-        session_date=parse_market_time(accepted_ignored_tail[-1]['time']).date().isoformat()
+    if interval!='1d' and accepted_empty_tail:
+        session_date=parse_market_time(accepted_empty_tail[-1]['time']).date().isoformat()
         try:
             daily_frame=provider.history(period='5d',interval='1d',prepost=False,auto_adjust=False,
                                          actions=False,repair=False,keepna=True,timeout=20,raise_errors=True)
@@ -2252,7 +2277,10 @@ def fetch_market(ticker,interval):
           'rvol':ind['rvol'],'rvol_incomplete':last['status']!='CLOSED','indicators':ind,
           'scoring':market_score(ind,last['close']),'direction':market_direction(ind,last['close']),
           'currency':metadata.get('currency'),'rows':len(rows),'history_attempts':attempts,
-          'ignored_trailing_empty_candles':accepted_ignored_tail,
+          'empty_trailing_source_candles':accepted_empty_tail,
+          'carried_price_candles':accepted_carried_prices,
+          'latest_price_origin':last.get('price_origin','Yahoo OHLC'),
+          'latest_price_reference_time':last.get('price_reference_time'),
           'session_summary':session_summary,'session_summary_warning':session_summary_warning,
           'missing_latest_fields':[k for k in ('open','high','low','volume') if last[k] is None],
           'metadata_warning':metadata_warning,'history_warning':history_warning,
@@ -2449,7 +2477,9 @@ def run_streamlit(db):
                     ' · RVOL: '+escape(fmt(s['rvol']))+'<br><span class="ki-'+color+'">'+escape(number+' — '+sc['label'])+'</span><br>'+
                     escape(s['direction'])+' · Świeca: '+escape(s['candle_status'])+'<br>'+
                     'Świeca: '+escape(s['candle_time'])+' · Pobranie: '+escape(s['acquired_at'])+'</div>',unsafe_allow_html=True)
-        if s.get('ignored_trailing_empty_candles'):st.warning('Pominięto puste końcowe wiersze Yahoo: '+str(len(s['ignored_trailing_empty_candles']))+'. Cena pochodzi ze świecy wskazanej powyżej.')
+        if s.get('empty_trailing_source_candles'):st.warning('Yahoo zwróciło puste końcowe OHLC: '+str(len(s['empty_trailing_source_candles']))+'. Przedziały zachowano; pochodzenie ceny pokazujemy poniżej.')
+        if s.get('carried_price_candles'):st.caption('Przedziały bez cen OHLC w źródle, z wolumenem 0: '+str(len(s['carried_price_candles']))+'. Zachowano godziny i przeniesiono poprzednią cenę zamknięcia jako O=H=L=C. Szczegóły pochodzenia poniżej.')
+        if s.get('latest_price_origin')=='carried_previous_close':st.warning('Cena tej świecy przeniesiona z '+str(s.get('latest_price_reference_time'))+'; Yahoo zwróciło puste OHLC i wolumen 0.')
         summary=s.get('session_summary')
         if summary:
             st.info('Zamknięcie sesji '+summary['session_date']+': '+fmt(summary['close'])+' '+str(summary.get('currency') or '')+
@@ -2704,18 +2734,17 @@ def run_market_tests():
         def test_27_empty_yahoo_tail_preserves_last_price_time(self):
             good={'time':'2026-10-02T16:00:00+02:00','open':5.9,'high':6.,'low':5.86,'close':6.,'volume':4230}
             empty={'time':'2026-10-02T17:00:00+02:00','open':None,'high':None,'low':None,'close':None,'volume':0}
-            rows=[good,empty];kept,ignored=trim_empty_yahoo_tail(rows)
-            self.assertEqual(kept,[good]);self.assertEqual(ignored[0]['time'],empty['time'])
+            rows=[good,empty];tail=empty_yahoo_tail(rows)
+            self.assertEqual(tail[0]['time'],empty['time'])
             self.assertEqual(len(rows),2)
 
         def test_28_partial_and_internal_missing_rows_are_retained(self):
             empty={'time':'2026-10-02T15:00:00+02:00','open':None,'high':None,'low':None,'close':None,'volume':0}
             partial={**empty,'time':'2026-10-02T16:00:00+02:00','open':6.}
-            kept,ignored=trim_empty_yahoo_tail([empty,partial])
-            self.assertEqual(kept,[empty,partial]);self.assertEqual(ignored,[])
-            with self.assertRaises(ValueError):trim_empty_yahoo_tail([empty])
+            self.assertEqual(empty_yahoo_tail([empty,partial]),[])
+            with self.assertRaises(ValueError):empty_yahoo_tail([empty])
             with_volume={**empty,'volume':10}
-            self.assertEqual(trim_empty_yahoo_tail([with_volume]),([with_volume],[]))
+            self.assertEqual(empty_yahoo_tail([with_volume]),[])
 
         def test_29_session_summary_is_separate_from_hourly_candle(self):
             daily={'time':'2026-10-02T00:00:00+02:00','open':5.95,'high':6.14,'low':5.86,
@@ -2735,6 +2764,55 @@ def run_market_tests():
             with self.assertRaises(ValueError):session_summary_from_rows([daily],'2026-10-01')
             daily['close']=None
             with self.assertRaises(ValueError):session_summary_from_rows([daily],'2026-10-02')
+
+        def test_31_zero_volume_carries_close_not_previous_high_low(self):
+            rows=self.rows(3);rows[0].update(open=5.9,high=6.2,low=5.8,close=6.02)
+            for k in ('open','high','low','close'):rows[1][k]=None
+            rows[1]['volume']=0
+            filled,report=carry_zero_volume_prices(rows)
+            self.assertEqual([filled[1][k] for k in ('open','high','low','close')],[6.02]*4)
+            self.assertEqual(filled[1]['volume'],0);self.assertEqual(filled[1]['time'],rows[1]['time'])
+            self.assertEqual(report[0]['reference_time'],rows[0]['time'])
+            self.assertEqual(filled[1]['price_origin'],'carried_previous_close')
+            self.assertIsNone(rows[1]['close'])
+
+        def test_32_missing_partial_or_positive_volume_not_filled(self):
+            rows=self.rows(5)
+            for i in (1,2,3,4):
+                for k in ('open','high','low','close'):rows[i][k]=None
+            rows[1]['volume']=None;rows[2]['volume']=7;rows[3].update(open=100,volume=0);rows[4]['volume']=0
+            filled,report=carry_zero_volume_prices(rows)
+            for i in (1,2,3,4):self.assertIsNone(filled[i]['close'])
+            self.assertEqual(report,[])
+
+        def test_33_leading_gap_and_consecutive_zero_candles(self):
+            rows=self.rows(4)
+            for i in (0,2,3):
+                for k in ('open','high','low','close'):rows[i][k]=None
+                rows[i]['volume']=0
+            filled,report=carry_zero_volume_prices(rows)
+            self.assertIsNone(filled[0]['close'])
+            self.assertEqual(filled[2]['close'],101);self.assertEqual(filled[3]['close'],101)
+            self.assertEqual([r['reference_time'] for r in report],[rows[1]['time']]*2)
+
+        def test_34_price_indicators_keep_hours_and_rvol_keeps_zero(self):
+            rows=self.rows()
+            for k in ('open','high','low','close'):rows[-6][k]=None
+            rows[-6]['volume']=0
+            filled,report=carry_zero_volume_prices(rows);ind=market_indicators(filled)
+            self.assertEqual(len(filled),len(rows));self.assertEqual(len(report),1)
+            for k in ('rsi','ma_slow','last_macd','atr','adx','stoch_k','obv'):
+                self.assertIsNotNone(ind[k],k)
+            self.assertAlmostEqual(ind['rvol'],100/95)
+
+        def test_35_last_empty_hour_is_retained_with_unchanged_price(self):
+            rows=self.rows();rows[-1]['volume']=0
+            for key in ('open','high','low','close'):rows[-1][key]=None
+            tail=empty_yahoo_tail(rows);filled,report=carry_zero_volume_prices(rows)
+            self.assertEqual(tail[0]['time'],rows[-1]['time'])
+            self.assertEqual(len(filled),len(rows));self.assertEqual(filled[-1]['close'],rows[-2]['close'])
+            self.assertEqual(filled[-1]['time'],rows[-1]['time'])
+            self.assertEqual(market_indicators(filled)['rvol'],0)
 
     return 0 if unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(MarketTests)).wasSuccessful() else 1
 
