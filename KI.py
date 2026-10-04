@@ -2139,6 +2139,32 @@ def market_direction(ind,price):
     return 'Brak sygnału'
 
 
+def visible_market_trend(ind,price):
+    # Use the existing SMA direction contract, independently of bullish scoring.
+    direction=market_direction(ind,price)
+    descriptions={
+        'Układ wzrostowy':('BYCZY','green','SMA 10 > SMA 30 oraz cena > SMA 30.'),
+        'Układ spadkowy':('NIEDŹWIEDZI','red','SMA 10 < SMA 30 oraz cena < SMA 30.'),
+        'Brak sygnału':('NEUTRALNY','yellow','Warunki układu byczego i niedźwiedziego nie są spełnione.'),
+        'Brak danych':('BRAK DANYCH','gray','Do oceny potrzebne są poprawna cena, SMA 10 i SMA 30.')}
+    label,color,reason=descriptions[direction]
+    return {'label':label,'color':color,'reason':reason}
+
+
+def market_wait_status(snapshot,evidence=None):
+    trend=visible_market_trend(snapshot.get('indicators',{}),snapshot.get('price'))
+    if trend['label']=='BRAK DANYCH' or snapshot.get('candle_status') not in ('OPEN','CLOSED'):
+        return {'label':'HOLD — CZEKAJ, nie otwieraj pozycji','reason':'Brak danych do oceny trendu lub nieustalony stan świecy.','color':'yellow'}
+    if trend['label']=='NEUTRALNY':
+        return {'label':'HOLD — CZEKAJ, nie otwieraj pozycji','reason':'Trend neutralny.','color':'yellow'}
+    # Only the detector's evidence for this exact acquisition can confirm a move.
+    if not evidence or evidence.get('snapshot')!=snapshot or not evidence.get('reasons'):
+        return {'label':'HOLD — CZEKAJ, nie otwieraj pozycji','reason':'Brak potwierdzonego przekroczenia progu dla tego odczytu.','color':'yellow'}
+    return {'label':'RUCH POTWIERDZONY — wymaga dalszej analizy',
+            'reason':'Przekroczone progi: '+', '.join(evidence['reasons'])+'. Samo zdarzenie nie oznacza zgody na wejście.',
+            'color':'gray'}
+
+
 def candle_state(row,interval,now,metadata):
     from datetime import timedelta
     start=parse_market_time(row['time']);end=None;basis=''
@@ -2427,39 +2453,48 @@ def normalize_tavily_context(payload,snapshot):
     from datetime import timedelta
     from email.utils import parsedate_to_datetime
     from urllib.parse import urlsplit
-    cutoff=event_context_cutoff(snapshot);start=cutoff-timedelta(days=7);sources=[];seen=set();excluded=0
+    cutoff=event_context_cutoff(snapshot);start=cutoff-timedelta(days=7);sources=[];seen=set();excluded=0;rejected=[]
     results=payload.get('results')
     if not isinstance(results,list):raise ServiceError('Tavily: brak listy wyników.')
     for result in results:
         try:
             url=result['url'];parts=urlsplit(url);content=result.get('content','');raw=result.get('published_date')
-            if not isinstance(content,str) or not content.strip() or not isinstance(raw,str):raise ValueError()
+            if not isinstance(content,str) or not content.strip():raise ValueError('Brak treści źródła.')
+            if not isinstance(raw,str):raise ValueError('Brak daty publikacji.')
             if parts.scheme not in ('https','http') or not parts.hostname or parts.username or parts.password or len(url)>500 or url in seen:raise ValueError()
             try:published=datetime.fromisoformat(raw.replace('Z','+00:00'))
             except ValueError:published=parsedate_to_datetime(raw)
             # A date without a publication time cannot prove same-day availability.
             if len(raw)==10:published=published.replace(hour=23,minute=59,second=59,tzinfo=timezone.utc)
-            if published.tzinfo is None or not start<=published<=cutoff:raise ValueError()
+            if published.tzinfo is None:raise ValueError('Brak strefy czasowej publikacji.')
+            if not start<=published<=cutoff:raise ValueError('Data poza siedmiodniowym oknem zdarzenia.')
             seen.add(url)
             if len(sources)>=5:raise ValueError()
             sources.append({'id':'S'+str(len(sources)+1),'url':url,'title':str(result.get('title') or '')[:160],
                             'published_at':published.isoformat(),'content':content.strip()[:1800]})
-        except (KeyError,ValueError,TypeError,AttributeError,OverflowError):excluded+=1
-    return {'sources':sources,'cutoff':cutoff.isoformat(),'excluded':excluded,
+        except (KeyError,ValueError,TypeError,AttributeError,OverflowError) as exc:
+            excluded+=1
+            reason=str(exc) if isinstance(exc,ValueError) and str(exc) else 'Niepoprawny adres, duplikat lub niepoprawne dane źródła.'
+            rejected.append({'title':str(result.get('title') or '')[:160] if isinstance(result,dict) else '', 'reason':reason})
+    return {'sources':sources,'cutoff':cutoff.isoformat(),'excluded':excluded,'rejected_sources':rejected,
             'date_basis':'Data publikacji lub aktualizacji wskazana przez Tavily; nie jest potwierdzeniem przyczyny ruchu.'}
 
 
-def fetch_event_context(evidence,keys):
+def event_context_request(evidence):
     from datetime import timedelta
-    if not keys['TAVILY_API_KEY']:raise ServiceError('Brak TAVILY_API_KEY.')
     snap=evidence['snapshot'];cutoff=event_context_cutoff(snap)
     query=snap['ticker']+' '+str(snap.get('company_name') or '')+' komunikat emitenta raport ESPI EBI SEC '+cutoff.date().isoformat()
-    body=service_http('Tavily','https://api.tavily.com/search',keys['TAVILY_API_KEY'],{
-        'query':query,'topic':'finance','search_depth':'basic','max_results':5,'include_answer':False,
-        'include_raw_content':False,'include_published_date':True,'filter_by_published_date':True,
-        'start_date':(cutoff-timedelta(days=7)).date().isoformat(),
-        'end_date':(cutoff+timedelta(days=1)).date().isoformat()})
-    return normalize_tavily_context(body,snap)
+    return {'query':query,'topic':'finance','search_depth':'basic','max_results':5,'include_answer':False,
+            'include_raw_content':False,'include_published_date':True,'filter_by_published_date':True,
+            'start_date':(cutoff-timedelta(days=7)).date().isoformat(),
+            'end_date':(cutoff+timedelta(days=1)).date().isoformat()}
+
+
+def fetch_event_context(evidence,keys):
+    if not keys['TAVILY_API_KEY']:raise ServiceError('Brak TAVILY_API_KEY.')
+    request=event_context_request(evidence)
+    body=service_http('Tavily','https://api.tavily.com/search',keys['TAVILY_API_KEY'],request)
+    return {**normalize_tavily_context(body,evidence['snapshot']),'request':request,'received_at':utc_now()}
 
 
 def analysis_schema(snapshot,context):
@@ -2658,7 +2693,12 @@ def process_analysis_once(store,keys,event_id=None):
     if not job:return False
     try:
         with store.connection() as c:evidence=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(job['event_id'],)).fetchone()[0])
-        if job['state']=='BUSY_CONTEXT':save_analysis_context(store,job['event_id'],fetch_event_context(evidence,keys))
+        if job['state']=='BUSY_CONTEXT':
+            # Persist the exact request before HTTP, including failed/interrupted attempts.
+            with store.transaction() as c:
+                c.execute('UPDATE analysis_jobs SET context=? WHERE event_id=? AND state=?',
+                          (json_text({'request':event_context_request(evidence),'requested_at':utc_now()}),job['event_id'],'BUSY_CONTEXT'))
+            save_analysis_context(store,job['event_id'],fetch_event_context(evidence,keys))
         else:
             result,metadata=analyze_event(evidence,json.loads(job['context']),keys)
             finish_analysis(store,job['event_id'],result,metadata)
@@ -2873,6 +2913,154 @@ def scanner_main(db,diagnostic=False,cycles=None):
     return 0
 
 
+DISCOVERY_MARKETS={'GPW / NewConnect':{'region':'pl','exchanges':['WSE'],'currency':'PLN'},
+                   'NASDAQ':{'region':'us','exchanges':['NMS','NGM','NCM'],'currency':'USD'}}
+
+
+def discovery_query(market,min_price,max_price):
+    from yfinance import EquityQuery
+    if market not in DISCOVERY_MARKETS or not finite_number(min_price,True) or not finite_number(max_price,True) or min_price>max_price:
+        raise ValueError('Niepoprawny rynek lub zakres cen.')
+    rules=DISCOVERY_MARKETS[market]
+    return EquityQuery('and',[EquityQuery('eq',['region',rules['region']]),
+        EquityQuery('is-in',['exchange',*rules['exchanges']]),
+        EquityQuery('gte',['intradayprice',min_price]),EquityQuery('lte',['intradayprice',max_price])])
+
+
+def discovery_quote(quote,market,min_price,max_price):
+    import re
+    rules=DISCOVERY_MARKETS[market]
+    ticker=quote.get('symbol');price=quote.get('regularMarketPrice')
+    if not isinstance(ticker,str) or not re.fullmatch(r'[A-Z0-9][A-Z0-9.\-^=]{0,31}',ticker):return None
+    if quote.get('quoteType')!='EQUITY' or quote.get('exchange') not in rules['exchanges'] or quote.get('currency')!=rules['currency']:return None
+    if market=='GPW / NewConnect' and not ticker.endswith('.WA'):return None
+    if not finite_number(price,True) or not min_price<=price<=max_price:return None
+    stamp=quote.get('regularMarketTime');change=quote.get('regularMarketChangePercent')
+    return {'ticker':ticker,'name':str(quote.get('shortName') or quote.get('longName') or ticker),
+            'price':price,'currency':rules['currency'],'exchange':quote['exchange'],
+            'change_pct':change if finite_number(change) else None,
+            'quote_time':datetime.fromtimestamp(stamp,timezone.utc).isoformat() if finite_number(stamp) and 0<stamp<32503680000 else None}
+
+
+def search_observation_candidates(market,min_price,max_price,limit=176):
+    import yfinance as yf
+    if isinstance(limit,bool) or not isinstance(limit,int) or not 1<=limit<=1000:raise ValueError('Limit wyników: 1–1000.')
+    query=discovery_query(market,min_price,max_price);rows=[];seen=set();offset=0;excluded=0;total=None
+    while offset<limit:
+        size=min(250,limit-offset)
+        try:payload=yf.screen(query,offset=offset,size=size,sortField='ticker',sortAsc=True)
+        except Exception as exc:
+            if type(exc).__name__=='YFRateLimitError':raise MarketRateLimitError('Yahoo ograniczył zapytania. Wyszukiwanie przerwane; lista obserwacji nie została zmieniona.') from None
+            raise ValueError('Wyszukiwanie Yahoo nie powiodło się: '+type(exc).__name__+'. Lista obserwacji nie została zmieniona.') from None
+        if not isinstance(payload,dict) or not isinstance(payload.get('quotes'),list):raise ValueError('Yahoo: niepoprawna odpowiedź screenera.')
+        quotes=payload['quotes'];total=payload.get('total')
+        for quote in quotes:
+            row=discovery_quote(quote,market,min_price,max_price) if isinstance(quote,dict) else None
+            if row and row['ticker'] not in seen:rows.append(row);seen.add(row['ticker'])
+            else:excluded+=1
+        offset+=len(quotes)
+        if not quotes or len(quotes)<size or isinstance(total,int) and offset>=total:break
+    return {'rows':rows,'market':market,'min_price':min_price,'max_price':max_price,'limit':limit,
+            'received':offset,'total':total,'excluded':excluded,'searched_at':utc_now()}
+
+
+def add_observation_tickers(store,tickers):
+    import re
+    if not isinstance(tickers,list) or any(not isinstance(t,str) or not re.fullmatch(r'[A-Z0-9][A-Z0-9.\-^=]{0,31}',t) for t in tickers):raise ValueError('Niepoprawne tickery do dodania.')
+    with store.transaction() as c:
+        current=store.load_section('tickers',[])
+        merged=list(dict.fromkeys(current+tickers))
+        store._write_section(c,'tickers',merged)
+    return len(merged)-len(current)
+
+
+def render_discovery_panel(store):
+    import streamlit as st
+    st.subheader('Wyszukaj spółki do obserwacji')
+    st.caption('Yahoo Finance · wyszukiwanie akcji po rynku i cenie. Bez wywołań Tavily, AI i Telegrama. Pokrycie GPW / NC zależy od Yahoo; nie jest to pełny rejestr giełdowy.')
+    with st.form('discovery_form'):
+        market=st.selectbox('Rynek wyszukiwania',list(DISCOVERY_MARKETS))
+        low=st.number_input('Minimalna cena w walucie rynku',min_value=.0001,value=.01,step=.01,format='%.4f')
+        high=st.number_input('Maksymalna cena w walucie rynku',min_value=.0001,value=10.,step=.1)
+        limit=st.number_input('Limit pobranych kandydatów',min_value=1,max_value=1000,value=176,step=1)
+        search=st.form_submit_button('Wyszukaj spółki w Yahoo')
+    if search:
+        st.session_state.pop('discovery_results',None);st.session_state.pop('discovery_selected',None)
+        try:
+            with st.spinner('Wyszukiwanie Yahoo…'):st.session_state['discovery_results']=search_observation_candidates(market,low,high,int(limit))
+        except Exception as exc:st.error(str(exc))
+    result=st.session_state.get('discovery_results')
+    if not result:return
+    st.caption(result['market']+' · zakres '+str(result['min_price'])+'–'+str(result['max_price'])+' · pobrano '+str(result['received'])+' / Yahoo podał '+str(result['total'])+' · odrzucono '+str(result['excluded'])+' · wyszukiwanie UTC: '+result['searched_at'])
+    st.caption('Wyniki w kolejności tickerów. Zmiana procentowa dotyczy poprzedniego zamknięcia; nie jest sygnałem detektora KI. Brak daty notowania jest jawnie oznaczony.')
+    rows=result['rows']
+    if not rows:st.warning('Brak zweryfikowanych kandydatów. Lista obserwacji pozostaje bez zmian.');return
+    st.dataframe([{'Ticker':r['ticker'],'Spółka':r['name'],'Cena':r['price'],'Waluta':r['currency'],'Giełda Yahoo':r['exchange'],'Zmiana (%)':r['change_pct'],'Czas notowania UTC':r['quote_time'] or 'Brak danych'} for r in rows],width='stretch',hide_index=True)
+    selected=st.multiselect('Spółki do dodania',[r['ticker'] for r in rows],key='discovery_selected')
+    if st.button('Dodaj wybrane do listy obserwacji',disabled=not selected):
+        count=add_observation_tickers(store,selected)
+        st.session_state['discovery_notice']='Dodano '+str(count)+' nowych spółek. Lista zapisana trwale w SQLite.'
+        st.rerun()
+    if st.session_state.get('discovery_notice'):st.success(st.session_state['discovery_notice'])
+
+
+def manual_store_path(db):
+    return Path(db).resolve().with_suffix('.manual.sqlite3')
+
+
+def record_manual_read(store,snapshot,config):
+    result=detect_market(store,snapshot,{**market_config(config),'pipeline_enabled':False,'telegram_enabled':False})
+    if result.get('event_id'):
+        with store.transaction() as c:
+            row=c.execute('SELECT payload FROM events WHERE id=?',(result['event_id'],)).fetchone()
+            evidence=json.loads(row[0]);evidence['manual_analysis']=True;evidence['delivery_enabled']=False
+            c.execute('UPDATE events SET payload=? WHERE id=?',(json_text(evidence),result['event_id']))
+    return result
+
+
+def queue_manual_analysis(store,event_id):
+    with store.transaction() as c:
+        row=c.execute('SELECT payload FROM events WHERE id=?',(event_id,)).fetchone()
+        if not row:raise ValueError('Brak potwierdzonego zdarzenia ręcznego.')
+        evidence=json.loads(row[0])
+        if not evidence.get('manual_analysis') or not evidence.get('reasons') or evidence.get('delivery_enabled'):
+            raise ValueError('Zdarzenie nie jest niezależnym dowodem ręcznym.')
+        if c.execute('SELECT 1 FROM analysis_jobs WHERE event_id=?',(event_id,)).fetchone():return False
+        now=utc_now()
+        c.execute('INSERT INTO analysis_jobs(event_id,state,updated_at) VALUES(?,?,?)',(event_id,'PENDING_CONTEXT',now))
+        c.execute('INSERT INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)',
+                  (event_id+':evidence',event_id,'EVIDENCE',evidence_message(event_id,evidence),'PREVIEW',now))
+    return True
+
+
+def render_manual_analysis(store):
+    import streamlit as st
+    st.subheader('Ręczne Tavily + AI')
+    st.caption('Pierwszy ręczny odczyt zapisuje osobny punkt odniesienia. Pobierz dane ponownie, aby sprawdzić ruch. Automat i jego lista pozostają niezależne. Analiza tylko po naciśnięciu przycisku; bez wysyłki Telegrama.')
+    with store.connection() as c:
+        events=[dict(r) for r in c.execute('SELECT e.*,j.state FROM events e LEFT JOIN analysis_jobs j ON j.event_id=e.id ORDER BY e.rowid DESC LIMIT 30')]
+    if events:
+        by_id={e['id']:e for e in events}
+        selected=st.selectbox('Potwierdzony ruch do ręcznej analizy',list(by_id),
+            format_func=lambda eid:by_id[eid]['ticker']+' · '+by_id[eid]['interval']+' · '+by_id[eid]['created_at'],key='manual_analysis_event')
+        event=by_id[selected];st.text(evidence_message(selected,json.loads(event['payload'])))
+        enabled=event['state'] is None or event['state'] in ('PENDING_CONTEXT','PENDING_AI')
+        if st.button('Analizuj potwierdzony ruch — Tavily + AI',disabled=not enabled):
+            try:
+                keys=load_service_keys()
+                if not keys['TAVILY_API_KEY'] or not keys['OPENAI_API_KEY']:raise ValueError('Brak klucza Tavily lub OpenAI w secrets.toml.')
+                with ScannerLock(str(store.path)+'.analysis'):
+                    queue_manual_analysis(store,selected)
+                    with st.spinner('Ręczna analiza: Tavily → GPT…'):
+                        process_analysis_once(store,keys,selected)
+                        process_analysis_once(store,keys,selected)
+            except Exception as exc:st.error(str(exc) if isinstance(exc,(ValueError,ServiceError)) else 'Analiza ręczna: '+type(exc).__name__+'.')
+        if event['state'] in ('FAILED','REVIEW_REQUIRED','BUSY_CONTEXT','BUSY_AI'):
+            st.warning('Analiza zatrzymana lub w toku. Sprawdź szczegóły poniżej; nie jest ponawiana automatycznie.')
+    else:st.info('Brak potwierdzonych ruchów ręcznych — Tavily i AI nie zostały wywołane.')
+    render_service_panel(store,manual=True)
+
+
 def run_streamlit(db):
     import streamlit as st
     import html
@@ -2933,13 +3121,24 @@ def run_streamlit(db):
         return parse_market_time(value).astimezone().strftime('%d.%m.%Y %H:%M %Z')
     def table(items):
         st.markdown('<table class="ki-table"><tr><th>Wskaźnik / dane</th><th>Wartość</th></tr>'+''.join('<tr><td>'+html.escape(str(k))+'</td><td>'+('<span class="ki-red">'+html.escape(str(v))+'</span>' if str(v).startswith('-') else html.escape(str(v)))+'</td></tr>' for k,v in items)+'</table>',unsafe_allow_html=True)
-    def card(s,view):
+    def card(s,view,manual_evidence=None):
         ind=s['indicators'];sc=s['scoring'];currency=s.get('currency') or ''
         key=view+'_'+s['ticker']+'_'+s['interval'];summary=s.get('session_summary')
         score='Brak danych' if sc['score'] is None else str(sc['score'])+'/100'
-        direction=s.get('direction','Brak danych').replace('Układ wzrostowy','Wzrostowy').replace('Układ spadkowy','Spadkowy')
+        trend_status=visible_market_trend(ind,s['price'])
         st.subheader(s['ticker']+' · '+s['interval'])
-        st.markdown('<div class="ki-card"><span class="ki-label">Ocena układu wzrostowego</span><br><span class="ki-score ki-'+html.escape(sc['color'])+'">'+html.escape(score+' — '+sc['label'])+'</span><br>Trend według SMA: '+html.escape(direction)+'</div>',unsafe_allow_html=True)
+        st.markdown('<div class="ki-card"><span class="ki-label">TREND · SMA 10 / SMA 30</span><br><b class="ki-score ki-'+trend_status['color']+'">'+trend_status['label']+'</b><br>'+html.escape(trend_status['reason'])+'</div>',unsafe_allow_html=True)
+        st.caption('Podstawa trendu: cena '+fmt(s['price'],4)+' · SMA 10 '+fmt(ind.get('ma_fast'),4)+' · SMA 30 '+fmt(ind.get('ma_slow'),4)+'.')
+        evidence=manual_evidence
+        if view=='auto':
+            with store.connection() as c:
+                event=c.execute('SELECT payload FROM events WHERE ticker=? AND interval=? ORDER BY rowid DESC LIMIT 1',(s['ticker'],s['interval'])).fetchone()
+            if event:evidence=json.loads(event[0])
+        wait_status=market_wait_status(s,evidence)
+        st.markdown('<div class="ki-card"><b class="ki-'+wait_status['color']+'">'+html.escape(wait_status['label'])+'</b><br>'+html.escape(wait_status['reason'])+'</div>',unsafe_allow_html=True)
+        if view=='manual':st.caption('Ruch oceniany względem osobnego punktu odniesienia ręcznego. Analizę AI uruchamia osobny przycisk.')
+
+        st.markdown('<div class="ki-card"><span class="ki-label">Ocena układu wzrostowego</span><br><span class="ki-score ki-'+html.escape(sc['color'])+'">'+html.escape(score+' — '+sc['label'])+'</span></div>',unsafe_allow_html=True)
         cols=st.columns(4)
         for col,label,value in zip(cols,['Cena','Wolumen przedziału','RVOL','Wolumen sesji (1d)'],[fmt(s['price'])+' '+currency,fmt(s.get('volume'),0),fmt(s.get('rvol')),fmt(summary.get('session_volume'),0) if summary else 'Brak danych']):col.metric(label,value)
         status={'CLOSED':'Zamknięta','OPEN':'W trakcie','UNKNOWN':'Nieustalona'}.get(s['candle_status'],s['candle_status'])
@@ -3023,6 +3222,7 @@ def run_streamlit(db):
         status=runtime_data.get('status','NOT_STARTED')
         active=age is not None and age<=15 and status in ('RUNNING','WAITING')
         st.caption(('Skaner aktywny' if active else 'Skaner zatrzymany lub brak aktualnego potwierdzenia')+' · panel odczytano: '+datetime.now().strftime('%H:%M:%S')+' · odświeżanie '+('co 10 s' if auto_refresh else 'wyłączone'))
+        render_service_panel(store)
         st.subheader('Automatyczne wyniki rynku')
         if not latest:st.info('Brak wyników automatu. Zapisz tickery i uruchom skaner: python KI.py --scanner')
         for row in latest:
@@ -3034,27 +3234,39 @@ def run_streamlit(db):
             ev=json.loads(event['payload']);delta=ev.get('price_change_pct');color='ki-red' if delta is not None and delta<0 else 'ki-green' if delta is not None and delta>0 else 'ki-yellow'
             st.markdown('<div class="ki-card '+color+'">'+html.escape(event['ticker']+' · '+when(event['created_at'])+' · cena '+fmt(delta)+'% · RVOL '+fmt(ev.get('rvol_change_pct'))+'%')+'</div>',unsafe_allow_html=True)
             with st.expander('Dowody zdarzenia '+event['id']):st.json(ev)
-        render_service_panel(store)
         with st.expander('Diagnostyka procesu, baza i cykle',expanded=False):
             st.caption('Baza: '+str(store.path));st.write('Liczba zapisanych rekordów',counts)
             if runtime:st.json({'ostatni_stan_procesu':runtime_data,'czas_zapisu_UTC':runtime[1]})
             st.dataframe([{k:r[k] for k in ('started_at','finished_at','status')} for r in recent],width='stretch')
             st.json([{**r,'payload':json.loads(r['payload'])} for r in recent])
     live_view()
+    render_discovery_panel(store)
     st.subheader('Ręczny odczyt — niezależny od automatu')
     with st.form('manual_market'):
         mt=st.text_input('Ticker ręczny').strip().upper();mi=st.selectbox('Interwał ręczny',list(MARKET_INTERVALS),index=2)
         manual=st.form_submit_button('Pobierz dane ręcznie')
+    manual_store=Store(manual_store_path(db))
     if manual:
         try:
-            with st.spinner('Pobieranie Yahoo…'):st.session_state['manual_market_snapshot']=fetch_market(mt,mi)
-        except Exception as exc:st.session_state.pop('manual_market_snapshot',None);st.error(type(exc).__name__+': '+str(exc))
+            with st.spinner('Pobieranie Yahoo…'):snap=fetch_market(mt,mi)
+            result=record_manual_read(manual_store,snap,cfg)
+            st.session_state['manual_market_snapshot']=snap
+            st.session_state['manual_market_result']=result
+        except Exception as exc:
+            st.session_state.pop('manual_market_snapshot',None);st.session_state.pop('manual_market_result',None)
+            st.error(type(exc).__name__+': '+str(exc))
     if 'manual_market_snapshot' in st.session_state:
-        st.caption('Wynik ręczny — niezależny od zapisów i punktów odniesienia automatu.')
-        card(st.session_state['manual_market_snapshot'],'manual')
+        result=st.session_state.get('manual_market_result',{});evidence=None
+        if result.get('event_id'):
+            with manual_store.connection() as c:
+                row=c.execute('SELECT payload FROM events WHERE id=?',(result['event_id'],)).fetchone()
+            if row:evidence=json.loads(row[0])
+        st.caption('Wynik ręczny · '+result.get('status','Brak zapisanego wyniku detektora')+' · osobna baza: '+str(manual_store.path))
+        card(st.session_state['manual_market_snapshot'],'manual',evidence)
+    render_manual_analysis(manual_store)
 
 
-def render_service_panel(store):
+def render_service_panel(store,manual=False):
     import streamlit as st
     labels={'PENDING_CONTEXT':'Oczekuje na Tavily','BUSY_CONTEXT':'Pobieranie kontekstu',
             'PENDING_AI':'Oczekuje na GPT','BUSY_AI':'Analiza GPT','DONE':'Analiza gotowa',
@@ -3066,20 +3278,45 @@ def render_service_panel(store):
         messages=[dict(r) for r in c.execute("SELECT * FROM outbox WHERE kind IN ('EVIDENCE','ANALYSIS') ORDER BY created_at DESC LIMIT 60")]
         errors=[json.loads(r[0]) for r in c.execute("SELECT payload FROM runtime WHERE key IN ('service_analysis','service_telegram')")]
         rejections={r['event_id']:dict(r) for r in c.execute('SELECT r.* FROM analysis_rejections r WHERE r.rowid=(SELECT MAX(x.rowid) FROM analysis_rejections x WHERE x.event_id=r.event_id)')}
-    st.subheader('Tavily · GPT · Telegram')
-    if not jobs:st.caption('Analiza pojawi się po nowym potwierdzonym ruchu i włączeniu Tavily + GPT. Odczyt ręczny nie uruchamia usług.')
+    st.subheader('Tavily + AI — historia ręczna' if manual else 'Tavily + AI — monitor analizy')
+    cfg=service_config(store.load_section('settings',{}))
+    if manual:st.info('Tryb ręczny — Tavily i AI uruchamiane wyłącznie przyciskiem po potwierdzonym ruchu.')
+    else:st.info('Tavily + AI: '+('WŁĄCZONE — analiza po potwierdzonym ruchu.' if cfg['pipeline_enabled'] else 'WYŁĄCZONE — włącz w ustawieniach i zapisz.'))
+    st.caption('Telegram: '+('włączony' if cfg['telegram_enabled'] and cfg['pipeline_enabled'] else 'wyłączony')+' · stan z zapisanej konfiguracji. Panel odczytuje SQLite; nie wywołuje usług.')
+    if jobs:
+        st.dataframe([{'Ticker':j['ticker'],'Stan':labels.get(j['state'],j['state']),'Ostatnia aktywność UTC':j['updated_at'],'Zdarzenie':j['event_id']} for j in jobs],width='stretch',hide_index=True)
+        choices=list(dict.fromkeys(j['ticker'] for j in jobs))
+        selected=st.selectbox('Historia analizy tickera',['Wszystkie']+choices,key='manual_service_ticker_history' if manual else 'service_ticker_history')
+        jobs=[j for j in jobs if selected=='Wszystkie' or j['ticker']==selected]
+    if not jobs:st.info('Brak uruchomionych analiz ręcznych.' if manual else 'Oczekiwanie na ruch — brak zapisanych zadań Tavily i AI. Pierwszy odczyt i niezmienione dane nie uruchamiają analizy.')
     for error in errors:st.error(error['error'])
     for job in jobs:
-        with st.expander(job['ticker']+' · '+labels.get(job['state'],job['state'])+' · '+job['event_id']):
+        with st.expander(job['ticker']+' · '+labels.get(job['state'],job['state'])+' · '+job['event_id'],expanded=job is jobs[0]):
+            ev=json.loads(job['payload'])
+            st.text(evidence_message(job['event_id'],ev))
+            st.caption('Ostatnia aktywność UTC: '+job['updated_at']+' · próby bieżącego etapu: '+str(job['attempts']))
             if job['last_error']:st.error(job['last_error'])
             rejection=rejections.get(job['event_id'])
             if rejection:
                 st.caption('Odrzucona odpowiedź GPT została zachowana do diagnostyki. Nie jest zaakceptowaną analizą i nie jest wysyłana.')
-                if st.checkbox('Pokaż odrzuconą odpowiedź',key='rejected_'+job['event_id']):
+                if st.checkbox('Pokaż odrzuconą odpowiedź',key=('manual_rejected_' if manual else 'rejected_')+job['event_id']):
                     st.text(json.loads(rejection['payload']).get('content') or 'Brak tekstu odpowiedzi.')
             if job['next_attempt_at']:st.caption('Ponowienie po: '+job['next_attempt_at'])
             context=json.loads(job['context']) if job['context'] else None
             if context:
+                if context.get('request'):
+                    st.markdown('**Tavily — zapisane zapytanie**')
+                    st.text(context['request']['query'])
+                    st.caption('Zakres wyszukiwania: '+context['request']['start_date']+' → '+context['request']['end_date'])
+                else:st.caption('Zapytanie nie zostało zapisane w starszej wersji KI.')
+                if 'sources' not in context:st.caption('Brak zapisanej odpowiedzi Tavily. Sprawdź stan zadania i błąd powyżej.')
+            if context and 'sources' in context:
+                if not context['sources']:st.warning('Tavily zakończone: brak źródeł spełniających warunki daty i treści.')
+                for source in context['sources']:
+                    st.text(source['id']+' · '+str(source.get('title') or 'Źródło')+' · '+source['published_at'])
+                    st.write(source['url'])
+                    st.text(source['content'])
+                for rejected in context.get('rejected_sources',[]):st.caption('Odrzucono: '+rejected['title']+' · '+rejected['reason'])
                 st.caption('Przyjęto źródeł: '+str(len(context['sources']))+' · odrzucono: '+str(context['excluded'])+' · granica czasu: '+context['cutoff'])
             if job['result']:
                 result=json.loads(job['result']);ev=json.loads(job['payload'])
@@ -3165,7 +3402,7 @@ def resume_analysis(db,event_id):
             job=c.execute('SELECT * FROM analysis_jobs WHERE event_id=?',(event_id,)).fetchone()
             if not job or job['state']=='DONE':raise ValueError('Brak zadania do ponowienia albo analiza jest już zakończona.')
             c.execute('UPDATE analysis_jobs SET state=?,attempts=0,next_attempt_at=NULL,last_error=NULL WHERE event_id=?',
-                      ('PENDING_AI' if job['context'] else 'PENDING_CONTEXT',event_id))
+                      ('PENDING_AI' if job['context'] and 'sources' in json.loads(job['context']) else 'PENDING_CONTEXT',event_id))
         process_analysis_once(store,keys,event_id);process_analysis_once(store,keys,event_id)
     with store.connection() as c:
         job=c.execute('SELECT state,last_error FROM analysis_jobs WHERE event_id=?',(event_id,)).fetchone()
@@ -3197,6 +3434,59 @@ def run_market_tests():
             return {'ticker':'AAA','interval':'1h','candle_time':candle,'acquired_at':utc_now(),
                     'candle_status':'OPEN','price':price,'rvol':rvol,'volume':100,
                     'indicators':{},'scoring':{'score':None},'currency':'PLN'}
+
+        def test_45_manual_baseline_is_independent_and_queue_is_idempotent(self):
+            temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup)
+            auto=Store(Path(temp.name)/'auto.db');manual=Store(manual_store_path(auto.path))
+            snap=self.snap(price=100.);cfg=market_config({})
+            self.assertEqual(record_manual_read(manual,snap,cfg)['status'],'BASELINE_CREATED')
+            self.assertEqual(record_manual_read(manual,snap,cfg)['status'],'UNCHANGED')
+            with manual.connection() as c:self.assertEqual(c.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0],0)
+            movement=record_manual_read(manual,{**snap,'price':102.},cfg)
+            eid=movement['event_id'];self.assertTrue(queue_manual_analysis(manual,eid))
+            self.assertFalse(queue_manual_analysis(Store(manual.path),eid))
+            with auto.connection() as c:
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM baselines').fetchone()[0],0)
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0],0)
+            with manual.connection() as c:
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM outbox WHERE status='PREVIEW'").fetchone()[0],1)
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0],1)
+
+        def test_44_discovery_validates_identity_and_restart_preserves_added_tickers(self):
+            temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup)
+            self.db=Path(temp.name)/'discovery.db';self.store=Store(self.db)
+            q={'symbol':'4MS.WA','quoteType':'EQUITY','exchange':'WSE','currency':'PLN','regularMarketPrice':6.}
+            self.assertEqual(discovery_quote(q,'GPW / NewConnect',.01,10.)['ticker'],'4MS.WA')
+            for field,value in [('quoteType','ETF'),('exchange','NYQ'),('currency','USD'),('regularMarketPrice',11.),('symbol','menu')]:
+                self.assertIsNone(discovery_quote({**q,field:value},'GPW / NewConnect',.01,10.))
+            self.assertEqual(add_observation_tickers(self.store,['4MS.WA','AAA']),2)
+            reopened=Store(self.db)
+            self.assertEqual(reopened.load_section('tickers',[]),['4MS.WA','AAA'])
+            self.assertEqual(add_observation_tickers(reopened,['4MS.WA','BBB']),1)
+            self.assertEqual(Store(self.db).load_section('tickers',[]),['4MS.WA','AAA','BBB'])
+            with self.assertRaises(ValueError):add_observation_tickers(self.store,['bad symbol'])
+            with self.store.connection() as c:
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM baselines').fetchone()[0],0)
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)
+
+        def test_43_hold_requires_exact_detector_evidence_and_direction(self):
+            snap={'price':12.,'indicators':{'ma_fast':11.,'ma_slow':10.},'candle_status':'CLOSED','acquired_at':utc_now()}
+            self.assertTrue(market_wait_status(snap)['label'].startswith('HOLD'))
+            proof={'snapshot':snap,'reasons':['PRICE']}
+            self.assertTrue(market_wait_status(snap,proof)['label'].startswith('RUCH POTWIERDZONY'))
+            changed={**snap,'price':13.}
+            self.assertTrue(market_wait_status(changed,proof)['label'].startswith('HOLD'))
+            for label_snap in [{**snap,'indicators':{}},{**snap,'indicators':{'ma_fast':10.,'ma_slow':10.}},{**snap,'candle_status':'UNKNOWN'}]:
+                self.assertTrue(market_wait_status(label_snap,{'snapshot':label_snap,'reasons':['PRICE']})['label'].startswith('HOLD'))
+
+        def test_42_visible_trend_uses_direction_not_bullish_score(self):
+            self.assertEqual(visible_market_trend({'ma_fast':11.,'ma_slow':10.},12.)['label'],'BYCZY')
+            self.assertEqual(visible_market_trend({'ma_fast':9.,'ma_slow':10.},8.)['label'],'NIEDŹWIEDZI')
+            for ind,price in [({'ma_fast':10.,'ma_slow':10.},10.),({'ma_fast':11.,'ma_slow':10.},9.),({'ma_fast':9.,'ma_slow':10.},11.)]:
+                self.assertEqual(visible_market_trend(ind,price)['label'],'NEUTRALNY')
+            for ind,price in [({},10.),({'ma_fast':float('nan'),'ma_slow':10.},10.),({'ma_fast':9.,'ma_slow':10.},0.)]:
+                self.assertEqual(visible_market_trend(ind,price)['label'],'BRAK DANYCH')
 
         def test_01_true_hlc_atr_and_direction(self):
             x=market_indicators(self.rows())
@@ -3574,7 +3864,7 @@ def run_panel_tests():
             self.assertEqual(len(self.app.exception),0)
             self.assertEqual(len(self.app.get('plotly_chart')),1)
             content=' '.join(m.value for m in self.app.markdown)
-            self.assertIn('BB górne',content);self.assertIn('5,60',content);self.assertIn('6,60',content)
+            self.assertIn('TREND · SMA 10 / SMA 30',content);self.assertIn('NEUTRALNY',content);self.assertIn('HOLD — CZEKAJ, nie otwieraj pozycji',content);self.assertIn('BB górne',content);self.assertIn('5,60',content);self.assertIn('6,60',content)
             mode=next(x for x in self.app.selectbox if x.label=='Cena odniesienia dla SL / TP')
             mode.set_value('Własna cena wejścia').run(timeout=30)
             next(x for x in self.app.number_input if x.label=='Cena wejścia AAA').set_value(7.).run(timeout=30)
@@ -3585,6 +3875,13 @@ def run_panel_tests():
             with self.store.connection() as c:
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM observations').fetchone()[0],1)
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)
+
+        def test_05_monitor_is_visible_when_disabled_without_service_calls(self):
+            self.assertIn('Tavily + AI — monitor analizy',[x.value for x in self.app.subheader])
+            self.assertIn('WYŁĄCZONE',' '.join(x.value for x in self.app.info))
+            self.assertIn('Oczekiwanie na ruch',' '.join(x.value for x in self.app.info))
+            with self.store.connection() as c:
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0],0)
 
         def test_04_service_settings_and_preview_read_real_sqlite_without_http(self):
             next(x for x in self.app.checkbox if x.label=='Tavily + GPT po wykryciu ruchu').set_value(True)
@@ -3997,6 +4294,12 @@ def run_service_tests():
             self.assertEqual(set(metric['enum']),{'rsi','last_macd_hist','ma_fast'})
             self.assertNotIn('RSI',metric['enum']);self.assertNotIn('MACD',metric['enum'])
             self.assertEqual(schema['properties']['context']['items']['properties']['source_id']['enum'],['S1'])
+        def test_25_request_has_event_ticker_and_time_window(self):
+            request=event_context_request({'snapshot':self.snap()})
+            self.assertIn(self.snap()['ticker'],request['query'])
+            self.assertFalse(request['include_answer'])
+            self.assertIn(event_context_cutoff(self.snap()).date().isoformat(),request['query'])
+
         def test_24_empty_data_schema_still_has_valid_enum_but_validator_rejects_invention(self):
             schema=analysis_schema({'indicators':{}},{'sources':[]})
             self.assertEqual(schema['properties']['technical']['items']['properties']['metric']['enum'],['UNAVAILABLE'])
