@@ -3656,6 +3656,26 @@ def start_deep_analysis(store,ticker):
     return rid
 
 
+def deep_analysis_error(exc,stage):
+    """Show a bounded diagnosis without source lines, locals or credentials."""
+    import traceback
+    import re
+    message=str(exc)
+    secrets=[value for name,value in os.environ.items() if value and
+             any(word in name.upper() for word in ('KEY','TOKEN','SECRET','PASSWORD'))]
+    try:secrets.extend(value for value in load_service_keys().values() if value)
+    except Exception:pass
+    for value in sorted(set(secrets),key=len,reverse=True):message=message.replace(value,'[UKRYTO]')
+    message=re.sub(r'(?i)Bearer\s+[^\s,;]+','Bearer [UKRYTO]',message)
+    message=re.sub(r'\bsk-[A-Za-z0-9_-]+','[UKRYTO]',message)
+    message=re.sub(r'https?://[^\s\"\']+','[ADRES UKRYTY]',message)
+    message=' '.join(message.split())[:1200] or 'Brak szczegółowego komunikatu.'
+    frames=traceback.extract_tb(exc.__traceback__)
+    location=' → '.join(Path(frame.filename).name+':'+str(frame.lineno)+' ('+frame.name+')' for frame in frames[-4:])
+    return ('TradingAgents: '+type(exc).__name__+'. Etap: '+stage+'. '+message+
+            (' Miejsce: '+location+'.' if location else '')+' Bez automatycznego ponawiania.')
+
+
 def deep_analysis_worker(store,report_id):
     from zoneinfo import ZoneInfo
     folder=store.path.parent/'KI_analizy_poglebione'/report_id
@@ -3664,6 +3684,7 @@ def deep_analysis_worker(store,report_id):
         if not raw:return 2
         ticker=raw['ticker'];c.execute("UPDATE deep_reports SET state='RUNNING' WHERE id=?",(report_id,))
     deadline=None
+    stage="Ładowanie TradingAgents"
     try:
         def timed_out():
             with store.transaction() as c:c.execute("UPDATE deep_reports SET state='REVIEW_REQUIRED',error=?,finished_at=? WHERE id=? AND state='RUNNING'",('Przekroczono czas analizy. Wynik niepotwierdzony; bez automatycznego ponawiania.',utc_now(),report_id))
@@ -3675,9 +3696,12 @@ def deep_analysis_worker(store,report_id):
         if tradingagents.__version__!='0.6.0':raise ValueError('Wymagana sprawdzona wersja TradingAgents 0.6.0.')
         folder.mkdir(parents=True,exist_ok=True)
         config=deep_analysis_config(DEFAULT_CONFIG,folder)
+        stage='Tworzenie konfiguracji i grafu'
         graph=TradingAgentsGraph(selected_analysts=('market','news','fundamentals'),debug=False,config=config)
         day=datetime.now(ZoneInfo('Europe/Warsaw' if ticker.endswith('.WA') else 'America/New_York')).date().isoformat()
+        stage='Analiza danych i wywołania modeli'
         state,decision=graph.propagate(ticker,day)
+        stage='Zapis raportu'
         fields={'market_report':'Analiza techniczna','news_report':'Wiadomości i źródła',
                 'fundamentals_report':'Fundamenty','investment_plan':'Argumenty za i przeciw',
                 'final_trade_decision':'Ocena końcowa'}
@@ -3690,8 +3714,8 @@ def deep_analysis_worker(store,report_id):
         with store.transaction() as c:c.execute("UPDATE deep_reports SET state='DONE',payload=?,finished_at=? WHERE id=?",(json_text(payload),utc_now(),report_id))
         return 0
     except Exception as exc:
-        # Provider exceptions can contain tokens or request bodies; save only the class.
-        with store.transaction() as c:c.execute("UPDATE deep_reports SET state='FAILED',error=?,finished_at=? WHERE id=?",('TradingAgents: '+type(exc).__name__+'. Sprawdź instalację, dostęp do Yahoo i konfigurację OpenAI. Bez automatycznego ponawiania.',utc_now(),report_id))
+        # Persist only a redacted message and frame names, never locals or raw traceback.
+        with store.transaction() as c:c.execute("UPDATE deep_reports SET state='FAILED',error=?,finished_at=? WHERE id=?",(deep_analysis_error(exc,stage),utc_now(),report_id))
         return 2
     finally:
         if deadline:deadline.cancel()
@@ -4624,6 +4648,19 @@ def run_opportunity_tests():
     import tempfile
     from datetime import timedelta
     class OpportunityTests(unittest.TestCase):
+     def test_16_deep_diagnostic_redacts_credentials_and_retains_location(self):
+         try:
+             raise ValueError('unsupported indicator; Bearer private-token; sk-private123; https://host/path?api_key=private')
+         except ValueError as exc:
+             result=deep_analysis_error(exc,'Analiza danych')
+         self.assertIn('ValueError',result)
+         self.assertIn('unsupported indicator',result)
+         self.assertIn('Miejsce:',result)
+         self.assertIn('Analiza danych',result)
+         self.assertNotIn('private-token',result)
+         self.assertNotIn('sk-private123',result)
+         self.assertNotIn('api_key=',result)
+
      def setUp(self):
       self.tmp=tempfile.TemporaryDirectory();self.s=Store(Path(self.tmp.name)/'test.db');self.s.save_section('tickers',['AAA'])
       self.now=datetime(2026,10,5,12,30,tzinfo=timezone.utc)
