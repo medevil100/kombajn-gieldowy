@@ -2597,6 +2597,19 @@ def message_limit(text):
     return text.encode('utf-16-le')[:8000].decode('utf-16-le',errors='ignore')+'\n[Pełna analiza w panelu KI]'
 
 
+def telegram_movement_confirmed(evidence):
+    """Delivery gate: price movement AND above-average candle volume."""
+    snap=evidence.get('snapshot',{});change=evidence.get('price_change_pct')
+    rv=snap.get('rvol');volume=snap.get('volume')
+    return (finite_number(change) and abs(change)>=2.0 and
+            finite_number(rv) and rv>=1.20 and finite_number(volume,True))
+
+
+def telegram_message_status(evidence,enabled):
+    if not enabled:return 'PREVIEW'
+    return 'PENDING' if telegram_movement_confirmed(evidence) else 'FILTERED'
+
+
 def evidence_message(event_id,evidence):
     snap=evidence['snapshot'];reference=evidence['reference']
     def val(v):return 'brak danych' if v is None else format(v,'.6g') if finite_number(v) else str(v)
@@ -2610,6 +2623,7 @@ def evidence_message(event_id,evidence):
            'Względna zmiana RVOL: '+val(evidence.get('rvol_change_pct'))+'%',
            'Przekroczone progi: '+', '.join(evidence['reasons']),
            'Progi: cena > '+val(evidence['thresholds']['price_threshold_pct'])+'%; RVOL > '+val(evidence['thresholds']['rvol_threshold_pct'])+'%',
+           'Filtr Telegram: |zmiana ceny| ≥ 2% ORAZ RVOL ≥ 1,20; dodatni wolumen świecy.',
            'Cena z: '+str(snap.get('latest_price_origin') or 'Yahoo OHLC'),
            'Analiza AI: osobny komunikat po zakończeniu.']
     return message_limit('\n'.join(lines))
@@ -2662,7 +2676,7 @@ def finish_analysis(store,event_id,result,metadata):
         c.execute("UPDATE analysis_jobs SET state='DONE',result=?,last_error=NULL,next_attempt_at=NULL,updated_at=? WHERE event_id=?",
                   (json_text({'analysis':result,'provider':metadata}),now,event_id))
         c.execute('INSERT INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)',
-                  (event_id+':analysis',event_id,'ANALYSIS',message,'PENDING' if evidence.get('delivery_enabled') else 'PREVIEW',now))
+                  (event_id+':analysis',event_id,'ANALYSIS',message,telegram_message_status(evidence,evidence.get('delivery_enabled')),now))
 
 
 def fail_analysis(store,event_id,error):
@@ -2715,9 +2729,16 @@ def approve_preview(store,outbox_id):
 
 def claim_delivery(store,outbox_id=None):
     with store.transaction() as c:
-        row=c.execute("SELECT o.* FROM outbox o JOIN analysis_jobs j ON j.event_id=o.event_id WHERE o.kind IN ('EVIDENCE','ANALYSIS') AND o.status='PENDING' AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=?)"+
-                      (' AND o.id=?' if outbox_id else '')+' ORDER BY o.created_at,o.kind DESC LIMIT 1',
-                      (utc_now(),outbox_id) if outbox_id else (utc_now(),)).fetchone()
+        # Check all pending messages, including retries, before any network request.
+        rows=c.execute("SELECT o.*,e.payload AS evidence_payload FROM outbox o JOIN analysis_jobs j ON j.event_id=o.event_id JOIN events e ON e.id=o.event_id WHERE o.kind IN ('EVIDENCE','ANALYSIS') AND o.status='PENDING'"+
+                      (' AND o.id=?' if outbox_id else '')+' ORDER BY o.created_at,o.kind DESC',
+                      (outbox_id,) if outbox_id else ()).fetchall()
+        row=None
+        for candidate in rows:
+            if not telegram_movement_confirmed(json.loads(candidate['evidence_payload'])):
+                c.execute("UPDATE outbox SET status='FILTERED',last_error='Telegram: wymagane |zmiana ceny| ≥ 2% i RVOL ≥ 1,20 oraz dodatni wolumen świecy.',next_attempt_at=NULL WHERE id=?",(candidate['id'],))
+            elif row is None and (candidate['next_attempt_at'] is None or candidate['next_attempt_at']<=utc_now()):
+                row=candidate
         if not row:return None
         item=dict(row);item['attempts']+=1
         c.execute("UPDATE outbox SET status='SENDING',attempts=? WHERE id=?",(item['attempts'],item['id']))
@@ -2827,7 +2848,7 @@ def detect_market(store,snapshot,config=None):
                     c.execute('INSERT INTO analysis_jobs(event_id,state,updated_at) VALUES(?,?,?)',(event_id,'PENDING_CONTEXT',now))
                     c.execute('INSERT INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)',
                               (event_id+':evidence',event_id,'EVIDENCE',evidence_message(event_id,evidence),
-                               'PENDING' if services['telegram_enabled'] else 'PREVIEW',now))
+                               telegram_message_status(evidence,services['telegram_enabled']),now))
                 baseline.update(price=price,rvol=rv,last_event_id=event_id)
             baseline.update(candle_time=snapshot['candle_time'],acquired_at=now)
         c.execute('INSERT INTO baselines VALUES(?,?,?,?) ON CONFLICT(ticker,interval) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',
@@ -3097,6 +3118,7 @@ def run_streamlit(db):
             st.markdown('**Dalsza analiza potwierdzonego ruchu**')
             pipeline_enabled=st.checkbox('Tavily + GPT po wykryciu ruchu',value=services['pipeline_enabled'])
             telegram_enabled=st.checkbox('Automatycznie wysyłaj nowe zdarzenia na Telegram',value=services['telegram_enabled'])
+            st.caption('Telegram: zmiana ceny co najmniej ±2% ORAZ RVOL ≥ 1,20, przy dodatnim wolumenie świecy. Filtr dotyczy alertu i uzupełnienia AI, także oczekującej kolejki. Progi powyżej dotyczą detekcji w panelu.')
             st.caption('Przy wyłączonej wysyłce wiadomości pozostają w podglądzie. Włączenie dotyczy nowych zdarzeń.')
             saved=st.form_submit_button('Zapisz ustawienia')
         if saved:
@@ -3316,7 +3338,7 @@ def render_service_panel(store,manual=False):
             'PENDING_AI':'Oczekuje na GPT','BUSY_AI':'Analiza GPT','DONE':'Analiza gotowa',
             'FAILED':'Błąd — zadanie zatrzymane','REVIEW_REQUIRED':'Wymaga sprawdzenia po przerwaniu',
             'PREVIEW':'Podgląd — bez wysyłki','PENDING':'Oczekuje na wysyłkę','SENDING':'Wysyłanie',
-            'DELIVERED':'Doręczono','UNCERTAIN':'Sprawdź czat — brak potwierdzenia'}
+            'DELIVERED':'Doręczono','FILTERED':'Tylko panel — warunki Telegrama niespełnione','UNCERTAIN':'Sprawdź czat — brak potwierdzenia'}
     with store.connection() as c:
         choices=[r[0] for r in c.execute('SELECT DISTINCT e.ticker FROM analysis_jobs j JOIN events e ON e.id=j.event_id ORDER BY e.ticker')]
     selected=st.selectbox('Historia analizy tickera',['Wszystkie']+choices,key='manual_service_ticker_history' if manual else 'service_ticker_history')
@@ -4234,6 +4256,53 @@ def run_service_tests():
     from concurrent.futures import ThreadPoolExecutor
 
     class ServiceTests(unittest.TestCase):
+        def test_26_telegram_requires_both_price_and_volume(self):
+            for change,rvol,expected in ((.1,5.,False),(2.,1.19,False),(2.,1.2,True),(-2.,1.2,True),(1.999,2.,False),(3.,None,False)):
+                evidence={'price_change_pct':change,'snapshot':{'rvol':rvol,'volume':100}}
+                self.assertEqual(telegram_movement_confirmed(evidence),expected)
+            self.assertFalse(telegram_movement_confirmed({'price_change_pct':3.,'snapshot':{'rvol':2.,'volume':0}}))
+
+        def test_27_old_queue_is_filtered_before_claim_without_network(self):
+            eid=self.event()
+            with self.store.transaction() as c:
+                evidence=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(eid,)).fetchone()[0])
+                evidence['price_change_pct']=.15
+                c.execute('UPDATE events SET payload=? WHERE id=?',(json_text(evidence),eid))
+                c.execute("UPDATE outbox SET status='PENDING'")
+                c.execute('INSERT INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)',
+                          (eid+':analysis',eid,'ANALYSIS','old analysis','PENDING',utc_now()))
+            self.assertIsNone(claim_delivery(Store(self.store.path)))
+            with self.store.connection() as c:
+                self.assertEqual([r[0] for r in c.execute('SELECT status FROM outbox')],['FILTERED','FILTERED'])
+                self.assertEqual(c.execute('SELECT SUM(attempts) FROM outbox').fetchone()[0],0)
+
+        def test_28_eligible_event_survives_restart_and_claim(self):
+            eid=self.event()
+            approve_preview(self.store,eid+':evidence')
+            item=claim_delivery(Store(self.store.path))
+            self.assertEqual(item['event_id'],eid)
+
+        def test_29_preview_approval_cannot_bypass_filter(self):
+            eid=self.event()
+            with self.store.transaction() as c:
+                evidence=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(eid,)).fetchone()[0])
+                evidence['snapshot']['rvol']=1.19
+                c.execute('UPDATE events SET payload=? WHERE id=?',(json_text(evidence),eid))
+            approve_preview(self.store,eid+':evidence')
+            self.assertIsNone(claim_delivery(self.store,eid+':evidence'))
+
+        def test_30_new_unconfirmed_event_and_ai_stay_in_panel(self):
+            detect_market(self.store,self.snap(),{**self.cfg,'telegram_enabled':True})
+            eid=detect_market(self.store,self.snap(101.5),{**self.cfg,'telegram_enabled':True})['event_id']
+            with self.store.connection() as c:
+                self.assertEqual(c.execute('SELECT status FROM outbox WHERE event_id=?',(eid,)).fetchone()[0],'FILTERED')
+            claim_analysis(self.store);save_analysis_context(self.store,eid,self.context());claim_analysis(self.store)
+            finish_analysis(self.store,eid,self.analysis(),{})
+            with self.store.connection() as c:
+                self.assertEqual(c.execute("SELECT status FROM outbox WHERE kind='ANALYSIS'").fetchone()[0],'FILTERED')
+                self.assertEqual(c.execute('SELECT state FROM analysis_jobs').fetchone()[0],'DONE')
+            self.assertIsNone(claim_delivery(self.store))
+
         def setUp(self):
             self.temp=tempfile.TemporaryDirectory();self.store=Store(Path(self.temp.name)/'services.db')
             self.cfg={'pipeline_enabled':True,'telegram_enabled':False}
@@ -4241,7 +4310,7 @@ def run_service_tests():
         def snap(self,price=100):
             return {'ticker':'AAA','interval':'1h','candle_time':'2026-10-02T14:00:00+00:00',
                     'candle_end':'2026-10-02T15:00:00+00:00','acquired_at':'2026-10-02T15:01:00+00:00',
-                    'candle_status':'CLOSED','price':price,'rvol':1.,'volume':123,'indicators':{'rsi':55.},'currency':'PLN'}
+                    'candle_status':'CLOSED','price':price,'rvol':1.2,'volume':123,'indicators':{'rsi':55.},'currency':'PLN'}
         def event(self):
             detect_market(self.store,self.snap(),self.cfg)
             return detect_market(self.store,self.snap(102),self.cfg)['event_id']
