@@ -2601,10 +2601,18 @@ def message_limit(text):
     return text.encode('utf-16-le')[:8000].decode('utf-16-le',errors='ignore')+'\n[Pełna analiza w panelu KI]'
 
 
-def telegram_movement_confirmed(evidence):
-    """Delivery gate: price movement AND above-average candle volume."""
+def telegram_movement_confirmed(evidence,now=None):
+    """Require a current open 1h candle at creation and again before delivery."""
     snap=evidence.get('snapshot',{});change=evidence.get('price_change_pct')
     rv=snap.get('rvol');volume=snap.get('volume')
+    if snap.get('interval')!='1h' or snap.get('candle_status')!='OPEN':return False
+    try:
+        from datetime import timedelta
+        current=now if now is not None else datetime.now(timezone.utc)
+        start=parse_market_time(snap['candle_time']);end=parse_market_time(snap['candle_end'])
+        acquired=parse_market_time(snap['acquired_at'])
+        if not (start<=acquired<=current<end and start<end<=start+timedelta(hours=1)):return False
+    except (KeyError,ValueError,TypeError,OverflowError):return False
     return (finite_number(change) and abs(change)>=2.0 and
             finite_number(rv) and rv>=1.20 and finite_number(volume,True))
 
@@ -2644,7 +2652,7 @@ def evidence_message(event_id,evidence):
            'Względna zmiana RVOL: '+val(evidence.get('rvol_change_pct'))+'%',
            'Przekroczone progi detekcji w panelu: '+', '.join({'PRICE':'Cena','RVOL':'Względna zmiana RVOL'}.get(r,r) for r in evidence['reasons']),
            'Progi: cena > '+val(evidence['thresholds']['price_threshold_pct'])+'%; RVOL > '+val(evidence['thresholds']['rvol_threshold_pct'])+'%',
-           'Filtr Telegram: |zmiana ceny| ≥ 2% ORAZ RVOL ≥ 1,20; dodatni wolumen świecy.',
+           'Filtr Telegram: |zmiana ceny| ≥ 2% ORAZ RVOL ≥ 1,20; dodatni wolumen aktualnej, otwartej świecy 1h.',
            'Źródło ceny: '+{'carried_previous_close':'Poprzednia cena zamknięcia','Yahoo OHLC':'Dane OHLC Yahoo'}.get(snap.get('latest_price_origin'),'Dane OHLC Yahoo'),
            'Analiza AI: osobny komunikat po zakończeniu.']
     return message_limit('\n'.join(lines))
@@ -2757,7 +2765,7 @@ def claim_delivery(store,outbox_id=None):
         row=None
         for candidate in rows:
             if not telegram_movement_confirmed(json.loads(candidate['evidence_payload'])):
-                c.execute("UPDATE outbox SET status='FILTERED',last_error='Telegram: wymagane |zmiana ceny| ≥ 2% i RVOL ≥ 1,20 oraz dodatni wolumen świecy.',next_attempt_at=NULL WHERE id=?",(candidate['id'],))
+                c.execute("UPDATE outbox SET status='FILTERED',last_error='Telegram: wymagane |zmiana ceny| ≥ 2% i RVOL ≥ 1,20 oraz dodatni wolumen aktualnej, otwartej świecy 1h.',next_attempt_at=NULL WHERE id=?",(candidate['id'],))
             elif row is None and (candidate['next_attempt_at'] is None or candidate['next_attempt_at']<=utc_now()):
                 row=candidate
         if not row:return None
@@ -3169,7 +3177,7 @@ def render_gpt_chat(store):
     with store.connection() as c:
         ticks=sorted(set(store.load_section('tickers',[]))|{r[0] for r in c.execute('SELECT DISTINCT ticker FROM observations')})
         history=[dict(r) for r in c.execute('SELECT * FROM gpt_chat_turns ORDER BY rowid DESC LIMIT 20')][::-1]
-    with st.form('gpt_chat_form',clear_on_submit=True):
+    with st.form('gpt_chat_form',clear_on_submit=False):
         selected=st.selectbox('Dane spółki do rozmowy',['Bez danych spółki']+ticks)
         question=st.text_area('Pytanie do GPT',max_chars=4000)
         send=st.form_submit_button('Wyślij pytanie do GPT')
@@ -3272,7 +3280,7 @@ def run_streamlit(db):
                     store._write_section(c,'settings',current);store._write_section(c,'tickers',new_ticks)
                 st.rerun()
         auto_refresh=st.checkbox('Automatyczne odświeżanie panelu',value=True)
-        st.caption('Odczyt zapisanych wyników co 10 sekund. Skaner pobiera Yahoo według ustawionego cyklu.')
+        st.caption('Odczyt zapisanych wyników co 15 minut. Skaner pobiera Yahoo według ustawionego cyklu.')
         st.caption('Etap 3 · GPT-4.1 analizuje dowód ruchu. Tavily dostarcza kontekst; nie skanuje rynku.')
     section=st.radio('Widok panelu',['Automat','Analiza GPT','Rozmowa z GPT','Monitor Tavily + AI','Ręczny ticker','Dodaj / wyszukaj spółki'],horizontal=True,key='panel_view')
     if section=='Analiza GPT':render_gpt_analysis(store);return
@@ -3371,7 +3379,7 @@ def run_streamlit(db):
             st.write('Punkty za składniki',{polish_indicator(k):v for k,v in sc.get('components',{}).items()})
             if ind.get('missing'):st.write('Brakujące wskaźniki',[polish_indicator(k) for k in ind['missing']])
             st.json(s)
-    @st.fragment(run_every=10 if auto_refresh else None)
+    @st.fragment(run_every=900 if auto_refresh else None)
     def live_view():
         st.button('Odśwież diagnostykę',help='Odczytuje zapisane wyniki; nie pobiera Yahoo.')
         with store.connection() as c:
@@ -3385,7 +3393,7 @@ def run_streamlit(db):
         age=(datetime.now(timezone.utc)-parse_market_time(runtime[1])).total_seconds() if runtime else None
         status=runtime_data.get('status','NOT_STARTED')
         active=age is not None and age<=15 and status in ('RUNNING','WAITING')
-        st.caption(('Skaner aktywny' if active else 'Skaner zatrzymany lub brak aktualnego potwierdzenia')+' · panel odczytano: '+datetime.now().strftime('%H:%M:%S')+' · odświeżanie '+('co 10 s' if auto_refresh else 'wyłączone'))
+        st.caption(('Skaner aktywny' if active else 'Skaner zatrzymany lub brak aktualnego potwierdzenia')+' · panel odczytano: '+datetime.now().strftime('%H:%M:%S')+' · odświeżanie '+('co 15 min' if auto_refresh else 'wyłączone'))
         with st.expander('Diagnostyka procesu, baza i cykle',expanded=False):
             st.caption('Baza: '+str(store.path));st.write('Liczba zapisanych rekordów',dict(zip(['Spółki','Odczyty','Punkty odniesienia','Zdarzenia','Cykle'],counts.values())))
             if runtime:st.json({'ostatni_stan_procesu':runtime_data,'czas_zapisu_UTC':runtime[1]})
@@ -4041,6 +4049,17 @@ def run_panel_tests():
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM gpt_chat_turns').fetchone()[0],0)
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)
 
+        def test_11_chat_ticker_survives_submit_and_panel_refresh_is_15_minutes(self):
+            self.assertTrue(any('co 15 minut' in x.value for x in self.app.caption))
+            self.store.save_section('tickers',['AAA'])
+            next(x for x in self.app.radio if x.label=='Widok panelu').set_value('Rozmowa z GPT').run(timeout=30)
+            next(x for x in self.app.selectbox if x.label=='Dane spółki do rozmowy').set_value('AAA')
+            self.button('Wyślij pytanie do GPT').click().run(timeout=30)
+            self.assertEqual(len(self.app.exception),0)
+            self.assertEqual(next(x for x in self.app.selectbox if x.label=='Dane spółki do rozmowy').value,'AAA')
+            self.app.run(timeout=30)
+            self.assertEqual(next(x for x in self.app.selectbox if x.label=='Dane spółki do rozmowy').value,'AAA')
+
         def test_09_gpt_chat_context_and_restart_preserve_real_sqlite(self):
             self.store.save_section('tickers',['AAA'])
             snap={'ticker':'AAA','interval':'1h','candle_time':'2026-10-05T08:00:00+00:00',
@@ -4441,7 +4460,7 @@ def run_service_tests():
     class ServiceTests(unittest.TestCase):
         def test_26_telegram_requires_both_price_and_volume(self):
             for change,rvol,expected in ((.1,5.,False),(2.,1.19,False),(2.,1.2,True),(-2.,1.2,True),(1.999,2.,False),(3.,None,False)):
-                evidence={'price_change_pct':change,'snapshot':{'rvol':rvol,'volume':100}}
+                evidence={'price_change_pct':change,'snapshot':{**self.snap(live=True),'rvol':rvol,'volume':100}}
                 self.assertEqual(telegram_movement_confirmed(evidence),expected)
             self.assertFalse(telegram_movement_confirmed({'price_change_pct':3.,'snapshot':{'rvol':2.,'volume':0}}))
 
@@ -4486,17 +4505,50 @@ def run_service_tests():
                 self.assertEqual(c.execute('SELECT state FROM analysis_jobs').fetchone()[0],'DONE')
             self.assertIsNone(claim_delivery(self.store))
 
+        def test_31_telegram_requires_current_open_hour(self):
+            from datetime import timedelta
+            now=datetime(2026,10,5,12,20,tzinfo=timezone.utc)
+            snap={**self.snap(live=True),'candle_time':'2026-10-05T12:00:00+00:00',
+                  'candle_end':'2026-10-05T13:00:00+00:00','acquired_at':now.isoformat()}
+            ev={'price_change_pct':3.,'snapshot':snap}
+            self.assertTrue(telegram_movement_confirmed(ev,now=now))
+            for changes in ({'candle_status':'CLOSED'},{'interval':'1d'},
+                            {'candle_end':None},{'acquired_at':(now+timedelta(seconds=1)).isoformat()},
+                            {'candle_time':'2026-10-05T13:00:00+00:00'}):
+                self.assertFalse(telegram_movement_confirmed({**ev,'snapshot':{**snap,**changes}},now=now))
+            self.assertFalse(telegram_movement_confirmed(ev,now=datetime(2026,10,5,13,tzinfo=timezone.utc)))
+
+        def test_32_expired_analysis_queue_filtered_after_restart(self):
+            from datetime import timedelta
+            eid=self.event()
+            with self.store.transaction() as c:
+                ev=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(eid,)).fetchone()[0])
+                now=datetime.now(timezone.utc)
+                ev['snapshot'].update(candle_time=(now-timedelta(hours=2)).isoformat(),
+                    candle_end=(now-timedelta(hours=1)).isoformat(),acquired_at=(now-timedelta(hours=1,minutes=1)).isoformat())
+                c.execute('UPDATE events SET payload=? WHERE id=?',(json_text(ev),eid))
+                c.execute("UPDATE outbox SET status='PENDING'")
+                c.execute('INSERT INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)',
+                          (eid+':analysis',eid,'ANALYSIS','saved analysis','PENDING',utc_now()))
+            self.assertIsNone(claim_delivery(Store(self.store.path)))
+            with self.store.connection() as c:
+                self.assertEqual([r[0] for r in c.execute('SELECT status FROM outbox')],['FILTERED','FILTERED'])
+                self.assertEqual(c.execute('SELECT SUM(attempts) FROM outbox').fetchone()[0],0)
+
         def setUp(self):
             self.temp=tempfile.TemporaryDirectory();self.store=Store(Path(self.temp.name)/'services.db')
             self.cfg={'pipeline_enabled':True,'telegram_enabled':False}
         def tearDown(self):self.temp.cleanup()
-        def snap(self,price=100):
-            return {'ticker':'AAA','interval':'1h','candle_time':'2026-10-02T14:00:00+00:00',
-                    'candle_end':'2026-10-02T15:00:00+00:00','acquired_at':'2026-10-02T15:01:00+00:00',
-                    'candle_status':'CLOSED','price':price,'rvol':1.2,'volume':123,'indicators':{'rsi':55.},'currency':'PLN'}
+        def snap(self,price=100,live=False):
+            from datetime import timedelta
+            now=datetime.now(timezone.utc) if live else datetime(2026,10,2,15,1,tzinfo=timezone.utc)
+            start=now.replace(minute=0,second=0,microsecond=0) if live else datetime(2026,10,2,14,tzinfo=timezone.utc)
+            return {'ticker':'AAA','interval':'1h','candle_time':start.isoformat(),
+                    'candle_end':(start+timedelta(hours=1)).isoformat(),'acquired_at':now.isoformat(),
+                    'candle_status':'OPEN' if live else 'CLOSED','price':price,'rvol':1.2,'volume':123,'indicators':{'rsi':55.},'currency':'PLN'}
         def event(self):
-            detect_market(self.store,self.snap(),self.cfg)
-            return detect_market(self.store,self.snap(102),self.cfg)['event_id']
+            detect_market(self.store,self.snap(live=True),self.cfg)
+            return detect_market(self.store,self.snap(102,live=True),self.cfg)['event_id']
         def context(self):
             return {'sources':[{'id':'S1','url':'https://example.org/report','title':'Raport',
                     'published_at':'2026-10-02T12:00:00+00:00','content':'Emitent opublikował raport.'}],
