@@ -3113,6 +3113,7 @@ def run_streamlit(db):
         auto_refresh=st.checkbox('Automatyczne odświeżanie panelu',value=True)
         st.caption('Odczyt zapisanych wyników co 10 sekund. Skaner pobiera Yahoo według ustawionego cyklu.')
         st.caption('Etap 3 · GPT-4.1 analizuje dowód ruchu. Tavily dostarcza kontekst; nie skanuje rynku.')
+    section=st.radio('Widok panelu',['Automat','Monitor Tavily + AI','Ręczny ticker','Dodaj / wyszukaj spółki'],horizontal=True,key='panel_view')
     def fmt(value,places=2):
         if not finite_number(value):return 'Brak danych'
         return f'{value:,.{places}f}'.replace(',',' ').replace('.',',')
@@ -3222,25 +3223,68 @@ def run_streamlit(db):
         status=runtime_data.get('status','NOT_STARTED')
         active=age is not None and age<=15 and status in ('RUNNING','WAITING')
         st.caption(('Skaner aktywny' if active else 'Skaner zatrzymany lub brak aktualnego potwierdzenia')+' · panel odczytano: '+datetime.now().strftime('%H:%M:%S')+' · odświeżanie '+('co 10 s' if auto_refresh else 'wyłączone'))
-        render_service_panel(store)
+        with st.expander('Diagnostyka procesu, baza i cykle',expanded=False):
+            st.caption('Baza: '+str(store.path));st.write('Liczba zapisanych rekordów',counts)
+            if runtime:st.json({'ostatni_stan_procesu':runtime_data,'czas_zapisu_UTC':runtime[1]})
+            st.dataframe([{k:r[k] for k in ('started_at','finished_at','status')} for r in recent],width='stretch')
+            st.json([{**r,'payload':json.loads(r['payload'])} for r in recent])
+        if section=='Monitor Tavily + AI':
+            render_service_panel(store)
+            return
+        if section!='Automat':return
         st.subheader('Automatyczne wyniki rynku')
         if not latest:st.info('Brak wyników automatu. Zapisz tickery i uruchom skaner: python KI.py --scanner')
-        for row in latest:
-            snap=json.loads(row[0]);card(snap,'auto')
-            with st.expander('Punkt odniesienia · '+snap['ticker']+' '+snap['interval']):st.json(bases.get((snap['ticker'],snap['interval']),{}))
+        snapshots=[json.loads(row[0]) for row in latest]
+        current={(x['ticker'],x['interval']):x for x in snapshots}
+        cycle=json.loads(recent[0]['payload']) if recent else {}
+        cycle_results={x['ticker']:x for x in cycle.get('results',[])}
+        unprocessed=set(cycle.get('unprocessed_tickers',[]))
+        rows=[]
+        for ticker in ticks:
+            snapshot=current.get((ticker,cfg['market_interval']))
+            result=cycle_results.get(ticker,{})
+            rows.append({'Ticker':ticker,'Interwał':cfg['market_interval'],
+                         'Stan ostatniego cyklu':result.get('status') or ('Nieprzetworzony' if ticker in unprocessed else 'Brak zapisanego wyniku'),
+                         'Cena':snapshot.get('price') if snapshot else None,
+                         'RVOL':snapshot.get('rvol') if snapshot else None,
+                         'Czas odczytu UTC':snapshot.get('acquired_at') if snapshot else None,
+                         'Błąd':result.get('error','')})
+        st.caption('Zapisanych spółek: '+str(len(ticks))+' · z odczytem dla '+cfg['market_interval']+': '+str(sum((t,cfg['market_interval']) in current for t in ticks))+'. Tabela obejmuje całą listę; szczegóły dotyczą wybranej spółki.')
+        if rows:st.dataframe(rows,width='stretch',hide_index=True)
+        choices={x['ticker']+' · '+x['interval']:x for x in snapshots if x['ticker'] in ticks}
+        if choices:
+            selected=st.selectbox('Szczegóły spółki',list(choices),key='automatic_ticker_detail')
+            snap=choices[selected]
+            try:
+                card(snap,'auto')
+                with st.expander('Punkt odniesienia · '+snap['ticker']+' '+snap['interval']):st.json(bases.get((snap['ticker'],snap['interval']),{}))
+            except (KeyError,ValueError,TypeError) as exc:
+                st.error('Nie można wyświetlić szczegółów '+snap['ticker']+': '+type(exc).__name__+'. Sprawdź zapis odczytu; inne widoki pozostają dostępne.')
         st.subheader('Wykryte zdarzenia')
         if not events:st.caption('Brak zdarzeń. Pierwszy odczyt tworzy punkt odniesienia; niezmieniona cena nie tworzy zdarzenia cenowego.')
         for event in events:
             ev=json.loads(event['payload']);delta=ev.get('price_change_pct');color='ki-red' if delta is not None and delta<0 else 'ki-green' if delta is not None and delta>0 else 'ki-yellow'
             st.markdown('<div class="ki-card '+color+'">'+html.escape(event['ticker']+' · '+when(event['created_at'])+' · cena '+fmt(delta)+'% · RVOL '+fmt(ev.get('rvol_change_pct'))+'%')+'</div>',unsafe_allow_html=True)
             with st.expander('Dowody zdarzenia '+event['id']):st.json(ev)
-        with st.expander('Diagnostyka procesu, baza i cykle',expanded=False):
-            st.caption('Baza: '+str(store.path));st.write('Liczba zapisanych rekordów',counts)
-            if runtime:st.json({'ostatni_stan_procesu':runtime_data,'czas_zapisu_UTC':runtime[1]})
-            st.dataframe([{k:r[k] for k in ('started_at','finished_at','status')} for r in recent],width='stretch')
-            st.json([{**r,'payload':json.loads(r['payload'])} for r in recent])
     live_view()
-    render_discovery_panel(store)
+    if section=='Dodaj / wyszukaj spółki':
+        st.subheader('Dodaj tickery ręcznie')
+        with st.form('add_tickers_form'):
+            addition=st.text_area('Nowe tickery — spacja, przecinek lub nowa linia')
+            add=st.form_submit_button('Dodaj tickery do listy')
+        if add:
+            import re
+            candidates=list(dict.fromkeys(t.upper() for t in re.split(r'[,\s]+',addition.strip()) if t))
+            try:
+                if not candidates:raise ValueError('Wpisz co najmniej jeden ticker.')
+                count=add_observation_tickers(store,candidates)
+                st.session_state['add_tickers_notice']='Dodano '+str(count)+' nowych spółek. Lista zapisana w SQLite; wcześniejsze tickery zachowane.'
+                st.rerun()
+            except ValueError as exc:st.error(str(exc))
+        if st.session_state.get('add_tickers_notice'):st.success(st.session_state['add_tickers_notice'])
+        render_discovery_panel(store)
+        return
+    if section!='Ręczny ticker':return
     st.subheader('Ręczny odczyt — niezależny od automatu')
     with st.form('manual_market'):
         mt=st.text_input('Ticker ręczny').strip().upper();mi=st.selectbox('Interwał ręczny',list(MARKET_INTERVALS),index=2)
@@ -3274,8 +3318,15 @@ def render_service_panel(store,manual=False):
             'PREVIEW':'Podgląd — bez wysyłki','PENDING':'Oczekuje na wysyłkę','SENDING':'Wysyłanie',
             'DELIVERED':'Doręczono','UNCERTAIN':'Sprawdź czat — brak potwierdzenia'}
     with store.connection() as c:
-        jobs=[dict(r) for r in c.execute('SELECT j.*,e.ticker,e.payload FROM analysis_jobs j JOIN events e ON e.id=j.event_id ORDER BY e.created_at DESC LIMIT 30')]
-        messages=[dict(r) for r in c.execute("SELECT * FROM outbox WHERE kind IN ('EVIDENCE','ANALYSIS') ORDER BY created_at DESC LIMIT 60")]
+        choices=[r[0] for r in c.execute('SELECT DISTINCT e.ticker FROM analysis_jobs j JOIN events e ON e.id=j.event_id ORDER BY e.ticker')]
+    selected=st.selectbox('Historia analizy tickera',['Wszystkie']+choices,key='manual_service_ticker_history' if manual else 'service_ticker_history')
+    with store.connection() as c:
+        where=' WHERE e.ticker=?' if selected!='Wszystkie' else ''
+        jobs=[dict(r) for r in c.execute('SELECT j.*,e.ticker,e.payload FROM analysis_jobs j JOIN events e ON e.id=j.event_id'+where+' ORDER BY e.created_at DESC,e.rowid DESC LIMIT 30',(selected,) if where else ())]
+        messages=[]
+        if jobs:
+            ids=[j['event_id'] for j in jobs]
+            messages=[dict(r) for r in c.execute("SELECT * FROM outbox WHERE kind IN ('EVIDENCE','ANALYSIS') AND event_id IN ("+','.join('?' for _ in ids)+') ORDER BY created_at',ids)]
         errors=[json.loads(r[0]) for r in c.execute("SELECT payload FROM runtime WHERE key IN ('service_analysis','service_telegram')")]
         rejections={r['event_id']:dict(r) for r in c.execute('SELECT r.* FROM analysis_rejections r WHERE r.rowid=(SELECT MAX(x.rowid) FROM analysis_rejections x WHERE x.event_id=r.event_id)')}
     st.subheader('Tavily + AI — historia ręczna' if manual else 'Tavily + AI — monitor analizy')
@@ -3285,9 +3336,7 @@ def render_service_panel(store,manual=False):
     st.caption('Telegram: '+('włączony' if cfg['telegram_enabled'] and cfg['pipeline_enabled'] else 'wyłączony')+' · stan z zapisanej konfiguracji. Panel odczytuje SQLite; nie wywołuje usług.')
     if jobs:
         st.dataframe([{'Ticker':j['ticker'],'Stan':labels.get(j['state'],j['state']),'Ostatnia aktywność UTC':j['updated_at'],'Zdarzenie':j['event_id']} for j in jobs],width='stretch',hide_index=True)
-        choices=list(dict.fromkeys(j['ticker'] for j in jobs))
-        selected=st.selectbox('Historia analizy tickera',['Wszystkie']+choices,key='manual_service_ticker_history' if manual else 'service_ticker_history')
-        jobs=[j for j in jobs if selected=='Wszystkie' or j['ticker']==selected]
+    st.caption('Wyświetlono '+str(len(jobs))+' zadań. Limit 30 dotyczy wybranego tickera lub widoku Wszystkie; wybór obejmuje wszystkie tickery z historią.')
     if not jobs:st.info('Brak uruchomionych analiz ręcznych.' if manual else 'Oczekiwanie na ruch — brak zapisanych zadań Tavily i AI. Pierwszy odczyt i niezmienione dane nie uruchamiają analizy.')
     for error in errors:st.error(error['error'])
     for job in jobs:
@@ -3859,6 +3908,7 @@ def run_panel_tests():
                   'currency':'PLN','indicators':ind,'scoring':market_score(ind,6.),'direction':market_direction(ind,6.),
                   'rvol_incomplete':False,'ohlc':{k:rows[-1][k] for k in ('open','high','low','close')},
                   'chart_history':build_chart_history(rows),'latest_price_origin':'Yahoo OHLC'}
+            self.store.save_section('tickers',['AAA'])
             detect_market(self.store,snap);baseline=self.store.get_baseline('AAA','1h')
             self.button('Odśwież diagnostykę').click().run(timeout=30)
             self.assertEqual(len(self.app.exception),0)
@@ -3877,6 +3927,7 @@ def run_panel_tests():
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)
 
         def test_05_monitor_is_visible_when_disabled_without_service_calls(self):
+            next(x for x in self.app.radio if x.label=='Widok panelu').set_value('Monitor Tavily + AI').run(timeout=30)
             self.assertIn('Tavily + AI — monitor analizy',[x.value for x in self.app.subheader])
             self.assertIn('WYŁĄCZONE',' '.join(x.value for x in self.app.info))
             self.assertIn('Oczekiwanie na ruch',' '.join(x.value for x in self.app.info))
@@ -3911,6 +3962,63 @@ def run_panel_tests():
             with self.store.connection() as c:
                 self.assertEqual(c.execute("SELECT COUNT(*) FROM outbox WHERE status='PREVIEW'").fetchone()[0],2)
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM delivery_receipts').fetchone()[0],0)
+
+        def test_06_navigation_with_174_observations_keeps_manual_and_nasdaq_accessible(self):
+            from datetime import timedelta
+            rows=[{'time':(datetime(2026,9,1,8,tzinfo=timezone.utc)+timedelta(hours=i)).isoformat(),
+                   'open':6.,'high':6.1,'low':5.9,'close':6.,'volume':100.,'status':'CLOSED'} for i in range(50)]
+            ind=market_indicators(rows)
+            ticks=['A'+str(i).zfill(3)+'.WA' for i in range(173)]+['ZUK.WA']
+            self.store.save_section('tickers',ticks)
+            for ticker in ticks:
+                detect_market(self.store,{'ticker':ticker,'interval':'1h','price':6.,'volume':100.,'rvol':ind['rvol'],
+                    'candle_time':rows[-1]['time'],'candle_end':None,'candle_status':'CLOSED','acquired_at':utc_now(),
+                    'currency':'PLN','indicators':ind,'scoring':market_score(ind,6.),'chart_history':build_chart_history(rows)})
+            self.app.run(timeout=30)
+            self.assertEqual(len(self.app.exception),0)
+            self.assertEqual(len(self.app.get('plotly_chart')),1)
+            select=next(x for x in self.app.selectbox if x.label=='Szczegóły spółki')
+            self.assertEqual(len(select.options),174)
+            select.set_value('ZUK.WA · 1h').run(timeout=30)
+            self.assertIn('ZUK.WA · 1h',[x.value for x in self.app.subheader])
+            nav=next(x for x in self.app.radio if x.label=='Widok panelu')
+            nav.set_value('Dodaj / wyszukaj spółki').run(timeout=30)
+            market=next(x for x in self.app.selectbox if x.label=='Rynek wyszukiwania')
+            market.set_value('NASDAQ').run(timeout=30)
+            self.assertEqual(len(self.app.exception),0)
+            self.assertEqual(len(self.app.get('plotly_chart')),0)
+            self.button('Wyszukaj spółki w Yahoo')
+            next(x for x in self.app.radio if x.label=='Widok panelu').set_value('Ręczny ticker').run(timeout=30)
+            self.assertTrue(any(x.label=='Ticker ręczny' for x in self.app.text_input))
+            self.button('Pobierz dane ręcznie')
+            self.assertEqual(len(self.app.exception),0)
+            self.assertEqual(self.store.load_section('tickers',[]),ticks)
+            next(x for x in self.app.radio if x.label=='Widok panelu').set_value('Dodaj / wyszukaj spółki').run(timeout=30)
+            next(x for x in self.app.text_area if x.label.startswith('Nowe tickery')).set_value('ABCD, EFGH, ABCD, ZUK.WA')
+            self.button('Dodaj tickery do listy').click().run(timeout=30)
+            self.assertEqual(len(self.app.exception),0)
+            self.assertEqual(Store(self.db).load_section('tickers',[]),ticks+['ABCD','EFGH'])
+            next(x for x in self.app.radio if x.label=='Widok panelu').set_value('Automat').run(timeout=30)
+            self.assertIn('Zapisanych spółek: 176',' '.join(x.value for x in self.app.caption))
+            self.assertEqual(len(self.app.get('plotly_chart')),1)
+            with self.store.connection() as c:
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM observations').fetchone()[0],174)
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)
+
+        def test_07_monitor_can_select_ticker_older_than_latest_30_jobs(self):
+            cfg={'pipeline_enabled':True,'telegram_enabled':False}
+            for i in range(32):
+                snap={'ticker':'T'+str(i).zfill(3),'interval':'1h','candle_time':'2026-10-05T08:00:00+00:00',
+                      'acquired_at':utc_now(),'candle_status':'CLOSED','price':100.,'rvol':1.,'volume':10.,'indicators':{}}
+                detect_market(self.store,snap,cfg)
+                detect_market(self.store,{**snap,'price':102.,'acquired_at':utc_now()},cfg)
+            source=str(Path(__file__).resolve())
+            component=AppTest.from_string('import runpy\nfrom pathlib import Path\nm=runpy.run_path('+repr(source)+",run_name='ki_history_test')\nm['render_service_panel'](m['Store'](Path("+repr(str(self.db))+')))\n').run(timeout=30)
+            select=next(x for x in component.selectbox if x.label=='Historia analizy tickera')
+            self.assertIn('T000',select.options)
+            select.set_value('T000').run(timeout=30)
+            self.assertEqual(len(component.exception),0)
+            self.assertTrue(any(x.label.startswith('T000 ·') for x in component.expander))
 
     return 0 if unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(PanelTests)).wasSuccessful() else 1
 
