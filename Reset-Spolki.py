@@ -1,6 +1,6 @@
 """Reset pamięci spółek KI; uruchamiany ręcznie po zatrzymaniu programu."""
 import argparse
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from datetime import datetime
 from pathlib import Path
 import sqlite3
@@ -33,7 +33,7 @@ def reset_company_data(db):
         backup_dir = primary.parent / ('kopia_SQLite_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
         backup_dir.mkdir()
         for store in stores:
-            with store.connection() as source, sqlite3.connect(backup_dir / store.path.name) as target:
+            with store.connection() as source, closing(sqlite3.connect(backup_dir / store.path.name)) as target:
                 source.backup(target)
                 if target.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
                     raise ValueError('Kopia bazy nie przeszła weryfikacji. Niczego nie wyczyszczono.')
