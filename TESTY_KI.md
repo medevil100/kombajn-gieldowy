@@ -65,3 +65,15 @@ Przeniesienie do main i uruchomienie na VPS dopiero po testach właściciela i j
 ## Poprawka narzędzi TradingAgents — 05.10.2026
 
 TradingAgents 0.6.0 udostępniał narzędzia makro i prognoz mimo wyłączonych dostawców. Napraw-TradingAgents.py jawnie usuwa je oraz ich instrukcje z agenta wiadomości w osobnym środowisku. Sprawdza wersję i hash źródła, zachowuje kopię, weryfikuje wspólny zestaw narzędzi modelu i grafu. Instalator stosuje poprawkę przed weryfikacją. Istniejące środowisko: uruchom skrypt jego interpreterem, następnie uruchom nową analizę ręcznie. Skrypt nie wywołuje API.
+
+## Czyszczenie błędów i późniejszy reset SQLite
+
+Każdy widok ma przycisk „Wyczyść zapisane błędy”. Ukrywa dokładne wersje zapisanych błędów w normalnej historii, bez usuwania audytu, udanych raportów, odczytów, deduplikacji i aktywnych zadań. Nowy błąd pozostaje widoczny. Przycisk nie naprawia błędów DOM przeglądarki; tam wyłącz tłumaczenie i odśwież stronę.
+
+Reset-Spolki.py uruchamiaj osobno po zatrzymaniu programu, dopiero gdy chcesz rozpocząć od pustej listy. Usuwa dane spółek, portfolio, alerty, rozmowy, analizy i kolejki z obu baz (automatycznej i ręcznej). Zachowuje ustawienia, klucze poza bazą i metadane migracji. Przed resetem blokuje procesy i tworzy sprawdzone kopie obu baz. Nie wywołuje API.
+
+Test resetu: python .\Reset-Spolki.py --self-test
+
+Polecenie resetu do późniejszego użycia: python .\Reset-Spolki.py --confirm "WYCZYSC DANE SPOLEK"
+
+Po resecie uruchom program i dodaj wyłącznie wybrane spółki. Pierwszy odczyt tworzy punkt odniesienia. Reset nie przenosi projektu na main i nie wdraża VPS.

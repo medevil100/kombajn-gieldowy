@@ -104,6 +104,9 @@ CREATE TABLE IF NOT EXISTS analysis_budgets(slot TEXT PRIMARY KEY, used INTEGER 
 CREATE TABLE IF NOT EXISTS deep_reports(
  id TEXT PRIMARY KEY, ticker TEXT NOT NULL, state TEXT NOT NULL, payload TEXT,
  error TEXT, created_at TEXT NOT NULL, finished_at TEXT);
+CREATE TABLE IF NOT EXISTS dismissed_errors(
+ kind TEXT NOT NULL, record_id TEXT NOT NULL, revision TEXT NOT NULL,
+ dismissed_at TEXT NOT NULL, PRIMARY KEY(kind,record_id,revision));
 CREATE TABLE IF NOT EXISTS gpt_chat_turns(
  id TEXT PRIMARY KEY, question TEXT NOT NULL, context TEXT NOT NULL,
  answer TEXT, state TEXT NOT NULL, metadata TEXT, error TEXT,
@@ -3343,7 +3346,9 @@ def render_manual_analysis(store):
                         process_analysis_once(store,keys,selected)
                         process_analysis_once(store,keys,selected)
             except Exception as exc:st.error(str(exc) if isinstance(exc,(ValueError,ServiceError)) else 'Analiza ręczna: '+type(exc).__name__+'.')
-        if event['state'] in ('FAILED','REVIEW_REQUIRED','BUSY_CONTEXT','BUSY_AI'):
+        with store.connection() as c:job=c.execute('SELECT * FROM analysis_jobs WHERE event_id=?',(selected,)).fetchone()
+        hidden=dismissed_error_keys(store)
+        if event['state'] in ('FAILED','REVIEW_REQUIRED','BUSY_CONTEXT','BUSY_AI') and not (job and error_is_dismissed(hidden,'analysis_jobs',selected,job)):
             st.warning('Analiza zatrzymana lub w toku. Sprawdź szczegóły poniżej; nie jest ponawiana automatycznie.')
     else:st.info('Brak potwierdzonych ruchów ręcznych — Tavily i AI nie zostały wywołane.')
     render_service_panel(store,manual=True)
@@ -3414,7 +3419,8 @@ def render_gpt_chat(store):
     st.caption('Pytanie wysyłasz przyciskiem. Otwarcie i odświeżenie okna nie wywołuje GPT. Rozmowa jest zapisana w SQLite; nie zmienia automatu i nie wysyła Telegrama. Każde wysłane pytanie korzysta z API OpenAI.')
     with store.connection() as c:
         ticks=sorted(set(store.load_section('tickers',[]))|{r[0] for r in c.execute('SELECT DISTINCT ticker FROM observations')})
-        history=[dict(r) for r in c.execute('SELECT * FROM gpt_chat_turns ORDER BY rowid DESC LIMIT 20')][::-1]
+        hidden=dismissed_error_keys(store)
+        history=[dict(r) for r in c.execute('SELECT * FROM gpt_chat_turns ORDER BY rowid DESC') if not error_is_dismissed(hidden,'gpt_chat_turns',r['id'],r)][:20][::-1]
     with st.form('gpt_chat_form',clear_on_submit=False):
         selected=st.selectbox('Dane spółki do rozmowy',['Bez danych spółki']+ticks)
         question=st.text_area('Pytanie do GPT',max_chars=4000)
@@ -3721,6 +3727,59 @@ def deep_analysis_worker(store,report_id):
         if deadline:deadline.cancel()
 
 
+def error_revision(row):
+    relevant={key:row.get(key) for key in ('state','status','error','last_error','updated_at','finished_at','attempts') if key in row}
+    if 'key' in row and 'payload' in row:relevant['payload']=row['payload']
+    return hashlib.sha256(json_text(relevant).encode('utf-8')).hexdigest()
+
+
+def dismissed_error_keys(store):
+    with store.connection() as c:
+        return {(r['kind'],r['record_id'],r['revision']) for r in c.execute('SELECT * FROM dismissed_errors')}
+
+
+def error_is_dismissed(keys,kind,record_id,row):
+    return (kind,str(record_id),error_revision(dict(row))) in keys
+
+
+def dismiss_saved_errors(store):
+    """Acknowledge only the exact failed revision. Audit and deduplication stay intact."""
+    with store.transaction() as c:
+        items=[]
+        for table,key,where in (
+            ('deep_reports','id',"state IN ('FAILED','REVIEW_REQUIRED')"),
+            ('gpt_chat_turns','id',"state IN ('FAILED','REVIEW_REQUIRED')"),
+            ('analysis_jobs','event_id',"state IN ('FAILED','REVIEW_REQUIRED')"),
+            ('outbox','id',"status IN ('FAILED','UNCERTAIN')"),
+            ('runtime','key',"1=1"),
+        ):
+            for raw in c.execute('SELECT * FROM '+table+' WHERE '+where):
+                row=dict(raw)
+                if table=='runtime':
+                    payload=json.loads(row['payload'])
+                    if not isinstance(payload,dict) or not (payload.get('error') or payload.get('status')=='ERROR'):continue
+                items.append((table,str(row[key]),error_revision(row),utc_now()))
+        for raw in c.execute('SELECT id,payload FROM cycles'):
+            for result in json.loads(raw['payload']).get('results',[]):
+                if result.get('error'):items.append(('cycle_error',raw['id']+':'+result['ticker'],error_revision(result),utc_now()))
+        before=c.total_changes
+        c.executemany('INSERT OR IGNORE INTO dismissed_errors VALUES(?,?,?,?)',items)
+        return c.total_changes-before
+
+
+def render_error_controls(store):
+    import streamlit as st
+    if st.button('Wyczyść zapisane błędy',key='clear_saved_errors'):
+        count=dismiss_saved_errors(store)
+        manual=manual_store_path(store.path)
+        if manual.exists():count+=dismiss_saved_errors(Store(manual))
+        st.session_state['cleared_error_count']=count
+        st.rerun()
+    if 'cleared_error_count' in st.session_state:
+        st.success('Wyczyszczono widoczne błędy: '+str(st.session_state.pop('cleared_error_count'))+'.')
+    st.caption('Przycisk porządkuje historię błędów we wszystkich widokach. Nie ponawia zadań ani nie usuwa spółek i poprawnych wyników. Nowy błąd pojawi się ponownie. Błędy samej przeglądarki wymagają odświeżenia strony.')
+
+
 def render_deep_analysis(store):
     import streamlit as st
     st.subheader('Analiza pogłębiona — TradingAgents')
@@ -3733,7 +3792,8 @@ def render_deep_analysis(store):
         try:start_deep_analysis(store,ticker);st.success('Analiza rozpoczęta. Możesz korzystać z innych widoków; wynik pojawi się po odświeżeniu.')
         except (ValueError,OSError) as exc:st.error(str(exc))
     st.button('Odśwież wynik analizy pogłębionej')
-    with store.connection() as c:rows=[dict(r) for r in c.execute('SELECT * FROM deep_reports ORDER BY created_at DESC LIMIT 10')]
+    hidden=dismissed_error_keys(store)
+    with store.connection() as c:rows=[dict(r) for r in c.execute('SELECT * FROM deep_reports ORDER BY created_at DESC') if not error_is_dismissed(hidden,'deep_reports',r['id'],r)][:10]
     if not rows:st.info('Brak uruchomionych analiz pogłębionych.')
     for row in rows:
         with st.expander(row['ticker']+' · '+{'QUEUED':'Oczekuje','RUNNING':'Analiza trwa','FAILED':'Błąd','DONE':'Gotowa','REVIEW_REQUIRED':'Wymaga sprawdzenia'}.get(row['state'],row['state'])+' · '+row['created_at'],expanded=row['state']!='DONE'):
@@ -3798,6 +3858,7 @@ def run_streamlit(db):
         st.caption('Odczyt zapisanych wyników co 15 minut. Skaner pobiera Yahoo według ustawionego cyklu.')
         st.caption('GPT-4o mini analizuje wybrane, potwierdzone okazje. Tavily dostarcza datowane źródła. Automatyczna analiza wymaga świec 1h.')
     section=st.radio('Widok panelu',['Automat','Analiza GPT','Rozmowa z GPT','Analiza pogłębiona','Monitor Tavily + AI','Ręczny ticker','Dodaj / wyszukaj spółki'],horizontal=True,key='panel_view')
+    render_error_controls(store)
     if section=='Analiza GPT':render_gpt_analysis(store);return
     if section=='Rozmowa z GPT':render_gpt_chat(store);return
     if section=='Analiza pogłębiona':render_deep_analysis(store);return
@@ -3903,7 +3964,7 @@ def run_streamlit(db):
             runtime=c.execute("SELECT payload,updated_at FROM runtime WHERE key='scanner'").fetchone()
             latest=list(c.execute('SELECT o.payload FROM observations o WHERE o.id=(SELECT MAX(x.id) FROM observations x WHERE x.ticker=o.ticker AND x.interval=o.interval) ORDER BY o.ticker,o.interval'))
             events=[dict(r) for r in c.execute('SELECT id,ticker,interval,created_at,payload FROM events ORDER BY created_at DESC LIMIT 30')]
-            recent=[dict(r) for r in c.execute('SELECT started_at,finished_at,status,payload FROM cycles ORDER BY started_at DESC LIMIT 10')]
+            recent=[dict(r) for r in c.execute('SELECT id,started_at,finished_at,status,payload FROM cycles ORDER BY started_at DESC LIMIT 10')]
             counts={t:c.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0] for t in ('watchlist','observations','baselines','events','cycles')}
             bases={(r['ticker'],r['interval']):json.loads(r['payload']) for r in c.execute('SELECT * FROM baselines')}
         runtime_data=json.loads(runtime[0]) if runtime else {}
@@ -3926,6 +3987,7 @@ def run_streamlit(db):
         snapshots=[json.loads(row[0]) for row in latest]
         current={(x['ticker'],x['interval']):x for x in snapshots}
         cycle=json.loads(recent[0]['payload']) if recent else {}
+        hidden=dismissed_error_keys(store)
         cycle_results={x['ticker']:x for x in cycle.get('results',[])}
         unprocessed=set(cycle.get('unprocessed_tickers',[]))
         rows=[]
@@ -3937,7 +3999,7 @@ def run_streamlit(db):
                          'Cena':snapshot.get('price') if snapshot else None,
                          'RVOL':snapshot.get('rvol') if snapshot else None,
                          'Czas odczytu UTC':snapshot.get('acquired_at') if snapshot else None,
-                         'Błąd':result.get('error','')})
+                         'Błąd':'' if recent and error_is_dismissed(hidden,'cycle_error',recent[0]['id']+':'+ticker,result) else result.get('error','')})
         st.caption('Zapisanych spółek: '+str(len(ticks))+' · z odczytem dla '+cfg['market_interval']+': '+str(sum((t,cfg['market_interval']) in current for t in ticks))+'. Tabela obejmuje całą listę; szczegóły dotyczą wybranej spółki.')
         if rows:
             with st.expander('Pokaż pełną listę obserwowanych spółek'):
@@ -4009,17 +4071,20 @@ def render_service_panel(store,manual=False):
             'FAILED':'Błąd — zadanie zatrzymane','REVIEW_REQUIRED':'Wymaga sprawdzenia po przerwaniu',
             'PREVIEW':'Podgląd — bez wysyłki','PENDING':'Oczekuje na wysyłkę','SENDING':'Wysyłanie',
             'DELIVERED':'Doręczono','FILTERED':'Tylko panel — brak aktualnego potwierdzenia okazji','UNCERTAIN':'Sprawdź czat — brak potwierdzenia'}
+    hidden=dismissed_error_keys(store)
     with store.connection() as c:
         choices=[r[0] for r in c.execute('SELECT DISTINCT e.ticker FROM analysis_jobs j JOIN events e ON e.id=j.event_id ORDER BY e.ticker')]
     selected=st.selectbox('Historia analizy tickera',['Wszystkie']+choices,key='manual_service_ticker_history' if manual else 'service_ticker_history')
     with store.connection() as c:
         where=' WHERE e.ticker=?' if selected!='Wszystkie' else ''
         jobs=[dict(r) for r in c.execute('SELECT j.*,e.ticker,e.payload FROM analysis_jobs j JOIN events e ON e.id=j.event_id'+where+' ORDER BY e.created_at DESC,e.rowid DESC LIMIT 30',(selected,) if where else ())]
+        jobs=[j for j in jobs if not error_is_dismissed(hidden,'analysis_jobs',j['event_id'],j)]
         messages=[]
         if jobs:
             ids=[j['event_id'] for j in jobs]
             messages=[dict(r) for r in c.execute("SELECT * FROM outbox WHERE kind IN ('EVIDENCE','ANALYSIS') AND event_id IN ("+','.join('?' for _ in ids)+') ORDER BY created_at',ids)]
-        errors=[json.loads(r[0]) for r in c.execute("SELECT payload FROM runtime WHERE key IN ('service_analysis','service_telegram')")]
+        messages=[m for m in messages if not error_is_dismissed(hidden,'outbox',m['id'],m)]
+        errors=[json.loads(r['payload']) for r in c.execute("SELECT * FROM runtime WHERE key IN ('service_analysis','service_telegram')") if not error_is_dismissed(hidden,'runtime',r['key'],r)]
         rejections={r['event_id']:dict(r) for r in c.execute('SELECT r.* FROM analysis_rejections r WHERE r.rowid=(SELECT MAX(x.rowid) FROM analysis_rejections x WHERE x.event_id=r.event_id)')}
     st.subheader('Tavily + AI — historia ręczna' if manual else 'Tavily + AI — monitor analizy')
     cfg=service_config(store.load_section('settings',{}))
@@ -4661,6 +4726,27 @@ def run_opportunity_tests():
          self.assertNotIn('sk-private123',result)
          self.assertNotIn('api_key=',result)
 
+     def test_dismiss_errors_preserves_audit_active_work_and_reveals_new_errors(self):
+      with self.s.transaction() as c:
+       c.execute("INSERT INTO deep_reports VALUES('bad','AAA','FAILED',NULL,'błąd',?,?)",(utc_now(),utc_now()))
+       c.execute("INSERT INTO deep_reports VALUES('active','AAA','RUNNING',NULL,NULL,?,NULL)",(utc_now(),))
+       c.execute("INSERT INTO events VALUES('event','AAA','1h',?,'{}')",(utc_now(),))
+       c.execute("INSERT INTO analysis_jobs(event_id,state,last_error,updated_at) VALUES('event','FAILED','błąd',?)",(utc_now(),))
+       c.execute("INSERT INTO outbox(id,event_id,kind,message,status,last_error,created_at) VALUES('msg','event','ANALYSIS','tekst','UNCERTAIN','błąd',?)",(utc_now(),))
+       c.execute("INSERT INTO runtime VALUES('service_analysis',?,?)",(json_text({'status':'ERROR','error':'błąd'}),utc_now()))
+      self.assertEqual(dismiss_saved_errors(self.s),4)
+      self.assertEqual(dismiss_saved_errors(self.s),0)
+      hidden=dismissed_error_keys(Store(self.s.path))
+      with self.s.connection() as c:
+       row=dict(c.execute("SELECT * FROM deep_reports WHERE id='bad'").fetchone())
+       self.assertTrue(error_is_dismissed(hidden,'deep_reports','bad',row))
+       self.assertFalse(error_is_dismissed(hidden,'deep_reports','bad',{**row,'error':'nowy błąd'}))
+       job=dict(c.execute('SELECT j.*,e.payload FROM analysis_jobs j JOIN events e ON e.id=j.event_id').fetchone())
+       self.assertTrue(error_is_dismissed(hidden,'analysis_jobs','event',job))
+       self.assertEqual(c.execute('SELECT COUNT(*) FROM deep_reports').fetchone()[0],2)
+       self.assertEqual(c.execute("SELECT state FROM deep_reports WHERE id='active'").fetchone()[0],'RUNNING')
+       self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0],1)
+
      def setUp(self):
       self.tmp=tempfile.TemporaryDirectory();self.s=Store(Path(self.tmp.name)/'test.db');self.s.save_section('tickers',['AAA'])
       self.now=datetime(2026,10,5,12,30,tzinfo=timezone.utc)
@@ -4777,6 +4863,22 @@ def run_panel_tests():
     from streamlit.testing.v1 import AppTest
 
     class PanelTests(unittest.TestCase):
+        def test_clear_errors_button_is_available_in_every_view(self):
+            for view in ('Automat','Analiza GPT','Rozmowa z GPT','Analiza pogłębiona','Monitor Tavily + AI','Ręczny ticker','Dodaj / wyszukaj spółki'):
+                next(x for x in self.app.radio if x.label=='Widok panelu').set_value(view).run(timeout=30)
+                self.assertEqual(len(self.app.exception),0)
+                self.assertTrue(any(x.label=='Wyczyść zapisane błędy' for x in self.app.button))
+            with self.store.transaction() as c:
+                c.execute("INSERT INTO deep_reports VALUES('failed','AAA','FAILED',NULL,'testowy błąd',?,?)",(utc_now(),utc_now()))
+            next(x for x in self.app.radio if x.label=='Widok panelu').set_value('Analiza pogłębiona').run(timeout=30)
+            self.assertTrue(any(x.value=='testowy błąd' for x in self.app.error))
+            self.button('Wyczyść zapisane błędy').click().run(timeout=30)
+            self.assertEqual(len(self.app.exception),0)
+            self.assertFalse(any(x.value=='testowy błąd' for x in self.app.error))
+            with self.store.connection() as c:
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM deep_reports').fetchone()[0],1)
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0],0)
+
         def test_08_gpt_windows_open_without_external_calls(self):
             for view,title in (('Analiza GPT','Analiza GPT spółki'),('Rozmowa z GPT','Rozmowa z GPT')):
                 next(x for x in self.app.radio if x.label=='Widok panelu').set_value(view).run(timeout=30)
