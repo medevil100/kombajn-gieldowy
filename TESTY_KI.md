@@ -61,3 +61,7 @@ Testy lokalne nie dowodzą odpowiedzi płatnych usług. W środowisku wykonawcy 
 Przy ponad 1700 tickerach sprawdź w monitorze czas pełnego przebiegu i pominięte sloty. Jeśli pobranie wszystkich danych trwa dłużej niż 15 minut, skaner nie nakłada cykli i raportuje przekroczenie; nie ma gwarancji odczytania całej listy w każdym slocie. Wygasłe okazje nie trafiają do płatnej kolejki.
 
 Przeniesienie do main i uruchomienie na VPS dopiero po testach właściciela i jego decyzji.
+
+## Poprawka narzędzi TradingAgents — 05.10.2026
+
+TradingAgents 0.6.0 udostępniał narzędzia makro i prognoz mimo wyłączonych dostawców. Napraw-TradingAgents.py jawnie usuwa je oraz ich instrukcje z agenta wiadomości w osobnym środowisku. Sprawdza wersję i hash źródła, zachowuje kopię, weryfikuje wspólny zestaw narzędzi modelu i grafu. Instalator stosuje poprawkę przed weryfikacją. Istniejące środowisko: uruchom skrypt jego interpreterem, następnie uruchom nową analizę ręcznie. Skrypt nie wywołuje API.
