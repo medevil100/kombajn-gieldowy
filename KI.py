@@ -3229,6 +3229,151 @@ def render_gpt_analysis(store):
     st.caption('Model: '+str(result['provider'].get('model') or 'Brak danych'))
 
 
+def score_growth_candidate(snapshot,reference,previous=None,saved_analysis=None,now=None):
+    """Read-only transparent ranking; independent of detector and delivery thresholds."""
+    current=now or datetime.now(timezone.utc)
+    price=snapshot.get('price');rv=snapshot.get('rvol');volume=snapshot.get('volume')
+    if not (finite_number(price,True) and finite_number(rv) and rv>=1.2 and finite_number(volume,True)
+            and finite_number(reference.get('price'),True)):return None
+    # Reuse the candle freshness contract without imposing the Telegram price threshold.
+    if not telegram_movement_confirmed({'snapshot':snapshot,'price_change_pct':2.},now=current):return None
+    delta=(price-reference['price'])/reference['price']*100
+    if delta<.5 and not math.isclose(delta,.5,abs_tol=1e-10):return None
+    top=delta>=2. or math.isclose(delta,2.,abs_tol=1e-10)
+    parts={'Ruch':10 if top else 0,'Aktywność':20 if rv>=3 else 15 if rv>=2 else 10 if rv>=1.5 else 5,
+           'Technika':0,'Kontekst':0}
+    confirms=[];weakens=[];missing=[]
+    if top:confirms.append('Wzrost od odniesienia ≥ 2%')
+    else:weakens.append('Wczesny wzrost poniżej 2%')
+    ohlc=snapshot.get('ohlc') or {};opening=ohlc.get('open');high=ohlc.get('high');low=ohlc.get('low')
+    candle_change=None
+    if finite_number(opening,True):
+        candle_change=(price-opening)/opening*100
+        if price>opening:parts['Ruch']+=10;confirms.append('Cena powyżej otwarcia świecy')
+        else:weakens.append('Cena nie jest powyżej otwarcia świecy')
+    else:missing.append('Otwarcie świecy')
+    if finite_number(high,True) and finite_number(low,True) and low<=price<=high:
+        if high>low and price>=high-.2*(high-low):parts['Ruch']+=10;confirms.append('Cena w górnych 20% świecy')
+        elif high==low:weakens.append('Świeca bez zakresu ceny')
+        else:weakens.append('Cena poza górnymi 20% świecy')
+    else:missing.append('Poprawny zakres minimum–maksimum świecy')
+    same_previous=False
+    if previous:
+        try:same_previous=(parse_market_time(previous['candle_time'])==parse_market_time(snapshot['candle_time'])
+                           and parse_market_time(previous['acquired_at'])<parse_market_time(snapshot['acquired_at']))
+        except (KeyError,ValueError,TypeError):pass
+    if same_previous and finite_number(previous.get('price'),True) and finite_number(previous.get('volume')):
+        if price>previous['price'] and volume>previous['volume']:
+            parts['Aktywność']+=10;confirms.append('Cena i wolumen wzrosły od poprzedniego odczytu')
+        else:weakens.append('Brak wspólnego wzrostu ceny i wolumenu między odczytami')
+    else:missing.append('Poprzedni odczyt tej samej świecy do potwierdzenia aktywności')
+    confirms.append('RVOL '+format(rv,'.2f')+' — '+str(parts['Aktywność']-(10 if 'Cena i wolumen wzrosły od poprzedniego odczytu' in confirms else 0))+' pkt za poziom')
+    ind=snapshot.get('indicators') or {}
+    for label,keys,predicate in (
+        ('Dodatni histogram MACD',('last_macd_hist',),lambda a:a[0]>0),
+        ('Cena powyżej SMA 10',('ma_fast',),lambda a:price>a[0]),
+        ('+DI większe od −DI',('plus_di','minus_di'),lambda a:a[0]>a[1])):
+        values=[ind.get(k) for k in keys]
+        if not all(finite_number(v) for v in values):missing.append(label)
+        elif predicate(values):parts['Technika']+=10;confirms.append(label)
+        else:weakens.append('Niespełnione: '+label)
+    source_facts=[]
+    if saved_analysis:
+        try:
+            from datetime import timedelta
+            if parse_market_time(saved_analysis['candle_time'])==parse_market_time(snapshot['candle_time']):
+                sources={s['id']:s for s in saved_analysis['context']['sources']}
+                cutoff=parse_market_time(snapshot['acquired_at'])
+                for fact in saved_analysis['result']['context']:
+                    source=sources.get(fact['source_id']);text=fact.get('fact')
+                    if source and isinstance(text,str) and text.strip() and text in source.get('content',''):
+                        published=parse_market_time(source['published_at'])
+                        if cutoff-timedelta(days=7)<=published<=cutoff and source.get('url'):
+                            source_facts.append({'fact':text,'url':source['url'],'published_at':source['published_at']})
+        except (KeyError,ValueError,TypeError):pass
+    if source_facts:parts['Kontekst']=10;confirms.append('Datowany fakt ze źródłem w zapisanej analizie tej świecy')
+    context_label='Kontekst źródłowy dostępny; przyczyna ruchu niepotwierdzona' if source_facts else 'Przyczyna nieustalona'
+    return {'ticker':snapshot['ticker'],'price':price,'currency':snapshot.get('currency') or 'Brak waluty',
+            'change_pct':delta,'candle_change_pct':candle_change,'rvol':rv,'estimated_turnover':price*volume,
+            'score':sum(parts.values()),'parts':parts,'confirms':confirms,'weakens':weakens,'missing':missing,
+            'context_label':context_label,'source_facts':source_facts,'group':'TOP' if top else 'EARLY',
+            'reference':reference,'snapshot':snapshot,'acquired_at':snapshot['acquired_at']}
+
+
+def load_growth_ranking(store,now=None):
+    """Use first event reference in the current candle, retaining it after detector resets."""
+    current=now or datetime.now(timezone.utc);rank=[]
+    ticks=set(store.load_section('tickers',[]))
+    with store.connection() as c:
+        c.execute('BEGIN')
+        latest=c.execute("SELECT o.id,o.payload FROM observations o WHERE o.interval='1h' AND o.id=(SELECT MAX(x.id) FROM observations x WHERE x.ticker=o.ticker AND x.interval='1h')").fetchall()
+        for latest_row in latest:
+            snap=json.loads(latest_row['payload']);ticker=snap['ticker']
+            if ticker not in ticks:continue
+            raw=c.execute("SELECT payload FROM baselines WHERE ticker=? AND interval='1h'",(ticker,)).fetchone()
+            if not raw:continue
+            reference=json.loads(raw[0]);previous=None;saved=None
+            start=parse_market_time(snap['candle_time'])
+            event_rows=c.execute("SELECT e.payload,j.state,j.context,j.result FROM events e LEFT JOIN analysis_jobs j ON j.event_id=e.id WHERE e.ticker=? AND e.interval='1h' AND e.created_at>=? ORDER BY e.rowid",(ticker,start.astimezone(timezone.utc).isoformat())).fetchall()
+            fixed=False
+            for event in event_rows:
+                ev=json.loads(event['payload'])
+                if parse_market_time(ev['snapshot']['candle_time'])!=start:continue
+                if not fixed:reference=ev['reference'];fixed=True
+                if event['state']=='DONE' and event['context'] and event['result']:
+                    saved={'candle_time':ev['snapshot']['candle_time'],'context':json.loads(event['context']),'result':json.loads(event['result'])}
+            for row in c.execute("SELECT payload FROM observations WHERE ticker=? AND interval='1h' AND id<? ORDER BY id DESC",(ticker,latest_row['id'])):
+                candidate=json.loads(row[0])
+                if parse_market_time(candidate['candle_time'])!=start:break
+                if parse_market_time(candidate['acquired_at'])<parse_market_time(snap['acquired_at']):previous=candidate;break
+            entry=score_growth_candidate(snap,reference,previous,saved,current)
+            if entry:rank.append(entry)
+    rank.sort(key=lambda r:(-r['score'],-r['rvol'],r['ticker']))
+    top=[r for r in rank if r['group']=='TOP'];early=[r for r in rank if r['group']=='EARLY']
+    return {'top':top[:20],'top_count':len(top),'early':early}
+
+
+def render_growth_ranking(store):
+    import streamlit as st
+    ranking=load_growth_ranking(store)
+    st.subheader('TOP 20 wzrostów')
+    st.caption('Aktualna otwarta świeca 1h · wzrost od odniesienia ≥ 2% · RVOL ≥ 1,20. Ocena warunków ruchu, nie prawdopodobieństwo zysku. Kolejność: punkty, RVOL, ticker.')
+    st.caption('Kwalifikujących się spółek: '+str(ranking['top_count'])+' · pokazano: '+str(len(ranking['top']))+'. Brak danych nie jest uzupełniany ani przeliczany do pełnych 100 punktów.')
+    def number(value,suffix='',digits=2):
+        return format(value,',.'+str(digits)+'f').replace(',',' ').replace('.',',')+suffix if finite_number(value) else 'Brak danych'
+    def show(entries,early=False):
+        if not entries:
+            st.info('Brak spółek spełniających warunki w aktualnej świecy.')
+            return
+        display=[]
+        for index,r in enumerate(entries,1):
+            display.append({'Pozycja':index,'Ticker':r['ticker'],'Cena':number(r['price'],' '+r['currency'],4),
+                'Wzrost od odniesienia':number(r['change_pct'],'%'),'Zmiana w świecy 1h':number(r['candle_change_pct'],'%'),
+                'RVOL':number(r['rvol']),'Szacowany obrót':number(r['estimated_turnover'],' '+r['currency']),
+                'Ocena':str(r['score'])+'/100'+(' · niepełna' if r['missing'] else ''),
+                'Uzasadnienie':'Technika '+str(r['parts']['Technika'])+'/30 · '+('Datowany fakt źródłowy' if r['source_facts'] else 'Przyczyna nieustalona')})
+        st.dataframe(display,width='stretch',hide_index=True)
+        for r in entries:
+            with st.expander(r['ticker']+' — '+str(r['score'])+'/100 · szczegóły oceny'):
+                st.write('Punkty: '+ ' · '.join(k+' '+str(v)+'/'+str({'Ruch':30,'Aktywność':30,'Technika':30,'Kontekst':10}[k]) for k,v in r['parts'].items()))
+                st.write('Co potwierdza: '+'; '.join(r['confirms']))
+                if r['weakens']:st.write('Co osłabia: '+'; '.join(r['weakens']))
+                if r['missing']:st.write('Brak danych do oceny: '+'; '.join(r['missing']))
+                ref=r['reference'];snap=r['snapshot']
+                st.caption('Odniesienie ruchu: '+number(ref['price'],' '+r['currency'],4)+' · czas: '+str(ref.get('acquired_at','Brak czasu')))
+                st.caption('Świeca: '+snap['candle_time']+' → '+str(snap.get('candle_end'))+' · otwarta. Odczyt: '+snap['acquired_at'])
+                st.caption('Szacowany obrót = ostatnia cena × wolumen świecy; nie jest dokładną sumą wartości transakcji. Nie stosujemy minimalnej kwoty obrotu.')
+                st.write(r['context_label'])
+                for source in r['source_facts']:
+                    st.write(source['published_at']+' · '+source['fact']);st.link_button('Otwórz źródło',source['url'])
+                st.caption('Dalsze sprawdzenie: wybierz '+r['ticker']+' w „Ręczny ticker” lub „Rozmowa z GPT”. Ranking nie wywołuje Yahoo, Tavily, GPT ani Telegrama.')
+    show(ranking['top'])
+    st.subheader('Wczesne obserwacje')
+    st.caption('Wzrost od +0,5% do poniżej +2% · RVOL ≥ 1,20 · aktualna otwarta świeca 1h. Bez dodatkowych zapytań Tavily i GPT.')
+    show(ranking['early'],True)
+    return ranking
+
+
 def run_streamlit(db):
     import streamlit as st
     import html
@@ -3403,7 +3548,8 @@ def run_streamlit(db):
             render_service_panel(store)
             return
         if section!='Automat':return
-        st.subheader('Automatyczne wyniki rynku')
+        render_growth_ranking(store)
+        st.subheader('Pełna lista obserwowanych spółek')
         if not latest:st.info('Brak wyników automatu. Zapisz tickery i uruchom skaner: python KI.py --scanner')
         snapshots=[json.loads(row[0]) for row in latest]
         current={(x['ticker'],x['interval']):x for x in snapshots}
@@ -3421,7 +3567,9 @@ def run_streamlit(db):
                          'Czas odczytu UTC':snapshot.get('acquired_at') if snapshot else None,
                          'Błąd':result.get('error','')})
         st.caption('Zapisanych spółek: '+str(len(ticks))+' · z odczytem dla '+cfg['market_interval']+': '+str(sum((t,cfg['market_interval']) in current for t in ticks))+'. Tabela obejmuje całą listę; szczegóły dotyczą wybranej spółki.')
-        if rows:st.dataframe(rows,width='stretch',hide_index=True)
+        if rows:
+            with st.expander('Pokaż pełną listę obserwowanych spółek'):
+                st.dataframe(rows,width='stretch',hide_index=True)
         choices={x['ticker']+' · '+x['interval']:x for x in snapshots if x['ticker'] in ticks}
         if choices:
             selected=st.selectbox('Szczegóły spółki',list(choices),key='automatic_ticker_detail')
@@ -3431,12 +3579,13 @@ def run_streamlit(db):
                 with st.expander('Punkt odniesienia · '+snap['ticker']+' '+snap['interval']):st.json(bases.get((snap['ticker'],snap['interval']),{}))
             except (KeyError,ValueError,TypeError) as exc:
                 st.error('Nie można wyświetlić szczegółów '+snap['ticker']+': '+type(exc).__name__+'. Sprawdź zapis odczytu; inne widoki pozostają dostępne.')
-        st.subheader('Wykryte zdarzenia')
-        if not events:st.caption('Brak zdarzeń. Pierwszy odczyt tworzy punkt odniesienia; niezmieniona cena nie tworzy zdarzenia cenowego.')
-        for event in events:
-            ev=json.loads(event['payload']);delta=ev.get('price_change_pct');color='ki-red' if delta is not None and delta<0 else 'ki-green' if delta is not None and delta>0 else 'ki-yellow'
-            st.markdown('<div class="ki-card '+color+'">'+html.escape(event['ticker']+' · '+when(event['created_at'])+' · cena '+fmt(delta)+'% · RVOL '+fmt(ev.get('rvol_change_pct'))+'%')+'</div>',unsafe_allow_html=True)
-            with st.expander('Dowody zdarzenia '+event['id']):st.json(ev)
+        with st.expander('Historia wykrytych zdarzeń — diagnostyka'):
+            st.subheader('Wykryte zdarzenia')
+            if not events:st.caption('Brak zdarzeń. Pierwszy odczyt tworzy punkt odniesienia; niezmieniona cena nie tworzy zdarzenia cenowego.')
+            for event in events:
+                ev=json.loads(event['payload']);delta=ev.get('price_change_pct');color='ki-red' if delta is not None and delta<0 else 'ki-green' if delta is not None and delta>0 else 'ki-yellow'
+                st.markdown('<div class="ki-card '+color+'">'+html.escape(event['ticker']+' · '+when(event['created_at'])+' · cena '+fmt(delta)+'% · RVOL '+fmt(ev.get('rvol_change_pct'))+'%')+'</div>',unsafe_allow_html=True)
+                with st.expander('Dowody zdarzenia '+event['id']):st.json(ev)
     live_view()
     if section=='Dodaj / wyszukaj spółki':
         st.subheader('Dodaj tickery ręcznie')
@@ -4032,6 +4181,80 @@ def run_market_tests():
     return 0 if unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(MarketTests)).wasSuccessful() else 1
 
 
+def run_ranking_tests():
+    import tempfile
+    import unittest
+    from datetime import timedelta
+
+    class RankingTests(unittest.TestCase):
+        def setUp(self):
+            self.temp=tempfile.TemporaryDirectory();self.store=Store(Path(self.temp.name)/'rank.db')
+            self.now=datetime(2026,10,5,12,30,tzinfo=timezone.utc)
+            self.store.save_section('tickers',['AAA'])
+        def tearDown(self):self.temp.cleanup()
+        def snap(self,price=102,minutes=20,ticker='AAA'):
+            return {'ticker':ticker,'interval':'1h','candle_time':'2026-10-05T12:00:00+00:00',
+                    'candle_end':'2026-10-05T13:00:00+00:00','candle_status':'OPEN',
+                    'acquired_at':self.now.replace(minute=minutes).isoformat(),'price':price,'rvol':3.,'volume':1000.,
+                    'ohlc':{'open':100.,'high':102.,'low':99.,'close':price},'currency':'PLN',
+                    'indicators':{'last_macd_hist':.1,'ma_fast':101.,'plus_di':30.,'minus_di':20.}}
+        def test_01_exact_score_and_missing_data(self):
+            snap=self.snap();previous={**self.snap(101,5),'volume':500.}
+            row=score_growth_candidate(snap,{'price':100.,'acquired_at':'2026-10-05T11:45:00Z'},previous,None,self.now)
+            self.assertEqual(row['score'],90);self.assertEqual(row['parts'],{'Ruch':30,'Aktywność':30,'Technika':30,'Kontekst':0})
+            self.assertEqual(row['context_label'],'Przyczyna nieustalona')
+            row=score_growth_candidate({**snap,'indicators':{},'ohlc':{}},{'price':100.},None,None,self.now)
+            self.assertEqual(row['score'],30);self.assertTrue(row['missing'])
+        def test_02_limits_and_expiration(self):
+            ref={'price':100.}
+            for price,group in ((100.499,None),(100.5,'EARLY'),(101.999,'EARLY'),(102.,'TOP')):
+                row=score_growth_candidate(self.snap(price),ref,None,None,self.now)
+                self.assertEqual(row['group'] if row else None,group)
+            for changes in ({'price':99.},{'rvol':1.19},{'volume':0.},{'candle_status':'CLOSED'},{'interval':'1d'}):
+                self.assertIsNone(score_growth_candidate({**self.snap(),**changes},ref,None,None,self.now))
+            self.assertIsNone(score_growth_candidate(self.snap(),ref,None,None,self.now.replace(hour=13,minute=0)))
+        def test_03_rvol_boundaries_and_same_candle_confirmation(self):
+            for rv,points in ((1.2,5),(1.499,5),(1.5,10),(2.,15),(3.,20)):
+                row=score_growth_candidate({**self.snap(),'rvol':rv},{'price':100.},None,None,self.now)
+                self.assertEqual(row['parts']['Aktywność'],points)
+            prev={**self.snap(101,5),'volume':500.,'candle_time':'2026-10-05T11:00:00Z'}
+            row=score_growth_candidate(self.snap(),{'price':100.},prev,None,self.now)
+            self.assertEqual(row['parts']['Aktywność'],20)
+        def test_04_reference_survives_detector_reset_and_restart(self):
+            detect_market(self.store,self.snap(100,0))
+            detect_market(self.store,self.snap(102,15))
+            detect_market(self.store,self.snap(102.5,30))
+            self.assertEqual(self.store.get_baseline('AAA','1h')['price'],102.)
+            before=self.store.path.read_bytes()
+            rows=load_growth_ranking(Store(self.store.path),self.now)
+            self.assertEqual(len(rows['top']),1);self.assertAlmostEqual(rows['top'][0]['change_pct'],2.5)
+            self.assertEqual(rows['top'][0]['reference']['price'],100.)
+            self.assertEqual(self.store.path.read_bytes(),before)
+        def test_05_context_requires_current_candle_valid_dated_source(self):
+            saved={'candle_time':self.snap()['candle_time'],'context':{'sources':[{'id':'S1','published_at':'2026-10-05T11:00:00Z','content':'Emitent opublikował raport.','url':'https://example.org/report'}]},
+                   'result':{'context':[{'source_id':'S1','fact':'Emitent opublikował raport.'}]}}
+            row=score_growth_candidate(self.snap(),{'price':100.},None,saved,self.now)
+            self.assertEqual(row['parts']['Kontekst'],10)
+            saved['candle_time']='2026-10-05T11:00:00Z'
+            self.assertEqual(score_growth_candidate(self.snap(),{'price':100.},None,saved,self.now)['parts']['Kontekst'],0)
+        def test_06_top_limit_ties_and_removed_tickers(self):
+            ticks=['T'+str(i).zfill(2) for i in range(25)];self.store.save_section('tickers',ticks)
+            for ticker in ticks:
+                detect_market(self.store,self.snap(100,0,ticker));detect_market(self.store,self.snap(102,15,ticker))
+            rows=load_growth_ranking(self.store,self.now)
+            self.assertEqual(len(rows['top']),20);self.assertEqual(rows['top'][0]['ticker'],'T00');self.assertEqual(rows['top_count'],25)
+            self.store.save_section('tickers',['T24'])
+            self.assertEqual([r['ticker'] for r in load_growth_ranking(self.store,self.now)['top']],['T24'])
+        def test_07_early_does_not_create_jobs_or_outbox(self):
+            detect_market(self.store,self.snap(100,0));detect_market(self.store,self.snap(100.5,15))
+            rows=load_growth_ranking(self.store,self.now)
+            self.assertEqual(len(rows['early']),1);self.assertEqual(rows['top'],[])
+            with self.store.connection() as c:
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0],0)
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM outbox').fetchone()[0],0)
+    return 0 if unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(RankingTests)).wasSuccessful() else 1
+
+
 def run_panel_tests():
     import tempfile
     import unittest
@@ -4059,6 +4282,35 @@ def run_panel_tests():
             self.assertEqual(next(x for x in self.app.selectbox if x.label=='Dane spółki do rozmowy').value,'AAA')
             self.app.run(timeout=30)
             self.assertEqual(next(x for x in self.app.selectbox if x.label=='Dane spółki do rozmowy').value,'AAA')
+
+        def test_12_rank_tables_are_polish_and_refresh_does_not_write(self):
+            from datetime import timedelta
+            self.store.save_section('tickers',['AAA','BBB'])
+            now=datetime.now(timezone.utc);start=now.replace(minute=0,second=0,microsecond=0)
+            snap={'ticker':'AAA','interval':'1h','candle_time':start.isoformat(),
+                  'candle_end':(start+timedelta(hours=1)).isoformat(),'candle_status':'OPEN',
+                  'acquired_at':now.isoformat(),'price':100.,'rvol':3.,'volume':1000.,
+                  'ohlc':{'open':100.,'high':103.,'low':99.,'close':100.},'currency':'PLN',
+                  'indicators':{'last_macd_hist':.1,'ma_fast':101.,'plus_di':30.,'minus_di':20.}}
+            for ticker,price in (('AAA',102.5),('BBB',100.5)):
+                detect_market(self.store,{**snap,'ticker':ticker})
+                detect_market(self.store,{**snap,'ticker':ticker,'price':price,
+                    'acquired_at':(now+timedelta(microseconds=1)).isoformat()})
+            with self.store.connection() as c:
+                before=[c.execute('SELECT COUNT(*) FROM '+t).fetchone()[0] for t in ('observations','events','analysis_jobs','outbox')]
+            self.app.run(timeout=30)
+            self.assertEqual(len(self.app.exception),0)
+            titles=[x.value for x in self.app.subheader]
+            self.assertIn('TOP 20 wzrostów',titles);self.assertIn('Wczesne obserwacje',titles)
+            frames=[x.value for x in self.app.dataframe]
+            ranking_frames=[x for x in frames if 'Wzrost od odniesienia' in x.columns]
+            self.assertEqual(len(ranking_frames),2)
+            self.assertEqual(ranking_frames[0].iloc[0]['Ticker'],'AAA')
+            self.assertEqual(ranking_frames[1].iloc[0]['Ticker'],'BBB')
+            self.assertIn('Przyczyna nieustalona',ranking_frames[0].iloc[0]['Uzasadnienie'])
+            with self.store.connection() as c:
+                after=[c.execute('SELECT COUNT(*) FROM '+t).fetchone()[0] for t in ('observations','events','analysis_jobs','outbox')]
+            self.assertEqual(before,after)
 
         def test_09_gpt_chat_context_and_restart_preserve_real_sqlite(self):
             self.store.save_section('tickers',['AAA'])
@@ -4932,7 +5184,8 @@ def main(argv=None):
             foundation_result = run_self_tests()
             market_result = run_market_tests()
             service_result = run_service_tests()
-            return 1 if foundation_result or market_result or service_result else 0
+            ranking_result = run_ranking_tests()
+            return 1 if foundation_result or market_result or service_result or ranking_result else 0
         if args.migration_report:
             plan = prepare_migration(args.migration_report)
             print(json.dumps(public_migration_report(plan),ensure_ascii=False,indent=2))
