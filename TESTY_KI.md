@@ -25,3 +25,20 @@ Po kazdej poprawce wymagane sa:
 
 Dotychczasowy filtr dwoch swiec i limit 3 analiz
 nie obowiazuja w E05. Nie przywracac ich.
+
+## E06 - REGRESJA KANDYDATA
+
+Polecenie:
+python -B .\URUCHOM_TESTY_E06_OFFLINE.py
+
+Potwierdzony wynik Windows:
+311 testow PASS, 20 grup PASS.
+
+SHA256 KI.py E06:
+6CAF50D72D259E123C9C3F400CE501B72AE69CEC2B124499D6150B33BD8C3B72
+
+Nowe testy:
+test_e06_tavily_issuer.py - 9 PASS.
+
+Historyczny test E05 pozostaje przeznaczony dla wersji E05.
+Regresja offline nie potwierdza rzeczywistego API Tavily.

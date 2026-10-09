@@ -2547,12 +2547,13 @@ def issuer_search_identity(snapshot):
     return {'ticker':ticker,'name':name,'domains':domains,'issuer_domain':issuer_domain,'aliases':aliases}
 
 
-def issuer_source_match(result,snapshot):
+def issuer_source_match(result,snapshot,allow_external_domains=False):
     import re
     import unicodedata
     from urllib.parse import urlsplit
     identity=issuer_search_identity(snapshot);host=urlsplit(result['url']).hostname.lower()
-    if not any(host==domain or host.endswith('.'+domain) for domain in identity['domains']):
+    listed_domain=any(host==domain or host.endswith('.'+domain) for domain in identity['domains'])
+    if not listed_domain and not allow_external_domains:
         raise ValueError('Domena poza źródłami komunikatów emitenta i raportów finansowych.')
     def normalized(value):
         value=unicodedata.normalize('NFKD',value.casefold().replace('ł','l'))
@@ -2565,6 +2566,23 @@ def issuer_source_match(result,snapshot):
     own_site=bool(issuer_domain and (host==issuer_domain or host.endswith('.'+issuer_domain)))
     # Mere mention in an unrelated article or in page navigation is insufficient.
     generic_report=bool(re.match(r'^(?:raport (?:(?:nr\.?|numer)\s+\d+|bieżący|biezacy|okresowy|kwartalny|roczny)|current report|quarterly report|annual report|form (?:8-k|10-k|10-q))\b',title,re.I))
+    if not listed_domain:
+        # Fallback 'prefer' moze zwrocic domeny spoza listy. Nie wystarczy
+        # ticker ani samo wspomnienie w stopce: wymagana wyrazna tozsamosc
+        # w tytule i poczatku tresci. Material jest zewnetrzny, nie oficjalny.
+        strong_aliases=[]
+        for alias in identity['aliases']:
+            normalized_alias=normalized(alias)
+            words=normalized_alias.split()
+            letters=len(''.join(words))
+            if letters>=8 or (len(words)>=2 and letters>=7):
+                strong_aliases.append(normalized_alias)
+        def strong_name_in(value):
+            target=' '+normalized(value)+' '
+            return any(' '+alias+' ' in target for alias in strong_aliases)
+        if not strong_aliases or not strong_name_in(title) or not strong_name_in(content[:400]):
+            raise ValueError('Domena zewnętrzna: brak jednoznacznej pełnej nazwy emitenta w tytule i początku treści.')
+        return 'Źródło zewnętrzne: pełna nazwa emitenta w tytule i początku treści; materiał nie jest komunikatem oficjalnym.'
     if identity['name']:
         if name_in(content) and (name_in(title) or own_site or (generic_report and name_in(content[:400]))):
             return 'Pełna nazwa emitenta w treści oraz tytuł raportu lub zapisana domena emitenta.'
@@ -2662,7 +2680,7 @@ def resolve_official_page_dates(payload,snapshot,max_pages=5):
     return {**payload,'results':updated}
 
 
-def normalize_tavily_context(payload,snapshot,window_days=7):
+def normalize_tavily_context(payload,snapshot,window_days=7,allow_external_domains=False):
     from datetime import timedelta
     from email.utils import parsedate_to_datetime
     from urllib.parse import urlsplit
@@ -2675,7 +2693,12 @@ def normalize_tavily_context(payload,snapshot,window_days=7):
             url=result['url'];parts=urlsplit(url);content=result.get('content','');raw=result.get('published_date')
             if not isinstance(content,str) or not content.strip():raise ValueError('Brak treści źródła.')
             if parts.scheme not in ('https','http') or not parts.hostname or parts.username or parts.password or len(url)>500 or url in seen:raise ValueError()
-            issuer_match=issuer_source_match(result,snapshot)
+            issuer_match=issuer_source_match(result,snapshot,allow_external_domains=allow_external_domains)
+            identity=issuer_search_identity(snapshot)
+            host=parts.hostname.lower()
+            source_provenance=('listed' if any(host==d or host.endswith('.'+d) for d in identity['domains']) else 'external')
+            if source_provenance=='external' and parts.scheme!='https':
+                raise ValueError('Źródło zewnętrzne musi używać HTTPS.')
             date_unverified=True
             if not isinstance(raw,str) or not raw.strip():raise ValueError('Brak daty publikacji; materiał nie potwierdza świeżej wiadomości.')
             raw=raw.strip()
@@ -2695,6 +2718,7 @@ def normalize_tavily_context(payload,snapshot,window_days=7):
             sources.append({'id':'S'+str(len(sources)+1),'url':url,'title':str(result.get('title') or '')[:160],
                             'published_at':published.isoformat(),'published_date_source':result.get('published_date_source','tavily'),
                             'content':content.strip()[:1800],'issuer_match':issuer_match,
+                            'source_provenance':source_provenance,
                             'scope':'fresh' if published>=cutoff-timedelta(days=7) else 'background'})
         except (KeyError,ValueError,TypeError,AttributeError,OverflowError) as exc:
             excluded+=1
@@ -2759,10 +2783,15 @@ def load_issuer_background(store,snapshot,now=None):
 def tavily_result_summary(research):
     if research.get('sources'):return 'Przyjęto datowane źródła dotyczące emitenta.'
     if research.get('date_unverified_count',0):
-        return 'Znaleziono materiały dotyczące emitenta, ale nie potwierdzono daty lub czasu publikacji dla '+str(research['date_unverified_count'])+' wyników. Nie są dowodem świeżych wiadomości. Szczegóły znajdują się poniżej.'
+        return ('Znaleziono materiały dotyczące emitenta, ale nie potwierdzono daty lub czasu publikacji dla '+str(research['date_unverified_count'])+' wyników. Odrzucone wyniki: '+str(research.get('excluded',0))+'. Nie są dowodem świeżych wiadomości. Szczegóły znajdują się poniżej.')
     if research.get('received_results')==0:
         return 'Tavily zwróciło pustą listę wyników dla wykonanych zapytań. To nie potwierdza braku informacji o emitencie.'
-    return 'Nie przyjęto datowanych źródeł dotyczących emitenta. Sprawdź powody odrzucenia; wynik nie potwierdza braku informacji na rynku.'
+    count=research.get('received_results')
+    if count is None:
+        return 'Nie przyjęto datowanych źródeł dotyczących emitenta. Sprawdź powody odrzucenia; wynik nie potwierdza braku informacji na rynku.'
+    return ('Nie przyjęto datowanych źródeł dotyczących emitenta. Tavily zwróciło '+str(count)+
+            ' wyników, wszystkie zostały odrzucone przez walidację KI. '
+            'Sprawdź powody odrzucenia; to nie dowodzi braku informacji na rynku.')
 
 
 def merge_manual_research_result(store,turn,context,normalized):
@@ -2808,8 +2837,13 @@ def collect_manual_research(store,turn,context,snapshot,key):
             research.update(status='RECEIVED',received_at=attempt['received_at'])
             research['received_results']+=count or 0
             save_gpt_chat_context(store,turn,context)
-            normalized=normalize_tavily_context(body,snapshot,window_days=180 if scope=='background' else 7)
-            attempt.update(status='DONE',accepted=len(normalized['sources']),excluded=normalized['excluded'],date_unverified_count=normalized['date_unverified_count'])
+            normalized=normalize_tavily_context(body,snapshot,window_days=180 if scope=='background' else 7,
+                allow_external_domains=(scope=='fallback' and request.get('include_domains_mode')=='prefer'))
+            reasons={}
+            for entry in normalized['rejected_sources']:
+                reason=entry['reason'];reasons[reason]=reasons.get(reason,0)+1
+            attempt.update(status='DONE',accepted=len(normalized['sources']),excluded=normalized['excluded'],
+                           date_unverified_count=normalized['date_unverified_count'],rejection_reasons=reasons)
             if scope=='background':save_issuer_background(store,snapshot,normalized)
         merge_manual_research_result(store,turn,context,normalized)
     research.update(status='DONE',cutoff=event_context_cutoff(snapshot).isoformat(),
@@ -2836,8 +2870,12 @@ def combine_automatic_tavily_results(snapshot,responses):
     """Pure, bounded evidence + cost accounting. Unknown credits are not zero."""
     all_sources=[];urls=set();attempts=[];excluded=0;rejected=[];undated=[]
     received=0;duplicates=0;credits_total=0;credits_known=0
-    for scope,request,body in responses:
-        normalized=normalize_tavily_context(body,snapshot)
+    for response in responses:
+        scope,request,body=response[:3]
+        requested_at=response[3] if len(response)>3 else None
+        received_at=response[4] if len(response)>4 else None
+        normalized=normalize_tavily_context(body,snapshot,
+            allow_external_domains=(scope=='fallback' and request.get('include_domains_mode')=='prefer'))
         source_count=0
         received+=normalized['received_results']
         excluded+=normalized['excluded'];rejected.extend(normalized['rejected_sources'])
@@ -2857,10 +2895,14 @@ def combine_automatic_tavily_results(snapshot,responses):
             credits=None
         else:
             credits_known+=1;credits_total+=credits
+        reasons={}
+        for entry in normalized['rejected_sources']:
+            reason=entry['reason'];reasons[reason]=reasons.get(reason,0)+1
         attempts.append({'scope':scope,'request':request,'status':'DONE',
+                         'requested_at':requested_at,'received_at':received_at,
                          'received_results':normalized['received_results'],'accepted':source_count,
                          'excluded':normalized['excluded'],'date_unverified_count':normalized['date_unverified_count'],
-                         'credits':credits})
+                         'rejection_reasons':reasons,'credits':credits})
     first_request=responses[0][1] if responses else None
     return {'sources':all_sources,'request':first_request,'attempts':attempts,
             'received_at':utc_now(),'cutoff':event_context_cutoff(snapshot).isoformat(),
@@ -2879,8 +2921,9 @@ def fetch_event_context(evidence,keys):
         if scope=='fallback' and combine_automatic_tavily_results(snapshot,responses)['sources']:
             break
         # No retries after transport errors: a failed Tavily response may still incur credits.
+        requested_at=utc_now()
         body=service_http('Tavily','https://api.tavily.com/search',keys['TAVILY_API_KEY'],request)
-        responses.append((scope,request,body))
+        responses.append((scope,request,body,requested_at,utc_now()))
     return combine_automatic_tavily_results(snapshot,responses)
 
 
