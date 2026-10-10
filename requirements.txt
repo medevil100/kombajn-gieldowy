@@ -5,3 +5,5 @@ requests
 streamlit
 streamlit_autorefresh
 yfinance
+
+tavily-cli==0.1.8

@@ -2439,6 +2439,9 @@ def load_service_keys(home=None,project=None,environ=None):
 def service_config(settings):
     cfg={key:settings.get(key,False) for key in ('pipeline_enabled','telegram_enabled')}
     if any(type(value) is not bool for value in cfg.values()):raise ValueError('Przełączniki usług muszą mieć wartość logiczną.')
+    mode=settings.get('tavily_mode','REST')
+    if mode not in ('REST','CLI'):raise ValueError('Nieznany wariant Tavily: oczekiwano REST lub CLI.')
+    cfg['tavily_mode']=mode
     return cfg
 
 
@@ -2781,6 +2784,10 @@ def load_issuer_background(store,snapshot,now=None):
 
 
 def tavily_result_summary(research):
+    if research.get('backend')=='CLI':
+        if research.get('sources'):
+            return 'Tavily CLI: zachowano wyniki Search i stany Extract. Daty i związek z ruchem wymagają oceny GPT.'
+        return 'Tavily CLI nie zwróciło materiałów w wykonanym wyszukiwaniu; nie dowodzi to braku wiadomości.'
     if research.get('sources'):return 'Przyjęto datowane źródła dotyczące emitenta.'
     if research.get('date_unverified_count',0):
         return ('Znaleziono materiały dotyczące emitenta, ale nie potwierdzono daty lub czasu publikacji dla '+str(research['date_unverified_count'])+' wyników. Odrzucone wyniki: '+str(research.get('excluded',0))+'. Nie są dowodem świeżych wiadomości. Szczegóły znajdują się poniżej.')
@@ -2809,7 +2816,17 @@ def merge_manual_research_result(store,turn,context,normalized):
     save_gpt_chat_context(store,turn,context)
 
 
-def collect_manual_research(store,turn,context,snapshot,key):
+def collect_manual_research(store,turn,context,snapshot,key,backend='REST'):
+    if backend=='CLI':
+        context['research'].update(status='REQUESTED',backend='CLI',requested_at=utc_now())
+        save_gpt_chat_context(store,turn,context)
+        def checkpoint(payload):
+            context['research'].update(payload)
+            save_gpt_chat_context(store,turn,context)
+        context['research'].update(tavily_cli_context(snapshot,key,manual=True,checkpoint=checkpoint),status='DONE')
+        save_gpt_chat_context(store,turn,context)
+        return
+    if backend!='REST':raise ServiceError('Nieznany wariant Tavily.')
     from datetime import timedelta
     research=context['research'];research.update(attempts=[],sources=[],excluded=0,rejected_sources=[],received_results=0,
         undated_sources=[],date_unverified_count=0,issuer_filter_version=1,research_version=4,
@@ -2914,8 +2931,22 @@ def combine_automatic_tavily_results(snapshot,responses):
             'date_basis':'Źródła są datowane i sprawdzone lokalnie; nie dowodzą przyczyny ruchu ceny.'}
 
 
-def fetch_event_context(evidence,keys):
+
+def tavily_cli_context(snapshot,key,manual=False,checkpoint=None):
+    # CLI is an explicitly selected parallel backend, never an implicit retry.
+    # It uses only Yahoo identity and does not participate in market detection.
+    from tavily_cli_adapter import collect, CLITransportError
+    plan=manual_search_plan(snapshot) if manual else automatic_search_plan(snapshot)
+    try:
+        return collect(snapshot,key,plan,event_context_cutoff(snapshot).isoformat(),checkpoint=checkpoint)
+    except CLITransportError as exc:
+        raise ServiceError(str(exc),uncertain=True) from None
+
+
+def fetch_event_context(evidence,keys,backend='REST',checkpoint=None):
     if not keys['TAVILY_API_KEY']:raise ServiceError('Brak TAVILY_API_KEY.')
+    if backend=='CLI':return tavily_cli_context(evidence['snapshot'],keys['TAVILY_API_KEY'],checkpoint=checkpoint)
+    if backend!='REST':raise ServiceError('Nieznany wariant Tavily.')
     snapshot=evidence['snapshot'];responses=[]
     for scope,request in automatic_search_plan(snapshot):
         if scope=='fallback' and combine_automatic_tavily_results(snapshot,responses)['sources']:
@@ -3596,13 +3627,13 @@ def analysis_message(event_id,evidence,context,result,limit=True):
         lines.append(polish_indicator(item['metric'])+' = '+format(snap['indicators'][item['metric']],'.6g')+': '+item['interpretation'])
     lines.append('5. KONTEKST TAVILY — bez domniemanej przyczynowości:' if layered else 'Kontekst źródłowy:')
     if not result['context']:
-        lines.append('Brak dopasowanych, datowanych faktów dotyczących emitenta. Przyczyna ruchu nieustalona.')
+        lines.append('Brak cytowanych faktów dotyczących emitenta. Przyczyna ruchu nieustalona.')
     for item in result['context']:
         source=sources[item['source_id']]
         lines.extend([item['source_id']+' · '+source['published_at']+': '+item['fact'],source['url']])
     for key,label in (('hypotheses','Hipotezy — bez dowodu przyczyny'),('risks','Ryzyka'),('missing','Brakujące dane')):
         lines.append(label+':');lines.extend('• '+s for s in result[key])
-    lines.append('Daty źródeł: publikacja lub aktualizacja według Tavily.')
+    lines.append('Daty źródeł: metadane Tavily, brak daty oznacza brak potwierdzenia czasu publikacji.')
     text='\n'.join(lines)
     return message_limit(text) if limit else text
 
@@ -3679,11 +3710,19 @@ def process_analysis_once(store,keys,event_id=None):
     try:
         with store.connection() as c:evidence=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(job['event_id'],)).fetchone()[0])
         if job['state']=='BUSY_CONTEXT':
-            # Persist the exact request before HTTP, including failed/interrupted attempts.
+            # Persist selected backend and request BEFORE any potentially paid operation.
+            backend=service_config(store.load_section('settings',{}))['tavily_mode']
+            initial_request=event_context_request(evidence)
+            if backend=='CLI':
+                initial_request={k:v for k,v in initial_request.items() if k in ('query','topic','search_depth','max_results','start_date','end_date')}
             with store.transaction() as c:
                 c.execute('UPDATE analysis_jobs SET context=? WHERE event_id=? AND state=?',
-                          (json_text({'request':event_context_request(evidence),'requested_at':utc_now()}),job['event_id'],'BUSY_CONTEXT'))
-            save_analysis_context(store,job['event_id'],fetch_event_context(evidence,keys))
+                          (json_text({'backend':backend,'request':initial_request,'requested_at':utc_now()}),job['event_id'],'BUSY_CONTEXT'))
+            def checkpoint(payload):
+                with store.transaction() as c:
+                    c.execute('UPDATE analysis_jobs SET context=?,updated_at=? WHERE event_id=? AND state=?',
+                              (json_text(payload),utc_now(),job['event_id'],'BUSY_CONTEXT'))
+            save_analysis_context(store,job['event_id'],fetch_event_context(evidence,keys,backend=backend,checkpoint=checkpoint))
         else:
             result,metadata=analyze_event(evidence,json.loads(job['context']),keys)
             finish_analysis(store,job['event_id'],result,metadata)
@@ -4725,14 +4764,17 @@ def gpt_chat_request(question,context,history):
         if turn.get('state')=='DONE' and turn.get('answer') and old.get('ticker')==context.get('ticker') and old.get('purpose')==context.get('purpose') and old.get('research',{}).get('issuer_filter_version')==1:
             messages.extend([{'role':'user','content':turn['question']},{'role':'assistant','content':turn['answer']}])
     # Keep rejected titles in SQLite diagnostics; they are not research for GPT.
-    safe_context={**context,'research':{k:v for k,v in context.get('research',{}).items() if k not in ('rejected_sources','undated_sources')}}
+    # Full CLI Search/Extract replies remain persisted; never pay GPT to resend
+    # the same raw payloads and provider diagnostics a second time.
+    safe_context={**context,'research':{k:v for k,v in context.get('research',{}).items()
+        if k not in ('rejected_sources','undated_sources','search_calls','search_hits','extract_calls')}}
     if context.get('report_version')==3:safe_context['numeric_references']={key:'{{metric:'+key+'}}' for key in manual_research_metrics(context)}
     local_context={**context,'previous_snapshot':manual_previous_snapshot(context)} if context.get('report_version')==3 else context
     local=local_research_analysis(local_context)
     if local:safe_context['local_analysis']={key:local[key] for key in ('conclusion','trend','score','confirms','weakens','missing','notes','risk','confirmed')}
     for field in ('snapshot','previous_snapshot'):
         if safe_context.get(field):safe_context[field]={k:v for k,v in safe_context[field].items() if k not in ('chart_history','carried_price_candles','empty_trailing_source_candles')}
-    if (context.get('research') or {}).get('issuer_filter_version')==1:safe_context.pop('saved_analysis',None)
+    if (context.get('research') or {}).get('issuer_filter_version') in (1,2):safe_context.pop('saved_analysis',None)
     if context.get('report_version')==3:safe_context=manual_numeric_context(safe_context,context)
     messages.append({'role':'user','content':json_text({'question':question.strip(),'context':safe_context})})
     return {'model':'gpt-4o-mini','temperature':.2,'max_completion_tokens':2600 if context.get('report_version')==3 else 1800,'store':False,'messages':messages,
@@ -4758,7 +4800,8 @@ def perform_manual_question(store,ticker,question,with_search,history=(),purpose
             if with_search:
                 snapshot={'ticker':ticker,'company_name':(context.get('snapshot') or {}).get('company_name'),'company_website':(context.get('snapshot') or {}).get('company_website'),'acquired_at':utc_now()}
                 snapshot['_manual_research']=True
-                collect_manual_research(store,turn,context,snapshot,keys['TAVILY_API_KEY'])
+                backend=service_config(store.load_section('settings',{}))['tavily_mode']
+                collect_manual_research(store,turn,context,snapshot,keys['TAVILY_API_KEY'],backend=backend)
             request=gpt_chat_request(question,context,list(history))
             context['gpt']={'status':'REQUESTED','requested_at':utc_now()}
             save_gpt_chat_context(store,turn,context)
@@ -4836,7 +4879,7 @@ def render_manual_service_status(turn):
     context=json.loads(turn['context']);research=context.get('research') or {};status=research.get('status')
     sources=research.get('sources') or []
     if status=='DONE':
-        st.caption('Tavily: wyszukiwanie zakończone · źródeł przyjętych: '+str(len(sources))+' · odrzuconych: '+str(research.get('excluded',0)))
+        st.caption('Tavily: wyszukiwanie zakończone · wariant: '+str(research.get('backend','REST'))+' · zapisanych wyników: '+str(len(sources))+' · odrzuconych: '+str(research.get('excluded',0)))
         if not sources:st.info(tavily_result_summary(research))
     elif status=='RECEIVED':st.caption('Tavily: odpowiedź odebrana · weryfikacja źródeł nie została zakończona.')
     elif status=='REQUESTED':st.caption('Tavily: rozpoczęto zapytanie · brak zapisanego potwierdzenia odpowiedzi.')
@@ -4849,7 +4892,7 @@ def render_manual_service_status(turn):
             if research.get('received_results') is not None:st.caption('Liczba wyników w odpowiedziach: '+str(research['received_results']))
             if research.get('request',{}).get('query'):st.write('Wyszukiwanie: '+research['request']['query'])
             if research.get('request',{}).get('include_domains'):st.caption('Domeny wyszukiwania: '+', '.join(research['request']['include_domains']))
-            if research.get('issuer_filter_version')!=1:st.warning('Starsze wyszukiwanie: źródła nie przeszły nowej kontroli dopasowania do emitenta.')
+            if research.get('issuer_filter_version') not in (1,2):st.warning('Starsze wyszukiwanie: źródła nie przeszły nowej kontroli dopasowania do emitenta.')
             if research.get('background_cached_at'):st.caption('Tło z zapisu: '+research['background_cached_at'])
             if research.get('date_basis'):st.caption(research['date_basis'])
             if research.get('research_version',0)>=4:
@@ -4858,12 +4901,20 @@ def render_manual_service_status(turn):
                 st.caption('W tym zapisie Tavily filtrowało daty przed zwróceniem wyników; materiały bez rozpoznanej daty mogły zostać pominięte przez usługę.')
             for attempt in research.get('attempts',[]):
                 st.write(attempt['scope']+' · '+attempt['status']+' · wyników: '+str(attempt.get('received_results','brak'))+' · '+attempt['request']['query'])
-                st.caption('Zakres: '+attempt['request']['start_date']+' → '+attempt['request']['end_date']+' · domeny: '+', '.join(attempt['request']['include_domains'])+' · przyjęte: '+str(attempt.get('accepted','brak')))
-                st.caption('Domeny: '+('preferowane; pozostałe wyniki podlegają lokalnej kontroli' if attempt['request'].get('include_domains_mode')=='prefer' else 'wyszukiwanie ograniczone do listy')+' · niepotwierdzona data: '+str(attempt.get('date_unverified_count','brak zapisu')))
+                st.caption('Zakres: '+str(attempt['request'].get('start_date') or 'brak')+' → '+str(attempt['request'].get('end_date') or 'brak')+' · domeny: '+', '.join(attempt['request'].get('include_domains') or [])+' · wyniki: '+str(attempt.get('accepted','brak')))
+                st.caption('Domeny: '+('bez ograniczeń listą KI' if research.get('backend')=='CLI' else 'preferowane; pozostałe wyniki podlegają lokalnej kontroli' if attempt['request'].get('include_domains_mode')=='prefer' else 'wyszukiwanie ograniczone do listy')+' · niepotwierdzona data: '+str(attempt.get('date_unverified_count',research.get('date_unverified_count','brak zapisu'))))
             for source in sources:
-                st.caption('Świeże wydarzenie' if source.get('scope')=='fresh' else 'Kontekst historyczny — nie dowód przyczyny dzisiejszego ruchu')
+                st.caption(('Zakres wyszukiwania: fresh; data publikacji niepotwierdzona' if source.get('date_state')!='KNOWN' else 'Wynik wyszukiwania fresh') if research.get('backend')=='CLI' and source.get('scope')=='fresh' else 'Kontekst historyczny — nie dowód przyczyny dzisiejszego ruchu' if source.get('scope')!='fresh' else 'Świeże wydarzenie')
                 st.write(source['published_at']+' · '+str(source.get('title') or 'Źródło'))
-                st.link_button('Otwórz źródło '+source['id'],source['url'])
+                if source.get('url','').startswith('https://'):
+                    st.link_button('Otwórz źródło '+source['id'],source['url'])
+                else:st.caption('Brak technicznie poprawnego odnośnika — wynik Search zachowany.')
+                if research.get('backend')=='CLI':
+                    st.caption('Extract: '+str(source.get('extract_state'))+' · data: '+str(source.get('date_state')))
+                    if source.get('extract_error'):st.caption('Błąd pobrania: '+source['extract_error'])
+                    st.text_area('Treść pobrana lub fragment Search · '+source['id'],
+                        value=source.get('content') or 'Brak treści; zachowano metadane Search.',
+                        height=160,disabled=True,key='cli_source_text_'+turn['id']+'_'+source['id'])
             for rejected in research.get('rejected_sources',[]):
                 st.write('Odrzucono: '+str(rejected.get('title') or 'Źródło')+' · '+str(rejected.get('reason') or 'Brak uzasadnienia'))
             for item in research.get('undated_sources',[]):
@@ -4916,8 +4967,16 @@ def render_ticker_research(store):
     import streamlit as st
     with store.connection() as c:
         ticks=sorted(set(store.load_section('tickers',[]))|{r[0] for r in c.execute('SELECT DISTINCT ticker FROM observations')})
-    if not ticks:st.info('Dodaj ticker albo pobierz jego dane w widoku ręcznym, aby uruchomić analizę.');return
-    ticker=stable_ticker_select('Ticker do analizy na żądanie',ticks,'research_ticker')
+    manual_raw=st.text_input('Wpisz ticker do analizy GPT',key='research_ticker_manual',placeholder='np. STX.WA')
+    manual_ticker=manual_raw.strip().upper()
+    selected=stable_ticker_select('Ticker do analizy na żądanie',ticks,'research_ticker') if ticks else None
+    ticker=manual_ticker or selected
+    if manual_ticker:
+        import re
+        if not re.fullmatch(r'[A-Z0-9][A-Z0-9.\-^=]{0,31}',manual_ticker):
+            st.error('Niepoprawny ticker. Sprawdź wpisany symbol.');ticker=None
+    elif not ticks:
+        st.info('Brak tickerów na liście automatu. Możesz wpisać ticker ręcznie bez dodawania go do listy.')
     live_context=gpt_chat_context(store,ticker) if ticker else None
     if ticker:
         snapshot=live_context.get('snapshot')
@@ -4925,7 +4984,8 @@ def render_ticker_research(store):
         else:st.caption('Najnowszy dostępny zapis Yahoo (dla nowej analizy): '+snapshot.get('acquired_at','Brak czasu odczytu'))
     question=st.text_area('Pytanie do analizy spółki',value='Co pokazują dane o ruchu tej spółki, jakie są potwierdzone informacje i czego brakuje do oceny?',key='ticker_research_question')
     st.caption('Bid/ask: osobne pobranie Yahoo przy nowej analizie. Otwarcie zapisanego raportu nie ponawia pobrania.')
-    st.caption('Do trzech wyszukiwań Tavily i jedno zapytanie GPT po przycisku. Tło emitenta zapisane na 24 godziny. Analiza na żądanie, bez zmiany filtra automatu.')
+    backend=service_config(store.load_section('settings',{}))['tavily_mode']
+    st.caption('Tryb Tavily: '+backend+'. Do trzech wyszukiwań i jedno zapytanie GPT po przycisku. Tło REST jest zapisywane na 24 godziny; CLI wykonuje Search i Extract przy każdym żądaniu. Bez zmiany filtra automatu.')
     if st.button('Analizuj dane spółki z Tavily',disabled=ticker is None):
         try:
             resolve_question_ticker(question,ticker,ticks)
@@ -5629,6 +5689,9 @@ def run_streamlit(db):
             tpm=st.number_input('Mnożnik ATR dla TP',min_value=.1,value=float(settings.get('tp_atr_multiplier',3.)),step=.1)
             st.markdown('**Dalsza analiza potwierdzonego ruchu**')
             pipeline_enabled=st.checkbox('Tavily + GPT po potwierdzeniu okazji',value=services['pipeline_enabled'])
+            tavily_mode=st.selectbox('Wariant Tavily',['REST','CLI'],index=['REST','CLI'].index(services['tavily_mode']))
+            st.caption('REST: dotychczasowe Tavily E06. CLI: tvly search i tvly extract, wymaga osobnej instalacji i zużywa kredyty. Wybór obejmuje automat i analizę ręczną.')
+            cli_cost_ack=st.checkbox('CLI: potwierdzam koszt Search + Extract w automacie',value=False)
             telegram_enabled=st.checkbox('Automatycznie wysyłaj nowe zdarzenia na Telegram',value=services['telegram_enabled'])
             st.caption('Okazja automatyczna: trzy kolejne odczyty ponad stałą bazą matrycy w ciągu godziny. GPW: alerty po 17:00 czasu Warszawy są blokowane. Skrócona świeca końcowa nie dostaje RVOL porównywanego z pełnymi świecami. Maksymalnie 3 analizy na 15 minut, jedna wiadomość na sekwencję.')
             st.caption('Przy wyłączonej wysyłce wiadomości pozostają w podglądzie. Włączenie dotyczy nowych zdarzeń.')
@@ -5636,9 +5699,11 @@ def run_streamlit(db):
         if saved:
             import re
             new_ticks=list(dict.fromkeys(t.upper() for t in re.split(r'[,\s]+',text.strip()) if t))
-            proposed={'market_interval':iv,'auto_scan_interval':cadence,'price_threshold_pct':pt,'rvol_threshold_pct':rt,'observation_retention_days':int(retention),'sl_atr_multiplier':slm,'tp_atr_multiplier':tpm,'pipeline_enabled':pipeline_enabled,'telegram_enabled':telegram_enabled}
+            proposed={'market_interval':iv,'auto_scan_interval':cadence,'price_threshold_pct':pt,'rvol_threshold_pct':rt,'observation_retention_days':int(retention),'sl_atr_multiplier':slm,'tp_atr_multiplier':tpm,'pipeline_enabled':pipeline_enabled,'telegram_enabled':telegram_enabled,'tavily_mode':tavily_mode}
             market_config(proposed);atr_risk_levels(1.,None,slm,tpm)
             if any(not valid_ticker(t) for t in new_ticks):st.error('Błędny ticker.')
+            elif tavily_mode=='CLI' and pipeline_enabled and not cli_cost_ack:
+                st.error('Wariant CLI w automacie wymaga potwierdzenia kosztów Search i Extract. Nie zapisano ustawień.')
             else:
                 with store.transaction() as c:
                     current=store.load_section('settings',{});current.update(proposed)
@@ -5933,7 +5998,7 @@ def render_service_panel(store,manual=False):
                 if 'sources' not in context:st.caption('Brak zapisanej odpowiedzi Tavily. Sprawdź stan zadania i błąd powyżej.')
             if context and 'sources' in context:
                 if not context['sources']:st.warning(tavily_result_summary(context))
-                if context.get('issuer_filter_version')!=1:st.warning('Starsze wyszukiwanie: źródła nie przeszły nowej kontroli dopasowania do emitenta.')
+                if context.get('issuer_filter_version') not in (1,2):st.warning('Starsze wyszukiwanie: źródła nie przeszły nowej kontroli dopasowania do emitenta.')
                 for attempt in context.get('attempts',[]):
                     credit_label=(str(attempt['credits']) if attempt.get('credits') is not None else 'nieznane')
                     st.caption('Tavily '+str(attempt['scope'])+' · wyników: '+str(attempt['received_results'])+
@@ -6956,6 +7021,20 @@ def run_panel_tests():
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0],0)
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM outbox').fetchone()[0],0)
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM gpt_chat_turns').fetchone()[0],3)
+
+        def test_manual_ticker_entry_available_with_empty_database(self):
+            self.assertEqual(self.store.load_section('tickers',[]),[])
+            next(x for x in self.app.radio if x.label=='Widok panelu').set_value('Analiza GPT').run(timeout=30)
+            self.assertEqual(len(self.app.exception),0)
+            entry=next(x for x in self.app.text_input if x.label=='Wpisz ticker do analizy GPT')
+            self.assertTrue(next(x for x in self.app.button if x.label=='Analizuj dane spółki z Tavily').disabled)
+            entry.set_value('STX.WA').run(timeout=30)
+            self.assertEqual(len(self.app.exception),0)
+            self.assertFalse(next(x for x in self.app.button if x.label=='Analizuj dane spółki z Tavily').disabled)
+            self.assertEqual(self.store.load_section('tickers',[]),[])
+            with self.store.connection() as c:
+                for table in ('observations','events','analysis_jobs','gpt_chat_turns','outbox'):
+                    self.assertEqual(c.execute('SELECT COUNT(*) FROM '+table).fetchone()[0],0)
 
         def test_manual_research_views_open_without_api_jobs(self):
             self.store.save_section('tickers',['MREO'])

@@ -21,3 +21,5 @@ venv/
 .env
 .env.*
 secrets.toml
+
+.venv_tavily_cli/

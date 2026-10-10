@@ -116,3 +116,18 @@ rzeczywistego API Tavily oraz kontrola jego wynikow.
 
 Nastepne poprawki: E07 GPT/Telegram, E08 TOP 20.
 Nie przywracac filtra dwoch swiec ani limitu 3 analiz.
+
+## E06 REST + CLI - 10.10.2026
+
+Dostepne sa dwa warianty Tavily: REST i CLI.
+REST pozostaje wariantem domyslnym.
+CLI korzysta z tvly search i tvly extract.
+Wariant wybierany jest recznie w ustawieniach.
+Analiza GPT pozwala recznie wpisac ticker,
+rowniez przy pustej bazie testowej.
+Reczny ticker nie trafia do automatu.
+Yahoo odpowiada za dane i detekcje rynku.
+Tavily dostarcza kontekst dla GPT.
+Regresja offline Windows: 319/319 PASS.
+Realny Search + Extract CLI wymaga weryfikacji.
+E05, main i produkcyjna SQLite bez zmian.

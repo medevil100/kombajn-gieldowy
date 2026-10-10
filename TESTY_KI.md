@@ -42,3 +42,15 @@ test_e06_tavily_issuer.py - 9 PASS.
 
 Historyczny test E05 pozostaje przeznaczony dla wersji E05.
 Regresja offline nie potwierdza rzeczywistego API Tavily.
+
+## E06 REST + CLI - REGRESJA 319
+
+Wynik Windows: 319/319 testow offline PASS.
+Polecenie:
+python -B .\URUCHOM_TESTY_E06_CLI_DUAL_OFFLINE.py
+
+Obejmuje dwa warianty Tavily, dotychczasowe
+kontrakty KI i pole recznego tickera.
+Testy uruchomiono bez platnego API i Telegrama.
+Rzeczywisty CLI, GPT i Telegram nie zostaly
+zweryfikowane w tym etapie.
