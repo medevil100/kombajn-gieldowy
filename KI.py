@@ -83,6 +83,18 @@ CREATE TABLE IF NOT EXISTS analysis_jobs(
  event_id TEXT PRIMARY KEY REFERENCES events(id), state TEXT NOT NULL,
  context TEXT, result TEXT, attempts INTEGER NOT NULL DEFAULT 0,
  next_attempt_at TEXT, last_error TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS research_requests(
+ event_id TEXT PRIMARY KEY REFERENCES events(id),
+ state TEXT NOT NULL CHECK(state IN (
+   'RESERVED','CALL_UNCERTAIN','SUBMITTED','COMPLETED','FAILED'
+ )),
+ query TEXT NOT NULL,
+ cutoff TEXT NOT NULL,
+ request_id TEXT UNIQUE,
+ raw_response TEXT,
+ last_error TEXT,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS analysis_rejections(
  id TEXT PRIMARY KEY, event_id TEXT NOT NULL REFERENCES events(id),
  reason TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -153,6 +165,18 @@ class Store:
             except BaseException:
                 c.execute('ROLLBACK')
                 raise
+
+    def ensure_research_schema(self):
+        """Kontrolowana migracja tabeli Research w istniejacym Store."""
+        with self.transaction() as connection:
+            return ensure_research_schema(connection)
+
+    def reserve_research(self, event_id, query, cutoff):
+        """Atomowa rezerwacja i COMMIT przed przyszlym wywolaniem CLI."""
+        with self.transaction() as connection:
+            return reserve_research(
+                connection, event_id, query, cutoff
+            )
 
     def load_state(self):
         with self.connection() as c:
@@ -1814,162 +1838,9 @@ def run_legacy_streamlit(db):
                 st.info(f"📊 Kup-Trzymaj lepsze o {avg_bh - avg_sig:+.2f}% – sygnały wymagają optymalizacji")
 
     # ------------------ MODUŁ: CZAT AI ------------------
-    def tavily_research(tavily_key, ticker, question):
-        if not tavily_key:
-            return "Brak klucza Tavily.", False
-        queries = [question]
-        if ticker:
-            queries.extend([f"{ticker} company profile", f"{ticker} stock news", f"{ticker} analyst ratings"])
-        all_answers, all_results = [], []
-        for q in queries[:3]:
-            try:
-                resp = requests.post("https://api.tavily.com/search",
-                                     headers={"Authorization": f"Bearer {tavily_key}"},
-                                     json={"query": q, "topic": "finance", "max_results": 3,
-                                           "include_answer": True, "include_raw_content": False},
-                                     timeout=15)
-                if resp.status_code == 200:
-                    j = resp.json()
-                    if j.get("answer"): all_answers.append(j["answer"])
-                    all_results.extend(j.get("results", []))
-            except:
-                continue
-        bullets = []
-        for item in all_results[:5]:
-            title, url = item.get("title", ""), item.get("url", "")
-            if title or url:
-                bullets.append(f"- {title} ({url})")
-        merged = "\n\n".join(all_answers)
-        research = ""
-        if merged: research += f"Podsumowanie Tavily:\n{merged}\n\n"
-        if bullets: research += "Źródła:\n" + "\n".join(bullets)
-        return research if research else "Brak danych z Tavily.", bool(research)
 
     def render_ai_chat():
-        st.title("🤖 Czat AI – Analityk finansowy")
-        st.caption("Zero zgadywania – tylko dane z Trading Engine + Tavily.")
-
-        if "OPENAI_API_KEY" not in st.secrets:
-            st.error("❌ Brak OPENAI_API_KEY w secrets.toml")
-            return
-        if "TAVILY_API_KEY" not in st.secrets:
-            st.error("❌ Brak TAVILY_API_KEY w secrets.toml")
-            return
-
-        openai_key = st.secrets["OPENAI_API_KEY"]
-        tavily_key = st.secrets["TAVILY_API_KEY"]
-
-        if "chat_history" not in st.session_state:
-            st.session_state.chat_history = []
-
-        st.markdown("### Historia rozmowy")
-        for sender, msg in st.session_state.chat_history:
-            st.markdown(f"**{sender}:** {msg}")
-
-        user_input = st.text_input("Twoja wiadomość:")
-        col_send, col_clear = st.columns([3,1])
-        send = col_send.button("Wyślij")
-        clear = col_clear.button("Wyczyść")
-
-        if clear:
-            st.session_state.chat_history = []
-            st.rerun()
-
-        if not send or not user_input.strip():
-            return
-
-        question = user_input.strip()
-        st.session_state.chat_history.append(("Ty", question))
-
-        ticker = detect_ticker_from_text(question)
-        if not ticker and "last_analysis" in st.session_state:
-            ticker = st.session_state["last_analysis"].get("ticker")
-
-        trading_data = st.session_state.get("last_analysis", None)
-        trading_summary = "Brak danych z Trading Engine."
-        if trading_data:
-            ind = trading_data["indicators"]
-            scoring = trading_data.get("scoring", compute_scoring_pro(ind, trading_data.get("sentiment")))
-            lines = [f"Ticker: {trading_data['ticker']}"]
-            if not np.isnan(trading_data["price"]): lines.append(f"Cena: {fmt_price(trading_data['price'])}")
-            lines.append(f"Sygnał: {trading_data['signal']}")
-            lines.append(f"Scoring: {scoring}")
-            if not np.isnan(ind["rsi"]): lines.append(f"RSI: {ind['rsi']:.1f}")
-            if not np.isnan(ind["ma_fast"]) and not np.isnan(ind["ma_slow"]):
-                lines.append(f"MA10: {fmt_price(ind['ma_fast'])}, MA30: {fmt_price(ind['ma_slow'])}")
-            lines.append(f"Trend: {ind['trend']}")
-            if not np.isnan(ind["adx"]): lines.append(f"ADX: {ind['adx']:.1f}")
-            if not np.isnan(ind["atr"]): lines.append(f"ATR: {ind['atr']:.2f}")
-            if not np.isnan(ind["vol"]): lines.append(f"Volatility: {ind['vol']:.4f}")
-            if not np.isnan(ind["volume"]): lines.append(f"Volume: {ind['volume']:.0f}")
-            if not np.isnan(ind["rvol"]): lines.append(f"RVOL: {ind['rvol']:.2f}")
-            if not np.isnan(ind["vwap"]): lines.append(f"VWAP: {ind['vwap']:.2f}")
-            if not np.isnan(ind["roc"]): lines.append(f"ROC: {ind['roc']:.2f}%")
-            if not np.isnan(ind["stoch_k"]) and not np.isnan(ind["stoch_d"]):
-                lines.append(f"Stochastic: {ind['stoch_k']:.1f}/{ind['stoch_d']:.1f}")
-            if not np.isnan(ind["sl"]): lines.append(f"SL: {ind['sl']:.2f}")
-            if not np.isnan(ind["tp"]): lines.append(f"TP: {ind['tp']:.2f}")
-            lines.append(f"Sentyment newsów: {trading_data['sentiment']}")
-            if "movement_label" in trading_data:
-                lines.append(f"Typ ruchu: {trading_data['movement_label']}")
-            trading_summary = "\n".join(lines)
-
-        # Sprawdź czy dane się zmieniły od ostatniego skanu – jeśli nie, pomiń Tavily i GPT
-        skip_ai = False
-        if ticker and trading_data is not None:
-            try:
-                price_val = float(trading_data["price"])
-                rvol_val = float(trading_data["indicators"]["rvol"])
-                if not _has_changed(ticker, price_val, rvol_val):
-                    skip_ai = True
-            except:
-                pass
-
-        if skip_ai:
-            ai_msg = (
-                f"📊 **{ticker} – brak znaczących zmian od ostatniego skanu.**\n\n"
-                f"{trading_summary}\n\n"
-                f"⚠️ Oszczędność: nie wysyłano zapytania do GPT/Tavily (brak zmian >1% ceny lub >2% wolumenu)."
-            )
-        else:
-            research_text, has_fund = tavily_research(tavily_key, ticker, question)
-
-            try:
-                system_prompt = (
-                    "Jesteś analitykiem finansowym. Masz dwa źródła: "
-                    "1) Trading Engine (dane techniczne/wskaźniki) - zawsze dostępne, "
-                    "2) Tavily (fundamenty/newsy/ratingi) - może być puste.\n\n"
-                    "ZASADY:\n"
-                    "- Jeśli Tavily zwrócił 'Brak danych' - analizuj WYŁĄCZNIE na podstawie Trading Engine.\n"
-                    "- Nie mów 'brak danych' ani 'nie mam informacji' - po prostu analizuj technicznie.\n"
-                    "- Podaj konkretne wartości: trend, RSI, ADX, typ ruchu, scoring i co oznaczają.\n"
-                    "- Odpowiadaj po polsku, konkretnie, bez ogólników."
-                )
-                def ask_gpt():
-                    return requests.post("https://api.openai.com/v1/chat/completions",
-                                         headers={"Authorization": f"Bearer {openai_key}"},
-                                         json={"model": "gpt-4o-mini", "messages": [
-                                             {"role": "system", "content": system_prompt},
-                                             {"role": "system", "content": f"Dane z Trading Engine:\n{trading_summary}"},
-                                             {"role": "system", "content": f"Research Tavily:\n{research_text}"}
-                                         ] + [{"role": "user" if s=="Ty" else "assistant", "content": c}
-                                              for s,c in st.session_state.chat_history],
-                                              "temperature": 0.1}, timeout=60)
-                resp = ask_gpt()
-                if resp.status_code != 200:
-                    resp = ask_gpt()
-                resp.raise_for_status()
-                ai_msg = resp.json()["choices"][0]["message"]["content"]
-            except Exception as e:
-                ai_msg = f"[Błąd GPT] {e}"
-
-        st.session_state.chat_history.append(("AI", ai_msg))
-
-        if st.session_state.get("telegram_enabled", True):
-            tg_text = f"🤖 <b>AI – {ticker or 'bez tickera'}</b>\n{question[:200]}\n\n{ai_msg[:500]}"
-            send_telegram(tg_text)
-
-        st.rerun()
+            st.info("Ten historyczny czat jest wyłączony. Użyj widoku Rozmowa GPT lub Analiza GPT w bieżącym panelu KI.")
 
     # ------------------ PANEL DIAGNOSTYCZNY ETAPU 1 ------------------
     st.title("Etap 1 — zapis i proces skanera")
@@ -2118,7 +1989,9 @@ def market_indicators(rows):
     vwma=None
     if n>=20 and all(v is not None for v in close[-20:]+volume[-20:]) and sum(volume[-20:])>0:
         vwma=sum(c*v for c,v in zip(close[-20:],volume[-20:]))/sum(volume[-20:])
-    prior=rows[-21:-1]
+    # Select 20 full closed reference bars across session-ending short bars.
+    # The current bar is always excluded, including while it is still open.
+    prior=[r for r in rows[:-1] if r.get('status')=='CLOSED' and not r.get('partial_interval')][-20:]
     rvol=None;avg_volume=None
     if (len(prior)==20 and all(r.get('status')=='CLOSED' and not r.get('partial_interval')
                                and finite_number(r.get('volume')) for r in prior)):
@@ -2438,10 +2311,10 @@ def load_service_keys(home=None,project=None,environ=None):
 
 def service_config(settings):
     cfg={key:settings.get(key,False) for key in ('pipeline_enabled','telegram_enabled')}
-    if any(type(value) is not bool for value in cfg.values()):raise ValueError('Przełączniki usług muszą mieć wartość logiczną.')
-    mode=settings.get('tavily_mode','REST')
-    if mode not in ('REST','CLI'):raise ValueError('Nieznany wariant Tavily: oczekiwano REST lub CLI.')
-    cfg['tavily_mode']=mode
+    if any(type(value) is not bool for value in cfg.values()):
+        raise ValueError('Przełączniki usług muszą mieć wartość logiczną.')
+    # Old stored preferences are ignored; history and SQLite are preserved.
+    cfg['tavily_mode']='RESEARCH'
     return cfg
 
 
@@ -2449,6 +2322,10 @@ class ServiceError(RuntimeError):
     def __init__(self,message,retryable=False,uncertain=False,retry_after=0):
         super().__init__(message);self.retryable=retryable;self.uncertain=uncertain
         self.retry_after=min(86400,max(0,int(retry_after or 0)))
+
+
+class ResearchPending(ServiceError):
+    """Existing Research still running; safe to schedule another status read."""
 
 
 class AnalysisRejected(ServiceError):
@@ -2493,7 +2370,7 @@ def issuer_name(value,ticker=''):
     import re
     name=' '.join(str(value or '').replace('"',' ').split())
     if name.upper() in ('NAME_UNAVAILABLE','N/A','NONE',ticker.upper()):return ''
-    return re.sub(r'(?:\s+(?:S\.?\s*A\.?|Spółka Akcyjna|Inc\.?|Incorporated|Corp\.?|Corporation|Ltd\.?|Limited|PLC|LLC))+$','',name,flags=re.I).strip(' ,.;')
+    return re.sub(r'(?:\s+(?:S\.?\s*A\.?|Sp[oó][lł]ka Akcyjna|Inc\.?|Incorporated|Corp\.?|Corporation|Ltd\.?|Limited|PLC|LLC))+$','',name,flags=re.I).strip(' ,.;')
 
 
 def issuer_domain_from_website(website):
@@ -2583,12 +2460,12 @@ def issuer_source_match(result,snapshot,allow_external_domains=False):
         def strong_name_in(value):
             target=' '+normalized(value)+' '
             return any(' '+alias+' ' in target for alias in strong_aliases)
-        if not strong_aliases or not strong_name_in(title) or not strong_name_in(content[:400]):
-            raise ValueError('Domena zewnętrzna: brak jednoznacznej pełnej nazwy emitenta w tytule i początku treści.')
-        return 'Źródło zewnętrzne: pełna nazwa emitenta w tytule i początku treści; materiał nie jest komunikatem oficjalnym.'
+        if not strong_aliases or not (strong_name_in(title) or (generic_report and strong_name_in(content[:400]))):
+            raise ValueError('Domena zewnętrzna: brak jednoznacznej nazwy emitenta w tytule lub początku raportu.')
+        return 'Źródło zewnętrzne: nazwa emitenta w tytule lub początku raportu; materiał nie jest komunikatem oficjalnym.'
     if identity['name']:
-        if name_in(content) and (name_in(title) or own_site or (generic_report and name_in(content[:400]))):
-            return 'Pełna nazwa emitenta w treści oraz tytuł raportu lub zapisana domena emitenta.'
+        if name_in(title) or (name_in(content) and (own_site or (generic_report and name_in(content[:400])))):
+            return 'Nazwa emitenta w tytule lub w treści raportu na zapisanej domenie.'
     else:
         ticker=re.escape(identity['ticker'])
         explicit=(r'(?<![\w.])'+ticker+r'(?![\w.])' if identity['ticker'].endswith('.WA') else
@@ -2597,93 +2474,11 @@ def issuer_source_match(result,snapshot,allow_external_domains=False):
     raise ValueError('Brak potwierdzonego dopasowania materiału do emitenta.')
 
 
-def issuer_page_publication_date(html):
-    import re
-    from html.parser import HTMLParser
-    from html import unescape
-    class Metadata(HTMLParser):
-        def __init__(self):super().__init__();self.dates=[]
-        def handle_starttag(self,tag,attrs):
-            values={str(k).casefold():str(v) for k,v in attrs if k and v is not None}
-            key=(values.get('property') or values.get('name') or values.get('itemprop') or '').casefold()
-            value=values.get('content') or values.get('datetime')
-            if value and (key in ('article:published_time','datepublished','datecreated','article:modified_time','og:updated_time','datemodified') or tag=='time'):
-                self.dates.append((value,'html_metadata:'+key if key else 'html_time'))
-        def handle_startendtag(self,tag,attrs):self.handle_starttag(tag,attrs)
-    if not isinstance(html,str):return None
-    parser=Metadata();parser.feed(html[:1048576])
-    embedded=re.findall(r'(?i)["\'](?:datePublished|dateCreated|dateModified)["\']\s*:\s*["\']([^"\']+)',html[:1048576])
-    ordered=embedded+ [v for v,k in parser.dates if 'published' in k or 'created' in k]+[v for v,k in parser.dates if 'modified' in k or 'updated' in k]+[v for v,k in parser.dates if k=='html_time']
-    for value in ordered:
-        value=unescape(value).strip()
-        try:
-            try:datetime.fromisoformat(value.replace('Z','+00:00'))
-            except ValueError:
-                from email.utils import parsedate_to_datetime
-                parsedate_to_datetime(value)
-            return {'value':value,'source':'official_page_metadata'}
-        except (ValueError,TypeError,OverflowError):continue
-    return None
 
 
-def resolve_official_page_dates(payload,snapshot,max_pages=5):
-    import urllib.request
-    from urllib.parse import urlsplit,urljoin
-    from html.parser import HTMLParser
-    class VisibleText(HTMLParser):
-        def __init__(self):super().__init__();self.parts=[];self.hidden=0
-        def handle_starttag(self,tag,attrs):
-            if tag in ('script','style','noscript'):self.hidden+=1
-        def handle_endtag(self,tag):
-            if tag in ('script','style','noscript') and self.hidden:self.hidden-=1
-        def handle_data(self,data):
-            if not self.hidden and data.strip():self.parts.append(data.strip())
-    identity=issuer_search_identity(snapshot);domain=identity.get('issuer_domain')
-    results=payload.get('results') if isinstance(payload,dict) else None
-    if not domain or not isinstance(results,list):return payload
-    used=0
-    class SameIssuerRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self,req,fp,code,msg,headers,newurl):
-            target=urlsplit(urljoin(req.full_url,newurl));host=(target.hostname or '').lower().rstrip('.')
-            if target.scheme!='https' or not (host==domain or host.endswith('.'+domain)):
-                raise urllib.error.URLError('Redirect poza domenę emitenta.')
-            return super().redirect_request(req,fp,code,msg,headers,newurl)
-    opener=urllib.request.build_opener(SameIssuerRedirect())
-    updated=[]
-    for result in results:
-        item=dict(result) if isinstance(result,dict) else result
-        if not isinstance(item,dict) or item.get('published_date') or used>=max_pages:
-            updated.append(item);continue
-        try:
-            parts=urlsplit(item.get('url',''));host=(parts.hostname or '').lower().rstrip('.')
-            title=str(item.get('title') or '').casefold()
-            listing=any(term in title for term in ('relacje inwestorskie','investor relations','raporty |','news |','aktualności |','aktualnosci |'))
-            if parts.scheme!='https' or not (host==domain or host.endswith('.'+domain)) or listing:
-                updated.append(item);continue
-            used+=1
-            request=urllib.request.Request(item['url'],headers={'User-Agent':'KI issuer date verifier/1.0','Accept':'text/html'})
-            with opener.open(request,timeout=5) as response:
-                final=urlsplit(response.geturl());final_host=(final.hostname or '').lower().rstrip('.')
-                if final.scheme!='https' or not (final_host==domain or final_host.endswith('.'+domain)):
-                    updated.append(item);continue
-                content_type=response.headers.get_content_type();charset=response.headers.get_content_charset() or 'utf-8'
-                if content_type not in ('text/html','application/xhtml+xml'):
-                    updated.append(item);continue
-                html=response.read(1048577)
-            if len(html)>1048576:html=html[:1048576]
-            decoded=html.decode(charset,errors='replace')
-            parsed=issuer_page_publication_date(decoded)
-            if parsed:item.update(published_date=parsed['value'],published_date_source=parsed['source'])
-            if not str(item.get('content') or '').strip():
-                visible=VisibleText();visible.feed(decoded)
-                item['content']=' '.join(visible.parts)[:1800]
-        except Exception:
-            pass
-        updated.append(item)
-    return {**payload,'results':updated}
 
 
-def normalize_tavily_context(payload,snapshot,window_days=7,allow_external_domains=False):
+def normalize_tavily_context(payload,snapshot,window_days=7,allow_external_domains=False,strict_time_window=False):
     from datetime import timedelta
     from email.utils import parsedate_to_datetime
     from urllib.parse import urlsplit
@@ -2696,6 +2491,10 @@ def normalize_tavily_context(payload,snapshot,window_days=7,allow_external_domai
             url=result['url'];parts=urlsplit(url);content=result.get('content','');raw=result.get('published_date')
             if not isinstance(content,str) or not content.strip():raise ValueError('Brak treści źródła.')
             if parts.scheme not in ('https','http') or not parts.hostname or parts.username or parts.password or len(url)>500 or url in seen:raise ValueError()
+            import re
+            words=re.findall(r'[^\W\d_]+',content.casefold())
+            if words and all(word in ('aktualizacja','publikacja','publication','published','updated','update','z','t','utc') for word in words):
+                raise ValueError('Treść zawiera wyłącznie metadane publikacji; brak informacji źródłowej.')
             issuer_match=issuer_source_match(result,snapshot,allow_external_domains=allow_external_domains)
             identity=issuer_search_identity(snapshot)
             host=parts.hostname.lower()
@@ -2711,11 +2510,13 @@ def normalize_tavily_context(payload,snapshot,window_days=7,allow_external_domai
             except (ValueError,TypeError,OverflowError):raise ValueError('Niepoprawna data publikacji.') from None
             # A date without a publication time cannot prove same-day availability.
             if len(raw)==10:
+                if strict_time_window:raise ValueError('Brak godziny publikacji; nie można potwierdzić okna 24 godzin.')
                 if published.date()==cutoff.astimezone(timezone.utc).date():raise ValueError('Brak godziny publikacji w dniu odczytu; niepotwierdzona dostępność materiału w chwili analizy.')
                 published=published.replace(hour=23,minute=59,second=59,tzinfo=timezone.utc)
             if published.tzinfo is None:raise ValueError('Brak strefy czasowej publikacji.')
             date_unverified=False
-            if published.date()<start.date() or published>cutoff:raise ValueError('Data poza oknem wyszukiwania ('+str(window_days)+' dni).')
+            too_old=published<start if strict_time_window else published.date()<start.date()
+            if too_old or published>cutoff:raise ValueError('Data poza oknem wyszukiwania ('+('24 godziny' if strict_time_window and window_days==1 else str(window_days)+' dni')+').')
             seen.add(url)
             if len(sources)>=5:raise ValueError()
             sources.append({'id':'S'+str(len(sources)+1),'url':url,'title':str(result.get('title') or '')[:160],
@@ -2735,59 +2536,17 @@ def normalize_tavily_context(payload,snapshot,window_days=7,allow_external_domai
             'date_basis':'Data publikacji lub aktualizacji wskazana przez Tavily; nie jest potwierdzeniem przyczyny ruchu.'}
 
 
-def event_context_request(evidence):
-    from datetime import timedelta
-    snap=evidence['snapshot'];cutoff=event_context_cutoff(snap);identity=issuer_search_identity(snap)
-    polish=snap['ticker'].endswith('.WA')
-    terms='komunikaty raporty ESPI EBI' if polish else 'company announcements SEC filings'
-    query='"'+(identity['name'] or identity['ticker'])+'" '+terms
-    return {'query':query,'topic':'general','search_depth':'basic','max_results':5,'include_answer':False,
-            'exact_match':False,'include_domains':identity['domains'],'include_domains_mode':'restrict','auto_parameters':False,
-            'language':'pl' if polish else 'en','filter_by_language':False,
-            'include_raw_content':False,'include_published_date':True,'filter_by_published_date':False,
-            'include_usage':True,
-            'start_date':(cutoff-timedelta(days=7)).date().isoformat(),
-            'end_date':(cutoff+timedelta(days=1)).date().isoformat()}
 
 
-def manual_search_plan(snapshot):
-    from datetime import timedelta
-    snapshot={**snapshot,'_manual_research':True}
-    identity=issuer_search_identity(snapshot);cutoff=event_context_cutoff(snapshot)
-    fresh=event_context_request({'snapshot':snapshot})
-    name=identity['aliases'][-1] if identity['aliases'] else identity['ticker']
-    fallback={**fresh,'query':name,'include_domains_mode':'prefer'}
-    background={**fresh,'query':'"'+name+'" '+('wyniki finansowe raporty' if identity['ticker'].endswith('.WA') else 'financial results company reports'),
-                'exact_match':False,'start_date':(cutoff-timedelta(days=180)).date().isoformat()}
-    return [('fresh',fresh),('fallback',fallback),('background',background)]
 
 
-def issuer_cache_key(snapshot):
-    identity=issuer_search_identity({**snapshot,'_manual_research':True})
-    return json_text({'ticker':identity['ticker'],'name':identity['name'],'domains':identity['domains'],'version':4})
 
 
-def save_issuer_background(store,snapshot,research,now=None):
-    with store.transaction() as c:
-        c.execute('CREATE TABLE IF NOT EXISTS manual_issuer_context (identity TEXT PRIMARY KEY, saved_at TEXT NOT NULL, payload TEXT NOT NULL)')
-        c.execute('INSERT OR REPLACE INTO manual_issuer_context VALUES(?,?,?)',(issuer_cache_key(snapshot),now or utc_now(),json_text(research)))
 
 
-def load_issuer_background(store,snapshot,now=None):
-    with store.connection() as c:
-        if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='manual_issuer_context'").fetchone():return None
-        row=c.execute('SELECT saved_at,payload FROM manual_issuer_context WHERE identity=?',(issuer_cache_key(snapshot),)).fetchone()
-    if not row:return None
-    age=(parse_market_time(now or utc_now())-parse_market_time(row[0])).total_seconds()
-    if not 0<=age<86400:return None
-    return {'saved_at':row[0],**json.loads(row[1])}
 
 
 def tavily_result_summary(research):
-    if research.get('backend')=='CLI':
-        if research.get('sources'):
-            return 'Tavily CLI: zachowano wyniki Search i stany Extract. Daty i związek z ruchem wymagają oceny GPT.'
-        return 'Tavily CLI nie zwróciło materiałów w wykonanym wyszukiwaniu; nie dowodzi to braku wiadomości.'
     if research.get('sources'):return 'Przyjęto datowane źródła dotyczące emitenta.'
     if research.get('date_unverified_count',0):
         return ('Znaleziono materiały dotyczące emitenta, ale nie potwierdzono daty lub czasu publikacji dla '+str(research['date_unverified_count'])+' wyników. Odrzucone wyniki: '+str(research.get('excluded',0))+'. Nie są dowodem świeżych wiadomości. Szczegóły znajdują się poniżej.')
@@ -2801,161 +2560,158 @@ def tavily_result_summary(research):
             'Sprawdź powody odrzucenia; to nie dowodzi braku informacji na rynku.')
 
 
-def merge_manual_research_result(store,turn,context,normalized):
-    research=context['research']
-    research['excluded']+=normalized['excluded'];research['rejected_sources'].extend(normalized['rejected_sources'])
-    research['date_unverified_count']=research.get('date_unverified_count',0)+normalized.get('date_unverified_count',0)
-    undated_urls={x['url'] for x in research.setdefault('undated_sources',[])}
-    for item in normalized.get('undated_sources',[]):
-        if item['url'] not in undated_urls:research['undated_sources'].append(item);undated_urls.add(item['url'])
-    urls={x['url'] for x in research['sources']}
-    for source in normalized['sources']:
-        if source['url'] not in urls:
-            research['sources'].append({**source,'id':'S'+str(len(research['sources'])+1)});urls.add(source['url'])
-    research['undated_sources']=[item for item in research['undated_sources'] if item['url'] not in urls]
-    save_gpt_chat_context(store,turn,context)
 
 
-def collect_manual_research(store,turn,context,snapshot,key,backend='REST'):
-    if backend=='CLI':
-        context['research'].update(status='REQUESTED',backend='CLI',requested_at=utc_now())
-        save_gpt_chat_context(store,turn,context)
-        def checkpoint(payload):
-            context['research'].update(payload)
-            save_gpt_chat_context(store,turn,context)
-        context['research'].update(tavily_cli_context(snapshot,key,manual=True,checkpoint=checkpoint),status='DONE')
-        save_gpt_chat_context(store,turn,context)
-        return
-    if backend!='REST':raise ServiceError('Nieznany wariant Tavily.')
+def research_query(snapshot,cutoff):
     from datetime import timedelta
-    research=context['research'];research.update(attempts=[],sources=[],excluded=0,rejected_sources=[],received_results=0,
-        undated_sources=[],date_unverified_count=0,issuer_filter_version=1,research_version=4,
-        issuer_domain=issuer_search_identity(snapshot)['issuer_domain'])
-    cached=load_issuer_background(store,snapshot)
-    for scope,request in manual_search_plan(snapshot):
-        if scope=='fallback' and research['sources']:continue
-        if scope=='background' and cached is not None:
-            research['background_cached_at']=cached['saved_at']
-            # Revalidate publication dates against this analysis, including cache age.
-            cached_results=[{'url':x['url'],'title':x['title'],'content':x['content'],'published_date':x['published_at'],
-                             'published_date_source':x.get('published_date_source','tavily')} for x in cached.get('sources',[])]
-            cached_results.extend({'url':x['url'],'title':x['title'],'content':x.get('content','')} for x in cached.get('undated_sources',[]))
-            payload=resolve_official_page_dates({'results':cached_results},snapshot)
-            normalized=normalize_tavily_context(payload,snapshot,window_days=180)
-        else:
-            attempt={'scope':scope,'request':request,'status':'REQUESTED','requested_at':utc_now()}
-            research['attempts'].append(attempt);research.update(status='REQUESTED',request=request)
-            save_gpt_chat_context(store,turn,context)
-            # Never retry HTTP errors or uncertain calls. Fallback only follows a completed empty search.
-            body=service_http('Tavily','https://api.tavily.com/search',key,request)
-            body=resolve_official_page_dates(body,snapshot)
-            count=len(body['results']) if isinstance(body.get('results'),list) else None
-            attempt.update(status='RECEIVED',received_at=utc_now(),received_results=count)
-            research.update(status='RECEIVED',received_at=attempt['received_at'])
-            research['received_results']+=count or 0
-            save_gpt_chat_context(store,turn,context)
-            normalized=normalize_tavily_context(body,snapshot,window_days=180 if scope=='background' else 7,
-                allow_external_domains=(scope=='fallback' and request.get('include_domains_mode')=='prefer'))
-            reasons={}
-            for entry in normalized['rejected_sources']:
-                reason=entry['reason'];reasons[reason]=reasons.get(reason,0)+1
-            attempt.update(status='DONE',accepted=len(normalized['sources']),excluded=normalized['excluded'],
-                           date_unverified_count=normalized['date_unverified_count'],rejection_reasons=reasons)
-            if scope=='background':save_issuer_background(store,snapshot,normalized)
-        merge_manual_research_result(store,turn,context,normalized)
-    research.update(status='DONE',cutoff=event_context_cutoff(snapshot).isoformat(),
-                    date_basis='Świeże: do 7 dni. Tło: do 180 dni; nie dowodzi przyczyny ruchu ani aktualności wszystkich opisanych warunków.')
+    identity=issuer_search_identity(snapshot)
+    end=parse_market_time(cutoff);start=end-timedelta(hours=24)
+    return ('Zbierz wyłącznie wiadomości, komunikaty, raporty i dokumenty dotyczące emitenta '+
+            (identity['name'] or identity['ticker'])+' (ticker Yahoo: '+identity['ticker']+'). '+
+            'Zakres publikacji: ostatnie 24 godziny, od '+start.isoformat()+' do '+end.isoformat()+'. '+
+            'Obie granice obejmują dokładny czas publikacji, nie tylko dzień. '+
+            'Nie szukaj archiwalnych raportów ani starszych informacji jako tła. '+
+            'Dla każdego materiału podaj URL, tytuł, datę i godzinę publikacji ze strefą czasową oraz dosłowny fragment treści. '+
+            'Fragment musi zawierać informację o emitencie, nie samą datę publikacji ani nawigację strony. '+
+            'Jeśli nie ma materiałów z tego zakresu, zwróć pustą listę materials; nie rozszerzaj zakresu. '+
+            'Brak daty lub treści oznacz pustym tekstem. Nie zastępuj fragmentu własnym podsumowaniem. '+
+            'Nie podawaj materiałów opublikowanych poza wskazanym zakresem. '+
+            'Nie oceniaj inwestycji, nie generuj BUY/SELL i nie przypisuj przyczyn ruchu bez dowodów.')
+
+
+def load_event_research(store,event_id):
+    store.ensure_research_schema()
+    with store.connection() as c:
+        row=c.execute('SELECT * FROM research_requests WHERE event_id=?',(event_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def resume_manual_research(store,turn_id):
+    """Explicit resume of one saved turn; no fresh Research, quote or Telegram."""
+    with ScannerLock(str(store.path)+'.gpt_chat'):
+        with store.transaction() as c:
+            row=c.execute('SELECT * FROM gpt_chat_turns WHERE id=?',(turn_id,)).fetchone()
+            if not row or row['state']=='DONE':raise ValueError('Brak ręcznej analizy do wznowienia.')
+            context=json.loads(row['context']);research=context.get('research') or {}
+            if research.get('status') not in ('SUBMITTED','COMPLETED','DONE') or not research.get('request_id'):
+                raise ValueError('Niepotwierdzony start Research. Nie uruchomiono nowego zadania.')
+            if context.get('gpt',{}).get('status') in ('REQUESTED','RECEIVED'):
+                raise ValueError('GPT był już wywołany. Wznowienie wymaga osobnej kontroli odpowiedzi.')
+            c.execute("UPDATE gpt_chat_turns SET state='REQUESTED',error=NULL,finished_at=NULL WHERE id=?",(turn_id,))
+        try:
+            keys=load_service_keys()
+            if not keys['OPENAI_API_KEY']:raise ValueError('Brak klucza OpenAI.')
+            snapshot=research.get('snapshot_identity') or {**(context.get('snapshot') or {}),
+                       'ticker':context.get('ticker'),'acquired_at':research['cutoff'],'_manual_research':True}
+            collect_manual_research(store,turn_id,context,snapshot,keys['TAVILY_API_KEY'])
+            request=gpt_chat_request(row['question'],context,[])
+            context['gpt']={'status':'REQUESTED','requested_at':utc_now()}
+            save_gpt_chat_context(store,turn_id,context)
+            body=service_http('OpenAI','https://api.openai.com/v1/chat/completions',keys['OPENAI_API_KEY'],request,uncertain=True)
+            context['gpt'].update(status='RECEIVED',received_at=utc_now())
+            save_gpt_chat_context(store,turn_id,context)
+            save_gpt_chat_metadata(store,turn_id,{**{k:body.get(k) for k in ('id','model','usage')},'raw_response':body.get('choices',[])})
+            answer,metadata=parse_gpt_chat_response(body,context)
+            finish_gpt_chat(store,turn_id,answer,{**metadata,'raw_response':body.get('choices',[])})
+        except Exception as exc:
+            error=str(exc) if isinstance(exc,(ValueError,ServiceError)) else 'Wznowienie analizy: '+type(exc).__name__+'.'
+            fail_gpt_chat(store,turn_id,error)
+            raise ValueError(error) from None
+
+
+def render_research_resume(store,turn):
+    import streamlit as st
+    context=json.loads(turn['context']);research=context.get('research') or {}
+    if turn['state']!='DONE' and research.get('request_id') and research.get('status') in ('SUBMITTED','COMPLETED','DONE') and context.get('gpt',{}).get('status') not in ('REQUESTED','RECEIVED'):
+        st.caption('Research ID zachowano. Wznowienie odczyta istniejące zadanie; po zakończeniu wykona jedno zapytanie GPT.')
+        if st.button('Wznów zapisane Research i analizę GPT',key='r1_resume_'+turn['id']):
+            try:
+                with st.spinner('Odczyt istniejącego Research i analiza GPT…'):resume_manual_research(store,turn['id'])
+                st.rerun()
+            except (ValueError,ServiceError,RuntimeError) as exc:st.error(str(exc))
+
+
+def reserve_manual_research(store,turn,context):
+    """Commit one manual reservation before allowing a paid start."""
+    with store.transaction() as c:
+        row=c.execute('SELECT state,context FROM gpt_chat_turns WHERE id=?',(turn,)).fetchone()
+        if not row or row['state']!='REQUESTED' or json.loads(row['context']).get('research',{}).get('status')!='PENDING':
+            raise ServiceError('Research: ręczne zadanie już zarezerwowane. Nie uruchomiono nowego zlecenia.',uncertain=True)
+        c.execute('UPDATE gpt_chat_turns SET context=? WHERE id=?',(json_text(context),turn))
+
+
+def record_manual_start_failure(store,turn,context,error):
+    """Persist safe diagnostics and any task ID; never authorize another start."""
+    from tavily_cli_adapter import sanitize_cli_diagnostic
+    research=context['research']
+    research['start_error']=sanitize_cli_diagnostic(str(error))
+    request_id=getattr(error,'request_id',None)
+    if request_id:
+        research.update(status='SUBMITTED',request_id=request_id)
+        # A raw error response can contain credentials; save only the safe diagnostic.
     save_gpt_chat_context(store,turn,context)
 
 
-def manual_context_request(ticker,context,acquired_at=None):
-    # Market questions belong to GPT's saved snapshot, not to the issuer news query.
-    snap=context.get('snapshot') or {}
-    snapshot={'ticker':ticker,'company_name':snap.get('company_name'),'company_website':snap.get('company_website'),'acquired_at':acquired_at or utc_now()}
-    return event_context_request({'snapshot':snapshot})
-
-
-def automatic_search_plan(snapshot):
-    """One strictly scoped search; at most one issuer-specific fallback if none qualifies."""
-    first=event_context_request({'snapshot':snapshot})
-    identity=issuer_search_identity(snapshot)
-    fallback={**first,'query':identity['name'] or identity['ticker'],'include_domains_mode':'prefer'}
-    return [('fresh',first),('fallback',fallback)]
-
-
-def combine_automatic_tavily_results(snapshot,responses):
-    """Pure, bounded evidence + cost accounting. Unknown credits are not zero."""
-    all_sources=[];urls=set();attempts=[];excluded=0;rejected=[];undated=[]
-    received=0;duplicates=0;credits_total=0;credits_known=0
-    for response in responses:
-        scope,request,body=response[:3]
-        requested_at=response[3] if len(response)>3 else None
-        received_at=response[4] if len(response)>4 else None
-        normalized=normalize_tavily_context(body,snapshot,
-            allow_external_domains=(scope=='fallback' and request.get('include_domains_mode')=='prefer'))
-        source_count=0
-        received+=normalized['received_results']
-        excluded+=normalized['excluded'];rejected.extend(normalized['rejected_sources'])
-        undated.extend(normalized['undated_sources'])
-        for source in normalized['sources']:
-            if source['url'] in urls:
-                duplicates+=1;continue
-            if len(all_sources)>=5:
-                excluded+=1
-                rejected.append({'title':source.get('title',''),'reason':'Przekroczono limit pięciu źródeł.'})
-                continue
-            urls.add(source['url']);source_count+=1
-            all_sources.append({**source,'id':'S'+str(len(all_sources)+1)})
-        usage=body.get('usage') or {}
-        credits=usage.get('credits') if isinstance(usage,dict) else None
-        if type(credits) not in (int,float) or not math.isfinite(credits) or credits<0:
-            credits=None
-        else:
-            credits_known+=1;credits_total+=credits
-        reasons={}
-        for entry in normalized['rejected_sources']:
-            reason=entry['reason'];reasons[reason]=reasons.get(reason,0)+1
-        attempts.append({'scope':scope,'request':request,'status':'DONE',
-                         'requested_at':requested_at,'received_at':received_at,
-                         'received_results':normalized['received_results'],'accepted':source_count,
-                         'excluded':normalized['excluded'],'date_unverified_count':normalized['date_unverified_count'],
-                         'rejection_reasons':reasons,'credits':credits})
-    first_request=responses[0][1] if responses else None
-    return {'sources':all_sources,'request':first_request,'attempts':attempts,
-            'received_at':utc_now(),'cutoff':event_context_cutoff(snapshot).isoformat(),
-            'received_results':received,'excluded':excluded,'rejected_sources':rejected,
-            'undated_sources':undated,'date_unverified_count':len(undated),
-            'duplicate_sources':duplicates,'issuer_filter_version':1,
-            'usage':{'reported_credits':credits_total if credits_known else None,
-                     'reports_with_credits':credits_known,'calls':len(attempts)},
-            'date_basis':'Źródła są datowane i sprawdzone lokalnie; nie dowodzą przyczyny ruchu ceny.'}
+def collect_manual_research(store,turn,context,snapshot,key):
+    from tavily_cli_adapter import start_research,check_research,CLITransportError
+    research=context['research']
+    state=research.get('status')
+    if state=='DONE':
+        return
+    if state in ('CALL_UNCERTAIN','RESERVED'):
+        raise ServiceError('Research: niepotwierdzony start. Automatyczne ponowienie zablokowane.',uncertain=True)
+    if state=='COMPLETED':
+        response=research.get('raw_response')
+    elif state=='SUBMITTED':
+        if not research.get('request_id') or not research.get('cutoff'):
+            raise ServiceError('Research: niepełny zapis zadania.',uncertain=True)
+        if not key:raise ServiceError('Tavily Research: brak klucza API.')
+        response=None
+    elif state=='PENDING':
+        if not key:raise ServiceError('Tavily Research: brak klucza API.')
+        cutoff=event_context_cutoff(snapshot).isoformat()
+        research.update(backend='RESEARCH',status='CALL_UNCERTAIN',
+                        query=research_query(snapshot,cutoff),cutoff=cutoff,
+                        snapshot_identity=snapshot,requested_at=utc_now())
+        reserve_manual_research(store,turn,context)
+        try:
+            started=start_research(research['query'],key)
+            research.update(status='SUBMITTED',request_id=started['request_id'],
+                            start_response=started.get('raw_response',started))
+            save_gpt_chat_context(store,turn,context)
+        except (CLITransportError,OSError,ValueError) as exc:
+            record_manual_start_failure(store,turn,context,exc)
+            raise ServiceError('Research: start nieudany; bez automatycznego ponowienia. '+
+                               context['research']['start_error'],uncertain=True) from None
+        response=None
+    else:
+        raise ServiceError('Research: nierozpoznany stan zapisu; wymaga kontroli.',uncertain=True)
+    if response is None:
+        try:
+            response=r1_wait_for_research(lambda:check_research(research['request_id'],key))
+        except CLITransportError:
+            # A status read failure does not lose the ID or authorize another start.
+            raise ServiceError('Research: nie udało się odczytać statusu. ID zachowano.',uncertain=True) from None
+        research.update(status='COMPLETED',raw_response=response)
+        save_gpt_chat_context(store,turn,context)
+    if not isinstance(response,dict) or response.get('request_id')!=research.get('request_id'):
+        raise ServiceError('Research: niezgodny identyfikator zapisanego wyniku.',uncertain=True)
+    normalized=r1_research_sources(response,research['cutoff'],research.get('snapshot_identity') or snapshot)
+    research.update(normalized)
+    save_gpt_chat_context(store,turn,context)
 
 
 
-def tavily_cli_context(snapshot,key,manual=False,checkpoint=None):
-    # CLI is an explicitly selected parallel backend, never an implicit retry.
-    # It uses only Yahoo identity and does not participate in market detection.
-    from tavily_cli_adapter import collect, CLITransportError
-    plan=manual_search_plan(snapshot) if manual else automatic_search_plan(snapshot)
-    try:
-        return collect(snapshot,key,plan,event_context_cutoff(snapshot).isoformat(),checkpoint=checkpoint)
-    except CLITransportError as exc:
-        raise ServiceError(str(exc),uncertain=True) from None
 
 
-def fetch_event_context(evidence,keys,backend='REST',checkpoint=None):
-    if not keys['TAVILY_API_KEY']:raise ServiceError('Brak TAVILY_API_KEY.')
-    if backend=='CLI':return tavily_cli_context(evidence['snapshot'],keys['TAVILY_API_KEY'],checkpoint=checkpoint)
-    if backend!='REST':raise ServiceError('Nieznany wariant Tavily.')
-    snapshot=evidence['snapshot'];responses=[]
-    for scope,request in automatic_search_plan(snapshot):
-        if scope=='fallback' and combine_automatic_tavily_results(snapshot,responses)['sources']:
-            break
-        # No retries after transport errors: a failed Tavily response may still incur credits.
-        requested_at=utc_now()
-        body=service_http('Tavily','https://api.tavily.com/search',keys['TAVILY_API_KEY'],request)
-        responses.append((scope,request,body,requested_at,utc_now()))
-    return combine_automatic_tavily_results(snapshot,responses)
+
+
+
+
+
+
+
+
 
 
 def analysis_schema(snapshot,context):
@@ -3261,7 +3017,12 @@ def opportunity_risk(snapshot):
         if spread>=2.-1e-10:reasons.append('Spread bid/ask ≥ 2% (świeżość notowania niepotwierdzona)' if not quote.get('freshness_confirmed') else 'Spread bid/ask ≥ 2%')
     else:missing.append('Poprawne bid/ask do obliczenia spreadu')
     if not quote.get('freshness_confirmed'):missing.append('Potwierdzony czas aktualizacji bid/ask')
-    return {'label':'Ryzyko podwyższone' if reasons else 'Ryzyko nieustalone' if missing else 'Ryzyko ograniczone według sprawdzonych filtrów',
+    checked=int(pullback is not None)+int(finite_number(spread) and spread>=0)
+    if reasons:label='Ryzyko podwyższone'
+    elif not checked:label='Brak danych do oceny ryzyka'
+    elif missing:label='Ocena częściowa: bez przekroczenia sprawdzonych progów ryzyka'
+    else:label='Bez przekroczenia sprawdzonych progów ryzyka'
+    return {'label':label,'checked_criteria':checked,'complete':not missing,
             'reasons':reasons,'missing':missing,'pullback_pct':pullback,'spread_pct':spread}
 
 
@@ -3541,7 +3302,7 @@ OPPORTUNITY_INDICATORS=(
 
 def opportunity_volume_average_label(snapshot):
     interval=snapshot.get('interval')
-    return 'Średnia z 20 zamkniętych świec '+str(interval) if interval else 'Średnia wolumenu z nieznanego interwału'
+    return 'Średnia z 20 pełnych zamkniętych świec '+str(interval) if interval else 'Średnia wolumenu z nieznanego interwału'
 
 
 def opportunity_candle_description(snapshot):
@@ -3658,6 +3419,136 @@ def claim_analysis(store,event_id=None):
         return job
 
 
+
+
+
+
+def ensure_research_schema(connection):
+    """Idempotentne uzupelnienie starszej tabeli Research."""
+    rows = connection.execute(
+        "PRAGMA table_info(research_requests)"
+    ).fetchall()
+    if not rows:
+        raise ValueError("Research: brak tabeli research_requests.")
+
+    columns = {row["name"] for row in rows}
+    required = {
+        "event_id", "state", "query", "cutoff", "request_id",
+        "last_error", "created_at", "updated_at"
+    }
+    if not required.issubset(columns):
+        raise ValueError(
+            "Research: nierozpoznana struktura tabeli; migracja wstrzymana."
+        )
+    if "raw_response" not in columns:
+        connection.execute(
+            "ALTER TABLE research_requests ADD COLUMN raw_response TEXT"
+        )
+    return True
+
+
+
+def reserve_research(connection, event_id, query, cutoff):
+    """Trwale zarezerwuj jedno Research dla jednego zdarzenia.
+
+    UNIQUE/PRIMARY KEY zapewnia brak ponownej rezerwacji.
+    Funkcja nie wywoluje Tavily.
+    """
+    if not isinstance(event_id, str) or not event_id.strip():
+        raise ValueError("Research: brak identyfikatora zdarzenia.")
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("Research: puste zapytanie.")
+    if not isinstance(cutoff, str) or not cutoff.strip():
+        raise ValueError("Research: brak czasu odniesienia.")
+
+    now = utc_now()
+    cursor = connection.execute(
+        "INSERT INTO research_requests"
+        "(event_id,state,query,cutoff,created_at,updated_at)"
+        " VALUES(?,?,?,?,?,?)"
+        " ON CONFLICT(event_id) DO NOTHING",
+        (event_id, "RESERVED", query, cutoff, now, now)
+    )
+    if cursor.rowcount == 1:
+        return True
+    row = connection.execute(
+        "SELECT query,cutoff FROM research_requests WHERE event_id=?",
+        (event_id,)
+    ).fetchone()
+    if row is None:
+        raise ValueError("Research: konflikt rezerwacji.")
+    if row["query"] != query or row["cutoff"] != cutoff:
+        raise ValueError(
+            "Research: proba zmiany zapytania lub czasu istniejacej rezerwacji."
+        )
+    return False
+
+
+def mark_research_uncertain(connection, event_id, reason):
+    """Zablokuj ponowne platne uruchomienie po niepewnym wyniku."""
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("Research: brak powodu niepewnosci.")
+
+    cursor = connection.execute(
+        "UPDATE research_requests"
+        " SET state='CALL_UNCERTAIN',last_error=?,updated_at=?"
+        " WHERE event_id=? AND state='RESERVED'",
+        (reason, utc_now(), event_id)
+    )
+    if cursor.rowcount != 1:
+        raise ValueError(
+            "Research: nie znaleziono aktywnej rezerwacji."
+        )
+
+
+
+
+
+def mark_research_submitted(connection, event_id, request_id):
+    """Zapisz identyfikator juz uruchomionego Research."""
+    if not isinstance(request_id, str) or not request_id.strip():
+        raise ValueError("Research: brak request_id.")
+
+    result = connection.execute(
+        "UPDATE research_requests"
+        " SET state='SUBMITTED',request_id=?,updated_at=?"
+        " WHERE event_id=? AND state='RESERVED' AND request_id IS NULL",
+        (request_id, utc_now(), event_id)
+    )
+    if result.rowcount != 1:
+        raise ValueError(
+            "Research: nie mozna zarejestrowac wywolania w tym stanie."
+        )
+
+
+def complete_research(connection, event_id, raw):
+    """Zapisz pelna odpowiedz zakonczonego Research."""
+    if not isinstance(raw, dict):
+        raise ValueError("Research: niepoprawna odpowiedz.")
+
+    request_id = raw.get("request_id")
+    if not isinstance(request_id, str) or not request_id.strip():
+        raise ValueError("Research: brak request_id w odpowiedzi.")
+
+    if raw.get("status") != "completed":
+        raise ValueError("Research: odpowiedz nie jest zakonczona.")
+
+    if not isinstance(raw.get("sources"), list):
+        raise ValueError("Research: niepoprawne zrodla.")
+
+    result = connection.execute(
+        "UPDATE research_requests"
+        " SET state='COMPLETED',raw_response=?,last_error=NULL,updated_at=?"
+        " WHERE event_id=? AND state='SUBMITTED' AND request_id=?",
+        (json_text(raw), utc_now(), event_id, request_id)
+    )
+    if result.rowcount != 1:
+        raise ValueError(
+            "Research: stan lub request_id nie odpowiada rezerwacji."
+        )
+
+
+
 def save_analysis_context(store,event_id,context):
     with store.transaction() as c:
         c.execute("UPDATE analysis_jobs SET state='PENDING_AI',context=?,attempts=0,next_attempt_at=NULL,last_error=NULL,updated_at=? WHERE event_id=? AND state='BUSY_CONTEXT'",
@@ -3682,6 +3573,13 @@ def fail_analysis(store,event_id,error):
     with store.transaction() as c:
         job=c.execute('SELECT * FROM analysis_jobs WHERE event_id=?',(event_id,)).fetchone()
         if not job or job['state'] not in ('BUSY_CONTEXT','BUSY_AI'):return
+        if isinstance(error,ResearchPending) and job['state']=='BUSY_CONTEXT':
+            research=c.execute('SELECT state,request_id FROM research_requests WHERE event_id=?',(event_id,)).fetchone()
+            if research and research['state']=='SUBMITTED' and research['request_id']:
+                due=(datetime.now(timezone.utc)+timedelta(seconds=30)).isoformat()
+                c.execute("UPDATE analysis_jobs SET state='PENDING_CONTEXT',next_attempt_at=?,last_error=?,updated_at=? WHERE event_id=?",
+                          (due,str(error),utc_now(),event_id))
+                return
         if isinstance(error,AnalysisRejected):
             c.execute('INSERT INTO analysis_rejections VALUES(?,?,?,?,?)',
                       (uuid.uuid4().hex,event_id,str(error),json_text(error.payload),utc_now()))
@@ -3697,38 +3595,233 @@ def fail_analysis(store,event_id,error):
 
 def recover_service_jobs(store,kind):
     with store.transaction() as c:
-        if kind=='analysis':c.execute("UPDATE opportunities SET state='SKIPPED_RESTART' WHERE state='RESERVED'")
         if kind=='analysis':
-            c.execute("UPDATE analysis_jobs SET state='REVIEW_REQUIRED',last_error='Proces przerwany; sprawdź przed ponowieniem.',updated_at=? WHERE state IN ('BUSY_CONTEXT','BUSY_AI')",(utc_now(),))
+            c.execute(
+                "UPDATE opportunities SET state='SKIPPED_RESTART' "
+                "WHERE state='RESERVED'"
+            )
+            c.execute(
+                "UPDATE analysis_jobs SET state='PENDING_CONTEXT',"
+                "last_error=NULL,next_attempt_at=NULL,updated_at=? "
+                "WHERE state='BUSY_CONTEXT' AND event_id IN "
+                "(SELECT event_id FROM research_requests "
+                "WHERE state IN ('SUBMITTED','COMPLETED') "
+                "AND request_id IS NOT NULL)",
+                (utc_now(),)
+            )
+            c.execute(
+                "UPDATE analysis_jobs SET state='REVIEW_REQUIRED',"
+                "last_error='Proces przerwany; sprawdz przed ponowieniem.',"
+                "updated_at=? WHERE state IN ('BUSY_CONTEXT','BUSY_AI')",
+                (utc_now(),)
+            )
         elif kind=='telegram':
-            c.execute("UPDATE outbox SET status='UNCERTAIN',last_error='Proces przerwany; sprawdź czat przed ponowieniem.' WHERE status='SENDING' AND kind IN ('EVIDENCE','ANALYSIS')")
+            c.execute(
+                "UPDATE outbox SET status='UNCERTAIN',"
+                "last_error='Proces przerwany; sprawdz czat przed ponowieniem.' "
+                "WHERE status='SENDING' "
+                "AND kind IN ('EVIDENCE','ANALYSIS')"
+            )
+
+
+
+
+
+def submit_event_research(store, event_id, query, cutoff, api_key):
+    """Zapisz rezerwacje przed zleceniem Tavily Research Mini."""
+    from tavily_cli_adapter import start_research, CLITransportError
+
+    if not isinstance(api_key, str) or not api_key.strip():
+        raise ServiceError("Tavily Research: brak klucza API.")
+
+    reserved = store.reserve_research(event_id, query, cutoff)
+
+    if not reserved:
+        # Takze RESERVED moze oznaczac wywolanie o nieznanym wyniku.
+        # Nie powtarzamy zadania na podstawie samego stanu SQLite.
+        raise ServiceError(
+            "Tavily Research: zadanie juz zarezerwowane. "
+            "Nie uruchomiono kolejnego platnego wywolania.",
+            uncertain=True
+        )
+
+    try:
+        response = start_research(query, api_key)
+    except (CLITransportError, OSError, ValueError) as exc:
+        from tavily_cli_adapter import sanitize_cli_diagnostic
+        detail = sanitize_cli_diagnostic(str(exc))
+        request_id = getattr(exc, 'request_id', None)
+        with store.transaction() as connection:
+            if request_id:
+                mark_research_submitted(connection, event_id, request_id)
+                connection.execute('UPDATE research_requests SET last_error=? WHERE event_id=?',
+                                   (detail, event_id))
+            else:
+                mark_research_uncertain(connection, event_id, detail)
+        raise ServiceError('Tavily Research: start nieudany; bez automatycznego ponowienia. '+detail,
+                           uncertain=True) from None
+
+    request_id = response["request_id"]
+
+    with store.transaction() as connection:
+        mark_research_submitted(
+            connection, event_id, request_id
+        )
+
+    return request_id
+
+
+def check_event_research(store, event_id, api_key):
+    """Sprawdz istniej?ce zadanie bez nowego platnego zlecenia."""
+    from tavily_cli_adapter import check_research, CLITransportError
+
+    with store.connection() as connection:
+        row = connection.execute(
+            "SELECT state,request_id FROM research_requests "
+            "WHERE event_id=?",
+            (event_id,)
+        ).fetchone()
+
+    if row is None or row["state"] != "SUBMITTED":
+        raise ServiceError(
+            "Tavily Research: brak zadania gotowego do sprawdzenia."
+        )
+
+    request_id = row["request_id"]
+
+    try:
+        result = check_research(request_id, api_key)
+    except CLITransportError:
+        raise ServiceError(
+            "Tavily Research: nie udalo sie sprawdzic statusu. "
+            "Nie uruchomiono nowego zadania.",
+            uncertain=True
+        ) from None
+
+    if result["status"] == "completed":
+        with store.transaction() as connection:
+            complete_research(connection, event_id, result)
+
+    return result
+
+
+
+def r1_research_sources(response,cutoff,snapshot):
+    """Validate provider material, keeping raw report separate from source facts."""
+    from tavily_cli_adapter import _safe_url,_normalize_research_response,CLITransportError
+    try:response=_normalize_research_response(response)
+    except (ValueError,CLITransportError):
+        raise ServiceError('Research: niepoprawna zakończona odpowiedź.',uncertain=True) from None
+    if response['status']!='completed':raise ServiceError('Research: zadanie nie jest zakończone.')
+    raw=response['raw_response'];citations=response['sources']
+    cited={item.get('url') for item in citations if isinstance(item,dict) and _safe_url(item.get('url'))}
+    report=response.get('content')
+    if isinstance(report,str):
+        try:structured=json.loads(report)
+        except (ValueError,TypeError):structured=None
+    else:structured=report
+    materials=structured.get('materials') if isinstance(structured,dict) else None
+    # Old R1 responses may contain full material directly in sources.
+    candidates=materials if isinstance(materials,list) else citations
+    results=[];technical_rejections=[]
+    for item in candidates:
+        if not isinstance(item,dict) or not _safe_url(item.get('url')) or item.get('url') not in cited:
+            technical_rejections.append({'title':str(item.get('title') or '') if isinstance(item,dict) else '',
+                                         'reason':'Niebezpieczny adres lub brak źródła w cytowaniach Research.'})
+            continue
+        results.append({'url':item['url'],'title':item.get('title'),
+                        'content':item.get('content') or item.get('snippet') or item.get('description') or '',
+                        'published_date':item.get('published_at') or item.get('published_date'),
+                        'published_date_source':'tavily_research_material'})
+    identity={**snapshot,'acquired_at':cutoff,'candle_status':None,'candle_end':None}
+    normalized=normalize_tavily_context({'results':results},identity,
+                 window_days=1,allow_external_domains=True,strict_time_window=True)
+    for source in normalized['sources']:
+        source['source_provenance']='tavily_research'
+        source['content_delivery_state']='RESEARCH_REPORTED_EXCERPT'
+    normalized['excluded']+=len(technical_rejections)
+    normalized['rejected_sources'].extend(technical_rejections)
+    normalized.update(backend='RESEARCH',status='DONE',request_id=response['request_id'],
+                      raw_response=raw,received_results=len(candidates),received_at=utc_now(),
+                      usage=response.get('usage'),research_version=7,window_hours=24,
+                      date_basis='Zakres publikacji: ostatnie 24 godziny przed punktem odniesienia. Daty i fragmenty wskazane przez Tavily Research; brak daty i treści nie jest uzupełniany. Materiał nie dowodzi przyczyny ruchu.')
+    return normalized
+
+
+def r1_wait_for_research(check, max_seconds=180):
+    """Odbior istniejacego zadania; bez ponownego uruchamiania."""
+    import time
+
+    if type(max_seconds) not in (int,float) or not math.isfinite(max_seconds) or max_seconds<0:
+        raise ValueError('Research: niepoprawny limit oczekiwania.')
+    end = time.monotonic() + max_seconds
+
+    while True:
+        response = check()
+        status = str(response.get("status") or "").lower()
+
+        if status == "completed":
+            return response
+
+        if status in ("failed", "error", "cancelled", "canceled"):
+            raise ServiceError(
+                "Tavily Research: zadanie zakonczone niepowodzeniem."
+            )
+
+        if status not in (
+            "pending", "queued", "running",
+            "in_progress", "processing", "submitted"
+        ):
+            raise ServiceError(
+                "Tavily Research: nieznany status zadania.",
+                uncertain=True
+            )
+
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            raise ResearchPending(
+                "Tavily Research: zadanie nadal trwa. "
+                "Identyfikator zachowano; nie uruchamiac ponownie.",
+                uncertain=True
+            )
+
+        time.sleep(min(5, remaining))
 
 
 def process_analysis_once(store,keys,event_id=None):
     job=claim_analysis(store,event_id)
     if not job:return False
     try:
-        with store.connection() as c:evidence=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(job['event_id'],)).fetchone()[0])
+        with store.connection() as c:
+            evidence=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(job['event_id'],)).fetchone()[0])
         if job['state']=='BUSY_CONTEXT':
-            # Persist selected backend and request BEFORE any potentially paid operation.
-            backend=service_config(store.load_section('settings',{}))['tavily_mode']
-            initial_request=event_context_request(evidence)
-            if backend=='CLI':
-                initial_request={k:v for k,v in initial_request.items() if k in ('query','topic','search_depth','max_results','start_date','end_date')}
-            with store.transaction() as c:
-                c.execute('UPDATE analysis_jobs SET context=? WHERE event_id=? AND state=?',
-                          (json_text({'backend':backend,'request':initial_request,'requested_at':utc_now()}),job['event_id'],'BUSY_CONTEXT'))
-            def checkpoint(payload):
-                with store.transaction() as c:
-                    c.execute('UPDATE analysis_jobs SET context=?,updated_at=? WHERE event_id=? AND state=?',
-                              (json_text(payload),utc_now(),job['event_id'],'BUSY_CONTEXT'))
-            save_analysis_context(store,job['event_id'],fetch_event_context(evidence,keys,backend=backend,checkpoint=checkpoint))
+            record=load_event_research(store,job['event_id'])
+            if record is None:
+                cutoff=event_context_cutoff(evidence['snapshot']).isoformat()
+                query=research_query(evidence['snapshot'],cutoff)
+                submit_event_research(store,job['event_id'],query,cutoff,keys.get('TAVILY_API_KEY',''))
+                record=load_event_research(store,job['event_id'])
+            if record['state']=='COMPLETED':
+                response=json.loads(record['raw_response'])
+            elif record['state']=='SUBMITTED' and record['request_id']:
+                if not keys.get('TAVILY_API_KEY'):raise ServiceError('Tavily Research: brak klucza API.')
+                response=r1_wait_for_research(lambda:check_event_research(store,job['event_id'],keys['TAVILY_API_KEY']))
+            else:
+                raise ServiceError('Research: rezerwacja niepewna; ponowny płatny start zablokowany.',uncertain=True)
+            if response.get('request_id')!=record['request_id']:
+                raise ServiceError('Research: niezgodny zapisany request_id.',uncertain=True)
+            context=r1_research_sources(response,record['cutoff'],evidence['snapshot'])
+            context['query']=record['query']
+            save_analysis_context(store,job['event_id'],context)
         else:
             result,metadata=analyze_event(evidence,json.loads(job['context']),keys)
             finish_analysis(store,job['event_id'],result,metadata)
     except ServiceError as exc:fail_analysis(store,job['event_id'],exc)
-    except Exception as exc:fail_analysis(store,job['event_id'],ServiceError('Błąd analizy: '+type(exc).__name__+'. Wymaga sprawdzenia.',uncertain=True))
+    except Exception as exc:
+        fail_analysis(store,job['event_id'],ServiceError('Błąd Research/analizy: '+type(exc).__name__+'. Wymaga kontroli.',uncertain=True))
     return True
+
+
 
 
 def approve_preview(store,outbox_id):
@@ -4451,7 +4544,7 @@ def manual_research_constants():
         'parameter': {
             key:{'label':label,'value':value,'digits':0,'unit':''}
             for key,label,value in (
-                ('volume_window','Liczba zamkniętych świec średniego wolumenu',20),
+                ('volume_window','Liczba pełnych zamkniętych świec średniego wolumenu',20),
                 ('ma_fast_window','Okno szybkiej SMA',10),('ma_slow_window','Okno wolnej SMA',30),
                 ('bb_window','Okno środka BB',20),('vwma_window','Okno VWMA',20),
                 ('macd_fast','Szybkie okno MACD',12),('macd_slow','Wolne okno MACD',26),
@@ -4764,10 +4857,9 @@ def gpt_chat_request(question,context,history):
         if turn.get('state')=='DONE' and turn.get('answer') and old.get('ticker')==context.get('ticker') and old.get('purpose')==context.get('purpose') and old.get('research',{}).get('issuer_filter_version')==1:
             messages.extend([{'role':'user','content':turn['question']},{'role':'assistant','content':turn['answer']}])
     # Keep rejected titles in SQLite diagnostics; they are not research for GPT.
-    # Full CLI Search/Extract replies remain persisted; never pay GPT to resend
-    # the same raw payloads and provider diagnostics a second time.
+    # Raw provider responses remain in SQLite, outside the GPT request.
     safe_context={**context,'research':{k:v for k,v in context.get('research',{}).items()
-        if k not in ('rejected_sources','undated_sources','search_calls','search_hits','extract_calls')}}
+        if k not in ('rejected_sources','undated_sources','search_calls','search_hits','extract_calls','raw_response','start_response','start_error','snapshot_identity')}}
     if context.get('report_version')==3:safe_context['numeric_references']={key:'{{metric:'+key+'}}' for key in manual_research_metrics(context)}
     local_context={**context,'previous_snapshot':manual_previous_snapshot(context)} if context.get('report_version')==3 else context
     local=local_research_analysis(local_context)
@@ -4800,8 +4892,7 @@ def perform_manual_question(store,ticker,question,with_search,history=(),purpose
             if with_search:
                 snapshot={'ticker':ticker,'company_name':(context.get('snapshot') or {}).get('company_name'),'company_website':(context.get('snapshot') or {}).get('company_website'),'acquired_at':utc_now()}
                 snapshot['_manual_research']=True
-                backend=service_config(store.load_section('settings',{}))['tavily_mode']
-                collect_manual_research(store,turn,context,snapshot,keys['TAVILY_API_KEY'],backend=backend)
+                collect_manual_research(store,turn,context,snapshot,keys['TAVILY_API_KEY'])
             request=gpt_chat_request(question,context,list(history))
             context['gpt']={'status':'REQUESTED','requested_at':utc_now()}
             save_gpt_chat_context(store,turn,context)
@@ -4879,8 +4970,10 @@ def render_manual_service_status(turn):
     context=json.loads(turn['context']);research=context.get('research') or {};status=research.get('status')
     sources=research.get('sources') or []
     if status=='DONE':
-        st.caption('Tavily: wyszukiwanie zakończone · wariant: '+str(research.get('backend','REST'))+' · zapisanych wyników: '+str(len(sources))+' · odrzuconych: '+str(research.get('excluded',0)))
+        st.caption('Tavily: wyszukiwanie zakończone · wariant: '+str(research.get('backend','zapis historyczny'))+' · zapisanych wyników: '+str(len(sources))+' · odrzuconych: '+str(research.get('excluded',0)))
         if not sources:st.info(tavily_result_summary(research))
+    elif status in ('SUBMITTED','COMPLETED'):st.caption('Research: zapisane zadanie '+str(research.get('request_id') or '')+' · '+status)
+    elif status=='CALL_UNCERTAIN':st.warning('Research: wynik startu niepotwierdzony. Automatyczne ponowienie zablokowane.')
     elif status=='RECEIVED':st.caption('Tavily: odpowiedź odebrana · weryfikacja źródeł nie została zakończona.')
     elif status=='REQUESTED':st.caption('Tavily: rozpoczęto zapytanie · brak zapisanego potwierdzenia odpowiedzi.')
     elif status=='PENDING':st.caption('Tavily: zapytanie nie zostało jeszcze rozpoczęte.')
@@ -4902,18 +4995,20 @@ def render_manual_service_status(turn):
             for attempt in research.get('attempts',[]):
                 st.write(attempt['scope']+' · '+attempt['status']+' · wyników: '+str(attempt.get('received_results','brak'))+' · '+attempt['request']['query'])
                 st.caption('Zakres: '+str(attempt['request'].get('start_date') or 'brak')+' → '+str(attempt['request'].get('end_date') or 'brak')+' · domeny: '+', '.join(attempt['request'].get('include_domains') or [])+' · wyniki: '+str(attempt.get('accepted','brak')))
-                st.caption('Domeny: '+('bez ograniczeń listą KI' if research.get('backend')=='CLI' else 'preferowane; pozostałe wyniki podlegają lokalnej kontroli' if attempt['request'].get('include_domains_mode')=='prefer' else 'wyszukiwanie ograniczone do listy')+' · niepotwierdzona data: '+str(attempt.get('date_unverified_count',research.get('date_unverified_count','brak zapisu'))))
+                st.caption('Domeny: '+('bez ograniczeń listą KI' if bool(research.get('extract_calls') or research.get('search_hits')) else 'preferowane; pozostałe wyniki podlegają lokalnej kontroli' if attempt['request'].get('include_domains_mode')=='prefer' else 'wyszukiwanie ograniczone do listy')+' · niepotwierdzona data: '+str(attempt.get('date_unverified_count',research.get('date_unverified_count','brak zapisu'))))
             for source in sources:
-                st.caption(('Zakres wyszukiwania: fresh; data publikacji niepotwierdzona' if source.get('date_state')!='KNOWN' else 'Wynik wyszukiwania fresh') if research.get('backend')=='CLI' and source.get('scope')=='fresh' else 'Kontekst historyczny — nie dowód przyczyny dzisiejszego ruchu' if source.get('scope')!='fresh' else 'Świeże wydarzenie')
+                st.caption(('Zakres wyszukiwania: fresh; data publikacji niepotwierdzona' if source.get('date_state')!='KNOWN' else 'Wynik wyszukiwania fresh') if bool(research.get('extract_calls') or research.get('search_hits')) and source.get('scope')=='fresh' else 'Kontekst historyczny — nie dowód przyczyny dzisiejszego ruchu' if source.get('scope')!='fresh' else 'Świeże wydarzenie')
                 st.write(source['published_at']+' · '+str(source.get('title') or 'Źródło'))
+                if research.get('backend')=='RESEARCH':
+                    st.text_area('Fragment wskazany przez Research · '+source['id'],value=source.get('content') or 'Brak treści.',height=160,disabled=True,key='r1_source_'+turn['id']+'_'+source['id'])
                 if source.get('url','').startswith('https://'):
                     st.link_button('Otwórz źródło '+source['id'],source['url'])
-                else:st.caption('Brak technicznie poprawnego odnośnika — wynik Search zachowany.')
-                if research.get('backend')=='CLI':
-                    st.caption('Extract: '+str(source.get('extract_state'))+' · data: '+str(source.get('date_state')))
+                else:st.caption('Brak technicznie poprawnego odnośnika — zachowano zapis źródła.')
+                if bool(research.get('extract_calls') or research.get('search_hits')):
+                    st.caption('Historyczny stan pobrania: '+str(source.get('extract_state'))+' · data: '+str(source.get('date_state')))
                     if source.get('extract_error'):st.caption('Błąd pobrania: '+source['extract_error'])
-                    st.text_area('Treść pobrana lub fragment Search · '+source['id'],
-                        value=source.get('content') or 'Brak treści; zachowano metadane Search.',
+                    st.text_area('Zapisana treść źródła · '+source['id'],
+                        value=source.get('content') or 'Brak treści; zachowano metadane źródła.',
                         height=160,disabled=True,key='cli_source_text_'+turn['id']+'_'+source['id'])
             for rejected in research.get('rejected_sources',[]):
                 st.write('Odrzucono: '+str(rejected.get('title') or 'Źródło')+' · '+str(rejected.get('reason') or 'Brak uzasadnienia'))
@@ -4960,6 +5055,7 @@ def render_gpt_chat(store):
             context=json.loads(turn['context'])
             if context.get('ticker'):st.caption('Spółka: '+context['ticker']+' · czas danych: '+(context.get('snapshot') or {}).get('acquired_at','Brak odczytu rynku'))
             render_manual_service_status(turn)
+            render_research_resume(store,turn)
     if not history:st.info('Historia rozmowy jest pusta. Wpisz pierwsze pytanie.')
 
 
@@ -4984,8 +5080,7 @@ def render_ticker_research(store):
         else:st.caption('Najnowszy dostępny zapis Yahoo (dla nowej analizy): '+snapshot.get('acquired_at','Brak czasu odczytu'))
     question=st.text_area('Pytanie do analizy spółki',value='Co pokazują dane o ruchu tej spółki, jakie są potwierdzone informacje i czego brakuje do oceny?',key='ticker_research_question')
     st.caption('Bid/ask: osobne pobranie Yahoo przy nowej analizie. Otwarcie zapisanego raportu nie ponawia pobrania.')
-    backend=service_config(store.load_section('settings',{}))['tavily_mode']
-    st.caption('Tryb Tavily: '+backend+'. Do trzech wyszukiwań i jedno zapytanie GPT po przycisku. Tło REST jest zapisywane na 24 godziny; CLI wykonuje Search i Extract przy każdym żądaniu. Bez zmiany filtra automatu.')
+    st.caption('R1: Tavily CLI Research Mini — informacje z ostatnich 24 godzin; jedno zlecenie Research i jedno zapytanie GPT na żądanie. Odświeżenie czyta zapisany raport.')
     if st.button('Analizuj dane spółki z Tavily',disabled=ticker is None):
         try:
             resolve_question_ticker(question,ticker,ticks)
@@ -5010,6 +5105,7 @@ def render_ticker_research(store):
             if saved_context.get('report_version') not in (2,3):st.caption('Komentarz zapisano we wcześniejszym układzie raportu. Nie wysłano ponownego zapytania do GPT.')
             st.markdown('### Kontekst źródłowy Tavily — bez dowodu przyczyny ruchu')
             render_manual_service_status(report)
+            render_research_resume(store,report)
     st.divider();st.subheader('Zapisane raporty automatu i odczytów ręcznych')
 
 
@@ -5689,9 +5785,7 @@ def run_streamlit(db):
             tpm=st.number_input('Mnożnik ATR dla TP',min_value=.1,value=float(settings.get('tp_atr_multiplier',3.)),step=.1)
             st.markdown('**Dalsza analiza potwierdzonego ruchu**')
             pipeline_enabled=st.checkbox('Tavily + GPT po potwierdzeniu okazji',value=services['pipeline_enabled'])
-            tavily_mode=st.selectbox('Wariant Tavily',['REST','CLI'],index=['REST','CLI'].index(services['tavily_mode']))
-            st.caption('REST: dotychczasowe Tavily E06. CLI: tvly search i tvly extract, wymaga osobnej instalacji i zużywa kredyty. Wybór obejmuje automat i analizę ręczną.')
-            cli_cost_ack=st.checkbox('CLI: potwierdzam koszt Search + Extract w automacie',value=False)
+            st.caption('R1: Tavily CLI Research Mini — jeden płatny start na zdarzenie lub ręczne żądanie, potem odczyt zapisanego ID. GPT analizuje materiały po zakończeniu Research.')
             telegram_enabled=st.checkbox('Automatycznie wysyłaj nowe zdarzenia na Telegram',value=services['telegram_enabled'])
             st.caption('Okazja automatyczna: trzy kolejne odczyty ponad stałą bazą matrycy w ciągu godziny. GPW: alerty po 17:00 czasu Warszawy są blokowane. Skrócona świeca końcowa nie dostaje RVOL porównywanego z pełnymi świecami. Maksymalnie 3 analizy na 15 minut, jedna wiadomość na sekwencję.')
             st.caption('Przy wyłączonej wysyłce wiadomości pozostają w podglądzie. Włączenie dotyczy nowych zdarzeń.')
@@ -5699,11 +5793,9 @@ def run_streamlit(db):
         if saved:
             import re
             new_ticks=list(dict.fromkeys(t.upper() for t in re.split(r'[,\s]+',text.strip()) if t))
-            proposed={'market_interval':iv,'auto_scan_interval':cadence,'price_threshold_pct':pt,'rvol_threshold_pct':rt,'observation_retention_days':int(retention),'sl_atr_multiplier':slm,'tp_atr_multiplier':tpm,'pipeline_enabled':pipeline_enabled,'telegram_enabled':telegram_enabled,'tavily_mode':tavily_mode}
+            proposed={'market_interval':iv,'auto_scan_interval':cadence,'price_threshold_pct':pt,'rvol_threshold_pct':rt,'observation_retention_days':int(retention),'sl_atr_multiplier':slm,'tp_atr_multiplier':tpm,'pipeline_enabled':pipeline_enabled,'telegram_enabled':telegram_enabled}
             market_config(proposed);atr_risk_levels(1.,None,slm,tpm)
             if any(not valid_ticker(t) for t in new_ticks):st.error('Błędny ticker.')
-            elif tavily_mode=='CLI' and pipeline_enabled and not cli_cost_ack:
-                st.error('Wariant CLI w automacie wymaga potwierdzenia kosztów Search i Extract. Nie zapisano ustawień.')
             else:
                 with store.transaction() as c:
                     current=store.load_section('settings',{});current.update(proposed)
@@ -6379,7 +6471,9 @@ def run_market_tests():
             r=self.rows();r[-3]['volume']=None
             self.assertIsNone(market_indicators(r)['rvol'])
             r=self.rows();r[-2]['status']='UNKNOWN'
-            self.assertIsNone(market_indicators(r)['rvol'])
+            # Unknown-status bars are excluded; twenty older closed bars remain.
+            self.assertEqual(market_indicators(r)['rvol'],1.)
+            self.assertEqual(market_indicators(r)['average_volume_reference'],100.)
 
         def test_23_settings_validation_and_daily_close(self):
             self.assertTrue(validate_state({'settings':{'market_interval':'5m'}}))
@@ -6804,9 +6898,9 @@ def run_opportunity_tests():
       self.assertEqual(opportunity_quality(self.snap(rv=3.)),'Duża okazja')
       self.assertEqual(opportunity_quality(self.snap(rv=2.)),'Okazja')
       s=self.snap(rv=3.);s['indicators']={};self.assertEqual(opportunity_quality(s),'Okazja')
-      self.assertEqual(opportunity_risk(self.snap())['label'],'Ryzyko nieustalone')
+      self.assertEqual(opportunity_risk(self.snap())['label'],'Ocena częściowa: bez przekroczenia sprawdzonych progów ryzyka')
       self.assertEqual(opportunity_risk({**self.snap(),'spread':{'spread_pct':2.}})['label'],'Ryzyko podwyższone')
-      self.assertEqual(opportunity_risk(self.snap(price=104.))['label'],'Ryzyko nieustalone')
+      self.assertEqual(opportunity_risk(self.snap(price=104.))['label'],'Ocena częściowa: bez przekroczenia sprawdzonych progów ryzyka')
       self.assertEqual(opportunity_risk({**self.snap(),'ohlc':{'high':110.}})['label'],'Ryzyko podwyższone')
      def test_quote_math(self):
       q=spread_from_info({'bid':4.64,'ask':4.76,'regularMarketTime':1791220554},self.now)
@@ -6903,10 +6997,34 @@ def run_panel_tests():
     from streamlit.testing.v1 import AppTest
 
     class PanelTests(unittest.TestCase):
+        def test_r1_has_one_backend_and_no_cost_switch(self):
+            labels=[item.label for item in self.app.selectbox]
+            checks=[item.label for item in self.app.checkbox]
+            self.assertNotIn('Wariant Tavily',labels)
+            self.assertNotIn('CLI: potwierdzam koszt Search + Extract w automacie',checks)
+            self.assertIn('Tavily CLI Research Mini',' '.join(item.value for item in self.app.caption))
+
+        def test_r1_saved_manual_id_can_resume_but_refresh_does_not_call_api(self):
+            context={'ticker':'MREO','purpose':'ticker_analysis','research':{'backend':'RESEARCH',
+                     'status':'SUBMITTED','request_id':'r1-panel-existing','query':'Saved query',
+                     'cutoff':utc_now(),'sources':[]}}
+            turn=begin_gpt_chat(self.store,'Saved question',context)
+            fail_gpt_chat(self.store,turn,'Status read interrupted.')
+            next(item for item in self.app.radio if item.label=='Widok panelu').set_value('Analiza GPT').run(timeout=30)
+            next(item for item in self.app.text_input if item.label=='Wpisz ticker do analizy GPT').set_value('MREO').run(timeout=30)
+            self.assertEqual(len(self.app.exception),0)
+            self.assertIn('Wznów zapisane Research i analizę GPT',[item.label for item in self.app.button])
+            self.app.run(timeout=30)
+            with self.store.connection() as c:
+                saved=json.loads(c.execute('SELECT context FROM gpt_chat_turns WHERE id=?',(turn,)).fetchone()[0])
+                self.assertEqual(saved['research']['request_id'],'r1-panel-existing')
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0],0)
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM outbox').fetchone()[0],0)
+
         def test_v3_saved_report_shows_attempts_background_and_own_timestamp(self):
             self.store.save_section('tickers',['HUMA'])
             snap={**opportunity_test_snapshot(datetime.now(timezone.utc),'HUMA',.4659,.05),'currency':'USD','spread':spread_from_info({'bid':.46,'ask':.47})}
-            request=manual_search_plan({**snap,'_manual_research':True})[0][1]
+            request={'query':research_query(snap,event_context_cutoff(snap).isoformat())}
             context={'ticker':'HUMA','snapshot':snap,'purpose':'ticker_analysis','report_version':3,
                      'research':{'status':'DONE','sources':[],'received_results':0,'issuer_filter_version':1,
                                  'background_cached_at':snap['acquired_at'],
@@ -7109,7 +7227,7 @@ def run_panel_tests():
             self.app.run(timeout=30);self.assertEqual(len(self.app.exception),0)
             self.assertIn('TOP 20 potwierdzonych okazji',[x.value for x in self.app.subheader])
             self.assertTrue(any('AAA' in x.value for x in self.app.markdown));self.assertTrue(any('BBB' in x.value for x in self.app.markdown))
-            self.assertTrue(any('Ryzyko nieustalone' in x.value for x in self.app.markdown))
+            self.assertTrue(any('Ocena częściowa' in x.value for x in self.app.markdown))
             with self.store.connection() as c:
                 after=[c.execute('SELECT COUNT(*) FROM '+t).fetchone()[0] for t in ('observations','events','analysis_jobs','outbox','opportunities')]
             self.assertEqual(before,after)
@@ -7684,24 +7802,17 @@ def run_service_tests():
                 {'url':'javascript:alert(1)','content':'x','published_date':src['published_at']}]}
             context=normalize_tavily_context(payload,self.snap())
             self.assertEqual(len(context['sources']),1);self.assertEqual(context['excluded'],4)
-        def test_issuer_query_uses_name_and_financial_sources(self):
+        def test_research_query_uses_verified_name_ticker_and_cutoff(self):
             snap={**self.snap(),'ticker':'06N.WA','company_name':'Magna Polonia S.A.'}
-            request=event_context_request({'snapshot':snap})
-            self.assertIn('"Magna Polonia"',request['query'])
-            self.assertNotIn('06N.WA',request['query'])
-            self.assertEqual(request['topic'],'general')
-            self.assertFalse(request['exact_match'])
-            self.assertFalse(request['filter_by_published_date'])
-            self.assertEqual(request['language'],'pl')
-            self.assertEqual(request['include_domains_mode'],'restrict')
-            self.assertIn('gpw.pl',request['include_domains'])
-            self.assertIn('bankier.pl',request['include_domains'])
-            self.assertNotIn('2026-10-02',request['query'])
-        def test_manual_volume_question_does_not_pollute_issuer_search(self):
+            query=research_query(snap,event_context_cutoff(snap).isoformat())
+            self.assertIn('Magna Polonia',query)
+            self.assertIn('06N.WA',query)
+            self.assertIn(event_context_cutoff(snap).isoformat(),query)
+            self.assertIn('Nie oceniaj inwestycji',query)
+        def test_manual_volume_question_is_separate_from_research_query(self):
             snap={**self.snap(),'ticker':'06N.WA','company_name':'Magna Polonia S.A.'}
-            request=manual_context_request('06N.WA',{'snapshot':snap})
-            self.assertEqual(request['query'],event_context_request({'snapshot':{**snap,'acquired_at':utc_now(),'candle_status':None,'candle_end':None}})['query'])
-            self.assertNotIn('wolumen',request['query'])
+            query=research_query(snap,event_context_cutoff(snap).isoformat())
+            self.assertNotIn('jak wygląda dziś wolumen',query)
             gpt=gpt_chat_request('jak wygląda dziś wolumen',{'ticker':'06N.WA','snapshot':snap,'research':{'sources':[]}},[])
             self.assertIn('jak wygląda dziś wolumen',gpt['messages'][-1]['content'])
         def test_unrelated_results_are_rejected_before_gpt(self):
@@ -7731,8 +7842,7 @@ def run_service_tests():
             self.assertEqual(len(context['sources']),1);self.assertEqual(context['excluded'],3)
         def test_recorded_issuer_website_can_supply_dated_reports(self):
             snap={**self.snap(),'ticker':'06N.WA','company_name':'Magna Polonia S.A.','company_website':'https://www.magna.example/'}
-            request=event_context_request({'snapshot':snap})
-            self.assertIn('magna.example',request['include_domains'])
+            self.assertIn('magna.example',issuer_search_identity(snap)['domains'])
             payload={'results':[{'url':'https://ir.magna.example/raport','title':'Raport bieżący','content':'Magna Polonia S.A. opublikowała raport.','published_date':'2026-10-02T12:00:00Z'}]}
             self.assertEqual(len(normalize_tavily_context(payload,snap)['sources']),1)
         def test_missing_name_does_not_match_common_words_or_wrong_ticker(self):
@@ -7857,12 +7967,12 @@ def run_service_tests():
             self.assertEqual(set(metric['enum']),{'rsi','last_macd_hist','ma_fast'})
             self.assertNotIn('RSI',metric['enum']);self.assertNotIn('MACD',metric['enum'])
             self.assertEqual(schema['properties']['context']['items']['properties']['source_id']['enum'],['S1'])
-        def test_25_request_has_event_ticker_and_time_window(self):
-            request=event_context_request({'snapshot':self.snap()})
-            self.assertIn(self.snap()['ticker'],request['query'])
-            self.assertFalse(request['include_answer'])
-            self.assertEqual(request['start_date'],'2026-09-25')
-            self.assertEqual(request['end_date'],'2026-10-03')
+        def test_25_research_query_has_event_ticker_and_cutoff(self):
+            cutoff=event_context_cutoff(self.snap()).isoformat()
+            query=research_query(self.snap(),cutoff)
+            self.assertIn(self.snap()['ticker'],query)
+            self.assertIn(cutoff,query)
+            self.assertIn('Nie podawaj materiałów opublikowanych po',query)
 
         def test_24_empty_data_schema_still_has_valid_enum_but_validator_rejects_invention(self):
             schema=analysis_schema({'indicators':{}},{'sources':[]})
