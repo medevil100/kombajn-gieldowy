@@ -23,3 +23,28 @@ venv/
 secrets.toml
 
 .venv_tavily_cli/
+
+# === KI - dodatkowe reguly ===
+# Baza danych i locki
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.lock
+KI.matrix
+KI.matrix.*
+
+# Sekrety
+.streamlit/secrets.toml
+**/secrets.toml
+secrets.toml
+
+# Backupy KI.py i adaptera
+KI.py.bak.*
+KI.py.przed_*
+tavily_cli_adapter.py.bak.*
+tavily_cli_adapter.py.przed_*
+
+# Skrypty pomocnicze asystenta
+_*.py
+_*.txt
+_dump*.txt

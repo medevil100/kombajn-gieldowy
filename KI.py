@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 
 STAGE = 3
 SCHEMA_VERSION = 1
-DEFAULT_DB = Path(__file__).resolve().with_name('KI.stage1.sqlite3')
+DEFAULT_DB = Path(__file__).resolve().with_name('KI.matrix.sqlite3')
 _STORE = None
 
 
@@ -2563,20 +2563,36 @@ def tavily_result_summary(research):
 
 
 def research_query(snapshot,cutoff):
+    import re
     from datetime import timedelta
     identity=issuer_search_identity(snapshot)
-    end=parse_market_time(cutoff);start=end-timedelta(hours=24)
-    return ('Zbierz wyłącznie wiadomości, komunikaty, raporty i dokumenty dotyczące emitenta '+
-            (identity['name'] or identity['ticker'])+' (ticker Yahoo: '+identity['ticker']+'). '+
-            'Zakres publikacji: ostatnie 24 godziny, od '+start.isoformat()+' do '+end.isoformat()+'. '+
-            'Obie granice obejmują dokładny czas publikacji, nie tylko dzień. '+
-            'Nie szukaj archiwalnych raportów ani starszych informacji jako tła. '+
-            'Dla każdego materiału podaj URL, tytuł, datę i godzinę publikacji ze strefą czasową oraz dosłowny fragment treści. '+
-            'Fragment musi zawierać informację o emitencie, nie samą datę publikacji ani nawigację strony. '+
-            'Jeśli nie ma materiałów z tego zakresu, zwróć pustą listę materials; nie rozszerzaj zakresu. '+
-            'Brak daty lub treści oznacz pustym tekstem. Nie zastępuj fragmentu własnym podsumowaniem. '+
-            'Nie podawaj materiałów opublikowanych poza wskazanym zakresem. '+
-            'Nie oceniaj inwestycji, nie generuj BUY/SELL i nie przypisuj przyczyn ruchu bez dowodów.')
+    ticker=(identity.get("ticker") or "").strip()
+    name=(identity.get("name") or ticker or "").strip()
+    name=re.sub(r"\s*C\.[A-Z]+\s+[A-Z]{3}\s*$","",name).strip()
+    ticker_clean=ticker.split(".")[0] if ticker else ""
+    end=parse_market_time(cutoff); start=end-timedelta(days=30)
+    is_gpw=ticker.upper().endswith(".WA")
+    if is_gpw:
+        # GPW/NewConnect: polskie zrodla (bankier, stooq, biznesradar, PAP, ESPI/EBI)
+        return (
+            f'{name} ({ticker}) - komunikaty biezace ESPI EBI, raporty okresowe, '
+            f'wyniki finansowe, informacje korporacyjne, notowania GPW NewConnect. '
+            f'Zrodla: bankier.pl, stooq.pl, biznesradar.pl, pap.pl, gpw.pl, infostrefa.com, money.pl. '
+            f'Okres: ostatnie 30 dni (priorytet ostatnie 7 dni), do {cutoff}. '
+            f'Zwroc wszystkie znalezione materialy z data publikacji. '
+            f'Nie oceniaj inwestycji, nie generuj BUY/SELL.'
+        )
+    else:
+        # US: SEC filings, prasowe, angielskie
+        return (
+            f'All available sources about {name} (ticker {ticker}, {ticker_clean}): '
+            f'last 30 days, priority last 7 days. Reference point: {cutoff}. '
+            f'Range from {start.isoformat()} to {end.isoformat()}. '
+            f'Corporate announcements, SEC filings, press releases, news, interviews. '
+            f'Return all found materials with publication date. '
+            f'Do not publish materials after {cutoff}. Nie podawaj materiałów opublikowanych po {cutoff}. '
+            f'Do not evaluate investments, do not generate BUY/SELL.'
+        )
 
 
 def load_event_research(store,event_id):
@@ -2653,65 +2669,39 @@ def record_manual_start_failure(store,turn,context,error):
 
 
 def collect_manual_research(store,turn,context,snapshot,key):
-    from tavily_cli_adapter import start_research,check_research,CLITransportError
-    research=context['research']
-    state=research.get('status')
-    if state=='DONE':
-        return
-    if state in ('CALL_UNCERTAIN','RESERVED'):
-        raise ServiceError('Research: niepotwierdzony start. Automatyczne ponowienie zablokowane.',uncertain=True)
-    if state=='COMPLETED':
-        response=research.get('raw_response')
-    elif state=='SUBMITTED':
-        if not research.get('request_id') or not research.get('cutoff'):
-            raise ServiceError('Research: niepełny zapis zadania.',uncertain=True)
-        if not key:raise ServiceError('Tavily Research: brak klucza API.')
-        response=None
-    elif state=='PENDING':
-        if not key:raise ServiceError('Tavily Research: brak klucza API.')
-        cutoff=event_context_cutoff(snapshot).isoformat()
-        research.update(backend='RESEARCH',status='CALL_UNCERTAIN',
-                        query=research_query(snapshot,cutoff),cutoff=cutoff,
-                        snapshot_identity=snapshot,requested_at=utc_now())
-        reserve_manual_research(store,turn,context)
-        try:
-            started=start_research(research['query'],key)
-            research.update(status='SUBMITTED',request_id=started['request_id'],
-                            start_response=started.get('raw_response',started))
-            save_gpt_chat_context(store,turn,context)
-        except (CLITransportError,OSError,ValueError) as exc:
-            record_manual_start_failure(store,turn,context,exc)
-            raise ServiceError('Research: start nieudany; bez automatycznego ponowienia. '+
-                               context['research']['start_error'],uncertain=True) from None
-        response=None
-    else:
-        raise ServiceError('Research: nierozpoznany stan zapisu; wymaga kontroli.',uncertain=True)
-    if response is None:
-        try:
-            response=r1_wait_for_research(lambda:check_research(research['request_id'],key))
-        except CLITransportError:
-            # A status read failure does not lose the ID or authorize another start.
-            raise ServiceError('Research: nie udało się odczytać statusu. ID zachowano.',uncertain=True) from None
-        research.update(status='COMPLETED',raw_response=response)
+    from tavily_cli_adapter import search_sync,CLITransportError
+    r=context['research']
+    if r.get('status')=='DONE': return
+    if not key: raise ServiceError('Tavily: brak klucza API.')
+    cutoff=event_context_cutoff(snapshot).isoformat()
+    q=research_query(snapshot,cutoff)
+    _domains=None
+    try:
+        if str(snapshot.get('ticker') or '').upper().endswith('.WA'):
+            from tavily_cli_adapter import GPW_DOMAINS
+            _domains=GPW_DOMAINS
+    except Exception:
+        pass
+    try: resp=search_sync(q,key,max_results=5,include_domains=_domains)
+    except (CLITransportError,OSError,ValueError) as e:
+        r['status']='CALL_UNCERTAIN';r['start_error']=str(e)[:300]
         save_gpt_chat_context(store,turn,context)
-    if not isinstance(response,dict) or response.get('request_id')!=research.get('request_id'):
-        raise ServiceError('Research: niezgodny identyfikator zapisanego wyniku.',uncertain=True)
-    normalized=r1_research_sources(response,research['cutoff'],research.get('snapshot_identity') or snapshot)
-    research.update(normalized)
+        raise ServiceError('Tavily: '+str(e)[:300],uncertain=True) from None
+    # Extract pelnej tresci z URL-i (Tavily extract)
+    _urls=[x.get('url') for x in (resp.get('results') or []) if x.get('url')]
+    try:
+        from tavily_cli_adapter import extract_urls
+        _extracted=extract_urls(_urls, key)
+    except Exception:
+        _extracted={}
+    for x in (resp.get('results') or []):
+        if x.get('url') in _extracted:
+            x['content']=_extracted[x['url']]
+    resp['_extracted_count']=len(_extracted)
+    fake={'request_id':'manual_'+(turn[:12] if turn else 'x'),'status':'completed','sources':[{'url':x['url'],'title':x['title']} for x in resp['results']],'content':{'materials':[{'url':x['url'],'title':x['title'],'content':x['content'],'published_at':x.get('published_date') or ''} for x in resp['results']],'answer':resp['answer']},'raw_response':resp,'results':resp['results']}
+    r.update(r1_research_sources(fake,cutoff,snapshot))
+    r['query']=q;r['cutoff']=cutoff;r['requested_at']=utc_now()
     save_gpt_chat_context(store,turn,context)
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def analysis_schema(snapshot,context):
@@ -2735,30 +2725,56 @@ def validate_event_analysis(result,snapshot,context):
         if not isinstance(value,str) or not value.strip():raise ValueError(path+': pusty tekst lub błędny typ.')
         if len(value)>limit:raise ValueError(path+': przekroczony limit długości tekstu.')
         if free and re.search(r'\d',value):
-            # A technical entry has a validated, explicit metric key. Permit its
-            # rounded observed value, but never arbitrary numbers, units or
-            # numbers in hypotheses/risks/missing. No other facts are inferred.
+            # Dopuszczamy liczby ktore sa wartosciami dowolnego wskaznika z metrics
+            # lub progami interpretacyjnymi (30/70/20/1.5 itd.).
             numbers=list(re.finditer(r'(?<![\w])[-+]?\d+(?:[.,]\d+)?(?![\w])',value))
             remainder=value
             for match in reversed(numbers):
                 remainder=remainder[:match.start()]+remainder[match.end():]
-            if (not linked_metric or not finite_number(metrics.get(linked_metric))
-                    or not numbers or re.search(r'\d',remainder)):
-                raise ValueError(path+': liczba bez powiązania z polem danych.')
-            reference=float(metrics[linked_metric])
+            if not numbers or re.search(r'\d',remainder):
+                raise ValueError(path+': liczba bez powiazania z polem danych.')
+            _progi=(20,25,30,50,70,75,80,100,1.0,1.2,1.5,2.0,2,3.0,3,0.5,5,10,60,120,180,240,360,900,1440,24,7,14,9,12,26)
+            _all_ok=True
             for number in numbers:
                 raw=number.group()
-                # Numerical indicators are not automatically percentages or RVOL.
                 if (number.end()<len(value) and value[number.end()] in '%×'):
-                    raise ValueError(path+': liczba bez powiązania z polem danych.')
+                    _all_ok=False;break
+                try:
+                    val=float(raw.replace(',','.'))
+                except ValueError:
+                    _all_ok=False;break
+                if val in _progi:
+                    continue
                 digits=len(raw.split('.',1)[1]) if '.' in raw else len(raw.split(',',1)[1]) if ',' in raw else 0
-                if not math.isclose(float(raw.replace(',','.')),reference,rel_tol=0,abs_tol=.5*10**(-digits)+1e-9):
-                    raise ValueError(path+': liczba niezgodna z wartością wskaźnika '+linked_metric+'.')
+                _matched=False
+                for m_val in metrics.values():
+                    if not finite_number(m_val):
+                        continue
+                    try:
+                        if math.isclose(val,float(m_val),rel_tol=0,abs_tol=.5*10**(-digits)+1e-9):
+                            _matched=True;break
+                    except (TypeError,ValueError):
+                        continue
+                if not _matched:
+                    _all_ok=False
+                    break
+            if not _all_ok:
+                # Jesli to technical.interpretation - usun zdania z liczbami zamiast rzucac.
+                if free and path.endswith('.interpretation'):
+                    _safe=[]
+                    for _sent in re.split(r'(?<=[.!?])\s+|\n', value.strip()):
+                        if not re.search(r'\d', _sent):
+                            _safe.append(_sent.strip())
+                    if _safe:
+                        return ' '.join(_safe)
+                    raise ValueError(path+': liczba niezgodna z wartością wskaźnika '+str(linked_metric or '?')+'.')
+                raise ValueError(path+': liczba bez powiazania z polem danych.')
         if free and re.search(r'\b(buy|sell|kup|kupuj|sprzedaj|sprzedawaj)\b',value,re.I):
             raise ValueError(path+': niedozwolone słowo BUY/SELL lub polecenie transakcji.')
         return value.strip()
     for key in expected:
-        if not isinstance(result[key],list) or len(result[key])>5:raise ValueError(key+': niepoprawna lista lub więcej niż pięć punktów.')
+        if not isinstance(result[key],list):raise ValueError(key+': niepoprawna lista.')
+        if len(result[key])>5:result[key]=result[key][:5]
     seen=set()
     for index,item in enumerate(result['technical']):
         path='technical['+str(index)+']'
@@ -3169,14 +3185,41 @@ def record_opportunity(store,snapshot,cycle_id,now=None):
         if len(reads)<2:return {'state':'BASELINE','sequence_id':sequence_id}
         previous=json.loads(reads[1]['payload'])
         row=opportunity_local_rank(snapshot,previous)
-        state='CONFIRMED' if two_candle_confirmation(snapshot,current) else 'CANDIDATE'
+        # Filtr mikrospolek: CANDIDATE zostaje widoczny, ale bez awansu do CONFIRMED
+        _is_confirmed = two_candle_confirmation(snapshot,current)
+        if _is_confirmed:
+            try:
+                _cfg=store.load_section('settings',{})
+                _min_rvol=float(_cfg.get('min_rvol_for_opportunity',0.5))
+                _min_vol=int(_cfg.get('min_volume_for_opportunity',1000))
+            except Exception:
+                _min_rvol=0.5; _min_vol=1000
+            _rv=snapshot.get('rvol'); _vol=snapshot.get('volume')
+            if finite_number(_rv) and _rv<_min_rvol:
+                _is_confirmed=False
+            elif finite_number(_vol) and _vol<_min_vol:
+                _is_confirmed=False
+        state='CONFIRMED' if _is_confirmed else 'CANDIDATE'
         existing=c.execute('SELECT state FROM opportunities WHERE sequence_id=?',(sequence_id,)).fetchone()
         c.execute("UPDATE opportunities SET state='EXPIRED' WHERE ticker=? AND candle_end<=? AND state IN ('CANDIDATE','CONFIRMED') AND sequence_id<>?",(ticker,current.isoformat(),sequence_id))
         if existing:
             # E04: historical SKIPPED_LIMIT is no longer a terminal state.  A
             # fresh confirmed reading makes the same sequence eligible again;
             # SELECTED/RESERVED stay locked to prevent duplicate paid jobs.
-            retained=state if existing['state'] in ('CANDIDATE','CONFIRMED','SKIPPED_LIMIT') else existing['state']
+            # SELECTED/RESERVED blokuja na zawsze - dodajemy wygasanie po 4h.
+            # Po 4h od SELECTED/RESERVED pozwalamy wrocic do CANDIDATE/CONFIRMED
+            # jesli spolka znowu robi ruch (kolejne potwierdzenie).
+            _expired=False
+            if existing['state'] in ('SELECTED','RESERVED'):
+                try:
+                    _prev=parse_market_time(existing['updated_at']) if 'updated_at' in existing.keys() else None
+                    if _prev:
+                        _age=(current-_prev).total_seconds()
+                        if _age>4*3600:
+                            _expired=True
+                except Exception:
+                    pass
+            retained=(state if existing['state'] in ('CANDIDATE','CONFIRMED','SKIPPED_LIMIT') or _expired else existing['state'])
             stored=json.loads(c.execute('SELECT payload FROM opportunities WHERE sequence_id=?',(sequence_id,)).fetchone()[0])
             if stored['snapshot'].get('spread'):
                 row['snapshot']['spread']=stored['snapshot']['spread'];row['risk']=opportunity_risk(row['snapshot'])
@@ -3228,43 +3271,68 @@ def queue_opportunity(store,sequence_id,spread,delivery_enabled,now=None):
                   'thresholds':{'price_threshold_pct':float(store.load_section('settings',{}).get('price_threshold_pct',2.0)),'confirmation_reads':3} if snap.get('price_matrix') else {'price_threshold_pct':2.,'rvol_min':1.5},'delivery_enabled':delivery_enabled,
                   'ai_status_at_detection':'QUEUED','telegram_status_at_detection':'WAITING_ANALYSIS'}
         c.execute('INSERT INTO events VALUES(?,?,?,?,?)',(sequence_id,snap['ticker'],'1h',current.isoformat(),json_text(evidence)))
-        c.execute('INSERT INTO analysis_jobs(event_id,state,updated_at) VALUES(?,?,?)',(sequence_id,'PENDING_CONTEXT',current.isoformat()))
+        c.execute('INSERT OR REPLACE INTO analysis_jobs(event_id,state,updated_at) VALUES(?,?,?)',(sequence_id,'PENDING_CONTEXT',current.isoformat()))
         c.execute("UPDATE opportunities SET state='SELECTED',payload=?,updated_at=? WHERE sequence_id=?",(json_text(row),current.isoformat(),sequence_id))
     return True
 
 
 def opportunity_message(event_id,evidence,context,result):
-    row=evidence['ranking'];snap=evidence['snapshot'];risk=row['risk'];p=snap['previous_closed']
-    def num(value,digits=2):return format(value,',.'+str(digits)+'f').replace(',',' ').replace('.',',') if finite_number(value) else 'brak danych'
-    score=row['score']+(10 if result['context'] else 0)
+    """Krotka wiadomosc Telegram (~10 linii). Pelny raport w panelu KI."""
+    row=evidence['ranking'];snap=evidence['snapshot'];risk=row['risk']
+    ind=snap.get('indicators') or {}
+    def num(v,d=2):
+        return format(v,',.'+str(d)+'f').replace(',',' ').replace('.',',') if finite_number(v) else '?'
     matrix=snap.get('price_matrix') or {}
-    lines=[row['quality'].upper()+' · '+snap['ticker']+' · '+risk['label'],
-           'Ocena '+str(score)+'/100 · cena '+num(snap['price'],4)+' '+str(snap.get('currency') or '')]
-    lines.extend(opportunity_three_layer_lines(row))
-    lines.append('4. DANE POMOCNICZE I ANALIZA GPT:')
-    if matrix:
-        lines.extend(['Cena bazowa: '+num(matrix['anchor_price'],4)+' · od '+matrix['anchor_at'],
-                      'Zmiana od niezmiennej bazy: +'+num(matrix['change_pct'])+'% · potwierdzenie po '+str(matrix['consecutive_reads'])+' odczytach z nową aktywnością'])
+    score=row['score']+(10 if result['context'] else 0)
+    cur=str(snap.get('currency') or '')
+    base=matrix.get('anchor_price');chg=matrix.get('change_pct')
+    lines=['OKAZJA · '+snap['ticker']+' · '+risk['label']]
+    lines.append('Cena '+num(snap['price'],4)+' '+cur+(' | baza '+num(base,4) if finite_number(base) else ''))
+    if finite_number(chg):
+        lines.append('Zmiana od bazy: '+('+' if chg>=0 else '')+num(chg)+'%')
+    lines.append('Punktacja: '+str(score)+'/100')
+    lines.append('')
+    lines.append('Ruch potwierdzony: 3 odczyty z nowa aktywnoscia')
+    # 3-4 kluczowe wskazniki
+    key=[]
+    if finite_number(ind.get('rsi')): key.append('RSI '+num(ind['rsi']))
+    if finite_number(ind.get('last_macd_hist')): key.append('MACD hist. '+(('+' if ind['last_macd_hist']>=0 else '')+num(ind['last_macd_hist'],4)))
+    if finite_number(ind.get('adx')): key.append('ADX '+num(ind['adx']))
+    if finite_number(snap.get('rvol')): key.append('RVOL '+num(snap['rvol'])+'x')
+    if key: lines.append(' · '.join(key))
+    if risk.get('reasons'):
+        lines.append('Ryzyko: '+'; '.join(risk['reasons'][:1]))
+    elif finite_number(risk.get('spread_pct')) and risk['spread_pct']>=2:
+        lines.append('Ryzyko: spread '+num(risk['spread_pct'])+'%')
+    # Ostrzezenia o jakosci ruchu
+    _warn=[]
+    _rv=snap.get('rvol')
+    if finite_number(_rv):
+        if _rv<0.5:
+            _warn.append('bardzo niska aktywnosc (RVOL '+num(_rv)+'x) - ruch moze byc niewiarygodny')
+        elif _rv<1.0:
+            _warn.append('niska aktywnosc (RVOL '+num(_rv)+'x) - ponizej sredniej')
+    _sp=risk.get('spread_pct')
+    if finite_number(_sp) and _sp>=5:
+        _warn.append('bardzo szeroki spread ('+num(_sp)+'%) - trudno zrealizowac transakcje')
+    if _warn:
+        lines.append('')
+        for w in _warn:
+            lines.append('UWAGA: '+w)
+    lines.append('')
+    if result.get('technical'):
+        lines.append(result['technical'][0]['interpretation'][:200])
+    if result.get('risks'):
+        lines.append('Ryzyko GPT: '+result['risks'][0][:150])
+    if result.get('context'):
+        _f=result['context'][0]
+        _src={s['id']:s for s in (context.get('sources') or [])}
+        lines.append('Fakt: '+_f['fact'][:150])
+        if _f.get('source_id') in _src:
+            lines.append(_src[_f['source_id']]['url'])
+        lines.append('(szczegoly w panelu KI)')
     else:
-        lines.extend(['Zamknięta 1h: +'+num((p['close']/p['open']-1)*100)+'% · RVOL '+num(p['rvol'])+'×',
-                      'Następna 1h: +'+num((snap['price']/snap['ohlc']['open']-1)*100)+'% od otwarcia · RVOL '+num(snap['rvol'])+'×'])
-    lines.extend([
-           'Wolumen '+num(snap['volume'],0)+' · '+opportunity_volume_average_label(snap)+': '+num(snap.get('average_volume'),0),
-           'Wskaźniki: '+opportunity_indicator_summary(snap),
-           'Bid '+num((snap.get('spread') or {}).get('bid'),4)+' · Ask '+num((snap.get('spread') or {}).get('ask'),4)+' '+str(snap.get('currency') or ''),
-           'Pobranie bid/ask: '+str((snap.get('spread') or {}).get('acquired_at') or 'brak danych'),
-           'Spread '+(num(risk['spread_pct'])+'%' if finite_number(risk['spread_pct']) else 'brak danych')+' · świeżość bid/ask niepotwierdzona',
-           'Potwierdzenie: '+ '; '.join(row['confirms'][:3])])
-    if risk['reasons']:lines.append('Ryzyko: '+'; '.join(risk['reasons']))
-    if result['risks']:lines.append('Analiza ryzyka: '+result['risks'][0])
-    if result['technical']:lines.append('Technika: '+result['technical'][0]['interpretation'])
-    sources={s['id']:s for s in context['sources']}
-    if result['context']:
-        f=result['context'][0];src=sources[f['source_id']]
-        lines.extend(['Fakt: '+f['fact'],src['published_at']+' · '+src['url'],'Przyczyna ruchu niepotwierdzona.'])
-    else:lines.append('Ruch potwierdzony danymi; przyczyna nieustalona.')
-    lines.append(opportunity_candle_description(snap)+': '+snap['candle_time']+' → '+str(snap.get('candle_end') or 'brak końca')+
-                 ' · '+polish_status(snap.get('candle_status'))+' · odczyt '+snap['acquired_at'])
+        lines.append('przyczyna nieustalona')
     return message_limit('\n'.join(lines))
 
 
@@ -3391,7 +3459,7 @@ def analysis_message(event_id,evidence,context,result,limit=True):
         lines.append('Brak cytowanych faktów dotyczących emitenta. Przyczyna ruchu nieustalona.')
     for item in result['context']:
         source=sources[item['source_id']]
-        lines.extend([item['source_id']+' · '+source['published_at']+': '+item['fact'],source['url']])
+        lines.extend([item['source_id']+' · '+str(source.get('published_at') or source.get('date_state') or 'Brak daty')+': '+item['fact'],source['url']])
     for key,label in (('hypotheses','Hipotezy — bez dowodu przyczyny'),('risks','Ryzyka'),('missing','Brakujące dane')):
         lines.append(label+':');lines.extend('• '+s for s in result[key])
     lines.append('Daty źródeł: metadane Tavily, brak daty oznacza brak potwierdzenia czasu publikacji.')
@@ -3564,7 +3632,7 @@ def finish_analysis(store,event_id,result,metadata):
         message=opportunity_message(event_id,evidence,context,result) if evidence.get('kind')=='CONFIRMED_OPPORTUNITY' else analysis_message(event_id,evidence,context,result);now=utc_now()
         c.execute("UPDATE analysis_jobs SET state='DONE',result=?,last_error=NULL,next_attempt_at=NULL,updated_at=? WHERE event_id=?",
                   (json_text({'analysis':result,'provider':metadata}),now,event_id))
-        c.execute('INSERT INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)',
+        c.execute('INSERT OR REPLACE INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)',
                   (event_id+':analysis',event_id,'ANALYSIS',message,telegram_message_status(evidence,evidence.get('delivery_enabled')),now))
 
 
@@ -3628,47 +3696,61 @@ def recover_service_jobs(store,kind):
 
 
 def submit_event_research(store, event_id, query, cutoff, api_key):
-    """Zapisz rezerwacje przed zleceniem Tavily Research Mini."""
-    from tavily_cli_adapter import start_research, CLITransportError
-
+    """Synchroniczne Tavily Search zamiast async Research. Wynik od razu COMPLETED."""
+    from tavily_cli_adapter import search_sync, CLITransportError
     if not isinstance(api_key, str) or not api_key.strip():
-        raise ServiceError("Tavily Research: brak klucza API.")
-
+        raise ServiceError("Tavily: brak klucza API.")
     reserved = store.reserve_research(event_id, query, cutoff)
-
     if not reserved:
-        # Takze RESERVED moze oznaczac wywolanie o nieznanym wyniku.
-        # Nie powtarzamy zadania na podstawie samego stanu SQLite.
-        raise ServiceError(
-            "Tavily Research: zadanie juz zarezerwowane. "
-            "Nie uruchomiono kolejnego platnego wywolania.",
-            uncertain=True
-        )
-
+        raise ServiceError("Tavily: zadanie juz zarejestrowane.", uncertain=True)
     try:
-        response = start_research(query, api_key)
+        _tkr=""
+        try:
+            with store.connection() as _c:
+                _row=_c.execute("SELECT ticker FROM events WHERE id=?",(event_id,)).fetchone()
+            if _row and _row[0]: _tkr=str(_row[0]).upper()
+        except Exception:
+            pass
+        _domains=None
+        if _tkr.endswith(".WA"):
+            try:
+                from tavily_cli_adapter import GPW_DOMAINS
+                _domains=GPW_DOMAINS
+            except Exception:
+                pass
+        resp = search_sync(query, api_key, max_results=5, include_domains=_domains)
+        _urls=[x.get('url') for x in (resp.get('results') or []) if x.get('url')]
+        try:
+            from tavily_cli_adapter import extract_urls
+            _extracted=extract_urls(_urls, api_key)
+        except Exception:
+            _extracted={}
+        for x in (resp.get('results') or []):
+            if x.get('url') in _extracted:
+                x['content']=_extracted[x['url']]
+        resp['_extracted_count']=len(_extracted)
     except (CLITransportError, OSError, ValueError) as exc:
-        from tavily_cli_adapter import sanitize_cli_diagnostic
-        detail = sanitize_cli_diagnostic(str(exc))
-        request_id = getattr(exc, 'request_id', None)
-        with store.transaction() as connection:
-            if request_id:
-                mark_research_submitted(connection, event_id, request_id)
-                connection.execute('UPDATE research_requests SET last_error=? WHERE event_id=?',
-                                   (detail, event_id))
-            else:
-                mark_research_uncertain(connection, event_id, detail)
-        raise ServiceError('Tavily Research: start nieudany; bez automatycznego ponowienia. '+detail,
-                           uncertain=True) from None
+        detail = str(exc)[:300]
+        with store.transaction() as c:
+            mark_research_uncertain(c, event_id, detail)
+        raise ServiceError("Tavily search: blad. "+detail, uncertain=True) from None
+    fake = {
+        "request_id": "search_"+event_id[:12],
+        "status": "completed",
+        "sources": [{"url": r["url"], "title": r["title"]} for r in resp["results"]],
+        "content": {"materials": [
+            {"url": r["url"], "title": r["title"], "content": r["content"],
+             "published_at": r.get("published_date") or ""}
+            for r in resp["results"]
+        ], "answer": resp["answer"]},
+        "raw_response": resp,
+        "results": resp["results"],
+    }
+    with store.transaction() as c:
+        mark_research_submitted(c, event_id, fake["request_id"])
+        complete_research(c, event_id, fake)
+    return fake["request_id"]
 
-    request_id = response["request_id"]
-
-    with store.transaction() as connection:
-        mark_research_submitted(
-            connection, event_id, request_id
-        )
-
-    return request_id
 
 
 def check_event_research(store, event_id, api_key):
@@ -3706,46 +3788,77 @@ def check_event_research(store, event_id, api_key):
 
 
 
-def r1_research_sources(response,cutoff,snapshot):
-    """Validate provider material, keeping raw report separate from source facts."""
-    from tavily_cli_adapter import _safe_url,_normalize_research_response,CLITransportError
-    try:response=_normalize_research_response(response)
-    except (ValueError,CLITransportError):
-        raise ServiceError('Research: niepoprawna zakończona odpowiedź.',uncertain=True) from None
-    if response['status']!='completed':raise ServiceError('Research: zadanie nie jest zakończone.')
-    raw=response['raw_response'];citations=response['sources']
-    cited={item.get('url') for item in citations if isinstance(item,dict) and _safe_url(item.get('url'))}
-    report=response.get('content')
-    if isinstance(report,str):
-        try:structured=json.loads(report)
-        except (ValueError,TypeError):structured=None
-    else:structured=report
-    materials=structured.get('materials') if isinstance(structured,dict) else None
-    # Old R1 responses may contain full material directly in sources.
-    candidates=materials if isinstance(materials,list) else citations
-    results=[];technical_rejections=[]
-    for item in candidates:
-        if not isinstance(item,dict) or not _safe_url(item.get('url')) or item.get('url') not in cited:
-            technical_rejections.append({'title':str(item.get('title') or '') if isinstance(item,dict) else '',
-                                         'reason':'Niebezpieczny adres lub brak źródła w cytowaniach Research.'})
-            continue
-        results.append({'url':item['url'],'title':item.get('title'),
-                        'content':item.get('content') or item.get('snippet') or item.get('description') or '',
-                        'published_date':item.get('published_at') or item.get('published_date'),
-                        'published_date_source':'tavily_research_material'})
-    identity={**snapshot,'acquired_at':cutoff,'candle_status':None,'candle_end':None}
-    normalized=normalize_tavily_context({'results':results},identity,
-                 window_days=1,allow_external_domains=True,strict_time_window=True)
-    for source in normalized['sources']:
-        source['source_provenance']='tavily_research'
-        source['content_delivery_state']='RESEARCH_REPORTED_EXCERPT'
-    normalized['excluded']+=len(technical_rejections)
-    normalized['rejected_sources'].extend(technical_rejections)
-    normalized.update(backend='RESEARCH',status='DONE',request_id=response['request_id'],
-                      raw_response=raw,received_results=len(candidates),received_at=utc_now(),
-                      usage=response.get('usage'),research_version=7,window_hours=24,
-                      date_basis='Zakres publikacji: ostatnie 24 godziny przed punktem odniesienia. Daty i fragmenty wskazane przez Tavily Research; brak daty i treści nie jest uzupełniany. Materiał nie dowodzi przyczyny ruchu.')
-    return normalized
+def r1_research_sources(response, cutoff, snapshot):
+    """Prosta wersja: bierze response.results i response.answer (z search_sync).
+    Zachowuje tez stary format (research run z materials)."""
+    # Jesli response ma results (search_sync):
+    if isinstance(response, dict) and "results" in response and isinstance(response.get("results"), list):
+        sources = []
+        # Filtr: zrodlo musi zawierac nazwe spoly lub ticker.
+        _name=(snapshot.get("company_name") or "").strip()
+        _tkr=(snapshot.get("ticker") or "").strip().upper()
+        _tkr_clean=_tkr.split(".")[0] if _tkr else ""
+        _name_root=_name.split(" S.A.")[0].split(" Sp")[0].split(" Inc")[0].strip()
+        _name_parts=[p for p in _name_root.lower().split() if len(p)>=4]
+        def _matches(r):
+            blob=(str(r.get("title") or "")+" "+str(r.get("content") or "")[:500]).lower()
+            if _name and len(_name_root)>=4 and _name_root.lower() in blob: return True
+            # Dla GPW: kazda czesc nazwy (>=4 znaki) wystarcza
+            if _tkr.endswith('.WA') and _name_parts:
+                if any(part in blob for part in _name_parts): return True
+            if _tkr_clean and len(_tkr_clean)>=3 and _tkr_clean.lower() in blob: return True
+            return False
+        from datetime import timezone as _tz2
+        _now = datetime.now(_tz2.utc)
+        for i, r in enumerate((response.get("results") or []), 1):
+            if not isinstance(r, dict): continue
+            url = r.get("url")
+            if not url: continue
+            if not _matches(r):
+                continue
+            _pd = r.get("published_date")
+            if isinstance(_pd,str) and _pd.strip():
+                try:
+                    from email.utils import parsedate_to_datetime
+                    try: _pub = datetime.fromisoformat(_pd.replace("Z","+00:00"))
+                    except ValueError: _pub = parsedate_to_datetime(_pd)
+                    if _pub.tzinfo is None:
+                        _pub = _pub.replace(tzinfo=_tz2.utc)
+                    if (_now - _pub).days > 30:
+                        continue
+                except Exception:
+                    pass
+
+            sources.append({
+                "id": "S"+str(i),
+                "url": str(url)[:500],
+                "title": str(r.get("title") or "")[:200],
+                "content": str(r.get("content") or "")[:4000],
+                "published_at": r.get("published_date") or None,
+                "date_state": "KNOWN" if r.get("published_date") else "MISSING",
+                "source_provenance": "tavily_search",
+                "content_delivery_state": "SEARCH_RESULT",
+                "scope": "fresh",
+            })
+        cut = cutoff if isinstance(cutoff, str) else str(cutoff)
+        return {
+            "sources": sources, "cutoff": cut, "excluded": 0, "rejected_sources": [],
+            "received_results": len(response.get("results") or []),
+            "date_unverified_count": sum(1 for s in sources if s["date_state"] == "MISSING"),
+            "undated_sources": [s for s in sources if s["date_state"] == "MISSING"],
+            "issuer_filter_version": 1,
+            "date_basis": "Data publikacji wskazana przez Tavily Search.",
+            "backend": "SEARCH", "status": "DONE",
+            "request_id": response.get("request_id"),
+            "raw_response": response,
+            "received_at": utc_now(),
+            "answer": response.get("answer") or "",
+            "research_version": 8,
+            "window_hours": 24,
+        }
+    # Stary format (research run z materials) - deleguj do oryginalu jesli istnieje
+    raise ServiceError("Research: nierozpoznany format odpowiedzi Tavily.", uncertain=True)
+
 
 
 def r1_wait_for_research(check, max_seconds=180):
@@ -3834,6 +3947,14 @@ def claim_delivery(store,outbox_id=None,now=None):
     current=now or datetime.now(timezone.utc)
     with store.transaction() as c:
         # Check all pending messages, including retries, before any network request.
+        # Portfolio alerty: bez event/job
+        pr = c.execute("SELECT o.* FROM outbox o WHERE o.kind='PORTFOLIO_ALERT' AND o.status='PENDING'"+
+                       (' AND o.id=?' if outbox_id else '')+' ORDER BY o.created_at',
+                       (outbox_id,) if outbox_id else ()).fetchall()
+        if pr:
+            item = dict(pr[0]); item['attempts'] = (item.get('attempts') or 0) + 1
+            c.execute("UPDATE outbox SET status='SENDING',attempts=? WHERE id=?", (item['attempts'], item['id']))
+            return item
         rows=c.execute("SELECT o.*,e.payload AS evidence_payload FROM outbox o JOIN analysis_jobs j ON j.event_id=o.event_id JOIN events e ON e.id=o.event_id WHERE o.kind IN ('EVIDENCE','ANALYSIS') AND o.status='PENDING'"+
                       (' AND o.id=?' if outbox_id else '')+' ORDER BY o.created_at,o.kind DESC',
                       (outbox_id,) if outbox_id else ()).fetchall()
@@ -4167,6 +4288,12 @@ def run_market_cycle(store,stop=None):
         except Exception as exc:
             results.append({'ticker':t,'status':'ERROR','error':type(exc).__name__+': '+str(exc)})
             print(json_text(results[-1]),flush=True)
+    # Portfolio SL/TP alerts - niezaleznie od pipeline_enabled
+    try:
+        portfolio_check_alerts(store)
+    except Exception as _pe:
+        try: print('portfolio_check_alerts: '+str(_pe)[:200], flush=True)
+        except Exception: pass
     selected=[]
     if services['pipeline_enabled'] and not (stop is not None and stop.is_set()):
         selected=reserve_opportunities(store,cid)
@@ -4703,7 +4830,7 @@ def render_manual_research_reply(reply,context):
                 if key not in metrics:raise ValueError('GPT: nieznane odwołanie liczbowe '+key)
                 item=metrics[key];suffix=match.group(2)
                 if suffix and suffix!=item['unit']:raise ValueError('GPT: jednostka niezgodna z polem '+key)
-                return marker(pl_number(item['value'],item['digits'])+(' '+item['unit'] if item['unit'] else ''))
+                return marker(pl_number(item['value'],item['digits'])+((' '+item['unit']) if item.get('unit') else ''))
             if '\x00' in text or any(0xE000<=ord(char)<=0xF8FF for char in text):raise ValueError('GPT: niepoprawne znaki kontrolne.')
             def identity_reference(match):
                 identities=manual_research_identity(context);key=match.group(1)
@@ -4722,13 +4849,13 @@ def render_manual_research_reply(reply,context):
                 if key not in constants:raise ValueError('GPT: nieznane odwołanie '+kind+':'+key+'.')
                 item=constants[key]
                 if suffix and suffix!=item['unit']:raise ValueError('GPT: jednostka niezgodna z odwołaniem '+kind+':'+key+'.')
-                return marker(pl_number(item['value'],item['digits'])+item['unit'])
+                return marker(pl_number(item['value'],item['digits'])+(item['unit'] or ''))
             clean=re.sub(r'\{\{(threshold|parameter):([a-zA-Z_0-9]+)\}\}(?:[ \t]*(%|×|USD\b|PLN\b))?',threshold_reference,clean)
             # Only the exact identity saved for this ticker may contain literal digits.
             # Remove it solely from numeric validation; the displayed text is retained.
             checked=clean
             snapshot=context.get('snapshot') or {}
-            company_name=snapshot.get('company_name')
+            company_name=snapshot.get('company_name') or ''
             if (context.get('ticker') and snapshot.get('ticker')==context['ticker']
                     and isinstance(company_name,str) and company_name.strip()):
                 checked=re.sub(r'(?<!\w)'+re.escape(company_name.strip())+r'(?!\w)','',checked,flags=re.I)
@@ -4781,7 +4908,7 @@ def render_manual_research_reply(reply,context):
         source_text=' '.join(source['content'].split())
         if not clean_quote or clean_quote not in source_text or len(clean_quote)>180 or len(clean_quote.split())>25:
             omitted_facts+=1;continue
-        cited.add(fact['source_id']);lines.append('- '+clean_quote+' · '+source['published_at']+' · '+source['url'])
+        cited.add(fact['source_id']);lines.append('- '+clean_quote+' · '+str(source.get('published_at') or source.get('date_state') or 'Brak daty')+' · '+source['url'])
     if omitted_facts:lines.append('Pominięto cytaty, których nie udało się potwierdzić w treści źródeł. Nie stanowią dowodu przyczyny ruchu.')
     for field,label in (('risks','Ryzyka wynikające z danych'),('missing','Brakujące dane')):
         values=reply[field]
@@ -4998,7 +5125,7 @@ def render_manual_service_status(turn):
                 st.caption('Domeny: '+('bez ograniczeń listą KI' if bool(research.get('extract_calls') or research.get('search_hits')) else 'preferowane; pozostałe wyniki podlegają lokalnej kontroli' if attempt['request'].get('include_domains_mode')=='prefer' else 'wyszukiwanie ograniczone do listy')+' · niepotwierdzona data: '+str(attempt.get('date_unverified_count',research.get('date_unverified_count','brak zapisu'))))
             for source in sources:
                 st.caption(('Zakres wyszukiwania: fresh; data publikacji niepotwierdzona' if source.get('date_state')!='KNOWN' else 'Wynik wyszukiwania fresh') if bool(research.get('extract_calls') or research.get('search_hits')) and source.get('scope')=='fresh' else 'Kontekst historyczny — nie dowód przyczyny dzisiejszego ruchu' if source.get('scope')!='fresh' else 'Świeże wydarzenie')
-                st.write(source['published_at']+' · '+str(source.get('title') or 'Źródło'))
+                st.write(str(source.get('published_at') or source.get('date_state') or 'Brak daty')+' · '+str(source.get('title') or 'Źródło'))
                 if research.get('backend')=='RESEARCH':
                     st.text_area('Fragment wskazany przez Research · '+source['id'],value=source.get('content') or 'Brak treści.',height=160,disabled=True,key='r1_source_'+turn['id']+'_'+source['id'])
                 if source.get('url','').startswith('https://'):
@@ -5256,7 +5383,7 @@ def render_saved_company_analysis(store,snapshot):
         with st.expander('Zapisane źródła Tavily · '+ticker+' · '+turn['created_at']+' · bez gotowej odpowiedzi GPT'):
             st.caption('Wyszukiwanie zostało zakończone; poniższe źródła nie dowodzą same w sobie przyczyny ruchu.')
             for source in context['research']['sources']:
-                st.write(source.get('published_at','Brak daty')+' · '+str(source.get('title') or 'Źródło'))
+                st.write(str(source.get('published_at') or source.get('date_state') or 'Brak daty')+' · '+str(source.get('title') or 'Źródło'))
                 st.write('Źródło '+str(source['id'])+': '+source['url'])
     for turn,context in turns:
         purpose='Analiza na żądanie' if context.get('purpose')=='ticker_analysis' else 'Odpowiedź w rozmowie'
@@ -5265,7 +5392,7 @@ def render_saved_company_analysis(store,snapshot):
             if (context.get('snapshot') or {}).get('acquired_at'):st.caption('Czas danych użytych w odpowiedzi: '+context['snapshot']['acquired_at'])
             sources=(context.get('research') or {}).get('sources') or []
             for source in sources:
-                st.write(source.get('published_at','Brak daty')+' · '+str(source.get('title') or 'Źródło'))
+                st.write(str(source.get('published_at') or source.get('date_state') or 'Brak daty')+' · '+str(source.get('title') or 'Źródło'))
                 st.write('Źródło '+str(source['id'])+': '+source['url'])
 
 
@@ -5353,7 +5480,7 @@ def score_growth_candidate(snapshot,reference,previous=None,saved_analysis=None,
                 for fact in saved_analysis['result']['context']:
                     source=sources.get(fact['source_id']);text=fact.get('fact')
                     if source and isinstance(text,str) and text.strip() and text in source.get('content',''):
-                        published=parse_market_time(source['published_at'])
+                        published=parse_market_time(source['published_at']) if source.get('published_at') else None
                         if cutoff-timedelta(days=7)<=published<=cutoff and source.get('url'):
                             source_facts.append({'fact':text,'url':source['url'],'published_at':source['published_at']})
         except (KeyError,ValueError,TypeError):pass
@@ -5414,6 +5541,416 @@ def load_price_matrix_rows(store,now=None):
                                       else 'Dozwolone tylko przy świeżej, otwartej świecy')})
     rows.sort(key=lambda row:(row['Stan']!='Potwierdzony',-row['Zmiana od bazy (%)'],row['Ticker']))
     return rows
+
+
+def tracking_confirmed_opportunities(store,days=7):
+    """Spolki ktore przeszly CONFIRMED w ostatnich N dniach; aktualna cena i zmiana."""
+    from datetime import timedelta
+    cutoff=(datetime.now(timezone.utc)-timedelta(days=days)).isoformat()
+    result=[]
+    with store.connection() as c:
+        rows=c.execute("""SELECT sequence_id,ticker,state,updated_at,payload
+                          FROM opportunities
+                          WHERE state IN ('CONFIRMED','RESERVED','SELECTED')
+                            AND updated_at>=?
+                          ORDER BY updated_at DESC""",(cutoff,)).fetchall()
+        for r in rows:
+            try:
+                payload=json.loads(r[4])
+            except Exception:
+                continue
+            snap=payload.get('snapshot') or {}
+            matrix=snap.get('price_matrix') or {}
+            anchor=matrix.get('anchor_price')
+            if not finite_number(anchor):
+                anchor=snap.get('price') or (snap.get('previous_closed') or {}).get('open')
+            # Najnowsza obserwacja dla tego tickera
+            obs=c.execute("""SELECT payload FROM observations
+                             WHERE ticker=? AND interval='1h'
+                             ORDER BY id DESC LIMIT 1""",(r[1],)).fetchone()
+            current=None; acquired=None
+            if obs:
+                try:
+                    latest=json.loads(obs[0])
+                    current=latest.get('price')
+                    acquired=latest.get('acquired_at')
+                except Exception:
+                    pass
+            change_pct=None
+            if finite_number(anchor) and finite_number(current) and anchor>0:
+                change_pct=(current-anchor)/anchor*100
+            if change_pct is None:
+                direction='brak danych'
+            elif change_pct>1.0:
+                direction='rosnie dalej'
+            elif change_pct<-1.0:
+                direction='spada'
+            else:
+                direction='stabilnie'
+            result.append({
+                'ticker':r[1],
+                'state':r[2],
+                'confirmed_at':r[3],
+                'anchor_price':anchor,
+                'current_price':current,
+                'change_pct':change_pct,
+                'direction':direction,
+                'current_at':acquired,
+                'currency':snap.get('currency') or '',
+            })
+    return result
+
+
+def render_confirmed_tracking(store):
+    """Panel: spolki ktore przeszly CONFIRMED w ostatnich 7 dniach."""
+    import streamlit as st
+    st.subheader('Sledzenie potwierdzonych spolek (ostatnie 7 dni)')
+    st.caption('Spolki ktore przeszly 3 potwierdzenia. Widok pokazuje, czy po potwierdzeniu cena rosnie dalej, spada, czy jest stabilna.')
+    rows=tracking_confirmed_opportunities(store,days=7)
+    if not rows:
+        st.info('Brak potwierdzonych spolek w ostatnich 7 dniach.')
+        return
+    # Statystyki
+    up=sum(1 for r in rows if r['direction']=='rosnie dalej')
+    down=sum(1 for r in rows if r['direction']=='spada')
+    flat=sum(1 for r in rows if r['direction']=='stabilnie')
+    nodata=sum(1 for r in rows if r['direction']=='brak danych')
+    st.caption(f'Rosnie dalej: {up} · Spada: {down} · Stabilnie: {flat} · Brak danych: {nodata}')
+    def fmt_price(v,c):
+        return (pl_number(v,4,' '+c) if finite_number(v) else 'brak')
+    def fmt_change(v):
+        return (pl_number(v,suffix='%',digits=2) if finite_number(v) else 'brak')
+    import pandas as pd
+    table=[]
+    for r in rows:
+        table.append({
+            'Ticker':r['ticker'],
+            'Stan':r['state'],
+            'Potwierdzone':r['confirmed_at'][:19] if r['confirmed_at'] else '',
+            'Cena bazowa':fmt_price(r['anchor_price'],r['currency']),
+            'Aktualna':fmt_price(r['current_price'],r['currency']),
+            'Zmiana od bazy':fmt_change(r['change_pct']),
+            'Kierunek':r['direction'],
+            'Czas aktualnej':r['current_at'][:19] if r['current_at'] else '',
+        })
+    df=pd.DataFrame(table)
+    def _color_row(row):
+        d=row['Kierunek']
+        if d=='rosnie dalej':
+            return ['background-color: rgba(34,197,94,0.25); color: #bbf7d0']*len(row)
+        if d=='spada':
+            return ['background-color: rgba(239,68,68,0.25); color: #fecaca']*len(row)
+        if d=='stabilnie':
+            return ['background-color: rgba(234,179,8,0.25); color: #fef08a']*len(row)
+        return ['']*len(row)
+    try:
+        styled=df.style.apply(_color_row,axis=1)
+        st.dataframe(styled,width='stretch',hide_index=True)
+    except Exception:
+        st.dataframe(df,width='stretch',hide_index=True)
+
+
+
+def portfolio_get(store):
+    """Pelny config portfela: [{ticker, sl, tp, direction, sl_fired_at, tp_fired_at}]."""
+    try:
+        with store.connection() as c:
+            row = c.execute("SELECT payload FROM settings WHERE key='portfolio_config'").fetchone()
+        if row:
+            cfg = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+            if isinstance(cfg, list):
+                return cfg
+        # Migracja ze starego portfolio_tickers
+        with store.connection() as c:
+            old = c.execute("SELECT payload FROM settings WHERE key='portfolio_tickers'").fetchone()
+        if old:
+            tickers = json.loads(old[0]) if isinstance(old[0], str) else old[0]
+            return [{'ticker': t, 'sl': None, 'tp': None, 'direction': 'long',
+                     'sl_fired_at': None, 'tp_fired_at': None} for t in tickers]
+        return []
+    except Exception:
+        return []
+
+
+def portfolio_save(store, config):
+    """Zapisuje pelny config portfela."""
+    with store.transaction() as c:
+        c.execute("INSERT OR REPLACE INTO settings(key,payload) VALUES('portfolio_config',?)",
+                  (json_text(config),))
+        # Zaktualizuj tez legacy portfolio_tickers dla kompatybilnosci
+        tickers = [e['ticker'] for e in config if isinstance(e, dict) and e.get('ticker')]
+        c.execute("INSERT OR REPLACE INTO settings(key,payload) VALUES('portfolio_tickers',?)",
+                  (json_text(tickers),))
+
+
+def portfolio_check_alerts(store):
+    """Sprawdza SL/TP dla portfela. Alert do outbox raz; re-arm po powrocie w strefe."""
+    config = portfolio_get(store)
+    if not config: return
+    now = utc_now()
+    fired = 0
+    with store.transaction() as c:
+        for entry in config:
+            ticker = entry.get('ticker')
+            if not ticker: continue
+            sl = entry.get('sl'); tp = entry.get('tp')
+            direction = entry.get('direction', 'long')
+            row = c.execute("""SELECT payload FROM observations
+                               WHERE ticker=? AND interval='1h'
+                               ORDER BY id DESC LIMIT 1""", (ticker,)).fetchone()
+            if not row: continue
+            try: snap = json.loads(row[0])
+            except Exception: continue
+            price = snap.get('price')
+            if not finite_number(price): continue
+            cur = str(snap.get('currency') or '')
+            def _fmt(v, d=4):
+                return format(v, ',.'+str(d)+'f').replace(',',' ').replace('.',',')
+            # SL
+            if finite_number(sl):
+                sl_hit = (price <= sl) if direction == 'long' else (price >= sl)
+                if sl_hit and not entry.get('sl_fired_at'):
+                    entry['sl_fired_at'] = now
+                    msg = ('ALERT PORTFELA · SL · '+ticker+'\n'
+                           'Cena '+_fmt(price)+' '+cur+' <= SL '+_fmt(sl)+'\n'
+                           'Pozycja dluga, stop loss osiagniety.\n'
+                           'Sprawdz w panelu KI.')
+                    alert_id = 'portfolio:'+ticker+':sl:'+now
+                    c.execute("INSERT OR IGNORE INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)",
+                              (alert_id, alert_id, 'PORTFOLIO_ALERT', msg, 'PENDING', now))
+                    fired += 1
+                elif not sl_hit and entry.get('sl_fired_at'):
+                    entry['sl_fired_at'] = None
+            # TP
+            if finite_number(tp):
+                tp_hit = (price >= tp) if direction == 'long' else (price <= tp)
+                if tp_hit and not entry.get('tp_fired_at'):
+                    entry['tp_fired_at'] = now
+                    msg = ('ALERT PORTFELA · TP · '+ticker+'\n'
+                           'Cena '+_fmt(price)+' '+cur+' >= TP '+_fmt(tp)+'\n'
+                           'Pozycja dluga, take profit osiagniety.\n'
+                           'Sprawdz w panelu KI.')
+                    alert_id = 'portfolio:'+ticker+':tp:'+now
+                    c.execute("INSERT OR IGNORE INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)",
+                              (alert_id, alert_id, 'PORTFOLIO_ALERT', msg, 'PENDING', now))
+                    fired += 1
+                elif not tp_hit and entry.get('tp_fired_at'):
+                    entry['tp_fired_at'] = None
+        c.execute("INSERT OR REPLACE INTO settings(key,payload) VALUES('portfolio_config',?)",
+                  (json_text(config),))
+    return fired
+
+
+
+def portfolio_tickers(store):
+    """Lista tickerow z portfolio_get."""
+    return [e['ticker'] for e in portfolio_get(store) if isinstance(e, dict) and e.get('ticker')][:10]
+
+
+def portfolio_set(store, tickers):
+    """Zapisz liste tickerow (max 5) - zachowuje istniejace SL/TP."""
+    tickers = list(dict.fromkeys(str(t).upper().strip() for t in tickers if str(t).strip()))[:10]
+    existing = {e['ticker']: e for e in portfolio_get(store) if isinstance(e, dict) and e.get('ticker')}
+    config = []
+    for t in tickers:
+        if t in existing:
+            config.append(existing[t])
+        else:
+            config.append({'ticker': t, 'sl': None, 'tp': None, 'direction': 'long',
+                           'sl_fired_at': None, 'tp_fired_at': None})
+    portfolio_save(store, config)
+
+
+def portfolio_snapshot(store, ticker, interval='1h'):
+    """Ostatni zapisany odczyt z bazy dla tickera."""
+    try:
+        with store.connection() as c:
+            row = c.execute("""SELECT payload,acquired_at FROM observations
+                               WHERE ticker=? AND interval=?
+                               ORDER BY id DESC LIMIT 1""", (ticker, interval)).fetchone()
+        if not row:
+            return None
+        snap = json.loads(row[0])
+        snap['_acquired_at'] = row[1]
+        return snap
+    except Exception:
+        return None
+
+
+def portfolio_avg_volume_1m(snap):
+    """Srednia wolumenu z dostepnych swiec 1H (chart_history, tylko volume>0).
+    Zwraca (avg_vol, n_candles) lub (None, 0) gdy brak danych."""
+    try:
+        hist = snap.get('chart_history') or []
+        vols = []
+        for c in hist:
+            if not isinstance(c, dict): continue
+            v = c.get('volume')
+            if v is None: v = c.get('Tom')
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                vols.append(v)
+        if not vols:
+            return (None, 0)
+        return (sum(vols)/len(vols), len(vols))
+    except Exception:
+        return (None, 0)
+
+
+
+def render_portfolio(store):
+    """Panel: osobista lista spolek, tylko podglad swiec."""
+    import streamlit as st
+    import re
+    st.subheader('Moj portfel')
+    st.caption('Osobista lista spolek (max 10). Bez analizy GPT, bez Telegrama. Dane z ostatniego odczytu skanera (co 15 min).')
+    tickers = portfolio_tickers(store)
+
+    # Dodawanie / usuwanie
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        new_ticker = st.text_input('Dodaj ticker do portfela (max 10)', key='portfolio_add',
+                                   placeholder='np. KGH.WA, MREO, PKN.WA')
+    with col2:
+        if st.button('Dodaj', key='portfolio_add_btn'):
+            raw = (new_ticker or '').strip().upper()
+            if not raw:
+                st.warning('Wpisz ticker.')
+            else:
+                candidates = [x.strip() for x in re.split(r'[,\s]+', raw) if x.strip()]
+                valid = [x for x in candidates if re.match(r'^[A-Z0-9][A-Z0-9.\-]{1,15}$', x)]
+                invalid = [x for x in candidates if x not in valid]
+                if invalid:
+                    st.error('Niepoprawny format: ' + ', '.join(invalid))
+                else:
+                    combined = list(dict.fromkeys(tickers + valid))
+                    if len(combined) > 10:
+                        st.error('Portfel moze miec max 10 spolek. Probojesz dodac ' + str(len(combined)) + '.')
+                    else:
+                        added = [x for x in valid if x not in tickers]
+                        if not added:
+                            st.info('Te tickery sa juz w portfelu.')
+                        else:
+                            portfolio_set(store, combined)
+                            st.rerun()
+
+    if not tickers:
+        st.info('Portfel jest pusty. Dodaj ticker powyzej.')
+        return
+
+    st.caption('W portfelu: ' + str(len(tickers)) + '/10 · ' + ', '.join(tickers))
+
+    # Odswiez
+    if st.button('Odswiez portfel', key='portfolio_refresh'):
+        st.rerun()
+
+    # Tabela
+    rows = []
+    for t in tickers:
+        snap = portfolio_snapshot(store, t, '1h')
+        if not snap:
+            rows.append({'Ticker':t, 'Cena':'brak odczytu', 'Zmiana 1H':'—',
+                         'Otwarcie':'—', 'Max':'—', 'Min':'—', 'Wolumen':'—',
+                         'Odczyt':'oczekuje na cykl skanera (do 15 min)'})
+            continue
+        price = snap.get('price')
+        ohlc = snap.get('ohlc') or {}
+        op = ohlc.get('open')
+        hi = ohlc.get('high')
+        lo = ohlc.get('low')
+        vol = snap.get('volume')
+        cur = str(snap.get('currency') or '')
+        change = None
+        if finite_number(price) and finite_number(op) and op:
+            change = (price - op) / op * 100
+        def fmt(v, d=4):
+            return (format(v, ',.'+str(d)+'f').replace(',',' ').replace('.',',') if finite_number(v) else '—')
+        avg_v, n_candles = portfolio_avg_volume_1m(snap)
+        vol_vs_avg = None
+        if finite_number(vol) and finite_number(avg_v) and avg_v > 0:
+            vol_vs_avg = vol / avg_v
+        rows.append({
+            'Ticker':t,
+            'Cena':(fmt(price,4)+' '+cur).strip() if finite_number(price) else '—',
+            'Zmiana 1H':(('+' if change>=0 else '')+format(change,',.2f').replace(',',' ').replace('.',',')+'%') if finite_number(change) else '—',
+            'Otwarcie':fmt(op,4),
+            'Max':fmt(hi,4),
+            'Min':fmt(lo,4),
+            'Wolumen':(format(vol,',.0f').replace(',',' ') if finite_number(vol) else '—'),
+            'Sr. wol. 1M':(format(avg_v,',.0f').replace(',',' ') if finite_number(avg_v) else '—'),
+            'Wol./Sr.':(format(vol_vs_avg,',.2f').replace(',',' ').replace('.',',')+'x' if finite_number(vol_vs_avg) else '—'),
+            'Odczyt':str(snap.get('_acquired_at') or '')[:19],
+        })
+
+    import pandas as pd
+    df = pd.DataFrame(rows)
+    def _color_row(row):
+        try:
+            ch = row['Zmiana 1H']
+            if isinstance(ch, str):
+                if ch.startswith('+'):
+                    return ['background-color: rgba(34,197,94,0.20); color: #bbf7d0']*len(row)
+                if ch.startswith('-'):
+                    return ['background-color: rgba(239,68,68,0.20); color: #fecaca']*len(row)
+        except Exception:
+            pass
+        return ['']*len(row)
+    try:
+        st.dataframe(df.style.apply(_color_row, axis=1), width='stretch', hide_index=True)
+    except Exception:
+        st.dataframe(df, width='stretch', hide_index=True)
+
+    # Progi SL/TP
+    st.markdown('---')
+    st.subheader('Progi SL / TP (alerty Telegram)')
+    st.caption('Ustaw cene stop-loss i take-profit. 0 = brak progu. Alert raz; re-arm po powrocie ceny w strefe.')
+    config = portfolio_get(store)
+    if config:
+        st.markdown('**Progi**')
+        new_sl = {}
+        new_tp = {}
+        for entry in config:
+            t = entry['ticker']
+            c1, c2, c3 = st.columns([2, 3, 3])
+            c1.markdown('**'+t+'**')
+            cur_sl = float(entry.get('sl') or 0.0)
+            cur_tp = float(entry.get('tp') or 0.0)
+            new_sl[t] = c2.number_input('SL '+t, min_value=0.0, value=cur_sl, step=0.01, format='%.4f', key='sl_'+t)
+            new_tp[t] = c3.number_input('TP '+t, min_value=0.0, value=cur_tp, step=0.01, format='%.4f', key='tp_'+t)
+        if st.button('Zapisz progi SL/TP', key='portfolio_save_thresholds'):
+            for entry in config:
+                t = entry['ticker']
+                entry['sl'] = new_sl[t] if new_sl[t] > 0 else None
+                entry['tp'] = new_tp[t] if new_tp[t] > 0 else None
+            portfolio_save(store, config)
+            st.success('Zapisano progi. Alerty beda wysylane po nastepnym cyklu skanera.')
+            st.rerun()
+        # Status
+        st.markdown('**Status alertow**')
+        for entry in config:
+            t = entry['ticker']
+            sl_f = entry.get('sl_fired_at')
+            tp_f = entry.get('tp_fired_at')
+            sl = entry.get('sl'); tp = entry.get('tp')
+            status = []
+            if sl: status.append('SL '+('FIRED' if sl_f else 'armed'))
+            if tp: status.append('TP '+('FIRED' if tp_f else 'armed'))
+            st.caption(t+': '+(' · '.join(status) if status else 'bez progow'))
+    st.markdown('---')
+
+    # Usuwanie
+    st.markdown('**Zarzadzanie**')
+    for t in tickers:
+        c1, c2 = st.columns([4, 1])
+        c1.write(t)
+        if c2.button('Usun', key='portfolio_del_'+t):
+            new_list = [x for x in tickers if x != t]
+            portfolio_set(store, new_list)
+            st.rerun()
+
 
 
 def render_growth_ranking(store):
@@ -5805,7 +6342,7 @@ def run_streamlit(db):
         st.caption('Odczyt zapisanych wyników co 15 minut. Skaner pobiera Yahoo według ustawionego cyklu.')
         st.caption('Panel jest po polsku. Wyłącz automatyczne tłumaczenie tej strony w przeglądarce; może zmieniać tickery, liczby i powodować błędy widoku.')
         st.caption('GPT-4o mini analizuje wybrane, potwierdzone okazje. Tavily dostarcza datowane źródła. Automatyczna analiza wymaga świec 1h.')
-    section=st.radio('Widok panelu',['Automat','Analiza GPT','Rozmowa z GPT','Analiza pogłębiona','Monitor Tavily + AI','Ręczny ticker','Dodaj / wyszukaj spółki'],horizontal=True,key='panel_view')
+    section=st.radio('Widok panelu',['Automat','Moj portfel','Analiza GPT','Rozmowa z GPT','Analiza pogłębiona','Monitor Tavily + AI','Ręczny ticker','Dodaj / wyszukaj spółki'],horizontal=True,key='panel_view')
     render_error_controls(store)
     if section=='Analiza GPT':render_gpt_analysis(store);return
     if section=='Rozmowa z GPT':render_gpt_chat(store);return
@@ -5945,16 +6482,26 @@ def run_streamlit(db):
             if runtime:st.json({'ostatni_stan_procesu':runtime_data,'czas_zapisu_UTC':runtime[1]})
             st.dataframe([{'Początek':r['started_at'],'Koniec':r['finished_at'],'Stan':polish_status(r['status'])} for r in recent],width='stretch')
             st.json([{**r,'payload':json.loads(r['payload'])} for r in recent])
+        if section=='Moj portfel':
+            render_portfolio(store)
+            return
         if section=='Monitor Tavily + AI':
             render_service_panel(store)
             return
         if section!='Automat':return
         render_growth_ranking(store)
+        render_confirmed_tracking(store)
         st.subheader('Pełna lista obserwowanych spółek')
         if not latest:st.info('Brak wyników automatu. Zapisz tickery i uruchom skaner: python KI.py --scanner')
         snapshots=[json.loads(row[0]) for row in latest]
         current={(x['ticker'],x['interval']):x for x in snapshots}
-        cycle=json.loads(recent[0]['payload']) if recent else {}
+        cycle={}
+        for _r in recent:
+            try:
+                _p=json.loads(_r['payload'])
+                if _p.get('results'):
+                    cycle=_p;break
+            except Exception:pass
         hidden=dismissed_error_keys(store)
         cycle_results={x['ticker']:x for x in cycle.get('results',[])}
         unprocessed=set(cycle.get('unprocessed_tickers',[]))

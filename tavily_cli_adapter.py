@@ -54,6 +54,71 @@ def parse_cli_result(returncode, stdout, stderr, secrets=()):
     return data
 
 
+
+GPW_DOMAINS = [
+    "bankier.pl", "stooq.pl", "biznesradar.pl", "pap.pl", "gpw.pl",
+    "infostrefa.com", "money.pl", "stockwatch.pl", "forsal.pl",
+    "parkiet.com", "rp.pl", "pulsbiznesu.pl", "wnp.pl", "eog.pl",
+    "pulsinwestora.pl", "comparic.pl", "gpwinfostrefa.pl", "newconnect.pl",
+]
+
+
+def search_sync(query, api_key, max_results=5, include_domains=None):
+    """Proste synchroniczne wyszukiwanie Tavily - jak w py.py wlasciciela.
+    Bez async, bez statusow, bez --no-wait. Zwraca dict:
+    {'answer': str, 'results': [{'url','title','content','score'}], 'request_id': str}
+    """
+    if not api_key or not isinstance(api_key, str):
+        raise CLITransportError("Tavily search: brak klucza API.")
+    if not isinstance(query, str) or not query.strip():
+        raise CLITransportError("Tavily search: puste zapytanie.")
+    try:
+        from tavily import TavilyClient
+    except ImportError:
+        raise CLITransportError("Brak pakietu tavily-python. pip install tavily-python")
+    try:
+        client = TavilyClient(api_key=api_key)
+        # Najpierw news z ostatnich 24h
+        _base = {
+            "query": query.strip(),
+            "search_depth": "advanced",
+            "max_results": int(max_results),
+            "include_answer": True,
+        }
+        if include_domains:
+            _base["include_domains"] = list(include_domains)
+        try:
+            _news = dict(_base); _news["topic"]="news"; _news["days"]=7
+            resp = client.search(**_news)
+        except Exception:
+            resp = {}
+        if not (isinstance(resp,dict) and resp.get("results")):
+            _gen = dict(_base); _gen["topic"]="general"; _gen["days"]=7
+            resp = client.search(**_gen)
+    except Exception as exc:
+        raise CLITransportError("Tavily search: "+type(exc).__name__+": "+str(exc)[:300]) from None
+    if not isinstance(resp, dict):
+        raise CLITransportError("Tavily search: odpowiedz nie jest obiektem.")
+    results = []
+    for r in (resp.get("results") or []):
+        if not isinstance(r, dict): continue
+        u = r.get("url")
+        if not isinstance(u, str) or not u.strip(): continue
+        results.append({
+            "url": u.strip(),
+            "title": str(r.get("title") or "")[:200],
+            "content": str(r.get("content") or r.get("raw_content") or ""),
+            "score": r.get("score"),
+            "published_date": r.get("published_date"),
+        })
+    return {
+        "answer": str(resp.get("answer") or ""),
+        "results": results,
+        "request_id": str(resp.get("request_id") or ""),
+        "query": query.strip(),
+    }
+
+
 def _safe_url(url):
     """Validate a public HTTPS citation without opening the URL."""
     if not isinstance(url, str) or len(url) > 2048:
@@ -165,3 +230,31 @@ def check_research(request_id,api_key):
     try:return _normalize_research_response(raw,request_id)
     except ValueError:
         raise CLITransportError('Research: niepoprawna odpowiedź statusu. ID zachowano.') from None
+
+
+def extract_urls(urls, api_key):
+    """Pobiera pelna tresc URL-i przez TavilyClient.extract.
+    Zwraca dict {url: content}. Kosztuje 1 kredyt za 5 URL (basic).
+    """
+    if not urls or not api_key:
+        return {}
+    try:
+        from tavily import TavilyClient
+    except ImportError:
+        return {}
+    # Max 5 URL na raz
+    urls = [u for u in urls if isinstance(u, str) and u.strip().startswith("http")][:5]
+    if not urls:
+        return {}
+    try:
+        client = TavilyClient(api_key=api_key)
+        resp = client.extract(urls=urls, extract_depth="basic")
+    except Exception:
+        return {}
+    out = {}
+    for item in (resp.get("results") or []):
+        if not isinstance(item, dict): continue
+        u = item.get("url"); c = item.get("raw_content") or item.get("content") or ""
+        if isinstance(u, str) and isinstance(c, str) and c.strip():
+            out[u] = c.strip()
+    return out
