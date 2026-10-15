@@ -4136,7 +4136,10 @@ def _record_price_matrix_read(c,snapshot,threshold_pct,cadence_minutes):
     if old.get('consecutive_reads',0) and elapsed<min_gap:
         return {**old,'read_status':'TOO_SOON','newly_confirmed':False}
     anchor=old['anchor_price'];delta=(price-anchor)/anchor*100
-    above=delta>=threshold_pct and not math.isclose(delta,threshold_pct,abs_tol=1e-10,rel_tol=1e-12)
+    # Matryca reaguje zarowno na wzrosty jak i spadki (abs). Kierunek ruchu
+    # jest zapisywany w polu 'last_move_direction' dla panelu i alertow.
+    above=abs(delta)>=threshold_pct and not math.isclose(abs(delta),threshold_pct,abs_tol=1e-10,rel_tol=1e-12)
+    _move_dir=('UP' if delta>0 else 'DOWN') if above else None
     # An old E04 CONFIRMED state is not evidence of three market activities.
     # Preserve the baseline and history, but require E05-confirmed proofs.
     legacy_unverified=old.get('activity_tracking_version')!='E05'
@@ -4517,6 +4520,10 @@ def run_market_cycle(store,stop=None):
             c.execute('UPDATE cycles SET finished_at=?,status=?,payload=? WHERE id=?',(utc_now(),status,json_text(payload),cid))
             cutoff=(datetime.now(timezone.utc)-timedelta(days=cfg['observation_retention_days'])).isoformat()
             c.execute('DELETE FROM observations WHERE acquired_at<?',(cutoff,))
+        try:
+            _rows = c.execute('SELECT COUNT(*) FROM observations').fetchone()[0]
+            print(f'observations: {_rows} rows', flush=True)
+        except Exception: pass
     except Exception as _fe:
         try: print('CYCLE finalize FAILED: '+type(_fe).__name__+': '+str(_fe)[:200], flush=True)
         except Exception: pass
@@ -4529,6 +4536,37 @@ def run_market_cycle(store,stop=None):
 
 def scanner_main(db,diagnostic=False,cycles=None):
     if diagnostic:return scanner_diagnostic_main(db,True,cycles)
+    # Diagnostyka crashy: faulthandler na stderr (launcher przekierowuje stderr do .scanner.log).
+    # Bez pliku - otwarty plik blokuje cleanup temp w testach.
+    try:
+        import faulthandler as _fh
+        _fh.enable(all_threads=True)
+        print('faulthandler: ON (stderr)', flush=True)
+    except Exception as _fhe2:
+        print('faulthandler import FAILED: '+str(_fhe2)[:200], flush=True)
+    import os as _os
+    _pid = _os.getpid()
+    print('SCANNER PID: '+str(_pid), flush=True)
+    try:
+        import psutil as _ps
+        _has_ps = True
+    except Exception:
+        _has_ps = False
+    def _log_ram(tag=''):
+        try:
+            if _has_ps:
+                _proc = _ps.Process(_pid)
+                _mem = _proc.memory_info().rss / (1024*1024)
+                _threads = _proc.num_threads()
+                print(f'RAM[{tag}]: {_mem:.1f} MB, threads: {_threads}', flush=True)
+            else:
+                import ctypes as _ct
+                _h = _ct.windll.kernel32.GetCurrentProcess()
+                _pmc = _ct.c_ulonglong(0)
+                _ct.windll.psapi.GetProcessMemoryInfo(_h, _ct.byref(_pmc), _ct.sizeof(_pmc))
+                print(f'RAM[{tag}]: {_pmc.value / (1024*1024):.1f} MB', flush=True)
+        except Exception:
+            pass
     stop=threading.Event();handlers={}
     if threading.current_thread() is threading.main_thread():
         for sig in termination_signals():handlers[sig]=signal.signal(sig,lambda *_:stop.set())
@@ -4553,12 +4591,14 @@ def scanner_main(db,diagnostic=False,cycles=None):
                         stop.wait(1);continue
                     status['status']='RUNNING'
                     cycle_start=time.time()
+                    _log_ram('before-cycle')
                     try:
                         result=run_market_cycle(store,stop)
                     except Exception as _ce:
                         result={'status':'ERROR','results':[],'error':type(_ce).__name__+': '+str(_ce)[:200]}
                         try: print('CYCLE ERROR (skaner kontynuuje): '+type(_ce).__name__+': '+str(_ce)[:300], flush=True)
                         except Exception: pass
+                    _log_ram('after-cycle')
                     elapsed_slots=max(0,math.floor(time.time()/(cfg['auto_scan_interval']*60))-math.floor(cycle_start/(cfg['auto_scan_interval']*60)))
                     if elapsed_slots:
                         status['skipped_slots']+=elapsed_slots
@@ -6371,10 +6411,15 @@ def render_portfolio(store):
         except Exception:
             pass
         return ['']*len(row)
+    _col_cfg = {
+        'Ryzyko': st.column_config.TextColumn('Ryzyko', width='large', help='Etykieta ryzyka z ostatniej analizy okazji'),
+        'Ticker': st.column_config.TextColumn('Ticker', width='small'),
+        'Odczyt': st.column_config.TextColumn('Odczyt', width='medium'),
+    }
     try:
-        st.dataframe(df.style.apply(_color_row, axis=1), width='stretch', hide_index=True)
+        st.dataframe(df.style.apply(_color_row, axis=1), width='stretch', hide_index=True, column_config=_col_cfg)
     except Exception:
-        st.dataframe(df, width='stretch', hide_index=True)
+        st.dataframe(df, width='stretch', hide_index=True, column_config=_col_cfg)
 
     # Progi SL/TP
     st.markdown('---')
