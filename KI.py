@@ -3200,7 +3200,11 @@ def record_opportunity(store,snapshot,cycle_id,now=None):
             elif finite_number(_vol) and _vol<_min_vol:
                 _is_confirmed=False
         state='CONFIRMED' if _is_confirmed else 'CANDIDATE'
-        existing=c.execute('SELECT state FROM opportunities WHERE sequence_id=?',(sequence_id,)).fetchone()
+        existing=c.execute("""SELECT o.state,o.updated_at,
+                                       (SELECT MAX(j.updated_at) FROM analysis_jobs j
+                                        WHERE j.event_id=o.sequence_id
+                                          AND j.state IN ('DONE','FAILED')) AS job_ts
+                                FROM opportunities o WHERE o.sequence_id=?""",(sequence_id,)).fetchone()
         c.execute("UPDATE opportunities SET state='EXPIRED' WHERE ticker=? AND candle_end<=? AND state IN ('CANDIDATE','CONFIRMED') AND sequence_id<>?",(ticker,current.isoformat(),sequence_id))
         if existing:
             # E04: historical SKIPPED_LIMIT is no longer a terminal state.  A
@@ -3211,8 +3215,15 @@ def record_opportunity(store,snapshot,cycle_id,now=None):
             # jesli spolka znowu robi ruch (kolejne potwierdzenie).
             _expired=False
             if existing['state'] in ('SELECTED','RESERVED'):
+                # Patrzymy na job_ts (kiedy ostatnio DONE), nie na updated_at (zmienia sie co cykl).
                 try:
-                    _prev=parse_market_time(existing['updated_at']) if 'updated_at' in existing.keys() else None
+                    _prev=None
+                    if 'job_ts' in existing.keys() and existing['job_ts']:
+                        _prev=parse_market_time(existing['job_ts'])
+                    if _prev is None:
+                        # Fallback na updated_at jesli brak joba
+                        if 'updated_at' in existing.keys() and existing['updated_at']:
+                            _prev=parse_market_time(existing['updated_at'])
                     if _prev:
                         _age=(current-_prev).total_seconds()
                         if _age>4*3600:
@@ -4293,6 +4304,18 @@ def run_market_cycle(store,stop=None):
         portfolio_check_alerts(store)
     except Exception as _pe:
         try: print('portfolio_check_alerts: '+str(_pe)[:200], flush=True)
+        except Exception: pass
+    # Dzienny raport Telegram (raz dziennie ~17:05 czasu polskiego)
+    try:
+        daily_report_send(store)
+    except Exception as _de:
+        try: print('daily_report_send: '+str(_de)[:200], flush=True)
+        except Exception: pass
+    # Raport USA o 22:00 czasu polskiego (zamkniecie sesji USA)
+    try:
+        us_report_send(store)
+    except Exception as _ue:
+        try: print('us_report_send: '+str(_ue)[:200], flush=True)
         except Exception: pass
     selected=[]
     if services['pipeline_enabled'] and not (stop is not None and stop.is_set()):
@@ -5683,6 +5706,188 @@ def portfolio_save(store, config):
                   (json_text(tickers),))
 
 
+def us_report_send(store):
+    """Raport USA o 22:00 czasu polskiego (zamkniecie sesji USA).
+    Tylko tickery bez sufiksu .WA. Wysyla raz dziennie."""
+    from datetime import timezone as _tz, timedelta as _td
+    try:
+        now_utc = datetime.now(_tz.utc)
+        today_key = now_utc.strftime('%Y-%m-%d')
+        with store.connection() as c:
+            row = c.execute("SELECT payload FROM settings WHERE key='last_us_report'").fetchone()
+        last_sent = None
+        if row:
+            try:
+                last_sent = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+            except Exception:
+                last_sent = None
+        if last_sent == today_key:
+            return False
+        # Okno 22:00 czasu polskiego: 20:00-20:30 UTC (CEST) lub 21:00-21:30 UTC (CET)
+        h = now_utc.hour; m = now_utc.minute
+        is_window = (h == 20 and m >= 5) or (h == 21 and m >= 5 and m <= 30)
+        if not is_window:
+            return False
+        cutoff = (now_utc - _td(days=1)).isoformat()
+        with store.connection() as c:
+            rows = list(c.execute("""SELECT ticker, payload FROM observations
+                                     WHERE acquired_at >= ?
+                                     ORDER BY id DESC LIMIT 4000""", (cutoff,)))
+        # Tylko USA (bez .WA)
+        by_t = {}
+        for r in rows:
+            t = r[0]
+            if not t: continue
+            if str(t).upper().endswith('.WA'): continue
+            if t in by_t: continue
+            try: snap = json.loads(r[1])
+            except Exception: continue
+            by_t[t] = snap
+        data = []
+        for t, snap in by_t.items():
+            price = snap.get('price'); ohlc = snap.get('ohlc') or {}
+            op = ohlc.get('open')
+            if not (finite_number(price) and finite_number(op) and op):
+                continue
+            ch = (price - op) / op * 100
+            cur = str(snap.get('currency') or '')
+            vol = snap.get('volume')
+            data.append((t, price, ch, cur, vol))
+        if not data:
+            # Brak danych USA - wyslij krotka informacje i zaznacz jako wyslane
+            with store.transaction() as c:
+                c.execute("INSERT OR REPLACE INTO settings(key,payload) VALUES('last_us_report',?)",
+                          (json_text(today_key),))
+            return False
+        data.sort(key=lambda x: x[2], reverse=True)
+        up = data[:5]
+        down = sorted(data, key=lambda x: x[2])[:5]
+        def _fmt(v, d=4):
+            return format(v, ',.'+str(d)+'f').replace(',',' ').replace('.',',')
+        def _fmt_vol(v):
+            return format(v, ',.0f').replace(',',' ') if finite_number(v) else '-'
+        lines = ['RAPORT USA · '+now_utc.strftime('%Y-%m-%d')]
+        lines.append('(zamkniecie sesji USA)')
+        lines.append('')
+        lines.append('TOP 5 WZROSTOW:')
+        for t, p, c, cur, v in up:
+            lines.append('  '+t+': '+_fmt(p)+' '+cur+' ('+('+' if c>=0 else '')+format(c,',.2f').replace('.',',')+'%) vol '+_fmt_vol(v))
+        lines.append('')
+        lines.append('TOP 5 SPADKOW:')
+        for t, p, c, cur, v in down:
+            lines.append('  '+t+': '+_fmt(p)+' '+cur+' ('+format(c,',.2f').replace('.',',')+'%) vol '+_fmt_vol(v))
+        lines.append('')
+        lines.append('Sprawdz panel KI.')
+        message = '\n'.join(lines)
+        now_iso = utc_now()
+        alert_id = 'us_report:'+today_key
+        with store.transaction() as c:
+            c.execute("INSERT OR IGNORE INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)",
+                      (alert_id, alert_id, 'PORTFOLIO_ALERT', message, 'PENDING', now_iso))
+            c.execute("INSERT OR REPLACE INTO settings(key,payload) VALUES('last_us_report',?)",
+                      (json_text(today_key),))
+        return True
+    except Exception as _e:
+        try: print('us_report_send: '+str(_e)[:200], flush=True)
+        except Exception: pass
+        return False
+
+
+
+def daily_report_send(store):
+    """Wysyla dzienny raport Telegram o 17:05 czasu polskiego (15:05 UTC).
+    Wysyla raz dziennie; znacznik w settings.last_daily_report."""
+    from datetime import timezone as _tz, timedelta as _td
+    try:
+        now_utc = datetime.now(_tz.utc)
+        # Czas polski = UTC+2 (CEST) lub UTC+1 (CET). Upraszczamy do UTC+1/2:
+        # sprawdzamy godzinę w UTC: 15:00-15:30 = 17:00-17:30 CEST, 16:00-16:30 = 17:00-17:30 CET
+        # Ale najprosciej: wysylamy gdy UTC hour == 15 i minute >= 5 (CEST)
+        # Zapiszemy datę jako klucz (YYYY-MM-DD) w UTC.
+        today_key = now_utc.strftime('%Y-%m-%d')
+        with store.connection() as c:
+            row = c.execute("SELECT payload FROM settings WHERE key='last_daily_report'").fetchone()
+        last_sent = None
+        if row:
+            try:
+                last_sent = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+            except Exception:
+                last_sent = None
+        if last_sent == today_key:
+            return False  # juz wyslano dzisiaj
+        # Sprawdz czy to w oknie 17:00-17:30 czasu polskiego.
+        # W UTC: 15:00-15:30 (CEST) lub 16:00-16:30 (CET)
+        h = now_utc.hour; m = now_utc.minute
+        is_window = (h == 15 and m >= 5) or (h == 16 and m >= 5 and m <= 30)
+        if not is_window:
+            return False
+        # Buduj raport
+        cutoff = (now_utc - _td(days=1)).isoformat()
+        with store.connection() as c:
+            # TOP 5 wzrostow
+            rows = list(c.execute("""SELECT ticker, payload FROM observations
+                                     WHERE acquired_at >= ?
+                                     ORDER BY id DESC LIMIT 2000""", (cutoff,)))
+        # Zbierz po tickerze najnowszy snapshot
+        by_t = {}
+        for r in rows:
+            t = r[0]
+            if t in by_t: continue
+            try: snap = json.loads(r[1])
+            except Exception: continue
+            by_t[t] = snap
+        # Sortuj wzgledem otwarcia swiecy
+        data = []
+        for t, snap in by_t.items():
+            price = snap.get('price'); ohlc = snap.get('ohlc') or {}
+            op = ohlc.get('open')
+            if not (finite_number(price) and finite_number(op) and op):
+                continue
+            ch = (price - op) / op * 100
+            cur = str(snap.get('currency') or '')
+            data.append((t, price, ch, cur))
+        data.sort(key=lambda x: x[2], reverse=True)
+        up = data[:5]
+        down = sorted(data, key=lambda x: x[2])[:5]
+        # SL/TP alerts dzisiaj
+        with store.connection() as c:
+            alerts = list(c.execute("""SELECT message FROM outbox
+                                       WHERE kind='PORTFEL_ALERT' AND created_at >= ?""",
+                                    (cutoff,)))
+        def _fmt(v, d=4):
+            return format(v, ',.'+str(d)+'f').replace(',',' ').replace('.',',')
+        lines = ['RAPORT DZIENNY · '+now_utc.strftime('%Y-%m-%d')]
+        lines.append('')
+        lines.append('TOP 5 WZROSTOW:')
+        for t, p, c, cur in up:
+            lines.append('  '+t+': '+_fmt(p)+' '+cur+' ('+('+' if c>=0 else '')+format(c,',.2f').replace('.',',')+'%)')
+        lines.append('')
+        lines.append('TOP 5 SPADKOW:')
+        for t, p, c, cur in down:
+            lines.append('  '+t+': '+_fmt(p)+' '+cur+' ('+format(c,',.2f').replace('.',',')+'%)')
+        if alerts:
+            lines.append('')
+            lines.append('ALERTY PORTFELA (SL/TP): '+str(len(alerts)))
+            for a in alerts[:3]:
+                lines.append('  '+str(a[0]).split('\n')[0][:80])
+        lines.append('')
+        lines.append('Sprawdz panel KI.')
+        message = '\n'.join(lines)
+        now_iso = utc_now()
+        alert_id = 'daily_report:'+today_key
+        with store.transaction() as c:
+            c.execute("INSERT OR IGNORE INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)",
+                      (alert_id, alert_id, 'PORTFOLIO_ALERT', message, 'PENDING', now_iso))
+            c.execute("INSERT OR REPLACE INTO settings(key,payload) VALUES('last_daily_report',?)",
+                      (json_text(today_key),))
+        return True
+    except Exception as _e:
+        try: print('daily_report_send: '+str(_e)[:200], flush=True)
+        except Exception: pass
+        return False
+
+
+
 def portfolio_check_alerts(store):
     """Sprawdza SL/TP dla portfela. Alert do outbox raz; re-arm po powrocie w strefe."""
     config = portfolio_get(store)
@@ -5748,7 +5953,7 @@ def portfolio_tickers(store):
 
 
 def portfolio_set(store, tickers):
-    """Zapisz liste tickerow (max 5) - zachowuje istniejace SL/TP."""
+    """Zapisz liste tickerow (max 10) - zachowuje istniejace SL/TP. Dopisuje do watchlist."""
     tickers = list(dict.fromkeys(str(t).upper().strip() for t in tickers if str(t).strip()))[:10]
     existing = {e['ticker']: e for e in portfolio_get(store) if isinstance(e, dict) and e.get('ticker')}
     config = []
@@ -5759,6 +5964,17 @@ def portfolio_set(store, tickers):
             config.append({'ticker': t, 'sl': None, 'tp': None, 'direction': 'long',
                            'sl_fired_at': None, 'tp_fired_at': None})
     portfolio_save(store, config)
+    # Sync z watchlist - skaner musi odwiedzac te spolki
+    try:
+        wl = list(store.load_section('tickers', []))
+        added = [t for t in tickers if t not in wl]
+        if added:
+            wl.extend(added)
+            with store.transaction() as c:
+                store._write_section(c, 'tickers', wl)
+    except Exception as _e:
+        try: print('portfolio_set watchlist sync: '+str(_e)[:200], flush=True)
+        except Exception: pass
 
 
 def portfolio_snapshot(store, ticker, interval='1h'):
@@ -5872,13 +6088,60 @@ def render_portfolio(store):
         vol_vs_avg = None
         if finite_number(vol) and finite_number(avg_v) and avg_v > 0:
             vol_vs_avg = vol / avg_v
+        # Spread bid/ask - probuj z observations, potem z opportunities
+        spread = snap.get('spread') or {}
+        spread_pct = spread.get('spread_pct') if isinstance(spread, dict) else None
+        if not finite_number(spread_pct):
+            try:
+                with store.connection() as _c:
+                    _row = _c.execute("""SELECT payload FROM opportunities
+                                         WHERE ticker=? AND state IN ('CONFIRMED','RESERVED','SELECTED')
+                                         ORDER BY updated_at DESC LIMIT 1""", (t,)).fetchone()
+                if _row:
+                    _p = json.loads(_row[0])
+                    _sp = (_p.get('snapshot') or {}).get('spread') or {}
+                    if isinstance(_sp, dict):
+                        spread_pct = _sp.get('spread_pct')
+            except Exception:
+                pass
+        # Cofniecie od maksimum swiecy
+        cofniecie = None
+        if finite_number(hi) and finite_number(price) and hi > 0 and price <= hi:
+            cofniecie = (hi - price) / hi * 100
+        # Ryzyko z ostatniej analizy (opportunities.payload.risk.label)
+        risk_label = '—'
+        try:
+            with store.connection() as _c:
+                _r = _c.execute("""SELECT payload FROM opportunities
+                                    WHERE ticker=? AND state IN ('CONFIRMED','RESERVED','SELECTED')
+                                    ORDER BY updated_at DESC LIMIT 1""", (t,)).fetchone()
+            if _r:
+                _p = json.loads(_r[0])
+                _risk = _p.get('risk') or {}
+                if isinstance(_risk, dict) and _risk.get('label'):
+                    risk_label = str(_risk['label'])[:40]
+        except Exception:
+            pass
+        # SL/TP z config portfela
+        sl_val = None; tp_val = None
+        for entry in portfolio_get(store):
+            if entry.get('ticker') == t:
+                sl_val = entry.get('sl'); tp_val = entry.get('tp')
+                break
+        def _fmt_lvl(v):
+            return format(v, ',.4f').replace(',',' ').replace('.',',') if finite_number(v) else '—'
         rows.append({
             'Ticker':t,
             'Cena':(fmt(price,4)+' '+cur).strip() if finite_number(price) else '—',
             'Zmiana 1H':(('+' if change>=0 else '')+format(change,',.2f').replace(',',' ').replace('.',',')+'%') if finite_number(change) else '—',
+            'Ryzyko':risk_label,
             'Otwarcie':fmt(op,4),
             'Max':fmt(hi,4),
             'Min':fmt(lo,4),
+            'Cofniecie %':(format(cofniecie,',.2f').replace(',',' ').replace('.',',')+'%' if finite_number(cofniecie) else '—'),
+            'Spread %':(format(spread_pct,',.2f').replace(',',' ').replace('.',',')+'%' if finite_number(spread_pct) else '—'),
+            'SL':_fmt_lvl(sl_val),
+            'TP':_fmt_lvl(tp_val),
             'Wolumen':(format(vol,',.0f').replace(',',' ') if finite_number(vol) else '—'),
             'Sr. wol. 1M':(format(avg_v,',.0f').replace(',',' ') if finite_number(avg_v) else '—'),
             'Wol./Sr.':(format(vol_vs_avg,',.2f').replace(',',' ').replace('.',',')+'x' if finite_number(vol_vs_avg) else '—'),
