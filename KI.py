@@ -4289,6 +4289,155 @@ def detect_market(store,snapshot,config=None):
             'rvol_change_pct':drvol,'baseline':baseline,'price_matrix':matrix}
 
 
+# === 52-tygodniowy baseline historyczny ===
+def ensure_historical_schema(store):
+    """Tworzy tabele historical_baseline jesli nie istnieje."""
+    with store.connection() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS historical_baseline(
+            ticker TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""")
+
+
+def fetch_52w_stats(ticker, period="2y"):
+    """Pobiera dzienne swiece z Yahoo i liczy statystyki 52-tygodniowe.
+    Zwraca dict lub None gdy brak danych."""
+    import math as _m
+    try:
+        import yfinance as yf
+    except ImportError:
+        return None
+    try:
+        tk = yf.Ticker(ticker)
+        df = tk.history(period=period, interval="1d", auto_adjust=False)
+        if df is None or df.empty:
+            return None
+        if len(df) < 30:
+            return None
+        highs = df["High"].dropna().tolist()
+        lows = df["Low"].dropna().tolist()
+        closes = df["Close"].dropna().tolist()
+        closes_sorted = sorted(float(x) for x in closes if _m.isfinite(float(x)))
+        if not closes_sorted:
+            return None
+        def _pct(arr, q):
+            if not arr: return None
+            k = (len(arr)-1)*q
+            f = int(_m.floor(k)); c = int(_m.ceil(k))
+            if f == c: return arr[f]
+            return arr[f] + (arr[c]-arr[f])*(k-f)
+        payload = {
+            "ticker": ticker,
+            "period": period,
+            "samples": len(closes_sorted),
+            "first_date": str(df.index[0].date()),
+            "last_date": str(df.index[-1].date()),
+            "last_close": float(closes_sorted[-1]),
+            "high_52w": float(max(float(x) for x in highs)),
+            "low_52w": float(min(float(x) for x in lows)),
+            "avg_52w": float(sum(closes_sorted)/len(closes_sorted)),
+            "median_52w": float(_pct(closes_sorted, 0.5)),
+            "p25_52w": float(_pct(closes_sorted, 0.25)),
+            "p75_52w": float(_pct(closes_sorted, 0.75)),
+        }
+        hi = payload["high_52w"]; lo = payload["low_52w"]; lc = payload["last_close"]
+        # Detekcja split-adjusted: jesli high/low lub max/min ratio > 50, to Yahoo
+        # zwraca nieskorygowane historyczne ceny (reverse split). Nie ufamy statystykom.
+        ratio_hl = (hi / lo) if lo > 0 else 0
+        if ratio_hl > 50 or hi > lc * 50:
+            payload["split_suspected"] = True
+            payload["high_52w"] = None
+            payload["low_52w"] = None
+            payload["avg_52w"] = None
+            payload["median_52w"] = None
+            payload["p25_52w"] = None
+            payload["p75_52w"] = None
+            payload["position_pct"] = None
+            payload["last_close"] = None
+        else:
+            payload["split_suspected"] = False
+            if hi > lo:
+                payload["position_pct"] = (lc - lo) / (hi - lo) * 100.0
+            else:
+                payload["position_pct"] = 50.0
+        return payload
+    except Exception:
+        return None
+
+
+def backfill_historical_baseline(store, tickers=None, force=False, verbose=True, stop=None):
+    """Pobiera i zapisuje statystyki 52-tygodniowe dla podanych tickerow.
+    tickers=None -> cala watchlista. force=True -> nadpisuje istniejace.
+    Zwraca (ok, skipped, failed)."""
+    ensure_historical_schema(store)
+    if tickers is None:
+        tickers = store.load_section('tickers', [])
+    tickers = [str(t).upper().strip() for t in tickers if str(t).strip()]
+    ok = 0; skipped = 0; failed = 0
+    if not force:
+        with store.connection() as c:
+            existing = {r[0] for r in c.execute("SELECT ticker FROM historical_baseline")}
+    else:
+        existing = set()
+    for i, tk in enumerate(tickers):
+        if stop is not None and stop.is_set():
+            break
+        if tk in existing and not force:
+            skipped += 1
+            continue
+        try:
+            stats = fetch_52w_stats(tk)
+        except Exception:
+            stats = None
+        if not stats:
+            failed += 1
+            continue
+        now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            with store.transaction() as c:
+                c.execute("INSERT OR REPLACE INTO historical_baseline(ticker,payload,updated_at) VALUES(?,?,?)",
+                          (tk, json_text(stats), now_iso))
+            ok += 1
+        except Exception as e:
+            failed += 1
+            if verbose:
+                try: print(f"[52w] {tk} SAVE FAILED: {str(e)[:120]}", flush=True)
+                except Exception: pass
+        if verbose and (i+1) % 25 == 0:
+            try: print(f"[52w] progress: {i+1}/{len(tickers)} ok={ok} skip={skipped} fail={failed}", flush=True)
+            except Exception: pass
+    if verbose:
+        try: print(f"[52w] DONE: ok={ok} skipped={skipped} failed={failed}", flush=True)
+        except Exception: pass
+    return (ok, skipped, failed)
+
+
+def attach_historical_baseline(store,snapshot):
+    """Dorzuć do snapshotu statystyki 52-tygodniowe (jesli sa w bazie).
+    Dodaje pole historical_52w - dict ze statystykami albo None gdy brak."""
+    ticker=snapshot.get('ticker')
+    if not ticker:
+        snapshot['historical_52w']=None
+        return snapshot
+    try:
+        with store.connection() as c:
+            row=c.execute("SELECT payload FROM historical_baseline WHERE ticker=?",(ticker,)).fetchone()
+    except Exception:
+        snapshot['historical_52w']=None
+        return snapshot
+    if not row:
+        snapshot['historical_52w']=None
+        return snapshot
+    try:
+        stats=json.loads(row[0])
+    except Exception:
+        snapshot['historical_52w']=None
+        return snapshot
+    snapshot['historical_52w']=stats
+    return snapshot
+
+
 def run_market_cycle(store,stop=None):
     from datetime import timedelta
     settings=store.load_section('settings',{});cfg=market_config(settings);services=service_config(settings)
@@ -4299,6 +4448,16 @@ def run_market_cycle(store,stop=None):
         if stop is not None and stop.is_set():break
         try:
             snap=fetch_market(t,cfg['market_interval'])
+            attach_historical_baseline(store,snap)
+        except MarketRateLimitError as _rl:
+            results.append({'ticker':t,'status':'RATE_LIMITED','error':str(_rl)})
+            print(json_text(results[-1]),flush=True)
+            break
+        except Exception as _fe:
+            results.append({'ticker':t,'status':'ERROR','error':type(_fe).__name__+': '+str(_fe)[:200]})
+            print(json_text(results[-1]),flush=True)
+            continue
+        try:
             # Re-read the active list: a ticker removed mid-cycle stops being processed.
             if t not in store.load_section('tickers',[]):continue
             result=detect_market(store,snap,{**cfg,**services,'price_matrix_enabled':True})
@@ -4353,10 +4512,18 @@ def run_market_cycle(store,stop=None):
                 except Exception: pass
     status='RATE_LIMITED' if any(r['status']=='RATE_LIMITED' for r in results) else 'EMPTY_WATCHLIST' if not tickers else 'INTERRUPTED' if stop is not None and stop.is_set() else 'ERROR' if all(r['status']=='ERROR' for r in results) else 'PARTIAL' if any(r['status']=='ERROR' for r in results) else 'OK'
     payload={'mode':'MARKET','interval':cfg['market_interval'],'results':results,'unprocessed_tickers':tickers[len(results):],'ai_called':False,'telegram_sent':False,'selected_opportunities':[r['sequence_id'] for r in selected],'service_calls_scope':'Oddzielne zadania; te flagi dotyczą wyłącznie cyklu pobrania Yahoo.'}
-    with store.transaction() as c:
-        c.execute('UPDATE cycles SET finished_at=?,status=?,payload=? WHERE id=?',(utc_now(),status,json_text(payload),cid))
-        cutoff=(datetime.now(timezone.utc)-timedelta(days=cfg['observation_retention_days'])).isoformat()
-        c.execute('DELETE FROM observations WHERE acquired_at<?',(cutoff,))
+    try:
+        with store.transaction() as c:
+            c.execute('UPDATE cycles SET finished_at=?,status=?,payload=? WHERE id=?',(utc_now(),status,json_text(payload),cid))
+            cutoff=(datetime.now(timezone.utc)-timedelta(days=cfg['observation_retention_days'])).isoformat()
+            c.execute('DELETE FROM observations WHERE acquired_at<?',(cutoff,))
+    except Exception as _fe:
+        try: print('CYCLE finalize FAILED: '+type(_fe).__name__+': '+str(_fe)[:200], flush=True)
+        except Exception: pass
+        try:
+            with store.transaction() as c2:
+                c2.execute('UPDATE cycles SET finished_at=?,status=? WHERE id=?',(utc_now(),'ERROR',cid))
+        except Exception: pass
     return {'id':cid,'status':status,'results':results}
 
 
@@ -4386,7 +4553,12 @@ def scanner_main(db,diagnostic=False,cycles=None):
                         stop.wait(1);continue
                     status['status']='RUNNING'
                     cycle_start=time.time()
-                    result=run_market_cycle(store,stop)
+                    try:
+                        result=run_market_cycle(store,stop)
+                    except Exception as _ce:
+                        result={'status':'ERROR','results':[],'error':type(_ce).__name__+': '+str(_ce)[:200]}
+                        try: print('CYCLE ERROR (skaner kontynuuje): '+type(_ce).__name__+': '+str(_ce)[:300], flush=True)
+                        except Exception: pass
                     elapsed_slots=max(0,math.floor(time.time()/(cfg['auto_scan_interval']*60))-math.floor(cycle_start/(cfg['auto_scan_interval']*60)))
                     if elapsed_slots:
                         status['skipped_slots']+=elapsed_slots
@@ -5734,6 +5906,15 @@ def portfolio_save(store, config):
                   (json_text(tickers),))
 
 
+def _ensure_report_event(c, event_id, now_iso):
+    """Wstawia sztuczny event dla raportu, zeby FK outbox.event_id->events.id nie pekal.
+    INSERT OR IGNORE nie ignoruje bledow FK — dlatego potrzebujemy tego rekordu."""
+    c.execute(
+        "INSERT OR IGNORE INTO events(id,ticker,interval,created_at,payload) VALUES(?,?,?,?,?)",
+        (event_id, 'REPORT', '1d', now_iso, '{}')
+    )
+
+
 def us_report_send(store):
     """Raport USA o 22:00 czasu polskiego (zamkniecie sesji USA).
     Tylko tickery bez sufiksu .WA. Wysyla raz dziennie."""
@@ -5810,6 +5991,7 @@ def us_report_send(store):
         now_iso = utc_now()
         alert_id = 'us_report:'+today_key
         with store.transaction() as c:
+            _ensure_report_event(c, alert_id, now_iso)
             c.execute("INSERT OR IGNORE INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)",
                       (alert_id, alert_id, 'PORTFOLIO_ALERT', message, 'PENDING', now_iso))
             c.execute("INSERT OR REPLACE INTO settings(key,payload) VALUES('last_us_report',?)",
