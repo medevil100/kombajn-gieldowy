@@ -2682,7 +2682,7 @@ def collect_manual_research(store,turn,context,snapshot,key):
             _domains=GPW_DOMAINS
     except Exception:
         pass
-    try: resp=search_sync(q,key,max_results=5,include_domains=_domains)
+    try: resp=search_sync(q,key,max_results=8,include_domains=_domains)
     except (CLITransportError,OSError,ValueError) as e:
         r['status']='CALL_UNCERTAIN';r['start_error']=str(e)[:300]
         save_gpt_chat_context(store,turn,context)
@@ -2851,7 +2851,7 @@ def event_analysis_request(evidence,context):
                   'cutoff':context.get('cutoff'),
                   'date_basis':context.get('date_basis')}
     return {
-        'model':'gpt-4o-mini','temperature':0.2,'max_completion_tokens':1200,'store':False,
+        'model':'gpt-4o-mini','temperature':0.2,'max_completion_tokens':1800,'store':False,
         'messages':[{'role':'system','content':instructions},
                     {'role':'user','content':json_text({'proved_event':evidence_data,'source_context':safe_context})}],
         'response_format':{'type':'json_schema','json_schema':{'name':'ki_event_analysis','strict':True,'schema':analysis_schema(snap,context)}}}
@@ -3241,6 +3241,23 @@ def record_opportunity(store,snapshot,cycle_id,now=None):
             c.execute('INSERT INTO opportunities VALUES(?,?,?,?,?,?,?,?,?)',
                       (sequence_id,ticker,start,expiry,state,cycle_id,json_text(row),current.isoformat(),current.isoformat()))
     return {'state':state,'sequence_id':sequence_id}
+
+
+def recover_orphaned_reserved(store,now=None,min_age_minutes=10):
+    """RESERVED starsze niz N minut bez wpisu w analysis_jobs -> z powrotem CONFIRMED.
+    Naprawia osierocone wpisy gdy fetch_opportunity_spread padnie miedzy
+    reserve_opportunities a queue_opportunity."""
+    from datetime import timedelta
+    current=now or datetime.now(timezone.utc)
+    cutoff=(current-timedelta(minutes=int(min_age_minutes))).isoformat()
+    with store.transaction() as c:
+        cur=c.execute(
+            "UPDATE opportunities SET state=?,updated_at=? "
+            "WHERE state=? AND updated_at < ? "
+            "AND sequence_id NOT IN (SELECT event_id FROM analysis_jobs)",
+            ('CONFIRMED',current.isoformat(),'RESERVED',cutoff)
+        )
+    return cur.rowcount if hasattr(cur,'rowcount') else 0
 
 
 def reserve_opportunities(store,cycle_id,now=None):
@@ -3729,7 +3746,7 @@ def submit_event_research(store, event_id, query, cutoff, api_key):
                 _domains=GPW_DOMAINS
             except Exception:
                 pass
-        resp = search_sync(query, api_key, max_results=5, include_domains=_domains)
+        resp = search_sync(query, api_key, max_results=8, include_domains=_domains)
         _urls=[x.get('url') for x in (resp.get('results') or []) if x.get('url')]
         try:
             from tavily_cli_adapter import extract_urls
@@ -4319,10 +4336,21 @@ def run_market_cycle(store,stop=None):
         except Exception: pass
     selected=[]
     if services['pipeline_enabled'] and not (stop is not None and stop.is_set()):
+        try:
+            _rec=recover_orphaned_reserved(store)
+            if _rec: print('recover_orphaned_reserved: '+str(_rec)+' wpisow wrocilo do CONFIRMED',flush=True)
+        except Exception as _re:
+            try: print('recover_orphaned_reserved FAILED: '+str(_re)[:200],flush=True)
+            except Exception: pass
         selected=reserve_opportunities(store,cid)
         for opportunity in selected:
-            quote=fetch_opportunity_spread(opportunity['ticker'])
-            queue_opportunity(store,opportunity['sequence_id'],quote,services['telegram_enabled'])
+            try:
+                quote=fetch_opportunity_spread(opportunity['ticker'])
+                queue_opportunity(store,opportunity['sequence_id'],quote,services['telegram_enabled'])
+            except Exception as _qe:
+                try:
+                    print('queue_opportunity FAILED for '+str(opportunity.get('ticker') or opportunity.get('sequence_id'))+': '+str(_qe)[:200],flush=True)
+                except Exception: pass
     status='RATE_LIMITED' if any(r['status']=='RATE_LIMITED' for r in results) else 'EMPTY_WATCHLIST' if not tickers else 'INTERRUPTED' if stop is not None and stop.is_set() else 'ERROR' if all(r['status']=='ERROR' for r in results) else 'PARTIAL' if any(r['status']=='ERROR' for r in results) else 'OK'
     payload={'mode':'MARKET','interval':cfg['market_interval'],'results':results,'unprocessed_tickers':tickers[len(results):],'ai_called':False,'telegram_sent':False,'selected_opportunities':[r['sequence_id'] for r in selected],'service_calls_scope':'Oddzielne zadania; te flagi dotyczą wyłącznie cyklu pobrania Yahoo.'}
     with store.transaction() as c:
@@ -5536,7 +5564,7 @@ def load_growth_ranking(store,now=None):
                 row['analysis_state']=polish_status(job['state']) or job['state']
                 if job['state']=='DONE' and job['context'] and job['result']:
                     saved=json.loads(job['result'])['analysis'];sources={x['id']:x for x in json.loads(job['context'])['sources']}
-                    row['source_facts']=[{'fact':f['fact'],'url':sources[f['source_id']]['url'],'published_at':sources[f['source_id']]['published_at']} for f in saved['context'] if f['source_id'] in sources]
+                    row['source_facts']=[{'fact':f['fact'],'url':sources[f['source_id']]['url'],'published_at':(sources[f['source_id']].get('published_at') or '')} for f in saved['context'] if f['source_id'] in sources]
                     row['parts']['Kontekst']=10 if row['source_facts'] else 0;row['score']=sum(row['parts'].values())
             if snap.get('price_matrix',{}).get('state')=='CONFIRMED' and not gpw_notification_session_open(raw['ticker'],current):
                 row['group']='AFTER_HOURS';row['analysis_state']='Sesja GPW zamknięta · alert wstrzymany'
@@ -6277,7 +6305,7 @@ def render_growth_ranking(store):
                     st.caption(opportunity_candle_description(snap)+': '+snap['candle_time']+' → '+str(snap.get('candle_end') or 'brak końca')+
                                ' · '+polish_status(snap.get('candle_status'))+' · odczyt '+snap['acquired_at'])
                     for source in r['source_facts']:
-                        st.write(source['published_at']+' · '+source['fact']);st.link_button('Otwórz źródło',source['url'])
+                        st.write(str(source.get('published_at') or source.get('date_state') or 'Brak daty') + ' · ' + str(source.get('fact') or ''));st.link_button('Otwórz źródło',source['url'])
     show(ranking['top'])
     st.subheader('Wczesne obserwacje')
     st.caption('Kandydaci pozostają widoczni do potwierdzenia lub spadku poniżej progu matrycy. Bez potwierdzenia nie są kierowani do GPT ani Telegrama.')
@@ -6911,7 +6939,7 @@ def render_service_panel(store,manual=False):
                     st.caption('Tavily: '+str(usage.get('calls',0))+' wykonanych zapytań · kredyty raportowane: '+label+
                                ' · odpowiedzi z rozliczeniem: '+str(usage.get('reports_with_credits',0)))
                 for source in context['sources']:
-                    st.text(source['id']+' · '+str(source.get('title') or 'Źródło')+' · '+source['published_at'])
+                    st.text(source['id']+' · '+str(source.get('title') or 'Źródło')+' · '+str(source.get('published_at') or source.get('date_state') or 'Brak daty'))
                     st.write(source['url'])
                     st.text(source['content'])
                 for rejected in context.get('rejected_sources',[]):st.caption('Odrzucono: '+rejected['title']+' · '+rejected['reason'])
