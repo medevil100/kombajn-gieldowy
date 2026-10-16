@@ -63,6 +63,32 @@ GPW_DOMAINS = [
 ]
 
 
+# Domyslne domeny-agregatory: ich tresc to karty spolek / nawigacja, nie newsy.
+DEFAULT_EXCLUDE_DOMAINS = [
+    "tradingview.com", "marketscreener.com", "yahoo.com",
+    "investing.com", "marketwatch.com", "zacks.com",
+    "wisesheets.io", "stockinvest.us", "public.com", "last10k.com",
+]
+
+# Wzorce sciezek w URL: strony-notowania, wykresy, karty spolek, fora.
+# Filtrujemy po URL, bo Tavily exclude_domains dziala na calej domenie
+# (nie da sie wykluczyc tylko /notowania/ z biznesradar.pl).
+_URL_NOISE_PATTERNS = (
+    "/notowania/", "/gielda/notowania/", "/gielda/sektory/", "/sektory/",
+    "/quote/", "/quotes/", "/stock/", "/stocks/", "/chart/", "/charts/",
+    "/kurs/", "/kursy/", "/akcje/notowania/", "/wiki/",
+    "/forum/", "/inwestor/", "/podstawowe-dane",
+)
+
+
+def _looks_like_noise(url):
+    """True jesli URL wyglada jak strona-notowanie/wykres/forum, nie artykul."""
+    if not isinstance(url, str):
+        return True
+    u = url.lower()
+    return any(pat in u for pat in _URL_NOISE_PATTERNS)
+
+
 def search_sync(query, api_key, max_results=5, include_domains=None):
     """Proste synchroniczne wyszukiwanie Tavily - jak w py.py wlasciciela.
     Bez async, bez statusow, bez --no-wait. Zwraca dict:
@@ -84,17 +110,20 @@ def search_sync(query, api_key, max_results=5, include_domains=None):
             "search_depth": "advanced",
             "max_results": int(max_results),
             "include_answer": True,
+            "include_published_date": True,
+            "include_raw_content": True,
         }
         if include_domains:
             _base["include_domains"] = list(include_domains)
-        try:
-            _news = dict(_base); _news["topic"]="news"; _news["days"]=7
-            resp = client.search(**_news)
-        except Exception:
-            resp = {}
-        if not (isinstance(resp,dict) and resp.get("results")):
-            _gen = dict(_base); _gen["topic"]="general"; _gen["days"]=7
-            resp = client.search(**_gen)
+            # Uwaga: country="poland" + pelna lista include_domains (18 GPW)
+            # zwraca 0 wynikow — to bug Tavily API. Sama lista domen wystarcza
+            # do promowania polskich zrodel, wiec country/language pomijamy.
+        # Domyslny filtr agregatorow — dziala w obie strony (GPW i US).
+        _base["exclude_domains"] = list(DEFAULT_EXCLUDE_DOMAINS)
+        # Tavily: news+advanced+include_domains zwraca 0 (bug API).
+        # General z time_range=week dziala niezawodnie, daje te same wyniki.
+        _gen = dict(_base); _gen["topic"]="general"; _gen["time_range"]="week"
+        resp = client.search(**_gen)
     except Exception as exc:
         raise CLITransportError("Tavily search: "+type(exc).__name__+": "+str(exc)[:300]) from None
     if not isinstance(resp, dict):
@@ -104,6 +133,7 @@ def search_sync(query, api_key, max_results=5, include_domains=None):
         if not isinstance(r, dict): continue
         u = r.get("url")
         if not isinstance(u, str) or not u.strip(): continue
+        if _looks_like_noise(u): continue
         results.append({
             "url": u.strip(),
             "title": str(r.get("title") or "")[:200],

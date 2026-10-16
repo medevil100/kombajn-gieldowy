@@ -2572,26 +2572,22 @@ def research_query(snapshot,cutoff):
     ticker_clean=ticker.split(".")[0] if ticker else ""
     end=parse_market_time(cutoff); start=end-timedelta(days=30)
     is_gpw=ticker.upper().endswith(".WA")
+    cutoff_iso = cutoff.isoformat() if hasattr(cutoff,'isoformat') else str(cutoff)
+    _stop = ('Nie oceniaj inwestycji, nie generuj BUY/SELL. '
+             f'Nie podawaj materiałów opublikowanych po {cutoff_iso}.')
     if is_gpw:
-        # GPW/NewConnect: polskie zrodla (bankier, stooq, biznesradar, PAP, ESPI/EBI)
+        # GPW/NewConnect: krotko i precyzyjnie. Domeny sa w include_domains,
+        # wiec nie wyliczamy ich w tresci zapytania (to powodowalo zwrot stron-notowan).
         return (
-            f'{name} ({ticker}) - komunikaty biezace ESPI EBI, raporty okresowe, '
-            f'wyniki finansowe, informacje korporacyjne, notowania GPW NewConnect. '
-            f'Zrodla: bankier.pl, stooq.pl, biznesradar.pl, pap.pl, gpw.pl, infostrefa.com, money.pl. '
-            f'Okres: ostatnie 30 dni (priorytet ostatnie 7 dni), do {cutoff}. '
-            f'Zwroc wszystkie znalezione materialy z data publikacji. '
-            f'Nie oceniaj inwestycji, nie generuj BUY/SELL.'
+            f'{name} ({ticker}) komunikat ESPI EBI raport bieżący '
+            f'wyniki finansowe raport okresowy do {cutoff_iso}. ' + _stop
         )
     else:
-        # US: SEC filings, prasowe, angielskie
+        # US: krotko i precyzyjnie po angielsku. Dla spolek notowanych rowniez na GPW:
+        # nazwa bywa polska - dodajemy obie formy.
         return (
-            f'All available sources about {name} (ticker {ticker}, {ticker_clean}): '
-            f'last 30 days, priority last 7 days. Reference point: {cutoff}. '
-            f'Range from {start.isoformat()} to {end.isoformat()}. '
-            f'Corporate announcements, SEC filings, press releases, news, interviews. '
-            f'Return all found materials with publication date. '
-            f'Do not publish materials after {cutoff}. Nie podawaj materiałów opublikowanych po {cutoff}. '
-            f'Do not evaluate investments, do not generate BUY/SELL.'
+            f'{name} ({ticker_clean}) press release SEC filing '
+            f'earnings report corporate announcement up to {cutoff_iso}. ' + _stop
         )
 
 
@@ -2917,14 +2913,14 @@ def two_candle_candidate(snapshot,now=None):
         if matrix.get('state') not in ('CANDIDATE','CONFIRMED'):return False
         try:
             current=parse_market_time(now or snapshot['acquired_at']);candidate=parse_market_time(matrix['candidate_started_at'])
-            return current>=candidate and (matrix['state']=='CONFIRMED' or (current-candidate).total_seconds()<=3600)
+            return current>=candidate and (matrix['state']=='CONFIRMED' or (current-candidate).total_seconds()<=7200)
         except (KeyError,ValueError,TypeError,OverflowError):return False
     matrix=snapshot.get('price_matrix') or {}
     if matrix.get('state') in ('CANDIDATE','CONFIRMED'):
         try:
             current=parse_market_time(now or snapshot['acquired_at']);candidate=parse_market_time(matrix['candidate_started_at'])
             return (snapshot.get('interval')=='1h' and current>=candidate and
-                    (matrix['state']=='CONFIRMED' or (current-candidate).total_seconds()<=3600))
+                    (matrix['state']=='CONFIRMED' or (current-candidate).total_seconds()<=7200))
         except (KeyError,ValueError,TypeError,OverflowError):return False
     if not open_hour_fresh(snapshot,now):return False
     p=snapshot.get('previous_closed') or {};o=snapshot.get('ohlc') or {}
@@ -3177,7 +3173,7 @@ def record_opportunity(store,snapshot,cycle_id,now=None):
     identity=(ticker+'|MATRIX|'+parse_market_time(matrix['anchor_at']).isoformat() if matrix else
               ticker+'|1h|'+parse_market_time(snapshot['previous_closed']['time']).isoformat()+'|'+parse_market_time(start).isoformat())
     sequence_id='seq_'+hashlib.sha256(identity.encode()).hexdigest()[:32]
-    expiry=(parse_market_time(matrix['candidate_started_at'])+timedelta(hours=1)).astimezone(timezone.utc).isoformat() if matrix and matrix['state']=='CANDIDATE' else (
+    expiry=(parse_market_time(matrix['candidate_started_at'])+timedelta(hours=2)).astimezone(timezone.utc).isoformat() if matrix and matrix['state']=='CANDIDATE' else (
         (current+timedelta(hours=1)).isoformat() if matrix else parse_market_time(snapshot['candle_end']).astimezone(timezone.utc).isoformat())
     with store.transaction() as c:
         # The first acquisition is an anchor; do not send a historical opportunity on startup.
@@ -4153,12 +4149,12 @@ def _record_price_matrix_read(c,snapshot,threshold_pct,cadence_minutes):
         count=0;candidate=None;confirmed_at=None
         state='MONITORING';verified=False;transitioned=False
     else:
-        expired=bool(candidate and (when-parse_market_time(candidate)).total_seconds()>3600)
+        expired=bool(candidate and (when-parse_market_time(candidate)).total_seconds()>7200)
         if expired:
             count=0;candidate=None;confirmed_at=None
         if active:
             since_start=(when-parse_market_time(candidate)).total_seconds() if candidate else 0
-            if count and candidate and elapsed<=max_gap and 0<=since_start<=3600:
+            if count and candidate and elapsed<=max_gap and 0<=since_start<=7200:
                 count=min(3,count+1)
             else:
                 count=1;candidate=acquired;confirmed_at=None
@@ -6358,8 +6354,10 @@ def render_portfolio(store):
         cofniecie = None
         if finite_number(hi) and finite_number(price) and hi > 0 and price <= hi:
             cofniecie = (hi - price) / hi * 100
-        # Ryzyko z ostatniej analizy (opportunities.payload.risk.label)
+        # Ryzyko z ostatniej analizy: pelny label + powody + braki (bez obcinania)
         risk_label = '—'
+        risk_reasons = '—'
+        risk_missing = '—'
         try:
             with store.connection() as _c:
                 _r = _c.execute("""SELECT payload FROM opportunities
@@ -6368,8 +6366,15 @@ def render_portfolio(store):
             if _r:
                 _p = json.loads(_r[0])
                 _risk = _p.get('risk') or {}
-                if isinstance(_risk, dict) and _risk.get('label'):
-                    risk_label = str(_risk['label'])[:40]
+                if isinstance(_risk, dict):
+                    if _risk.get('label'):
+                        risk_label = str(_risk['label'])
+                    _rs = _risk.get('reasons') or []
+                    if isinstance(_rs, list) and _rs:
+                        risk_reasons = ' · '.join(str(x) for x in _rs)
+                    _ms = _risk.get('missing') or []
+                    if isinstance(_ms, list) and _ms:
+                        risk_missing = ' · '.join(str(x) for x in _ms)
         except Exception:
             pass
         # SL/TP z config portfela
@@ -6385,6 +6390,8 @@ def render_portfolio(store):
             'Cena':(fmt(price,4)+' '+cur).strip() if finite_number(price) else '—',
             'Zmiana 1H':(('+' if change>=0 else '')+format(change,',.2f').replace(',',' ').replace('.',',')+'%') if finite_number(change) else '—',
             'Ryzyko':risk_label,
+            'Powody':risk_reasons,
+            'Braki':risk_missing,
             'Otwarcie':fmt(op,4),
             'Max':fmt(hi,4),
             'Min':fmt(lo,4),
@@ -6412,7 +6419,9 @@ def render_portfolio(store):
             pass
         return ['']*len(row)
     _col_cfg = {
-        'Ryzyko': st.column_config.TextColumn('Ryzyko', width='large', help='Etykieta ryzyka z ostatniej analizy okazji'),
+        'Ryzyko': st.column_config.TextColumn('Ryzyko', width='large', help='Pelna etykieta ryzyka z ostatniej analizy okazji'),
+        'Powody': st.column_config.TextColumn('Powody', width='large', help='Czynniki ryzyka z analizy (reasons)'),
+        'Braki': st.column_config.TextColumn('Braki', width='large', help='Brakujace dane do oceny ryzyka (missing)'),
         'Ticker': st.column_config.TextColumn('Ticker', width='small'),
         'Odczyt': st.column_config.TextColumn('Odczyt', width='medium'),
     }
