@@ -5424,6 +5424,14 @@ def render_gpt_chat(store):
         with_search=st.checkbox('Pytanie z wyszukiwaniem Tavily',value=True,key='chat_with_search')
         st.caption('Po wysłaniu: jedno wyszukiwanie Tavily i jedno zapytanie GPT. Odświeżenie nie wykonuje wywołań API.')
         send=st.form_submit_button('Wyślij pytanie do GPT')
+    _col_clear, _ = st.columns([1, 5])
+    if _col_clear.button('Wyczyść rozmowę', key='gpt_chat_clear', help='Usuwa całą historię rozmowy z GPT. Nie usuwa analiz automatycznych ani wpisów innych celów.'):
+        with store.transaction() as _c:
+            _rows = list(_c.execute("SELECT id, context FROM gpt_chat_turns"))
+            _ids = [r[0] for r in _rows if (json.loads(r[1]).get('purpose','chat') == 'chat')]
+            for _i in _ids:
+                _c.execute("DELETE FROM gpt_chat_turns WHERE id=?", (_i,))
+        st.rerun()
     if send:
         if not question.strip():st.warning('Wpisz pytanie do GPT.')
         else:
