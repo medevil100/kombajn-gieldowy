@@ -1,9 +1,38 @@
-numpy
-pandas
-plotly
-requests
-streamlit
-streamlit_autorefresh
-yfinance
+﻿# KI — zaleznosci runtime (panel + skaner + uslugi)
+# Wersje minimalne; pip dobierze najnowsze zgodne.
 
+# Panel i UI
+streamlit>=1.32
+streamlit-autorefresh
+
+# Dane rynkowe
+yfinance>=0.2.36
+requests>=2.31
+websocket-client
+cloudscraper
+beautifulsoup4
+feedparser
+
+# Analiza i przetwarzanie
+pandas>=2.0
+numpy>=1.24
+scikit-learn
+ta
+plotly>=5.18
+matplotlib
+
+# Daty i strefy czasowe
+python-dateutil
+pytz
+
+# Uslugi zewnetrzne
+openai>=1.0
+tavily-python
 tavily-cli==0.1.8
+
+# Powiadomienia
+twilio
+
+# Scheduler i monitoring
+schedule
+psutil
