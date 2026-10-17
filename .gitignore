@@ -48,3 +48,8 @@ tavily_cli_adapter.py.przed_*
 _*.py
 _*.txt
 _dump*.txt
+
+# Lokalne dane TradingAgents
+KI_tradingagents_env/
+KI_analizy_poglebione/
+deep_worker.log

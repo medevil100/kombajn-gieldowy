@@ -6564,7 +6564,15 @@ def tradingagents_python():
     custom=os.environ.get('KI_TRADINGAGENTS_PYTHON')
     if custom:return Path(custom).expanduser().resolve()
     env=Path(__file__).resolve().parent/'KI_tradingagents_env'
-    return env/('Scripts/python.exe' if os.name=='nt' else 'bin/python')
+    # venv: Scripts/python.exe (Windows), bin/python (Linux)
+    # conda -p (Windows): python.exe w katalogu glownym env
+    candidates=[
+        env/('Scripts/python.exe' if os.name=='nt' else 'bin/python'),
+        env/('python.exe' if os.name=='nt' else 'bin/python'),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():return candidate
+    return candidates[0]
 
 
 DEEP_REPORT_CONTRACT = (
@@ -6625,6 +6633,12 @@ def start_deep_analysis(store,ticker,question="Co potwierdza ruch tej spółki, 
     if not keys['OPENAI_API_KEY']:raise ValueError('Brak OPENAI_API_KEY w secrets.toml.')
     # Cross-session lock is backed by SQLite, rather than only Streamlit state.
     with store.transaction() as c:
+        # Cleanup osieroconych wpisow: worker zabity lub timeout nie zadzialal.
+        c.execute("""UPDATE deep_reports SET state='FAILED',
+                     error='Osierocony wpis RUNNING/QUEUED >25 min (worker zabity lub timeout nie zadzialal).',
+                     finished_at=?
+                     WHERE state IN ('QUEUED','RUNNING')
+                       AND created_at < datetime('now', '-25 minutes')""",(utc_now(),))
         if c.execute("SELECT 1 FROM deep_reports WHERE state IN ('QUEUED','RUNNING')").fetchone():
             raise ValueError('Analiza pogłębiona już trwa. Odśwież jej wynik przed uruchomieniem następnej.')
         rid=uuid.uuid4().hex
@@ -6632,8 +6646,12 @@ def start_deep_analysis(store,ticker,question="Co potwierdza ruch tej spółki, 
     env={k:v for k,v in os.environ.items() if not k.startswith('TRADINGAGENTS_')}
     env.update(OPENAI_API_KEY=keys['OPENAI_API_KEY'],PYTHONUTF8='1')
     try:
+        _deep_log_path=Path(__file__).resolve().parent/'deep_worker.log'
+        _deep_log=open(_deep_log_path,'a',encoding='utf-8')
+        _deep_log.write(f"\n=== spawn {utc_now()} rid={rid} ticker={ticker} python={python} ===\n")
+        _deep_log.flush()
         subprocess.Popen([str(python),str(Path(__file__).resolve()),'--deep-worker',rid,'--db',str(store.path)],
-                         env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                         env=env,stdout=_deep_log,stderr=_deep_log,
                          creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
     except OSError:
         with store.transaction() as c:c.execute("UPDATE deep_reports SET state='FAILED',error=?,finished_at=? WHERE id=?",('Nie można uruchomić procesu TradingAgents.',utc_now(),rid))
@@ -6672,8 +6690,15 @@ def deep_analysis_worker(store,report_id):
     stage="Ładowanie TradingAgents"
     try:
         def timed_out():
-            with store.transaction() as c:c.execute("UPDATE deep_reports SET state='REVIEW_REQUIRED',error=?,finished_at=? WHERE id=? AND state='RUNNING'",('Przekroczono czas analizy. Wynik niepotwierdzony; bez automatycznego ponawiania.',utc_now(),report_id))
-            os._exit(2)
+            import sys as _sys
+            _sys.stderr.write('TIMEOUT rid='+str(report_id)+' after 1200s\n');_sys.stderr.flush()
+            try:
+                with store.transaction() as c:c.execute("UPDATE deep_reports SET state='REVIEW_REQUIRED',error=?,finished_at=? WHERE id=? AND state='RUNNING'",('Przekroczono czas analizy. Wynik niepotwierdzony; bez automatycznego ponawiania.',utc_now(),report_id))
+            except Exception as _exc:
+                try:_sys.stderr.write('TIMEOUT DB update failed: '+repr(_exc)+'\n');_sys.stderr.flush()
+                except Exception:pass
+            finally:
+                os._exit(2)
         deadline=threading.Timer(1200,timed_out);deadline.daemon=True;deadline.start()
         import tradingagents
         from tradingagents.default_config import DEFAULT_CONFIG
@@ -6698,7 +6723,14 @@ def deep_analysis_worker(store,report_id):
                 for entry in audit:
                     if entry['run_id']==str(run_id):entry['error']=type(error).__name__;break
         stage='Tworzenie konfiguracji i grafu'
-        graph=TradingAgentsGraph(selected_analysts=('market','news','fundamentals'),debug=False,config=config,callbacks=[ToolEvidence()])
+        _evidence_handler=ToolEvidence()
+        graph=TradingAgentsGraph(selected_analysts=('market','news'),debug=False,config=config,callbacks=[_evidence_handler])
+        # LangGraph _run_graph wywoluje propagator.get_graph_args() bez argumentow,
+        # wiec callbacks z konstruktora nie trafiaja do node'ow narzedzi. Patch:
+        _orig_get_graph_args=graph.propagator.get_graph_args
+        def _patched_get_graph_args(callbacks=None,_orig=_orig_get_graph_args,_handler=_evidence_handler):
+            return _orig(callbacks=callbacks or [_handler])
+        graph.propagator.get_graph_args=_patched_get_graph_args
         day=datetime.now(ZoneInfo('Europe/Warsaw' if ticker.endswith('.WA') else 'America/New_York')).date().isoformat()
         stage='Analiza danych i wywołania modeli'
         state,decision=graph.propagate(ticker,day)
