@@ -3256,6 +3256,55 @@ def recover_orphaned_reserved(store,now=None,min_age_minutes=10):
     return cur.rowcount if hasattr(cur,'rowcount') else 0
 
 
+def should_alert(snapshot, rank_snapshot, watchlist, now=None, *, check_basis=True):
+    """
+    Czysta decyzja: czy snapshot kwalifikuje sie do alertu (RESERVED/SELECTED).
+    Bez I/O. Testowalna w izolacji.
+
+    snapshot:      aktualny snapshot (latest observation lub rank.snapshot)
+    rank_snapshot: baseline z payload.rank.snapshot (do porownania basis; ignorowane gdy check_basis=False)
+    watchlist:     zbior tickerow
+    check_basis:   True dla latest vs rank; False dla rank vs rank / queue
+    """
+    ticker = (snapshot or {}).get('ticker') or (rank_snapshot or {}).get('ticker')
+    if not ticker:
+        return False, 'brak tickera'
+    if ticker not in watchlist:
+        return False, 'ticker poza watchlist'
+    if check_basis and rank_snapshot and not same_opportunity_basis(snapshot, rank_snapshot):
+        return False, 'inna baza opportunity (latest vs rank)'
+    if not two_candle_confirmation(snapshot, now):
+        return False, 'brak potwierdzenia dwoch swiec'
+    return True, 'ok'
+
+
+def alert_decisions_ensure(c):
+    """Lazy CREATE TABLE - idempotentne, tanie po pierwszym razie."""
+    c.execute("""CREATE TABLE IF NOT EXISTS alert_decisions(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        seq TEXT NOT NULL,
+        ts TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        should_alert INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        payload_json TEXT
+    )""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_alert_decisions_seq ON alert_decisions(seq)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_alert_decisions_ts ON alert_decisions(ts)")
+
+
+def log_alert_decision(c, seq, stage, ok, reason, snapshot=None):
+    """Zapisuje decyzje should_alert do tabeli alert_decisions."""
+    alert_decisions_ensure(c)
+    payload = None
+    if snapshot:
+        payload = json_text({'ticker': (snapshot or {}).get('ticker'), 'acquired_at': (snapshot or {}).get('acquired_at')})
+    c.execute(
+        "INSERT INTO alert_decisions(seq, ts, stage, should_alert, reason, payload_json) VALUES(?,?,?,?,?,?)",
+        (seq, utc_now(), stage, 1 if ok else 0, reason, payload)
+    )
+
+
 def reserve_opportunities(store,cycle_id,now=None):
     # E04: confirmation determines eligibility, not a per-slot number of GPT
     # jobs.  Process all qualifying records, in stable ranking order; the
@@ -3271,9 +3320,13 @@ def reserve_opportunities(store,cycle_id,now=None):
             latest=c.execute("SELECT payload FROM observations WHERE ticker=? AND interval='1h' ORDER BY id DESC LIMIT 1",(r['ticker'],)).fetchone()
             if latest:
                 snap=json.loads(latest[0])
-                if not same_opportunity_basis(snap,r['rank']['snapshot']) or not two_candle_confirmation(snap,current):
+                ok_latest,reason_latest=should_alert(snap,r['rank']['snapshot'],ticks,current,check_basis=True)
+                log_alert_decision(c,r['sequence_id'],'reserve/latest',ok_latest,reason_latest,snap)
+                if not ok_latest:
                     c.execute('UPDATE opportunities SET state=? WHERE sequence_id=?',('CANDIDATE' if two_candle_candidate(snap,current) else 'EXPIRED',r['sequence_id']));continue
-            if r['ticker'] not in ticks or not two_candle_confirmation(r['rank']['snapshot'],current):
+            ok_rank,reason_rank=should_alert(r['rank']['snapshot'],None,ticks,current,check_basis=False)
+            log_alert_decision(c,r['sequence_id'],'reserve/rank',ok_rank,reason_rank,r['rank']['snapshot'])
+            if not ok_rank:
                 c.execute("UPDATE opportunities SET state='EXPIRED' WHERE sequence_id=?",(r['sequence_id'],));continue
             c.execute("UPDATE opportunities SET state='RESERVED' WHERE sequence_id=?",(r['sequence_id'],))
             selected.append(r)
@@ -3286,7 +3339,10 @@ def queue_opportunity(store,sequence_id,spread,delivery_enabled,now=None):
         raw=c.execute("SELECT * FROM opportunities WHERE sequence_id=? AND state='RESERVED'",(sequence_id,)).fetchone()
         if not raw:return False
         row=json.loads(raw['payload']);snap={**row['snapshot'],'spread':spread}
-        if snap['ticker'] not in store.load_section('tickers',[]) or not two_candle_confirmation(snap,current):
+        _ticks=set(store.load_section('tickers',[]))
+        _ok,_reason=should_alert(snap,None,_ticks,current,check_basis=False)
+        log_alert_decision(c,sequence_id,'queue',_ok,_reason,snap)
+        if not _ok:
             c.execute("UPDATE opportunities SET state='EXPIRED' WHERE sequence_id=?",(sequence_id,));return False
         row.update(snapshot=snap,risk=opportunity_risk(snap))
         evidence={'kind':'CONFIRMED_OPPORTUNITY','sequence_id':sequence_id,'snapshot':snap,'ranking':row,
