@@ -6442,10 +6442,11 @@ def render_portfolio(store):
         except Exception:
             pass
         # SL/TP z config portfela
-        sl_val = None; tp_val = None
+        sl_val = None; tp_val = None; sl_fired = None; tp_fired = None
         for entry in portfolio_get(store):
             if entry.get('ticker') == t:
                 sl_val = entry.get('sl'); tp_val = entry.get('tp')
+                sl_fired = entry.get('sl_fired_at'); tp_fired = entry.get('tp_fired_at')
                 break
         def _fmt_lvl(v):
             return format(v, ',.4f').replace(',',' ').replace('.',',') if finite_number(v) else '—'
@@ -6463,6 +6464,8 @@ def render_portfolio(store):
             'Spread %':(format(spread_pct,',.2f').replace(',',' ').replace('.',',')+'%' if finite_number(spread_pct) else '—'),
             'SL':_fmt_lvl(sl_val),
             'TP':_fmt_lvl(tp_val),
+            'SL status':('FIRED' if (finite_number(sl_val) and sl_fired) else ('armed' if finite_number(sl_val) else '—')),
+            'TP status':('FIRED' if (finite_number(tp_val) and tp_fired) else ('armed' if finite_number(tp_val) else '—')),
             'Wolumen':(format(vol,',.0f').replace(',',' ') if finite_number(vol) else '—'),
             'Sr. wol. 1M':(format(avg_v,',.0f').replace(',',' ') if finite_number(avg_v) else '—'),
             'Wol./Sr.':(format(vol_vs_avg,',.2f').replace(',',' ').replace('.',',')+'x' if finite_number(vol_vs_avg) else '—'),
@@ -6470,7 +6473,16 @@ def render_portfolio(store):
         })
 
     import pandas as pd
-    df = pd.DataFrame(rows)
+    df_all = pd.DataFrame(rows)
+
+    _cols_price = ['Ticker','Cena','Zmiana 1H','Otwarcie','Max','Min','Cofniecie %','Wolumen','Sr. wol. 1M','Wol./Sr.','Odczyt']
+    _cols_price = [c for c in _cols_price if c in df_all.columns]
+    df_price = df_all[_cols_price].copy() if _cols_price else df_all.copy()
+
+    _cols_risk = ['Ticker','Ryzyko','Powody','Braki','Spread %','SL','TP','SL status','TP status']
+    _cols_risk = [c for c in _cols_risk if c in df_all.columns]
+    df_risk = df_all[_cols_risk].copy() if _cols_risk else pd.DataFrame()
+
     def _color_row(row):
         try:
             ch = row['Zmiana 1H']
@@ -6482,17 +6494,48 @@ def render_portfolio(store):
         except Exception:
             pass
         return ['']*len(row)
-    _col_cfg = {
+
+    _col_cfg_price = {
+        'Ticker': st.column_config.TextColumn('Ticker', width='small'),
+        'Odczyt': st.column_config.TextColumn('Odczyt', width='medium'),
+    }
+    _col_cfg_risk = {
         'Ryzyko': st.column_config.TextColumn('Ryzyko', width='large', help='Pelna etykieta ryzyka z ostatniej analizy okazji'),
         'Powody': st.column_config.TextColumn('Powody', width='large', help='Czynniki ryzyka z analizy (reasons)'),
         'Braki': st.column_config.TextColumn('Braki', width='large', help='Brakujace dane do oceny ryzyka (missing)'),
         'Ticker': st.column_config.TextColumn('Ticker', width='small'),
-        'Odczyt': st.column_config.TextColumn('Odczyt', width='medium'),
+        'SL status': st.column_config.TextColumn('SL status', width='small', help='FIRED = stop-loss wyzwolony (czerwony), armed = ustawiony (niebieski), — = brak'),
+        'TP status': st.column_config.TextColumn('TP status', width='small', help='FIRED = take-profit wyzwolony (zielony), armed = ustawiony (niebieski), — = brak'),
     }
+
+    def _color_risk_row(row):
+        try:
+            _sl = row.get('SL status', '—')
+            _tp = row.get('TP status', '—')
+            if _sl == 'FIRED':
+                return ['background-color: rgba(239,68,68,0.20); color: #fecaca']*len(row)
+            if _tp == 'FIRED':
+                return ['background-color: rgba(34,197,94,0.20); color: #bbf7d0']*len(row)
+            if _sl == 'armed' or _tp == 'armed':
+                return ['background-color: rgba(59,130,246,0.10)']*len(row)
+        except Exception:
+            pass
+        return ['']*len(row)
+
+    st.markdown('**Ceny i wolumen**')
     try:
-        st.dataframe(df.style.apply(_color_row, axis=1), width='stretch', hide_index=True, column_config=_col_cfg)
+        st.dataframe(df_price.style.apply(_color_row, axis=1), width='stretch', hide_index=True, column_config=_col_cfg_price)
     except Exception:
-        st.dataframe(df, width='stretch', hide_index=True, column_config=_col_cfg)
+        st.dataframe(df_price, width='stretch', hide_index=True, column_config=_col_cfg_price)
+
+    st.markdown('**Ryzyko i progi SL/TP**')
+    if len(df_risk.columns) > 1:
+        try:
+            st.dataframe(df_risk.style.apply(_color_risk_row, axis=1), width='stretch', hide_index=True, column_config=_col_cfg_risk)
+        except Exception:
+            st.dataframe(df_risk, width='stretch', hide_index=True, column_config=_col_cfg_risk)
+    else:
+        st.caption('Brak analizy ryzyka - dodaj ticker do portfela i poczekaj na cykl skanera.')
 
     # Progi SL/TP
     st.markdown('---')
