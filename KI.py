@@ -3256,21 +3256,19 @@ def recover_orphaned_reserved(store,now=None,min_age_minutes=10):
     return cur.rowcount if hasattr(cur,'rowcount') else 0
 
 
-def should_alert(snapshot, rank_snapshot, watchlist, now=None, *, check_basis=True):
+def should_alert(snapshot, rank_snapshot, watchlist, now=None, *, check_basis=True, min_rvol=None, rvol=None):
     """
     Czysta decyzja: czy snapshot kwalifikuje sie do alertu (RESERVED/SELECTED).
     Bez I/O. Testowalna w izolacji.
-
-    snapshot:      aktualny snapshot (latest observation lub rank.snapshot)
-    rank_snapshot: baseline z payload.rank.snapshot (do porownania basis; ignorowane gdy check_basis=False)
-    watchlist:     zbior tickerow
-    check_basis:   True dla latest vs rank; False dla rank vs rank / queue
     """
     ticker = (snapshot or {}).get('ticker') or (rank_snapshot or {}).get('ticker')
     if not ticker:
         return False, 'brak tickera'
     if ticker not in watchlist:
         return False, 'ticker poza watchlist'
+    if rvol is not None and min_rvol is not None and finite_number(rvol):
+        if rvol < min_rvol:
+            return False, f'rvol {rvol:.2f} < {min_rvol:.2f}'
     if check_basis and rank_snapshot and not same_opportunity_basis(snapshot, rank_snapshot):
         return False, 'inna baza opportunity (latest vs rank)'
     if not two_candle_confirmation(snapshot, now):
@@ -3313,6 +3311,7 @@ def reserve_opportunities(store,cycle_id,now=None):
     current=now or datetime.now(timezone.utc);selected=[]
     with store.transaction() as c:
         ticks=set(store.load_section('tickers',[]))
+        _min_rvol=float(store.load_section('settings',{}).get('rvol_threshold_pct',1.0))
         rows=[dict(r) for r in c.execute("SELECT * FROM opportunities WHERE state='CONFIRMED' AND cycle_id=?",(cycle_id,))]
         for r in rows:r['rank']=json.loads(r['payload'])
         rows.sort(key=lambda r:(-r['rank']['score'],-(r['rank']['rvol'] if finite_number(r['rank'].get('rvol')) else 0),r['ticker']))
@@ -3320,11 +3319,13 @@ def reserve_opportunities(store,cycle_id,now=None):
             latest=c.execute("SELECT payload FROM observations WHERE ticker=? AND interval='1h' ORDER BY id DESC LIMIT 1",(r['ticker'],)).fetchone()
             if latest:
                 snap=json.loads(latest[0])
-                ok_latest,reason_latest=should_alert(snap,r['rank']['snapshot'],ticks,current,check_basis=True)
+                _rvol=r['rank'].get('rvol')
+                ok_latest,reason_latest=should_alert(snap,r['rank']['snapshot'],ticks,current,check_basis=True,min_rvol=_min_rvol,rvol=_rvol)
                 log_alert_decision(c,r['sequence_id'],'reserve/latest',ok_latest,reason_latest,snap)
                 if not ok_latest:
                     c.execute('UPDATE opportunities SET state=? WHERE sequence_id=?',('CANDIDATE' if two_candle_candidate(snap,current) else 'EXPIRED',r['sequence_id']));continue
-            ok_rank,reason_rank=should_alert(r['rank']['snapshot'],None,ticks,current,check_basis=False)
+            _rvol_rank=r['rank'].get('rvol')
+            ok_rank,reason_rank=should_alert(r['rank']['snapshot'],None,ticks,current,check_basis=False,min_rvol=_min_rvol,rvol=_rvol_rank)
             log_alert_decision(c,r['sequence_id'],'reserve/rank',ok_rank,reason_rank,r['rank']['snapshot'])
             if not ok_rank:
                 c.execute("UPDATE opportunities SET state='EXPIRED' WHERE sequence_id=?",(r['sequence_id'],));continue
@@ -3340,7 +3341,9 @@ def queue_opportunity(store,sequence_id,spread,delivery_enabled,now=None):
         if not raw:return False
         row=json.loads(raw['payload']);snap={**row['snapshot'],'spread':spread}
         _ticks=set(store.load_section('tickers',[]))
-        _ok,_reason=should_alert(snap,None,_ticks,current,check_basis=False)
+        _min_rvol=float(store.load_section('settings',{}).get('rvol_threshold_pct',1.0))
+        _rvol=row.get('rvol')
+        _ok,_reason=should_alert(snap,None,_ticks,current,check_basis=False,min_rvol=_min_rvol,rvol=_rvol)
         log_alert_decision(c,sequence_id,'queue',_ok,_reason,snap)
         if not _ok:
             c.execute("UPDATE opportunities SET state='EXPIRED' WHERE sequence_id=?",(sequence_id,));return False
