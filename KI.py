@@ -2293,7 +2293,7 @@ def fetch_market(ticker,interval):
     return snap
 
 
-SERVICE_KEYS=('TAVILY_API_KEY','OPENAI_API_KEY','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')
+SERVICE_KEYS=('TAVILY_API_KEY','OPENAI_API_KEY','DEEPSEEK_API_KEY','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')
 
 
 def load_service_keys(home=None,project=None,environ=None):
@@ -2619,7 +2619,16 @@ def resume_manual_research(store,turn_id):
             request=gpt_chat_request(row['question'],context,[])
             context['gpt']={'status':'REQUESTED','requested_at':utc_now()}
             save_gpt_chat_context(store,turn_id,context)
-            body=service_http('OpenAI','https://api.openai.com/v1/chat/completions',keys['OPENAI_API_KEY'],request,uncertain=True)
+            if engine=='deepseek':
+                _schema=request.get('response_format',{}).get('json_schema',{}).get('schema',{})
+                if _schema:
+                    request['messages'][0]['content']+='\n\nMusisz zwrocic odpowiedz w formacie JSON zgodnym z ponizszym schematem:\n'+json_text(_schema)
+                request['model']='deepseek-chat'
+                request['max_tokens']=request.pop('max_completion_tokens',2600)
+                request['response_format']={'type':'json_object'}
+                body=service_http('DeepSeek','https://api.deepseek.com/v1/chat/completions',keys['DEEPSEEK_API_KEY'],request,uncertain=True)
+            else:
+                body=service_http('OpenAI','https://api.openai.com/v1/chat/completions',keys['OPENAI_API_KEY'],request,uncertain=True)
             context['gpt'].update(status='RECEIVED',received_at=utc_now())
             save_gpt_chat_context(store,turn_id,context)
             save_gpt_chat_metadata(store,turn_id,{**{k:body.get(k) for k in ('id','model','usage')},'raw_response':body.get('choices',[])})
@@ -2853,10 +2862,21 @@ def event_analysis_request(evidence,context):
         'response_format':{'type':'json_schema','json_schema':{'name':'ki_event_analysis','strict':True,'schema':analysis_schema(snap,context)}}}
 
 
-def analyze_event(evidence,context,keys):
-    if not keys['OPENAI_API_KEY']:raise ServiceError('Brak OPENAI_API_KEY.')
+def analyze_event(evidence,context,keys,engine='openai'):
     snap=evidence['snapshot']
-    body=service_http('OpenAI','https://api.openai.com/v1/chat/completions',keys['OPENAI_API_KEY'],event_analysis_request(evidence,context),uncertain=True)
+    if engine=='deepseek':
+        if not keys.get('DEEPSEEK_API_KEY'):raise ServiceError('Brak DEEPSEEK_API_KEY w secrets.toml.')
+        req=event_analysis_request(evidence,context)
+        _schema=req.get('response_format',{}).get('json_schema',{}).get('schema',{})
+        if _schema:
+            req['messages'][0]['content']+='\n\nMusisz zwrocic odpowiedz w formacie JSON zgodnym z ponizszym schematem:\n'+json_text(_schema)
+        req['model']='deepseek-chat'
+        if 'max_completion_tokens' in req:req['max_tokens']=req.pop('max_completion_tokens')
+        req['response_format']={'type':'json_object'}
+        body=service_http('DeepSeek','https://api.deepseek.com/v1/chat/completions',keys['DEEPSEEK_API_KEY'],req,uncertain=True)
+    else:
+        if not keys['OPENAI_API_KEY']:raise ServiceError('Brak OPENAI_API_KEY.')
+        body=service_http('OpenAI','https://api.openai.com/v1/chat/completions',keys['OPENAI_API_KEY'],event_analysis_request(evidence,context),uncertain=True)
     return parse_event_analysis_response(body,snap,context)
 
 
@@ -4010,7 +4030,8 @@ def process_analysis_once(store,keys,event_id=None):
             context['query']=record['query']
             save_analysis_context(store,job['event_id'],context)
         else:
-            result,metadata=analyze_event(evidence,json.loads(job['context']),keys)
+            _engine=store.load_section('settings',{}).get('analysis_engine','openai')
+            result,metadata=analyze_event(evidence,json.loads(job['context']),keys,engine=_engine)
             finish_analysis(store,job['event_id'],result,metadata)
     except ServiceError as exc:fail_analysis(store,job['event_id'],exc)
     except Exception as exc:
@@ -5318,9 +5339,12 @@ def gpt_chat_request(question,context,history):
             'response_format':{'type':'json_schema','json_schema':{'name':'ki_manual_research','strict':True,'schema':manual_research_schema(context)}}}
 
 
-def perform_manual_question(store,ticker,question,with_search,history=(),purpose='chat'):
+def perform_manual_question(store,ticker,question,with_search,history=(),purpose='chat',engine='openai'):
     keys=load_service_keys()
-    if not keys['OPENAI_API_KEY']:raise ValueError('Brak klucza OpenAI w secrets.toml.')
+    if engine=='deepseek':
+        if not keys.get('DEEPSEEK_API_KEY'):raise ValueError('Brak klucza DeepSeek w secrets.toml.')
+    else:
+        if not keys.get('OPENAI_API_KEY'):raise ValueError('Brak klucza OpenAI w secrets.toml.')
     if with_search and not ticker:raise ValueError('Wybierz ticker do wyszukiwania Tavily.')
     if with_search and not keys['TAVILY_API_KEY']:raise ValueError('Brak klucza Tavily. Nie wysłano pytania do GPT.')
     context={**gpt_chat_context(store,ticker),'purpose':purpose,'report_version':3,'research':{'sources':[],'status':'PENDING' if with_search else 'DISABLED'}}
@@ -5481,8 +5505,9 @@ def render_gpt_chat(store):
         selected=stable_ticker_select('Dane spółki do rozmowy',['Bez danych spółki']+ticks,'chat_ticker',in_form=True)
         question=st.text_area('Pytanie do GPT',max_chars=4000)
         with_search=st.checkbox('Pytanie z wyszukiwaniem Tavily',value=True,key='chat_with_search')
-        st.caption('Po wysłaniu: jedno wyszukiwanie Tavily i jedno zapytanie GPT. Odświeżenie nie wykonuje wywołań API.')
-        send=st.form_submit_button('Wyślij pytanie do GPT')
+        engine_choice=st.radio('Silnik AI',['OpenAI (gpt-4o-mini)','DeepSeek (deepseek-chat)'],horizontal=True,key='chat_engine')
+        st.caption('Po wysłaniu: jedno wyszukiwanie Tavily i jedno zapytanie do wybranego silnika. Odświeżenie nie wykonuje wywołań API.')
+        send=st.form_submit_button('Wyślij pytanie')
     _col_clear, _ = st.columns([1, 5])
     if _col_clear.button('Wyczyść rozmowę', key='gpt_chat_clear', help='Usuwa całą historię rozmowy z GPT. Nie usuwa analiz automatycznych ani wpisów innych celów.'):
         with store.transaction() as _c:
@@ -5497,7 +5522,8 @@ def render_gpt_chat(store):
             try:
                 ticker=resolve_question_ticker(question,None if selected=='Bez danych spółki' else selected,ticks)
                 with st.spinner('Tavily wyszukuje źródła, GPT analizuje dane…' if with_search else 'GPT analizuje zapisane dane…'):
-                    perform_manual_question(store,ticker,question,with_search,history)
+                    _eng='deepseek' if 'DeepSeek' in engine_choice else 'openai'
+                    perform_manual_question(store,ticker,question,with_search,history,engine=_eng)
                 st.rerun()
             except (ServiceError,ValueError,RuntimeError) as exc:st.error(str(exc))
     for turn in history:
@@ -6990,8 +7016,11 @@ def run_streamlit(db):
             slm=st.number_input('Mnożnik ATR dla SL',min_value=.1,value=float(settings.get('sl_atr_multiplier',2.)),step=.1)
             tpm=st.number_input('Mnożnik ATR dla TP',min_value=.1,value=float(settings.get('tp_atr_multiplier',3.)),step=.1)
             st.markdown('**Dalsza analiza potwierdzonego ruchu**')
-            pipeline_enabled=st.checkbox('Tavily + GPT po potwierdzeniu okazji',value=services['pipeline_enabled'])
-            st.caption('R1: Tavily CLI Research Mini — jeden płatny start na zdarzenie lub ręczne żądanie, potem odczyt zapisanego ID. GPT analizuje materiały po zakończeniu Research.')
+            pipeline_enabled=st.checkbox('Tavily + AI po potwierdzeniu okazji',value=services['pipeline_enabled'])
+            _cur_engine = settings.get('analysis_engine', 'openai')
+            _engine_choice = st.radio('Silnik AI dla automatu', ['OpenAI (gpt-4o-mini)', 'DeepSeek (deepseek-chat)'], index=0 if _cur_engine == 'openai' else 1, horizontal=True)
+            _engine_val = 'deepseek' if 'DeepSeek' in _engine_choice else 'openai'
+            st.caption('R1: Tavily CLI Research Mini — jeden płatny start na zdarzenie lub ręczne żądanie, potem odczyt zapisanego ID. Wybrany silnik analizuje materiały po zakończeniu Research.')
             telegram_enabled=st.checkbox('Automatycznie wysyłaj nowe zdarzenia na Telegram',value=services['telegram_enabled'])
             st.caption('Okazja automatyczna: trzy kolejne odczyty ponad stałą bazą matrycy w ciągu godziny. GPW: alerty po 17:00 czasu Warszawy są blokowane. Skrócona świeca końcowa nie dostaje RVOL porównywanego z pełnymi świecami. Maksymalnie 3 analizy na 15 minut, jedna wiadomość na sekwencję.')
             st.caption('Przy wyłączonej wysyłce wiadomości pozostają w podglądzie. Włączenie dotyczy nowych zdarzeń.')
@@ -6999,7 +7028,7 @@ def run_streamlit(db):
         if saved:
             import re
             new_ticks=list(dict.fromkeys(t.upper() for t in re.split(r'[,\s]+',text.strip()) if t))
-            proposed={'market_interval':iv,'auto_scan_interval':cadence,'price_threshold_pct':pt,'rvol_threshold_pct':rt,'observation_retention_days':int(retention),'sl_atr_multiplier':slm,'tp_atr_multiplier':tpm,'pipeline_enabled':pipeline_enabled,'telegram_enabled':telegram_enabled}
+            proposed={'market_interval':iv,'auto_scan_interval':cadence,'price_threshold_pct':pt,'rvol_threshold_pct':rt,'observation_retention_days':int(retention),'sl_atr_multiplier':slm,'tp_atr_multiplier':tpm,'pipeline_enabled':pipeline_enabled,'telegram_enabled':telegram_enabled,'analysis_engine':_engine_val}
             market_config(proposed);atr_risk_levels(1.,None,slm,tpm)
             if any(not valid_ticker(t) for t in new_ticks):st.error('Błędny ticker.')
             else:
@@ -7253,6 +7282,12 @@ def run_streamlit(db):
 
 
 def render_service_panel(store,manual=False):
+    _settings = store.load_section('settings', {})
+    _cur_engine = _settings.get('analysis_engine', 'openai')
+    _new_engine = st.radio('Silnik AI dla automatu (Tavily + AI)', ['openai', 'deepseek'], index=0 if _cur_engine == 'openai' else 1, horizontal=True, key=f'service_engine_{manual}')
+    if _new_engine != _cur_engine:
+        store.update_settings({'analysis_engine': _new_engine})
+        st.rerun()
     import streamlit as st
     labels={'PENDING_CONTEXT':'Oczekuje na Tavily','BUSY_CONTEXT':'Pobieranie kontekstu',
             'PENDING_AI':'Oczekuje na GPT','BUSY_AI':'Analiza GPT','DONE':'Analiza gotowa',
