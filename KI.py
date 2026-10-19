@@ -6405,7 +6405,7 @@ def render_portfolio(store):
             try:
                 with store.connection() as _c:
                     _row = _c.execute("""SELECT payload FROM opportunities
-                                         WHERE ticker=? AND state IN ('CONFIRMED','RESERVED','SELECTED')
+                                         WHERE ticker=?
                                          ORDER BY updated_at DESC LIMIT 1""", (t,)).fetchone()
                 if _row:
                     _p = json.loads(_row[0])
@@ -6425,7 +6425,7 @@ def render_portfolio(store):
         try:
             with store.connection() as _c:
                 _r = _c.execute("""SELECT payload FROM opportunities
-                                    WHERE ticker=? AND state IN ('CONFIRMED','RESERVED','SELECTED')
+                                    WHERE ticker=?
                                     ORDER BY updated_at DESC LIMIT 1""", (t,)).fetchone()
             if _r:
                 _p = json.loads(_r[0])
