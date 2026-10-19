@@ -5339,7 +5339,7 @@ def gpt_chat_request(question,context,history):
             'response_format':{'type':'json_schema','json_schema':{'name':'ki_manual_research','strict':True,'schema':manual_research_schema(context)}}}
 
 
-def perform_manual_question(store,ticker,question,with_search,history=(),purpose='chat',engine='openai'):
+def perform_manual_question(store,ticker,question,with_search,history=(),purpose='chat',engine='openai',fetch_fresh_spread=False):
     keys=load_service_keys()
     if engine=='deepseek':
         if not keys.get('DEEPSEEK_API_KEY'):raise ValueError('Brak klucza DeepSeek w secrets.toml.')
@@ -5351,7 +5351,7 @@ def perform_manual_question(store,ticker,question,with_search,history=(),purpose
     with ScannerLock(str(store.path)+'.gpt_chat'):
         turn=begin_gpt_chat(store,question,context)
         try:
-            if purpose=='ticker_analysis' and context.get('snapshot'):
+            if (purpose=='ticker_analysis' or fetch_fresh_spread) and context.get('snapshot') and ticker:
                 context['quote_request']={'status':'REQUESTED','requested_at':utc_now()}
                 save_gpt_chat_context(store,turn,context)
                 quote=fetch_opportunity_spread(ticker)
@@ -5505,6 +5505,7 @@ def render_gpt_chat(store):
         selected=stable_ticker_select('Dane spółki do rozmowy',['Bez danych spółki']+ticks,'chat_ticker',in_form=True)
         question=st.text_area('Pytanie do GPT',max_chars=4000)
         with_search=st.checkbox('Pytanie z wyszukiwaniem Tavily',value=True,key='chat_with_search')
+        fetch_fresh_spread=st.checkbox('Pobierz świeże bid/ask (Yahoo)',value=False,key='chat_fetch_spread')
         engine_choice=st.radio('Silnik AI',['OpenAI (gpt-4o-mini)','DeepSeek (deepseek-chat)'],horizontal=True,key='chat_engine')
         st.caption('Po wysłaniu: jedno wyszukiwanie Tavily i jedno zapytanie do wybranego silnika. Odświeżenie nie wykonuje wywołań API.')
         send=st.form_submit_button('Wyślij pytanie')
@@ -5523,7 +5524,7 @@ def render_gpt_chat(store):
                 ticker=resolve_question_ticker(question,None if selected=='Bez danych spółki' else selected,ticks)
                 with st.spinner('Tavily wyszukuje źródła, GPT analizuje dane…' if with_search else 'GPT analizuje zapisane dane…'):
                     _eng='deepseek' if 'DeepSeek' in engine_choice else 'openai'
-                    perform_manual_question(store,ticker,question,with_search,history,engine=_eng)
+                    perform_manual_question(store,ticker,question,with_search,history,engine=_eng,fetch_fresh_spread=fetch_fresh_spread)
                 st.rerun()
             except (ServiceError,ValueError,RuntimeError) as exc:st.error(str(exc))
     for turn in history:
