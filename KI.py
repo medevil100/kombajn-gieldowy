@@ -2909,14 +2909,16 @@ def open_hour_fresh(snapshot,now=None):
     except (KeyError,ValueError,TypeError,OverflowError):return False
 
 
-def gpw_notification_session_open(ticker,now=None):
-    """Suppress GPW (.WA) notifications at and after 17:00 Europe/Warsaw."""
-    if not isinstance(ticker,str) or not ticker.upper().endswith('.WA'):return True
+def market_session_open(ticker,now=None):
+    """Suppress notifications outside market hours: GPW 17:00, US 22:00 Europe/Warsaw."""
+    if not isinstance(ticker,str):return True
     try:
         from zoneinfo import ZoneInfo
         current=parse_market_time(now or datetime.now(timezone.utc))
         local=current.astimezone(ZoneInfo('Europe/Warsaw'))
-        return local.hour<17
+        if ticker.upper().endswith('.WA'):
+            return local.hour < 17
+        return local.hour < 22
     except (KeyError,ValueError,TypeError,OverflowError,ImportError):
         return False
 
@@ -2970,7 +2972,7 @@ def two_candle_candidate(snapshot,now=None):
 def two_candle_confirmation(snapshot,now=None):
     if not two_candle_candidate(snapshot,now):return False
     if not open_hour_fresh(snapshot,now):return False
-    if not gpw_notification_session_open(snapshot.get('ticker'),now or snapshot.get('acquired_at')):return False
+    if not market_session_open(snapshot.get('ticker'),now or snapshot.get('acquired_at')):return False
     if 'price_matrix' in snapshot:
         matrix=snapshot.get('price_matrix') or {}
         return (matrix.get('state')=='CONFIRMED' and matrix.get('activity_verified') is True
@@ -3155,7 +3157,7 @@ def opportunity_local_rank(snapshot,previous=None):
     parts={'Ruch':10,'Aktywność':20 if finite_number(rv) and rv>=3 else 15 if finite_number(rv) and rv>=2 else 10 if finite_number(rv) and rv>=1.5 else 0,'Technika':0,'Kontekst':0}
     matrix=snapshot.get('price_matrix') or {}
     outside_gpw_session=bool(matrix and matrix.get('state')=='CONFIRMED' and
-                            not gpw_notification_session_open(snapshot.get('ticker'),snapshot.get('acquired_at')))
+                            not market_session_open(snapshot.get('ticker'),snapshot.get('acquired_at')))
     confirms=([f"Zmiana od stałej bazy: +{matrix.get('change_pct',0):.2f}%"] if matrix else
               ['Pierwsza zamknięta 1h: wzrost ≥ 2% i RVOL ≥ 1,50','Druga świeca otworzyła się powyżej poprzedniego zamknięcia'])
     weakens=[];missing=[]
@@ -3465,7 +3467,7 @@ def opportunity_delivery_valid(store,evidence,now=None):
 def telegram_movement_confirmed(evidence,now=None):
     snap=evidence.get('snapshot',{})
     return (evidence.get('kind')=='CONFIRMED_OPPORTUNITY' and
-            gpw_notification_session_open(snap.get('ticker'),now) and
+            market_session_open(snap.get('ticker'),now) and
             open_hour_fresh(snap,now) and two_candle_confirmation(snap,now))
 
 
@@ -4078,8 +4080,8 @@ def claim_delivery(store,outbox_id=None,now=None):
             evidence=json.loads(candidate['evidence_payload'])
             if candidate['kind']!='ANALYSIS' or not opportunity_delivery_valid(store,evidence,current):
                 snap=evidence.get('snapshot') or {}
-                reason=('Telegram: sesja GPW zamknięta po 17:00 czasu Warszawy; alert nie został wysłany.'
-                        if candidate['kind']=='ANALYSIS' and not gpw_notification_session_open(snap.get('ticker'),current) else
+                reason=('Telegram: sesja zamknięta; alert nie został wysłany.'
+                        if candidate['kind']=='ANALYSIS' and not market_session_open(snap.get('ticker'),current) else
                         'Telegram: brak świeżej, aktywnej świecy lub potwierdzenia ruchu; alert nie został wysłany.')
                 c.execute("UPDATE outbox SET status='FILTERED',last_error=?,next_attempt_at=NULL WHERE id=?",(reason,candidate['id']))
             elif row is None and (candidate['next_attempt_at'] is None or candidate['next_attempt_at']<=utc_now()):
@@ -4211,7 +4213,7 @@ def _record_price_matrix_read(c,snapshot,threshold_pct,cadence_minutes):
              'activity_evidence':'BASELINE_ONLY','last_activity_at':None}
         c.execute('INSERT INTO price_matrix VALUES(?,?,?)',(ticker,json_text(row),acquired))
         return row
-    if not gpw_notification_session_open(ticker,when):
+    if not market_session_open(ticker,when):
         return {**old,'read_status':'MARKET_CLOSED','newly_confirmed':False}
     previous=parse_market_time(old['last_acquired_at'])
     if when<=previous:
@@ -4577,7 +4579,7 @@ def run_market_cycle(store,stop=None):
     except Exception as _de:
         try: print('daily_report_send: '+str(_de)[:200], flush=True)
         except Exception: pass
-    # Raport USA o 22:00 czasu polskiego (zamkniecie sesji USA)
+    # Raport USA o 23:05 czasu polskiego (zamkniecie sesji USA)
     try:
         us_report_send(store)
     except Exception as _ue:
@@ -5879,8 +5881,8 @@ def load_growth_ranking(store,now=None):
                     saved=json.loads(job['result'])['analysis'];sources={x['id']:x for x in json.loads(job['context'])['sources']}
                     row['source_facts']=[{'fact':f['fact'],'url':sources[f['source_id']]['url'],'published_at':(sources[f['source_id']].get('published_at') or '')} for f in saved['context'] if f['source_id'] in sources]
                     row['parts']['Kontekst']=10 if row['source_facts'] else 0;row['score']=sum(row['parts'].values())
-            if snap.get('price_matrix',{}).get('state')=='CONFIRMED' and not gpw_notification_session_open(raw['ticker'],current):
-                row['group']='AFTER_HOURS';row['analysis_state']='Sesja GPW zamknięta · alert wstrzymany'
+            if snap.get('price_matrix',{}).get('state')=='CONFIRMED' and not market_session_open(raw['ticker'],current):
+                row['group']='AFTER_HOURS';row['analysis_state']='Sesja zamknięta · alert wstrzymany'
             if two_candle_confirmation(snap,current):rank.append(row)
             else:early.append(row)
     rank.sort(key=lambda r:(-r['score'],-(r['rvol'] if finite_number(r['rvol']) else 0),r['ticker']))
@@ -5901,7 +5903,7 @@ def load_price_matrix_rows(store,now=None):
                      'Cena bazowa':item['anchor_price'],'Czas bazy UTC':item['anchor_at'],
                      'Ostatnia cena':item['last_price'],'Zmiana od bazy (%)':item['change_pct'],
                      'Odczyty pod rząd':item['consecutive_reads'],'Ostatni odczyt UTC':item['last_acquired_at'],
-                     'Powiadomienia':('Wstrzymane po 17:00 — GPW zamknięta' if not gpw_notification_session_open(record['ticker'],current)
+                     'Powiadomienia':('Wstrzymane poza sesją — rynek zamknięty' if not market_session_open(record['ticker'],current)
                                       else 'Dozwolone tylko przy świeżej, otwartej świecy')})
     rows.sort(key=lambda row:(row['Stan']!='Potwierdzony',-row['Zmiana od bazy (%)'],row['Ticker']))
     return rows
@@ -6038,13 +6040,8 @@ def portfolio_get(store):
 
 def portfolio_save(store, config):
     """Zapisuje pelny config portfela."""
-    with store.transaction() as c:
-        c.execute("INSERT OR REPLACE INTO settings(key,payload) VALUES('portfolio_config',?)",
-                  (json_text(config),))
-        # Zaktualizuj tez legacy portfolio_tickers dla kompatybilnosci
-        tickers = [e['ticker'] for e in config if isinstance(e, dict) and e.get('ticker')]
-        c.execute("INSERT OR REPLACE INTO settings(key,payload) VALUES('portfolio_tickers',?)",
-                  (json_text(tickers),))
+    tickers = [e['ticker'] for e in config if isinstance(e, dict) and e.get('ticker')]
+    store.update_settings({'portfolio_config': config, 'portfolio_tickers': tickers})
 
 
 def _ensure_report_event(c, event_id, now_iso):
@@ -6057,7 +6054,7 @@ def _ensure_report_event(c, event_id, now_iso):
 
 
 def us_report_send(store):
-    """Raport USA o 22:00 czasu polskiego (zamkniecie sesji USA).
+    """Raport USA o 23:05 czasu polskiego (zamkniecie sesji USA).
     Tylko tickery bez sufiksu .WA. Wysyla raz dziennie."""
     from datetime import timezone as _tz, timedelta as _td
     try:
@@ -6073,9 +6070,9 @@ def us_report_send(store):
                 last_sent = None
         if last_sent == today_key:
             return False
-        # Okno 22:00 czasu polskiego: 20:00-20:30 UTC (CEST) lub 21:00-21:30 UTC (CET)
+        # Okno 23:05 czasu polskiego: 21:05-21:30 UTC (CEST) lub 22:05-22:30 UTC (CET)
         h = now_utc.hour; m = now_utc.minute
-        is_window = (h == 20 and m >= 5) or (h == 21 and m >= 5 and m <= 30)
+        is_window = (h == 21 and m >= 5 and m <= 30) or (h == 22 and m >= 5 and m <= 30)
         if not is_window:
             return False
         cutoff = (now_utc - _td(days=1)).isoformat()
@@ -7034,7 +7031,7 @@ def run_streamlit(db):
             _engine_val = 'deepseek' if 'DeepSeek' in _engine_choice else 'openai'
             st.caption('R1: Tavily CLI Research Mini — jeden płatny start na zdarzenie lub ręczne żądanie, potem odczyt zapisanego ID. Wybrany silnik analizuje materiały po zakończeniu Research.')
             telegram_enabled=st.checkbox('Automatycznie wysyłaj nowe zdarzenia na Telegram',value=services['telegram_enabled'])
-            st.caption('Okazja automatyczna: trzy kolejne odczyty ponad stałą bazą matrycy w ciągu godziny. GPW: alerty po 17:00 czasu Warszawy są blokowane. Skrócona świeca końcowa nie dostaje RVOL porównywanego z pełnymi świecami. Maksymalnie 3 analizy na 15 minut, jedna wiadomość na sekwencję.')
+            st.caption('Okazja automatyczna: trzy kolejne odczyty ponad stałą bazą matrycy w ciągu godziny. GPW: alerty po 17:00, USA: po 22:00 czasu Warszawy są blokowane. Skrócona świeca końcowa nie dostaje RVOL porównywanego z pełnymi świecami. Maksymalnie 3 analizy na 15 minut, jedna wiadomość na sekwencję.')
             st.caption('Przy wyłączonej wysyłce wiadomości pozostają w podglądzie. Włączenie dotyczy nowych zdarzeń.')
             saved=st.form_submit_button('Zapisz ustawienia')
         if saved:
@@ -7294,6 +7291,7 @@ def run_streamlit(db):
 
 
 def render_service_panel(store,manual=False):
+    import streamlit as st
     _settings = store.load_section('settings', {})
     _cur_engine = _settings.get('analysis_engine', 'openai')
     _new_engine = st.radio('Silnik AI dla automatu (Tavily + AI)', ['openai', 'deepseek'], index=0 if _cur_engine == 'openai' else 1, horizontal=True, key=f'service_engine_{manual}')
