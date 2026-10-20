@@ -2215,7 +2215,18 @@ def build_chart_history(rows,limit=120):
     return chart
 
 
-def fetch_market(ticker,interval):
+import concurrent.futures
+
+def fetch_market(ticker, interval, timeout_sec=30):
+    """Wrapper z twardym timeoutem. Zapobiega nieskonczonemu czekaniu na yfinance."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_orig_fetch_market, ticker, interval)
+        try:
+            return future.result(timeout=timeout_sec)
+        except concurrent.futures.TimeoutError:
+            raise ValueError(f'Yahoo {ticker}: TIMEOUT ({timeout_sec}s). Pomijam ticker.')
+
+def _orig_fetch_market(ticker,interval):
     import yfinance as yf
     if not valid_ticker(ticker) or interval not in MARKET_INTERVALS:raise ValueError('Błędny ticker lub interwał.')
     provider=yf.Ticker(ticker)
