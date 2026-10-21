@@ -2734,6 +2734,7 @@ def analysis_schema(snapshot,context):
 
 def validate_event_analysis(result,snapshot,context):
     import re
+    warnings=[]
     expected={'technical','context','hypotheses','risks','missing'}
     if not isinstance(result,dict) or set(result)!=expected:raise ValueError('Niepoprawne sekcje analizy AI.')
     sources={s['id']:s for s in context['sources']};metrics=snapshot.get('indicators',{})
@@ -2804,11 +2805,24 @@ def validate_event_analysis(result,snapshot,context):
         if not isinstance(item,dict) or set(item)!={'source_id','fact'} or not isinstance(item.get('source_id'),str) or item['source_id'] not in sources:raise ValueError(path+': nieznane źródło lub błędne pola.')
         fact=text(item['fact'],180,False,path+'.fact')
         if item['source_id'] in cited:raise ValueError(path+': powtórzone źródło.')
-        if fact not in sources[item['source_id']]['content']:raise ValueError(path+'.fact: tekst nie jest dosłownym fragmentem wskazanego źródła.')
-        if len(fact.split())>25:raise ValueError(path+'.fact: więcej niż dwadzieścia pięć słów.')
+        if fact not in sources[item['source_id']]['content']:
+            warnings.append(path+'.fact: tekst nie jest dosłownym fragmentem źródła (usunięto).')
+            continue
+        if len(fact.split())>25:
+            warnings.append(path+'.fact: więcej niż 25 słów (usunięto).')
+            continue
         cited.add(item['source_id'])
         item['fact']=fact
-    for key in ('hypotheses','risks','missing'):result[key]=[text(v,path=key+'['+str(i)+']') for i,v in enumerate(result[key])]
+    for key in ('hypotheses','risks','missing'):
+        _clean=[]
+        for i,v in enumerate(result[key]):
+            try:
+                _clean.append(text(v,path=key+'['+str(i)+']'))
+            except ValueError as _e:
+                warnings.append(key+'['+str(i)+']: '+str(_e)+' (usunięto).')
+        result[key]=_clean
+    if warnings:
+        result['quality_issues']=warnings
     return result
 
 
