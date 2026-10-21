@@ -695,8 +695,11 @@ def run_legacy_streamlit(db):
             if not token or not chat_id:
                 return False
             url = f"https://api.telegram.org/bot{token}/sendMessage"
-            payload = {"chat_id": chat_id, "text": message, "parse_mode": parse_mode}
+            # Wylaczamy HTML, zeby znaki < > & w tekscie nie wysadzaly API (blad 400)
+            payload = {"chat_id": chat_id, "text": message}
             resp = requests.post(url, json=payload, timeout=10)
+            if resp.status_code != 200:
+                print(f"Telegram HTTP {resp.status_code}: {resp.text[:300]}", flush=True)
             return resp.status_code == 200
         except Exception:
             return False
@@ -2361,7 +2364,16 @@ def service_http(label,url,key=None,payload=None,uncertain=False):
         if label=='Telegram' and response.status_code==429:
             try:wait=response.json().get('parameters',{}).get('retry_after',wait)
             except (ValueError,AttributeError):pass
-        raise ServiceError(label+' HTTP '+str(response.status_code),
+        _detail=''
+        if label=='Telegram':
+            try:
+                _rjson=response.json()
+                _desc=_rjson.get('description') if isinstance(_rjson,dict) else ''
+                if _desc:_detail=': '+str(_desc)[:200]
+            except (ValueError,AttributeError):
+                try:_detail=': '+str(response.text or '')[:200]
+                except Exception:pass
+        raise ServiceError(label+' HTTP '+str(response.status_code)+_detail,
                            retryable=response.status_code==429 or (label!='Telegram' and response.status_code>=500),
                            uncertain=label=='Telegram' and response.status_code>=500,retry_after=wait)
     try:body=response.json()
@@ -2847,7 +2859,7 @@ def event_analysis_request(evidence,context):
     snap=evidence['snapshot']
     # Research stays untrusted user data, never system instructions.
     instructions=('Analizujesz wyłącznie już udowodniony ruch instrumentu. Pisz konkretnie po polsku. '
-        'Rozdziel detekcję potwierdzonego ruchu, jakość ruchu (aktywność i technika) oraz ryzyko płynności, spreadu i wykonania transakcji. '
+        'Rozdziel detekcję potwierdzonego ruchu, jakość ruchu (aktywność i technika) oraz ryzyko płynności, spreadu i wykonania transakcji. ''ANALIZA BID/ASK: masz w snapshot.spread aktualne bid/ask/spread_pct, a w snapshot.spread_history oraz spread_avg_pct, spread_max_pct, spread_min_pct, spread_samples historię. Porównaj aktualny spread_pct z spread_avg_pct i użyj spread_vs_avg (wyzszy/nizszy/podobny). Jesli spread_above_threshold=true, wskaz konkretne ryzyko wykonania powyzej progu spread_threshold_pct. freshness_confirmed=false to oczekiwane ograniczenie Yahoo - NIE traktuj tego jako braku danych. Zamiast tego opisz wartosc spread_pct, bid, ask i porownanie z historia. '
         'Wysoka punktacja lub sam wzrost ceny nie dowodzą wykonalności transakcji; brak RVOL lub bid/ask to brak danych, nie dowód braku ruchu. '
         'Nie przypisuj przyczyny ruchu bez dosłownego źródła emitenta; przy braku źródeł uznaj przyczynę za nieustaloną. '
         'Nie skanuj rynku, nie oceniaj atrakcyjności newsów, nie wydawaj BUY/SELL ani poleceń transakcji. '
@@ -2866,8 +2878,34 @@ def event_analysis_request(evidence,context):
         'Nie stwierdzaj przyczynowości. '
         'risks: konkretne ryzyka wynikające z dostarczonych danych. missing: konkretnie czego brakuje. '
         'W hipotezach, ryzykach i brakach nie wpisuj cyfr ani własnych wartości liczbowych. '
-        'Nie dopisuj faktów ani ogólnych porad. Zwróć JSON zgodny ze schematem.')
+        'Nie dopisuj faktów ani ogólnych porad. '
+        'ZASADY: Jesli w snapshot jest pole market_activity, uzyj go do opisu stanu rynku (zamkniety/aktywny). Jesli jest spread_interpretation, uzyj go jako jednego z ryzyk (gotowe zdanie z liczbami). NIE pisz fraz typu brak potwierdzonego czasu bid/ask ani liczba przeniesionych przedzialow - te informacje sa juz podsumowane w market_activity i spread_interpretation. Zwróć JSON zgodny ze schematem.')
     market={k:v for k,v in snap.items() if k not in ('chart_history','carried_price_candles','empty_trailing_source_candles')}
+    # Usun diagnostyczne pola spreadu (GPT interpretuje je jako braki danych).
+    if isinstance(market.get('spread'),dict):
+        _sp=dict(market['spread'])
+        _sp.pop('freshness_confirmed',None)
+        _sp.pop('note',None)
+        market['spread']=_sp
+    # Podsumowanie aktywnosci rynku.
+    _cpc=snap.get('carried_price_candles')
+    _cpc_cnt=len(_cpc) if isinstance(_cpc,list) else 0
+    if _cpc_cnt>0:
+        market['market_activity']='{} kolejnych odczytow z ta sama cena - rynek prawdopodobnie zamkniety (normalne dla weekendu lub przerwy w handlu).'.format(_cpc_cnt)
+    else:
+        market['market_activity']='Ceny zmieniaja sie w kazdym odczycie - rynek aktywny.'
+    # Gotowe podsumowanie spreadu z historia.
+    if isinstance(market.get('spread_history'),list) and market.get('spread_avg_pct') is not None:
+        _cur=(market.get('spread') or {}).get('spread_pct')
+        if finite_number(_cur):
+            _avg=market['spread_avg_pct']
+            _samples=market.get('spread_samples',0)
+            _th=market.get('spread_threshold_pct')
+            _interp='Aktualny spread {:.2f}% vs srednia {:.2f}% ({} probek)'.format(_cur,_avg,_samples)
+            if finite_number(_th):
+                if _cur>_th:_interp+=' - POWYZEJ progu ryzyka {:.2f}%.'.format(_th)
+                else:_interp+=' - ponizej progu ryzyka {:.2f}%.'.format(_th)
+            market['spread_interpretation']=_interp
     # Keep complete, duplicate snapshots in persisted event/ranking for audit and
     # UI.  Only the GPT request excludes the redundant nested snapshot and bulk
     # histories: ranking still carries score, parts, quality and risk.
@@ -4058,6 +4096,53 @@ def process_analysis_once(store,keys,event_id=None):
             save_analysis_context(store,job['event_id'],context)
         else:
             _engine=store.load_section('settings',{}).get('analysis_engine','openai')
+            try:
+                _snap = evidence.get('snapshot') or {}
+                _ticker = _snap.get('ticker')
+                _interval = _snap.get('interval') or '1h'
+                _acq = _snap.get('acquired_at')
+                if _ticker and _acq:
+                    with store.connection() as _c:
+                        _rows = _c.execute(
+                            "SELECT payload, acquired_at FROM observations "
+                            "WHERE ticker=? AND interval=? AND acquired_at < ? "
+                            "ORDER BY acquired_at DESC LIMIT 10",
+                            (_ticker, _interval, _acq)).fetchall()
+                    _spread_history = []
+                    for _r in _rows:
+                        try:
+                            _p = json.loads(_r[0])
+                            _sp = _p.get('spread') or {}
+                            if isinstance(_sp, dict) and finite_number(_sp.get('spread_pct')):
+                                _spread_history.append({
+                                    'acquired_at': _r[1],
+                                    'spread_pct': _sp['spread_pct'],
+                                    'bid': _sp.get('bid'),
+                                    'ask': _sp.get('ask'),
+                                })
+                        except Exception:
+                            pass
+                    if _spread_history:
+                        _vals = [x['spread_pct'] for x in _spread_history]
+                        _snap['spread_history'] = _spread_history
+                        _snap['spread_avg_pct'] = round(sum(_vals)/len(_vals), 4)
+                        _snap['spread_max_pct'] = round(max(_vals), 4)
+                        _snap['spread_min_pct'] = round(min(_vals), 4)
+                        _snap['spread_samples'] = len(_vals)
+                        _cur_sp = (_snap.get('spread') or {}).get('spread_pct')
+                        if finite_number(_cur_sp):
+                            _avg = _snap['spread_avg_pct']
+                            _snap['spread_vs_avg'] = 'wyzszy' if _cur_sp > _avg else ('nizszy' if _cur_sp < _avg else 'podobny')
+                    _th = store.load_section('settings',{}).get('spread_risk_pct', 2.0)
+                    try:_th = float(_th)
+                    except (TypeError,ValueError):_th = 2.0
+                    _snap['spread_threshold_pct'] = _th
+                    _cur_sp = (_snap.get('spread') or {}).get('spread_pct')
+                    if finite_number(_cur_sp):
+                        _snap['spread_above_threshold'] = bool(_cur_sp > _th)
+                    evidence['snapshot'] = _snap
+            except Exception:
+                pass
             result,metadata=analyze_event(evidence,json.loads(job['context']),keys,engine=_engine)
             finish_analysis(store,job['event_id'],result,metadata)
     except ServiceError as exc:fail_analysis(store,job['event_id'],exc)
@@ -4149,7 +4234,7 @@ def process_delivery_once(store,keys,outbox_id=None):
                 c.execute("UPDATE outbox SET status='PENDING',attempts=attempts-1 WHERE id=? AND status='SENDING' AND attempts>0",(item['id'],))
             return False
         body=service_http('Telegram','https://api.telegram.org/bot'+token+'/sendMessage',payload={
-            'chat_id':destination,'text':item['message'],'link_preview_options':{'is_disabled':True}},uncertain=True)
+            'chat_id':destination,'text':item['message'],'disable_web_page_preview':True},uncertain=True)
         receipt=telegram_receipt(body,destination);now=utc_now()
         with store.transaction() as c:
             c.execute("UPDATE outbox SET status='DELIVERED',delivered_at=?,last_error=NULL,next_attempt_at=NULL WHERE id=?",(now,item['id']))
@@ -4908,10 +4993,30 @@ def render_manual_analysis(store):
             st.info('Wybierz spółkę i zdarzenie do ręcznej analizy.');render_service_panel(store,manual=True);return
         event=by_id[selected];st.text(evidence_message(selected,json.loads(event['payload'])))
         enabled=event['state'] is None or event['state'] in ('PENDING_CONTEXT','PENDING_AI')
+        fetch_spread=st.checkbox('Pobierz świeże bid/ask (Yahoo) przed analizą',value=False,key='manual_fetch_spread')
         if st.button('Analizuj potwierdzony ruch — Tavily + AI',disabled=not enabled):
             try:
                 keys=load_service_keys()
                 if not keys['TAVILY_API_KEY'] or not keys['OPENAI_API_KEY']:raise ValueError('Brak klucza Tavily lub OpenAI w secrets.toml.')
+                if fetch_spread:
+                    with st.spinner('Pobieram bid/ask z Yahoo…'):
+                        _ev_obj=json.loads(event['payload']) if event.get('payload') else {}
+                        _ticker=((_ev_obj.get('snapshot') or {}).get('ticker')) or event.get('ticker') or ''
+                        _quote=fetch_opportunity_spread(_ticker) if _ticker else {'error':'brak tickera w zdarzeniu'}
+                        if _quote and not _quote.get('error'):
+                            with store.transaction() as _c:
+                                _row=_c.execute('SELECT payload FROM events WHERE id=?',(selected,)).fetchone()
+                                if _row:
+                                    _ev=json.loads(_row[0])
+                                    if isinstance(_ev,dict) and isinstance(_ev.get('snapshot'),dict):
+                                        _ev['snapshot']['spread']=dict(_quote)
+                                        _ev['snapshot']['spread_acquired_at']=utc_now()
+                                        _c.execute('UPDATE events SET payload=? WHERE id=?',(json_text(_ev),selected))
+                            _sp=_quote.get('spread_pct')
+                            if finite_number(_sp):st.success('Pobrano świeże bid/ask (spread: '+format(_sp,'.2f').replace('.',',')+'%)')
+                            else:st.success('Pobrano świeże bid/ask')
+                        else:
+                            st.warning('Nie udało się pobrać bid/ask: '+str((_quote or {}).get('error') or 'brak odpowiedzi'))
                 with ScannerLock(str(store.path)+'.analysis'):
                     queue_manual_analysis(store,selected)
                     with st.spinner('Ręczna analiza: Tavily → GPT…'):
