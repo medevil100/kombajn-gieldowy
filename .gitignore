@@ -56,3 +56,20 @@ deep_worker.log
 
 # Wyjatek: _ai_review.py to narzedzie produkcyjne, nie diagnostyka
 !_ai_review.py
+
+# Lokalne kopie i wyniki napraw z 24.10.2026 (bez danych w repozytorium)
+KI.bak.*
+backup_20261024_*/
+integration_test_20261024/
+*_20261024.json
+RAPORT_*_20261024.md
+TAVILY_AB_DIAGNOZA_20261024.md
+repair_code_audit.json
+repair_database_migration.json
+repair_rollback_compatibility.json
+yahoo_repair_summary.json
+yahoo_restart_verification.json
+service_status_helpers.txt
+tavily_search_helpers.txt
+compare_tavily_calls_20261024.py
+run_ki_integration_probe_20261024.py

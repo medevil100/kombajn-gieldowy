@@ -14,11 +14,14 @@ class E04Tests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.store = KI.Store(Path(self.temp.name) / 'e04.sqlite3')
-        self.now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        self.now = datetime(2026,10,9,14,30,tzinfo=timezone.utc).replace(second=0, microsecond=0)
         # Existing legacy confirmation fixture; the production matrix is exercised
         # separately by test_e_integracja_contract.py and test_price_matrix.py.
         self.tickers = [f'XYZ{i}' for i in range(7)]
         self.store.save_section('tickers', self.tickers)
+        for ticker in self.tickers:
+            KI._save_daily_history(self.store,ticker,[{'session_date':'2026-10-08','status':'CLOSED',
+                'open':100.,'high':100.,'low':100.,'close':100.,'volume':1000}],self.now)
 
     def qualified(self, ticker, cycle):
         s = KI.opportunity_test_snapshot(self.now, ticker=ticker)
@@ -96,7 +99,7 @@ class E04Tests(unittest.TestCase):
 
 
     def test_07_real_matrix_three_read_confirmations_all_eligible(self):
-        base = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
+        base = datetime(2026, 10, 9, 14, 0, tzinfo=timezone.utc)
         cfg = {'price_matrix_enabled': True, 'auto_scan_interval': 15,
                'price_threshold_pct': 2.0}
         confirmed = []

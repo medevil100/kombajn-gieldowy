@@ -30,7 +30,7 @@ import uuid
 from datetime import datetime, timezone
 
 STAGE = 3
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_DB = Path(__file__).resolve().with_name('KI.matrix.sqlite3')
 _STORE = None
 
@@ -68,6 +68,14 @@ CREATE INDEX IF NOT EXISTS observation_lookup ON observations(ticker,interval,ac
 CREATE TABLE IF NOT EXISTS baselines(
  ticker TEXT NOT NULL, interval TEXT NOT NULL, payload TEXT NOT NULL,
  updated_at TEXT NOT NULL, PRIMARY KEY(ticker,interval));
+CREATE TABLE IF NOT EXISTS daily_candles(
+ ticker TEXT NOT NULL, session_date TEXT NOT NULL,
+ open REAL NOT NULL CHECK(open>0), high REAL NOT NULL CHECK(high>0),
+ low REAL NOT NULL CHECK(low>0), close REAL NOT NULL CHECK(close>0),
+ volume REAL NOT NULL CHECK(volume>=0), closed_at TEXT NOT NULL,
+ source TEXT NOT NULL, metadata TEXT NOT NULL,
+ PRIMARY KEY(ticker,session_date),
+ CHECK(low<=open AND low<=close AND high>=open AND high>=close AND low<=high));
 CREATE TABLE IF NOT EXISTS price_matrix(
  ticker TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS events(
@@ -125,6 +133,14 @@ CREATE TABLE IF NOT EXISTS gpt_chat_turns(
  id TEXT PRIMARY KEY, question TEXT NOT NULL, context TEXT NOT NULL,
  answer TEXT, state TEXT NOT NULL, metadata TEXT, error TEXT,
  created_at TEXT NOT NULL, finished_at TEXT);
+CREATE TABLE IF NOT EXISTS alert_decisions(
+ id INTEGER PRIMARY KEY AUTOINCREMENT, seq TEXT NOT NULL, ts TEXT NOT NULL,
+ stage TEXT NOT NULL, should_alert INTEGER NOT NULL, reason TEXT NOT NULL,
+ payload_json TEXT);
+CREATE INDEX IF NOT EXISTS idx_alert_decisions_seq ON alert_decisions(seq);
+CREATE INDEX IF NOT EXISTS idx_alert_decisions_ts ON alert_decisions(ts);
+CREATE TABLE IF NOT EXISTS historical_baseline(
+ ticker TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL);
 """
 
 
@@ -138,10 +154,12 @@ class Store:
             exists = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").fetchone()
             if exists:
                 row = c.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
-                if row and int(row[0]) != SCHEMA_VERSION:
+                if row and int(row[0]) not in (1, SCHEMA_VERSION):
                     raise ValueError('Nieobsługiwana wersja bazy; nie zmieniono schematu.')
             c.executescript(SCHEMA)
             c.execute("INSERT OR IGNORE INTO metadata VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
+            c.execute("UPDATE metadata SET value=? WHERE key='schema_version' AND value<>?", (str(SCHEMA_VERSION), str(SCHEMA_VERSION)))
+            alert_decisions_ensure(c)
 
     @contextmanager
     def connection(self):
@@ -193,8 +211,11 @@ class Store:
                   (section, payload, utc_now()))
         # Stage-one adapters preserve all legacy fields while preparing typed data.
         if section == 'settings':
-            c.execute('DELETE FROM settings')
-            c.executemany('INSERT INTO settings VALUES(?,?)', [(k, json_text(v)) for k,v in data.items()])
+            managed_keys = list(data.keys())
+            if managed_keys:
+                placeholders = ','.join('?' * len(managed_keys))
+                c.execute(f'DELETE FROM settings WHERE key IN ({placeholders})', managed_keys)
+            c.executemany('INSERT OR REPLACE INTO settings VALUES(?,?)', [(k, json_text(v)) for k,v in data.items()])
         elif section == 'tickers':
             c.execute('DELETE FROM watchlist')
             c.executemany('INSERT INTO watchlist VALUES(?,?)', [(t,i) for i,t in enumerate(data)])
@@ -492,1394 +513,112 @@ def scanner_diagnostic_main(db, diagnostic=False, cycles=None):
     return 0
 
 
-def _load_state():
-    return _STORE.load_state()
-
-
-def _load_user_tickers():
-    return _STORE.load_section('tickers',[])
-
-
-def _save_user_tickers(data):
-    _STORE.save_section('tickers',data)
-
-
-def _load_last_scan():
-    return _STORE.load_section('last_scan',{})
-
-
-def _save_last_scan(data):
-    warnings,errors = [],[]
-    clean = normalize_legacy(data,warnings,errors,'state.last_scan')
-    if errors:
-        raise ValueError('; '.join(errors))
-    _STORE.save_section('last_scan',clean)
-
-
-def _load_settings():
-    return _STORE.load_section('settings',{})
-
-
-def _save_settings(data):
-    _STORE.update_settings(data)
-
-
-def _load_alerts():
-    return _STORE.load_section('alerts',{})
-
-
-def _save_alerts(data):
-    _STORE.save_section('alerts',data)
-
-
-def _load_backtest_results():
-    return _STORE.load_section('backtest',{})
-
-
-def _save_backtest_results(data):
-    _STORE.save_section('backtest',data)
-
-
-def _load_portfolio():
-    return _STORE.load_section('portfolio',[])
-
-
-def _save_portfolio(data):
-    _STORE.save_section('portfolio',data)
-
-def _has_changed(ticker: str, price_now: float, rvol_now: float) -> bool:
-    """Sprawdza czy cena zmieniła się >1% lub wolumen >2% od ostatniego skanu."""
-    last_scan = _load_last_scan()
-    old = last_scan.get(ticker, {})
-    old_price = old.get("price", None)
-    old_vol = old.get("rvol", None)
-    price_changed = old_price is None or (
-        old_price != 0 and abs(price_now - old_price) / max(abs(old_price), 0.0001) > 0.01
-    )
-    vol_changed = old_vol is None or (
-        old_vol != 0 and abs(rvol_now - old_vol) / max(abs(rvol_now), 0.0001) > 0.02
-    )
-    return price_changed or vol_changed
-
-
-def run_legacy_streamlit(db):
-    global _STORE
-    try:
-        import re
-        import requests
-        import numpy as np
-        import pandas as pd
-        import yfinance as yf
-        import plotly.graph_objects as go
-        import streamlit as st
-        from streamlit_autorefresh import st_autorefresh
-    except ImportError as exc:
-        raise ValueError("Brak zależności interfejsu: " + str(exc) + ". SQLite i --self-test działają bez tych pakietów.") from exc
-    _STORE = Store(db)
-    # ------------------ KONFIGURACJA ------------------
-    st.set_page_config(page_title="CYBER DESK PRO", page_icon="💠", layout="wide")
-    st.warning("ETAP 1 — wersja robocza. SQLite i diagnostyka procesów; moduły rynku są wyłączone do kolejnych etapów naprawy.")
-    st.caption(f"Baza robocza: {_STORE.path}")
-
-    st.markdown(
-        """
-        <style>
-        body, .stApp { background-color: #050816; color: #E0E0FF; }
-        .stSidebar, section[data-testid="stSidebar"] { background: radial-gradient(circle at top, #111827 0, #020617 60%); color: #E0E0FF; }
-        .stButton>button { background: linear-gradient(90deg, #0ea5e9, #6366f1); color: white; border-radius: 8px; border: none; }
-        .stButton>button:hover { background: linear-gradient(90deg, #22c55e, #6366f1); color: #e5e7eb; }
-        .stTextInput>div>div>input { background-color: #020617; color: #e5e7eb; }
-        .stSelectbox>div>div>div { background-color: #020617; color: #e5e7eb; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    with st.sidebar:
-        st.markdown("### 💠 CYBER DESK PRO")
-        st.caption("Czat + Trading + Skaner · GPT-4o mini + Tavily + yfinance")
-        _saved_settings = _load_settings()
-        _saved_tickers = _load_user_tickers()
-
-        mode = st.radio(
-            "Tryb pracy:",
-            [
-                "🏠 Dashboard portfela",
-                "🤖 Czat AI (internet + trading)",
-                "📈 Kombajn tradingowy",
-                "🧪 Skaner spółek (wpisz własne tickery)",
-                "🔔 Alerty cenowe",
-                "📊 Backtesting sygnałów",
-            ],
-        )
-        st.divider()
-        tg_enabled = st.checkbox("📲 Telegram – wysyłaj wyniki",
-                                 value=_saved_settings.get("telegram", True),
-                                 help="Wysyła sygnały BUY/SELL, skany i odpowiedzi AI na Telegram")
-        st.caption("Token i chat ID z secrets.toml")
-        st.session_state["telegram_enabled"] = tg_enabled
-        if tg_enabled != _saved_settings.get("telegram", True):
-            _save_settings({"telegram": tg_enabled})
-
-        st.divider()
-        st.markdown("⏰ **Auto-skaner**")
-        _auto_interval_options = [0, 15, 30, 60]
-        _saved_auto_val = _saved_settings.get("auto_scan_interval", 0)
-        _auto_index = _auto_interval_options.index(_saved_auto_val) if _saved_auto_val in _auto_interval_options else 0
-        auto_interval = st.selectbox(
-            "Skanuj co:",
-            options=_auto_interval_options,
-            format_func=lambda x: "Wyłączony" if x == 0 else f"Co {x} min",
-            index=_auto_index,
-            key="auto_interval"
-        )
-        st.caption("Etap 1: zapis ustawienia. Diagnostyka nie pobiera danych rynku.")
-        st.session_state["auto_scan_interval"] = 0  # Etap 1: brak skanowania w UI
-        if auto_interval != _saved_settings.get("auto_scan_interval", 0):
-            _save_settings({"auto_scan_interval": auto_interval})
-
-    # ------------------ FUNKCJE POMOCNICZE ------------------
-    def detect_ticker_from_text(text: str):
-        pattern = r"\b[A-Z0-9]{2,5}\.[A-Z]{2,3}\b|\b[A-Z]{1,5}\b"
-        matches = re.findall(pattern, text)
-        stop_words = {'I', 'A', 'THE', 'TO', 'FOR', 'OF', 'WITH', 'ON', 'AT', 'BY', 'IN', 'IS', 'IT', 'AS', 'OR', 'AND', 'BUT'}
-        for m in matches:
-            if m not in stop_words and len(m) >= 2:
-                return m
-        return None
-
-    def to_scalar(x):
-        if isinstance(x, (pd.Series, np.ndarray, list)):
-            if len(x) == 0:
-                return np.nan
-            try:
-                return float(np.asarray(x).ravel()[-1])
-            except Exception:
-                return np.nan
-        try:
-            return float(x)
-        except Exception:
-            return np.nan
-
-    def fmt_price(price: float) -> str:
-        """Formatuje cenę – dla groszówek więcej miejsc po przecinku."""
-        if np.isnan(price) or price == 0:
-            return "Brak"
-        if price < 0.01:
-            return f"{price:.6f}"
-        elif price < 1:
-            return f"{price:.4f}"
-        elif price < 10:
-            return f"{price:.3f}"
-        else:
-            return f"{price:.2f}"
-
-    def fmt_price_short(price: float) -> str:
-        """Krótki format ceny dla metryk."""
-        if np.isnan(price) or price == 0:
-            return "Brak"
-        if price < 0.01:
-            return f"{price:.4f}"
-        elif price < 1:
-            return f"{price:.3f}"
-        else:
-            return f"{price:.2f}"
-
-    # ------------------ TELEGRAM ------------------
-    def send_telegram(message: str, parse_mode: str = "HTML"):
-        """Wysyła wiadomość przez Telegram Bot API.
-           Token i chat ID czyta z st.secrets – nie hardcoduje."""
-        try:
-            token = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
-            chat_id = st.secrets.get("TELEGRAM_CHAT_ID", "")
-            if not token or not chat_id:
-                return False
-            url = f"https://api.telegram.org/bot{token}/sendMessage"
-            # Wylaczamy HTML, zeby znaki < > & w tekscie nie wysadzaly API (blad 400)
-            payload = {"chat_id": chat_id, "text": message}
-            resp = requests.post(url, json=payload, timeout=10)
-            if resp.status_code != 200:
-                print(f"Telegram HTTP {resp.status_code}: {resp.text[:300]}", flush=True)
-            return resp.status_code == 200
-        except Exception:
-            return False
-
-    # ------------------ WSKAŹNIKI TECHNICZNE ------------------
-    def compute_indicators(close, volume):
-        close = close.copy()
-        volume = volume.copy()
-        if len(close) < 30:
-            return {"rsi": np.nan, "ma_fast": np.nan, "ma_slow": np.nan,
-                    "upper_bb": pd.Series([np.nan]), "lower_bb": pd.Series([np.nan]),
-                    "last_upper_bb": np.nan, "last_lower_bb": np.nan,
-                    "macd": pd.Series([np.nan]), "macd_signal": pd.Series([np.nan]),
-                    "macd_hist": pd.Series([np.nan]),
-                    "last_macd": np.nan, "last_macd_signal": np.nan, "last_macd_hist": np.nan,
-                    "vol": np.nan, "volume": np.nan,
-                    "sl": np.nan, "tp": np.nan,
-                    "trend": "Unknown", "atr": np.nan, "adx": np.nan,
-                    "obv": np.nan, "vwap": np.nan, "roc": np.nan,
-                    "stoch_k": np.nan, "stoch_d": np.nan, "rvol": np.nan}
-
-        # RSI
-        delta = close.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / (loss + 1e-9)
-        rsi_series = 100 - (100 / (1 + rs)).dropna()
-        last_rsi = to_scalar(rsi_series.iloc[-1]) if not rsi_series.empty else np.nan
-
-        # MA
-        ma_fast = close.rolling(10).mean()
-        ma_slow = close.rolling(30).mean()
-        last_ma_fast = to_scalar(ma_fast.iloc[-1]) if not ma_fast.dropna().empty else np.nan
-        last_ma_slow = to_scalar(ma_slow.iloc[-1]) if not ma_slow.dropna().empty else np.nan
-
-        # BB
-        ma_bb = close.rolling(20).mean()
-        std_bb = close.rolling(20).std()
-        upper_bb = ma_bb + 2 * std_bb
-        lower_bb = ma_bb - 2 * std_bb
-        last_upper_bb = to_scalar(upper_bb.iloc[-1]) if not upper_bb.dropna().empty else np.nan
-        last_lower_bb = to_scalar(lower_bb.iloc[-1]) if not lower_bb.dropna().empty else np.nan
-
-        # MACD
-        ema12 = close.ewm(span=12, adjust=False).mean()
-        ema26 = close.ewm(span=26, adjust=False).mean()
-        macd_series = ema12 - ema26
-        macd_signal_series = macd_series.ewm(span=9, adjust=False).mean()
-        macd_hist_series = macd_series - macd_signal_series
-        last_macd = to_scalar(macd_series.iloc[-1]) if not macd_series.empty else np.nan
-        last_macd_signal = to_scalar(macd_signal_series.iloc[-1]) if not macd_signal_series.empty else np.nan
-        last_macd_hist = to_scalar(macd_hist_series.iloc[-1]) if not macd_hist_series.empty else np.nan
-
-        # Volatility
-        vol_series = close.pct_change().rolling(20).std().dropna()
-        last_vol = to_scalar(vol_series.iloc[-1]) if not vol_series.empty else np.nan
-
-        # Volume
-        last_volume = to_scalar(volume.iloc[-1]) if not volume.empty else np.nan
-
-        # ATR
-        high = close.rolling(1).max()
-        low = close.rolling(1).min()
-        tr = pd.concat([(high - low).abs(),
-                        (high - close.shift(1)).abs(),
-                        (low - close.shift(1)).abs()], axis=1).max(axis=1)
-        atr_series = tr.rolling(14).mean()
-        last_atr = to_scalar(atr_series.iloc[-1]) if not atr_series.dropna().empty else np.nan
-
-        # ADX (uproszczony)
-        try:
-            plus_dm = high.diff().where((high.diff() > -low.diff()) & (high.diff() > 0), 0.0)
-            minus_dm = (-low.diff()).where((-low.diff() > high.diff()) & (-low.diff() > 0), 0.0)
-            atr_adx = tr.rolling(14).mean()
-            plus_di = 100 * (plus_dm.rolling(14).mean() / (atr_adx + 1e-9))
-            minus_di = 100 * (minus_dm.rolling(14).mean() / (atr_adx + 1e-9))
-            dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)) * 100
-            adx_series = dx.rolling(14).mean()
-            last_adx = to_scalar(adx_series.iloc[-1]) if not adx_series.dropna().empty else np.nan
-        except:
-            last_adx = np.nan
-
-        # OBV
-        try:
-            obv = volume.where(close == close.shift(1), np.where(close > close.shift(1), volume, -volume)).cumsum()
-            last_obv = to_scalar(obv.iloc[-1]) if not obv.empty else np.nan
-        except:
-            last_obv = np.nan
-
-        # VWAP
-        try:
-            vwap_series = (close * volume).rolling(20).sum() / (volume.rolling(20).sum() + 1e-9)
-            last_vwap = to_scalar(vwap_series.iloc[-1]) if not vwap_series.dropna().empty else np.nan
-        except:
-            last_vwap = np.nan
-
-        # ROC
-        try:
-            roc_series = close.pct_change(10) * 100
-            last_roc = to_scalar(roc_series.iloc[-1]) if not roc_series.dropna().empty else np.nan
-        except:
-            last_roc = np.nan
-
-        # Stochastic
-        try:
-            low14 = close.rolling(14).min()
-            high14 = close.rolling(14).max()
-            stoch_k = (close - low14) / (high14 - low14 + 1e-9) * 100
-            stoch_d = stoch_k.rolling(3).mean()
-            last_stoch_k = to_scalar(stoch_k.iloc[-1]) if not stoch_k.dropna().empty else np.nan
-            last_stoch_d = to_scalar(stoch_d.iloc[-1]) if not stoch_d.dropna().empty else np.nan
-        except:
-            last_stoch_k = np.nan
-            last_stoch_d = np.nan
-
-        # RVOL
-        try:
-            avg_vol_20 = volume.rolling(20).mean()
-            rvol_series = volume / (avg_vol_20 + 1e-9)
-            last_rvol = to_scalar(rvol_series.iloc[-1]) if not rvol_series.dropna().empty else np.nan
-        except:
-            last_rvol = np.nan
-
-        # SL/TP
-        sl_level = last_lower_bb if not np.isnan(last_lower_bb) else np.nan
-        tp_level = last_upper_bb if not np.isnan(last_upper_bb) else np.nan
-
-        # Trend
-        if not np.isnan(last_ma_fast) and not np.isnan(last_ma_slow):
-            if last_ma_fast > last_ma_slow * 1.01:
-                trend = "Uptrend"
-            elif last_ma_fast < last_ma_slow * 0.99:
-                trend = "Downtrend"
-            else:
-                trend = "Sideways"
-        else:
-            trend = "Unknown"
-
-        return {
-            "rsi": last_rsi, "ma_fast": last_ma_fast, "ma_slow": last_ma_slow,
-            "upper_bb": upper_bb, "lower_bb": lower_bb,
-            "last_upper_bb": last_upper_bb, "last_lower_bb": last_lower_bb,
-            "macd": macd_series, "macd_signal": macd_signal_series, "macd_hist": macd_hist_series,
-            "last_macd": last_macd, "last_macd_signal": last_macd_signal, "last_macd_hist": last_macd_hist,
-            "vol": last_vol, "volume": last_volume,
-            "sl": sl_level, "tp": tp_level,
-            "trend": trend,
-            "atr": last_atr, "adx": last_adx,
-            "obv": last_obv, "vwap": last_vwap, "roc": last_roc,
-            "stoch_k": last_stoch_k, "stoch_d": last_stoch_d, "rvol": last_rvol,
-        }
-
-    def compute_scoring_pro(ind, sentiment=None):
-        score = 0
-        if ind["trend"] == "Uptrend": score += 20
-        elif ind["trend"] == "Sideways": score += 10
-
-        adx = ind.get("adx", np.nan)
-        if not np.isnan(adx):
-            if adx > 40: score += 20
-            elif adx > 25: score += 15
-            elif adx > 20: score += 10
-
-        rsi = ind.get("rsi", np.nan)
-        if not np.isnan(rsi):
-            if 30 <= rsi <= 50: score += 15
-            elif rsi < 30: score += 10
-            elif 50 < rsi <= 70: score += 5
-
-        k, d = ind.get("stoch_k", np.nan), ind.get("stoch_d", np.nan)
-        if not np.isnan(k) and not np.isnan(d):
-            if k < 20 and d < 20: score += 10
-            elif k > 80 and d > 80: score += 0
-            else: score += 5
-
-        rvol = ind.get("rvol", np.nan)
-        if not np.isnan(rvol):
-            if rvol > 1.5: score += 15
-            elif rvol > 1.0: score += 10
-            elif rvol > 0.7: score += 5
-
-        if not np.isnan(ind.get("last_macd", np.nan)) and not np.isnan(ind.get("last_macd_signal", np.nan)):
-            if ind["last_macd"] > ind["last_macd_signal"]: score += 10
-
-        if not np.isnan(ind.get("last_lower_bb", np.nan)): score += 5
-        if not np.isnan(ind.get("last_upper_bb", np.nan)): score += 5
-
-        if not np.isnan(ind.get("atr", np.nan)): score += 5
-
-        if sentiment == "Bullish": score += 10
-        elif sentiment == "Bearish": score -= 10
-
-        return max(0, min(score, 100))
-
-    def generate_signal(price, ind):
-        rsi, ma_fast, ma_slow, trend = ind["rsi"], ind["ma_fast"], ind["ma_slow"], ind["trend"]
-        adx, rvol, stoch_k, stoch_d = ind.get("adx", np.nan), ind.get("rvol", np.nan), ind.get("stoch_k", np.nan), ind.get("stoch_d", np.nan)
-        sl, tp = ind["sl"], ind["tp"]
-
-        if any(np.isnan(x) for x in [rsi, ma_fast, ma_slow]):
-            return "HOLD", "Za mało danych."
-
-        reasons = []
-        signal = "HOLD"
-
-        if trend == "Uptrend": reasons.append("📈 Trend wzrostowy (MA10 > MA30)")
-        elif trend == "Downtrend": reasons.append("📉 Trend spadkowy (MA10 < MA30)")
-        else: reasons.append("➡️ Trend boczny")
-
-        if not np.isnan(adx):
-            if adx < 20: reasons.append(f"🔹 ADX {adx:.1f} → słaby trend")
-            elif adx < 40: reasons.append(f"🔸 ADX {adx:.1f} → umiarkowany")
-            else: reasons.append(f"🔺 ADX {adx:.1f} → silny")
-
-        if rsi < 30: reasons.append(f"📊 RSI {rsi:.1f} → wyprzedanie")
-        elif rsi > 70: reasons.append(f"📊 RSI {rsi:.1f} → wykupienie")
-        else: reasons.append(f"📊 RSI {rsi:.1f} → neutralny")
-
-        if not np.isnan(stoch_k) and not np.isnan(stoch_d):
-            if stoch_k < 20 and stoch_d < 20: reasons.append(f"🔻 Stochastic → wyprzedanie")
-            elif stoch_k > 80 and stoch_d > 80: reasons.append(f"🔺 Stochastic → wykupienie")
-
-        if not np.isnan(rvol):
-            if rvol > 1.5: reasons.append(f"📊 RVOL {rvol:.2f} → wysoki wolumen")
-            elif rvol < 0.7: reasons.append(f"📊 RVOL {rvol:.2f} → niski wolumen")
-
-        if trend == "Uptrend" and rsi < 40:
-            signal = "BUY"
-            reasons.append("✅ Sygnał BUY: trend wzrostowy + RSI < 40")
-        elif trend == "Downtrend" and rsi > 60:
-            signal = "SELL"
-            reasons.append("⛔ Sygnał SELL: trend spadkowy + RSI > 60")
-        elif trend == "Uptrend" and 30 < rsi < 50:
-            signal = "BUY"
-            reasons.append("✅ Sygnał BUY: trend wzrostowy + RSI w strefie akumulacji")
-        elif trend == "Downtrend" and rsi < 30:
-            signal = "BUY"
-            reasons.append("✅ Sygnał BUY: wyprzedanie w trendzie spadkowym")
-        else:
-            signal = "HOLD"
-            reasons.append("⏸️ HOLD: brak jednoznacznego sygnału")
-
-        if not np.isnan(sl): reasons.append(f"🛑 SL: {sl:.2f}")
-        if not np.isnan(tp): reasons.append(f"🎯 TP: {tp:.2f}")
-
-        return signal, "\n".join(f"- {r}" for r in reasons)
-
-    def fetch_news_sentiment(ticker):
-        try:
-            t = yf.Ticker(ticker)
-            news = t.news if hasattr(t, "news") else []
-        except:
-            news = []
-        titles = [n.get("title", "") for n in news if isinstance(n.get("title", ""), str)][:5]
-        if not titles:
-            return "Mixed", [], "Brak newsów."
-        score = 0
-        pos = ["beat","strong","growth","upgrade","profit","record","surge","rally","positive"]
-        neg = ["miss","weak","downgrade","fall","loss","cut","crash","negative","concern"]
-        for title in titles:
-            tl = title.lower()
-            if any(w in tl for w in pos): score += 1
-            if any(w in tl for w in neg): score -= 1
-        sentiment = "Bullish" if score > 0 else "Bearish" if score < 0 else "Mixed"
-        return sentiment, titles, ""
-
-    # ------------------ KLASYFIKACJA TYPÓW RUCHU ------------------
-    def classify_movement(close: pd.Series, price: float, ind: dict) -> tuple:
-        """Rozpoznaje typ ruchu cenowego (breakout, pullback, konsolidacja itd.).
-        Zwraca (etykieta_z_emoją, opis, ranking_wagowy)."""
-        trend = ind.get("trend", "Unknown")
-        adx = ind.get("adx", np.nan)
-        rvol = ind.get("rvol", np.nan)
-        roc = ind.get("roc", np.nan)
-        rsi = ind.get("rsi", np.nan)
-        obv = ind.get("obv", np.nan)
-        last_upper = ind.get("last_upper_bb", np.nan)
-        last_lower = ind.get("last_lower_bb", np.nan)
-        ma_fast = ind.get("ma_fast", np.nan)
-        ma_slow = ind.get("ma_slow", np.nan)
-        vol = ind.get("vol", np.nan)
-
-        has_all = not any(np.isnan(x) for x in [price, ma_fast, ma_slow])
-        candidates = []
-
-        # --- Gwałtowny ruch (Pump / Dump) ---
-        if not np.isnan(roc) and not np.isnan(rvol):
-            if roc > 4 and rvol > 2.0:
-                candidates.append(("⚡ Gwałtowny wzrost (pump)", 40))
-            elif roc < -4 and rvol > 2.0:
-                candidates.append(("⚡ Gwałtowny spadek (dump)", 40))
-
-        # --- Breakout / Breakdown ---
-        if has_all and not np.isnan(last_upper) and not np.isnan(last_lower):
-            if price > last_upper and trend == "Uptrend" and not np.isnan(rvol) and rvol > 1.3:
-                candidates.append(("🚀 Breakout (przebicie górnego BB)", 50))
-            elif price < last_lower and trend == "Downtrend" and not np.isnan(rvol) and rvol > 1.3:
-                candidates.append(("💥 Breakdown (przebicie dolnego BB)", 50))
-
-        # --- Reversal warning (dywergencja RSI) ---
-        if len(close) >= 10 and not np.isnan(rsi):
-            try:
-                delta = close.diff()
-                gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-                rs = gain / (loss + 1e-9)
-                rsi_vals = 100 - (100 / (1 + rs))
-                last5_rsi = rsi_vals.iloc[-5:]
-                last5_price = close.iloc[-5:]
-                if not last5_rsi.dropna().empty and not last5_price.dropna().empty:
-                    if (last5_price.iloc[-1] > last5_price.max() - 1e-9 and
-                        last5_rsi.iloc[-1] < last5_rsi.max() - 1e-9 and
-                        last5_rsi.iloc[-1] < last5_rsi.iloc[0]):
-                        candidates.append(("⚠️ Reversal (dywergencja RSI – niedźwiedzia)", 30))
-                    if (last5_price.iloc[-1] < last5_price.min() + 1e-9 and
-                        last5_rsi.iloc[-1] > last5_rsi.min() + 1e-9 and
-                        last5_rsi.iloc[-1] > last5_rsi.iloc[0]):
-                        candidates.append(("⚠️ Reversal (dywergencja RSI – bycza)", 30))
-            except Exception:
-                pass
-
-        # --- Kontynuacja trendu ---
-        if has_all and not np.isnan(adx) and adx > 22:
-            if trend == "Uptrend" and price > ma_fast:
-                candidates.append(("📈 Kontynuacja wzrostu", 25))
-            elif trend == "Downtrend" and price < ma_fast:
-                candidates.append(("📉 Kontynuacja spadku", 25))
-
-        # --- Pullback ---
-        if has_all and not np.isnan(adx) and adx > 22:
-            if trend == "Uptrend" and ma_slow < price < ma_fast * 1.02:
-                candidates.append(("🔄 Pullback (cofnięcie do MA w trendzie wzrostowym)", 20))
-            elif trend == "Downtrend" and ma_fast * 0.98 < price < ma_slow:
-                candidates.append(("🔄 Pullback (cofnięcie do MA w trendzie spadkowym)", 20))
-
-        # --- Konsolidacja ---
-        if trend == "Sideways" or (not np.isnan(adx) and adx < 18):
-            if not np.isnan(vol) and vol < 0.015:
-                candidates.append(("⏸️ Konsolidacja / brak kierunku", 10))
-
-        # --- Domyślny ---
-        if not has_all:
-            candidates.append(("❓ Nieznany (brak danych)", 0))
-        elif not candidates:
-            if trend == "Uptrend":
-                candidates.append(("📈 Ruch wzrostowy (bez sygnału specjalnego)", 15))
-            elif trend == "Downtrend":
-                candidates.append(("📉 Ruch spadkowy (bez sygnału specjalnego)", 15))
-            else:
-                candidates.append(("➡️ Ruch boczny (bez sygnału specjalnego)", 5))
-
-        candidates.sort(key=lambda x: -x[1])
-        best_label, best_weight = candidates[0]
-        short_desc = best_label.split("(")[0].strip() if "(" in best_label else best_label
-        return best_label, short_desc, best_weight
-
-    # ------------------ DASHBOARD PORFELA ------------------
-    def render_dashboard():
-        st.title("🏠 Dashboard portfela")
-        portfolio = _load_portfolio()
-        last_scan = _load_last_scan()
-        user_tickers = _load_user_tickers()
-
-        # --- Sekcja zarządzania portfelem ---
-        with st.expander("💼 **Mój portfel – dodaj/edytuj akcje**", expanded=True):
-            col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
-            new_ticker = col1.text_input("Ticker", placeholder="np. STX.WA", key="pf_ticker", label_visibility="collapsed")
-            new_shares = col2.number_input("Liczba akcji", min_value=0.0, step=1.0, format="%g", key="pf_shares", label_visibility="collapsed")
-            new_price = col3.number_input("Średnia cena zakupu", min_value=0.0, step=0.01, format="%f", key="pf_price", label_visibility="collapsed")
-            if col4.button("➕ Dodaj", use_container_width=True):
-                if new_ticker and new_shares > 0 and new_price > 0:
-                    t = new_ticker.strip().upper()
-                    found = False
-                    for item in portfolio:
-                        if item["ticker"] == t:
-                            item["shares"] += new_shares
-                            item["avg_price"] = new_price
-                            found = True
-                            break
-                    if not found:
-                        portfolio.append({"ticker": t, "shares": new_shares, "avg_price": new_price})
-                    _save_portfolio(portfolio)
-                    st.rerun()
-
-        # --- Tabela portfela ---
-            if portfolio:
-                st.divider()
-                st.markdown("**📋 Twoje pozycje:**")
-
-                # Nagłówek tabeli
-                st.markdown("""
-                <div style="display:flex; align-items:center; gap:10px; padding:6px 0; font-size:13px; color:#94a3b8; border-bottom:2px solid #334155;">
-                    <div style="flex:3;"><b>Spółka</b></div>
-                    <div style="flex:2;"><b>Akcje</b></div>
-                    <div style="flex:2;"><b>Śr. cena</b></div>
-                    <div style="flex:2;"><b>Kurs</b></div>
-                    <div style="flex:2;"><b>Wartość</b></div>
-                    <div style="flex:2;"><b>Zysk/Strata</b></div>
-                    <div style="flex:1;"></div>
-                </div>
-                """, unsafe_allow_html=True)
-
-                total_value = 0
-                total_cost = 0
-                for item in portfolio[:25]:
-                    t = item["ticker"]; shares = item["shares"]; avg_price = item["avg_price"]
-                    price_live = None; change_pct = 0
-
-                    # Pobierz aktualną cenę z yfinance (próbuj różne okresy)
-                    for period_try in ["1mo", "3mo", "6mo"]:
-                        try:
-                            d = yf.download(t, period=period_try, interval="1d", progress=False)
-                            if not d.empty:
-                                c = d["Close"].iloc[:, 0] if isinstance(d.columns, pd.MultiIndex) else d["Close"]
-                                price_live = to_scalar(c.iloc[-1])
-                                if len(c) > 1:
-                                    change_pct = (price_live - to_scalar(c.iloc[-2])) / (to_scalar(c.iloc[-2]) + 1e-9) * 100
-                                break
-                        except: continue
-
-                    # Fallback: last_scan → avg_price
-                    if price_live is None or np.isnan(price_live):
-                        cached_price = last_scan.get(t, {}).get("price", None)
-                        if cached_price is not None and not np.isnan(cached_price):
-                            price_live = cached_price
-                        else:
-                            price_live = avg_price
-                        change_pct = 0
-
-                    cur_val = price_live * shares
-                    cost_val = avg_price * shares
-                    pnl = cur_val - cost_val
-                    pnl_pct = (pnl / cost_val) * 100 if cost_val > 0 else 0
-                    total_value += cur_val; total_cost += cost_val
-
-                    # Kolory
-                    pnl_color = "#22c55e" if pnl >= 0 else "#ef4444"
-                    pnl_arrow = "📈" if pnl >= 0 else "📉"
-                    change_arrow = ("<span style='color:#22c55e'>▲</span>" if change_pct > 0
-                                   else "<span style='color:#ef4444'>▼</span>" if change_pct < 0
-                                   else "")
-
-                    # HTML dla każdego wiersza
-                    st.markdown(f"""
-                    <div style="display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid #1e293b; font-size:14px;">
-                        <div style="flex:3;"><b>{t}</b></div>
-                        <div style="flex:2;">{int(shares) if shares == int(shares) else f'{shares:.1f}'} szt.</div>
-                        <div style="flex:2;">{fmt_price_short(avg_price)}</div>
-                        <div style="flex:2;">{fmt_price_short(price_live)} {change_arrow}</div>
-                        <div style="flex:2;">{fmt_price_short(cur_val)}</div>
-                        <div style="flex:2;color:{pnl_color};font-weight:bold;">{pnl_arrow} {fmt_price_short(abs(pnl))} ({pnl_pct:+.1f}%)</div>
-                        {"<div style='flex:1;'><span style='cursor:pointer;' onclick=''>🗑️</span></div>"}
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                    # Przycisk usuwania (potrzebuje osobnego wiersza by działał)
-                    if st.button("🗑️ Usuń " + t, key="del_" + t):
-                        portfolio = [p for p in portfolio if p["ticker"] != t]
-                        _save_portfolio(portfolio)
-                        st.rerun()
-
-                st.divider()
-                total_pnl = total_value - total_cost
-                tpc = "#22c55e" if total_pnl >= 0 else "#ef4444"
-                st.markdown(f"""
-                <div style="background:#1e293b; padding:14px; border-radius:10px; border:1px solid #334155;">
-                    <b>💰 Podsumowanie</b><br>
-                    Wartość: <b>{fmt_price_short(total_value)}</b> •
-                    Koszt: <b>{fmt_price_short(total_cost)}</b> •
-                    <span style="color:{tpc};font-size:17px;">{total_pnl:+.2f} ({total_pnl/total_cost*100:+.1f}%)</span>
-                </div>
-                """, unsafe_allow_html=True)
-
-        # --- Obserwowane ---
-        if user_tickers:
-            st.divider()
-            st.markdown("**👀 Obserwowane (" + str(len(user_tickers)) + " spółek):**")
-            from streamlit_autorefresh import st_autorefresh
-            st_autorefresh(interval=60 * 1000, key="dash_refresh")
-            ch = st.columns([2, 1, 1, 1, 1, 1])
-            ch[0].markdown("**Ticker**"); ch[1].markdown("**Cena**"); ch[2].markdown("**Zmiana**"); ch[3].markdown("**Score**"); ch[4].markdown("**Trend**"); ch[5].markdown("**Ruch**")
-            for t in user_tickers:
-                c = last_scan.get(t, {}); pl = None; cp = 0
-                try:
-                    d = yf.download(t, period="1mo", interval="1d", progress=False)
-                    if not d.empty:
-                        cl = d["Close"].iloc[:, 0] if isinstance(d.columns, pd.MultiIndex) else d["Close"]
-                        pl = to_scalar(cl.iloc[-1])
-                        if len(cl) > 1: cp = (pl - to_scalar(cl.iloc[-2])) / (to_scalar(cl.iloc[-2]) + 1e-9) * 100
-                except: pass
-                if pl is None or np.isnan(pl): pl = c.get("price", None); cp = 0
-                ps = fmt_price_short(pl) if pl is not None and not np.isnan(pl) else "?"
-                cs = f"{cp:+.2f}%" if cp != 0 else "0.00%"
-                cc = "#22c55e" if cp > 0 else "#ef4444" if cp < 0 else "#888"
-                sc = c.get("scoring"); tr = c.get("trend", "?"); ru = c.get("ruch", "?")
-                bg = "🟢" if sc is not None and sc >= 70 else "🟡" if sc is not None and sc >= 40 else "🔴"
-                cr = st.columns([2, 1, 1, 1, 1, 1])
-                cr[0].write("**" + bg + " " + t + "**")
-                cr[1].write(ps)
-                cr[2].write(f"<span style='color:{cc}'>{cs}</span>", unsafe_allow_html=True)
-                cr[3].write(f"{sc if sc is not None else '?'}/100")
-                cr[4].write(tr); cr[5].write(ru)
-
-            if last_scan:
-                st.divider()
-                st.markdown("**📋 Podsumowanie dla Telegram:**")
-                tg = [f"<b>🏠 Dashboard – {len(user_tickers)} spółek</b>"]
-                for t in user_tickers:
-                    d = last_scan.get(t, {}); p = d.get("price", "?")
-                    tg.append(f"• {t} – {fmt_price(p) if p != '?' else '?'} | {d.get('scoring','?')}/100 | {d.get('trend','?')} | {d.get('ruch','?')}")
-                st.code("\n".join(tg), language="text")
-        elif not portfolio:
-            st.info("📌 Dodaj spółki do portfela powyżej lub zapisz tickery w skanerze.")
-
-    # ------------------ ANALIZA MULTI-INTERWAŁ ------------------
-    def analyze_multi_tf(ticker: str):
-        """Pobiera dane dla 1d, 1h, 15m i zwraca DataFrame z wskaźnikami."""
-        configs = [
-            ("1d (długi)", "3mo", "1d"),
-            ("1h (średni)", "1mo", "1h"),
-            ("15m (krótki)", "5d", "15m"),
-        ]
-        rows = []
-        for label, period, interval in configs:
-            try:
-                d = yf.download(ticker, period=period, interval=interval, progress=False)
-                if d.empty or len(d) < 30:
-                    rows.append({"Interwał": label, "Okres": period, "Cena": None, "Trend": "Brak danych",
-                                 "RSI": None, "ADX": None, "RVOL": None, "Sygnał": "N/A", "Scoring": None,
-                                 "Ruch": "?"})
-                    continue
-                if isinstance(d.columns, pd.MultiIndex):
-                    close = d["Close"].iloc[:, 0]
-                    volume = d["Volume"].iloc[:, 0]
-                else:
-                    close = d["Close"]
-                    volume = d["Volume"]
-                price = to_scalar(close.iloc[-1])
-                ind = compute_indicators(close, volume)
-                sentiment, _, _ = fetch_news_sentiment(ticker)
-                signal, _ = generate_signal(price, ind)
-                scoring = compute_scoring_pro(ind, sentiment)
-                _, movement_short, _ = classify_movement(close, price, ind)
-                rows.append({
-                    "Interwał": label,
-                    "Okres": period,
-                    "Cena": price,
-                    "Trend": ind["trend"],
-                    "RSI": ind["rsi"],
-                    "ADX": ind["adx"],
-                    "RVOL": ind["rvol"],
-                    "Sygnał": signal,
-                    "Scoring": scoring,
-                    "Ruch": movement_short
-                })
-            except:
-                rows.append({"Interwał": label, "Okres": period, "Cena": None, "Trend": "Błąd",
-                             "RSI": None, "ADX": None, "RVOL": None, "Sygnał": "N/A",
-                             "Scoring": None, "Ruch": "?"})
-        return pd.DataFrame(rows)
-
-    # ------------------ MODUŁ: TRADING ------------------
-    def render_trading():
-        st.title("📈 Kombajn tradingowy – pełny panel")
-        ticker = st.text_input("Ticker (np. AAPL, MSFT, STX.WA):", "",
-                               placeholder="Wpisz ticker, np. STX.WA")
-        col1, col2, col3 = st.columns([2, 2, 1])
-        period = col1.selectbox("Okres:", ["5d", "1mo", "3mo", "6mo", "1y"], index=1)
-        interval = col2.selectbox("Interwał:", ["15m", "30m", "1h", "1d"], index=3)
-        multi_tf = col3.checkbox("🔬 Multi-TF", value=False,
-                                 help="Analiza 1d + 1h + 15m jednocześnie")
-
-        if st.button("Pobierz dane i policz sygnały", use_container_width=True):
-            try:
-                with st.spinner(f"Pobieram dane dla {ticker}..."):
-                    data = yf.download(ticker, period=period, interval=interval, progress=False)
-                    if data.empty:
-                        st.error("Brak danych.")
-                        return
-                    if len(data) < 60:
-                        st.info("Za mało danych, używam 6mo/1d")
-                        data = yf.download(ticker, period="6mo", interval="1d", progress=False)
-                        if data.empty:
-                            st.error("Brak danych.")
-                            return
-
-                    if isinstance(data.columns, pd.MultiIndex):
-                        close = data["Close"].iloc[:, 0]
-                        open_ = data["Open"].iloc[:, 0]
-                        high = data["High"].iloc[:, 0]
-                        low = data["Low"].iloc[:, 0]
-                        volume = data["Volume"].iloc[:, 0]
-                    else:
-                        close, open_, high, low, volume = data["Close"], data["Open"], data["High"], data["Low"], data["Volume"]
-
-                    ind = compute_indicators(close, volume)
-                    price = to_scalar(close.iloc[-1])
-
-                    # Wykres
-                    fig = go.Figure()
-                    fig.add_trace(go.Candlestick(x=data.index, open=open_, high=high, low=low, close=close, name="Świece"))
-                    if not ind["upper_bb"].isna().all():
-                        fig.add_trace(go.Scatter(x=data.index, y=ind["upper_bb"], line=dict(color="rgba(34,197,94,0.5)", width=1), name="BB górna"))
-                        fig.add_trace(go.Scatter(x=data.index, y=ind["lower_bb"], line=dict(color="rgba(239,68,68,0.5)", width=1), name="BB dolna"))
-                    fig.update_layout(height=500, title=f"{ticker} - {period} ({interval})", paper_bgcolor="#020617", plot_bgcolor="#020617", font=dict(color="#E5E7EB"))
-                    st.plotly_chart(fig, use_container_width=True)
-
-                    sentiment, titles, _ = fetch_news_sentiment(ticker)
-                    signal, explanation = generate_signal(price, ind)
-                    scoring = compute_scoring_pro(ind, sentiment)
-                    movement_label, movement_short, movement_weight = classify_movement(close, price, ind)
-
-                    st.subheader("🤖 Analiza")
-                    c1, c2 = st.columns(2)
-                    c1.metric("Cena", fmt_price_short(price))
-                    c1.metric("RSI", f"{ind['rsi']:.1f}" if not np.isnan(ind['rsi']) else "Brak")
-                    c1.metric("Trend", ind['trend'])
-                    c1.metric("Sygnał", signal)
-                    c2.metric("Scoring", f"{scoring}/100")
-                    c2.metric("ADX", f"{ind['adx']:.1f}" if not np.isnan(ind['adx']) else "Brak")
-                    c2.metric("RVOL", f"{ind['rvol']:.2f}" if not np.isnan(ind['rvol']) else "Brak")
-                    c2.metric("Sentyment", sentiment)
-
-                    st.info(f"🧠 **Typ ruchu:** {movement_label} (waga: {movement_weight}/50)")
-
-                    with st.expander("📊 Wszystkie wskaźniki"):
-                        for k, v in ind.items():
-                            if isinstance(v, pd.Series):
-                                continue
-                            try:
-                                if not np.isnan(v):
-                                    val_str = f"{v:.2f}" if isinstance(v, float) else str(v)
-                                    st.write(f"**{k}:** {val_str}")
-                            except TypeError:
-                                st.write(f"**{k}:** {v}")
-
-                    st.markdown("**Uzasadnienie:**")
-                    st.markdown(explanation)
-                    st.subheader("📰 News")
-                    st.write(f"Sentyment: {sentiment}")
-                    for t in titles:
-                        st.write(f"- {t}")
-
-                    st.session_state["last_analysis"] = {
-                        "ticker": ticker, "price": price, "indicators": ind,
-                        "signal": signal, "explanation": explanation,
-                        "sentiment": sentiment, "news_titles": titles,
-                        "scoring": scoring, "period": period, "interval": interval,
-                        "movement_label": movement_label, "movement_short": movement_short
-                    }
-                    st.success("✅ Analiza zapisana.")
-
-                    # --- Analiza multi-interwał ---
-                    if multi_tf:
-                        st.divider()
-                        st.subheader("🔬 Analiza multi-interwał (1d + 1h + 15m)")
-                        with st.spinner("Pobieram dane dla 1d, 1h, 15m..."):
-                            df_multi = analyze_multi_tf(ticker)
-                        if df_multi is not None and not df_multi.empty:
-                            # Tabela
-                            cols_m = st.columns([2, 1, 1, 1, 1, 1, 1, 1, 1])
-                            cols_m[0].markdown("**Interwał**")
-                            cols_m[1].markdown("**Cena**")
-                            cols_m[2].markdown("**Trend**")
-                            cols_m[3].markdown("**RSI**")
-                            cols_m[4].markdown("**ADX**")
-                            cols_m[5].markdown("**RVOL**")
-                            cols_m[6].markdown("**Ruch**")
-                            cols_m[7].markdown("**Sygnał**")
-                            cols_m[8].markdown("**Score**")
-
-                            trends = []
-                            signals = []
-                            for _, r in df_multi.iterrows():
-                                color_row = ""
-                                if r["Sygnał"] == "BUY": color_row = "rgba(34,197,94,0.15)"
-                                elif r["Sygnał"] == "SELL": color_row = "rgba(239,68,68,0.15)"
-                                c = st.columns([2, 1, 1, 1, 1, 1, 1, 1, 1])
-                                c[0].write(f"**{r['Interwał']}**")
-                                c[1].write(fmt_price_short(r["Cena"]) if r["Cena"] is not None and not np.isnan(r["Cena"]) else "?")
-                                tr = r["Trend"]
-                                em = "🟢" if tr == "Uptrend" else ("🔴" if tr == "Downtrend" else "⚪")
-                                c[2].write(f"{em} {tr}")
-                                c[3].write(f"{r['RSI']:.1f}" if r["RSI"] is not None and not np.isnan(r["RSI"]) else "?")
-                                c[4].write(f"{r['ADX']:.1f}" if r["ADX"] is not None and not np.isnan(r["ADX"]) else "?")
-                                c[5].write(f"{r['RVOL']:.2f}" if r["RVOL"] is not None and not np.isnan(r["RVOL"]) else "?")
-                                c[6].write(r["Ruch"])
-                                c[7].write(f"**{r['Sygnał']}**" if r["Sygnał"] in ("BUY", "SELL") else r["Sygnał"])
-                                c[8].write(f"{int(r['Scoring'])}/100" if r["Scoring"] is not None and not np.isnan(r["Scoring"]) else "?")
-                                trends.append(tr)
-                                signals.append(r["Sygnał"])
-
-                            # Konsensus
-                            st.divider()
-                            buy_count = signals.count("BUY")
-                            sell_count = signals.count("SELL")
-                            hold_count = signals.count("HOLD")
-                            uptrends = trends.count("Uptrend")
-                            downtrends = trends.count("Downtrend")
-
-                            verdict_parts = []
-                            if uptrends >= 2:
-                                verdict_parts.append("📈 Trend zgodny: **WZROSTOWY**")
-                            elif downtrends >= 2:
-                                verdict_parts.append("📉 Trend zgodny: **SPADKOWY**")
-                            else:
-                                verdict_parts.append("➡️ Trend mieszany")
-
-                            if buy_count >= 2:
-                                verdict_parts.append(f"🟢 Sygnały: **{buy_count}/3 BUY** 🔥")
-                            elif sell_count >= 2:
-                                verdict_parts.append(f"🔴 Sygnały: **{sell_count}/3 SELL** ⚠️")
-                            else:
-                                verdict_parts.append(f"⏸️ Sygnały: BUY {buy_count} / SELL {sell_count} / HOLD {hold_count}")
-
-                            st.info(" | ".join(verdict_parts))
-
-                            # Telegram z multi-TF
-                            if st.session_state.get("telegram_enabled", True) and (buy_count >= 2 or sell_count >= 2):
-                                tg_tf_lines = [
-                                    f"<b>🔬 Multi-TF {ticker}</b>",
-                                    f"📊 {' | '.join(verdict_parts)}"
-                                ]
-                                for _, r in df_multi.iterrows():
-                                    tg_tf_lines.append(f"• {r['Interwał']}: {r['Trend']} | RSI:{r['RSI']:.1f if r['RSI'] is not None and not np.isnan(r['RSI']) else '?'} | {r['Sygnał']}")
-                                send_telegram("\n".join(tg_tf_lines))
-
-                    if st.session_state.get("telegram_enabled", True) and signal in ("BUY", "SELL"):
-                        tg_msg = (
-                            f"🚀 <b>{ticker}</b> – sygnał: <b>{signal}</b>\n"
-                            f"{movement_label}\n"
-                            f"💰 Cena: {fmt_price(price)} | Scoring: {scoring}/100\n"
-                            f"📈 Trend: {ind['trend']} | RSI: {ind['rsi']:.1f}\n"
-                            f"📊 ADX: {ind['adx']:.1f} | RVOL: {ind['rvol']:.2f}\n"
-                            f"📰 Sentyment: {sentiment}\n"
-                            f"📅 {period} ({interval})"
-                        )
-                        if send_telegram(tg_msg):
-                            st.toast("📲 Telegram wysłany", icon="✅")
-                        else:
-                            st.toast("📲 Telegram: brak tokena lub błąd", icon="⚠️")
-            except Exception as e:
-                st.error(f"❌ Błąd: {str(e)}")
-
-    # ------------------ MODUŁ: SKANER ------------------
-    def render_scanner():
-        st.title("🧪 Skaner spółek – własne tickery → TOP N")
-
-        # --- Auto-refresh ---
-        auto_interval = st.session_state.get("auto_scan_interval", 0)
-        is_auto_scan = False
-        if auto_interval > 0:
-            # odśwież stronę co N minut (st_autorefresh w ms)
-            st_autorefresh(interval=auto_interval * 60 * 1000, key="autoscan")
-            # sprawdź czy to auto-odświeżenie (brak kliknięcia przycisku)
-            last_auto = st.session_state.get("last_auto_scan_time", 0)
-            now = time.time()
-            if now - last_auto > auto_interval * 60 - 5 and st.session_state.get("auto_scan_trigger", False):
-                is_auto_scan = True
-            st.session_state["auto_scan_trigger"] = True
-
-        _saved_tickers_list = _load_user_tickers()
-        _default_tickers_str = " ".join(_saved_tickers_list)
-        tickers_text = st.text_area("Tickery (oddzielone spacją, przecinkiem lub nową linią):",
-                                    _default_tickers_str, height=120,
-                                    placeholder="Wpisz tickery, np. STX.WA, ACP.WA, TUP.WA")
-        max_to_show = st.slider("TOP N:", 5, 20, 10)
-
-        if is_auto_scan and _saved_tickers_list:
-            st.info(f"⏰ Auto-skaner aktywny (co {auto_interval} min) – automatycznie skanuję: {' '.join(_saved_tickers_list[:8])}" +
-                    ("..." if len(_saved_tickers_list) > 8 else ""))
-
-        # --- Decyzja: czy uruchomić skanowanie ---
-        _should_scan = False
-        _auto_mode = False
-        if st.button("🔍 Skanuj", use_container_width=True):
-            _should_scan = True
-        elif is_auto_scan and _saved_tickers_list:
-            # auto-skan: użyj zapisanych tickerów
-            _should_scan = True
-            _auto_mode = True
-            tickers_text = _default_tickers_str
-
-        if _should_scan:
-            raw = re.split(r'[,\s\n]+', tickers_text)
-            tickers = list(dict.fromkeys([t.strip().upper() for t in raw if t.strip()]))
-            if not tickers:
-                st.error("Brak tickerów.")
-                if not _auto_mode:
-                    return
-
-            results = []
-            progress_bar = st.progress(0) if not _auto_mode else st.empty()
-            status = st.empty()
-            for i, ticker in enumerate(tickers):
-                if not _auto_mode:
-                    status.text(f"Skanuję: {ticker} ({i+1}/{len(tickers)})")
-                    progress_bar.progress((i+1)/len(tickers))
-                try:
-                    data = yf.download(ticker, period="6mo", interval="1d", progress=False)
-                    if data.empty or len(data) < 30:
-                        continue
-                    if isinstance(data.columns, pd.MultiIndex):
-                        close = data["Close"].iloc[:, 0]
-                        volume = data["Volume"].iloc[:, 0]
-                    else:
-                        close, volume = data["Close"], data["Volume"]
-                    ind = compute_indicators(close, volume)
-                    price = to_scalar(close.iloc[-1])
-                    sentiment, _, _ = fetch_news_sentiment(ticker)
-                    scoring = compute_scoring_pro(ind, sentiment)
-                    _, movement_short, _ = classify_movement(close, price, ind)
-                    results.append({
-                        "Ticker": ticker, "Cena": price, "Trend": ind["trend"],
-                        "RSI": ind["rsi"], "ADX": ind["adx"], "RVOL": ind["rvol"],
-                        "Sentyment": sentiment, "Scoring": scoring,
-                        "Ruch": movement_short
-                    })
-                except:
-                    continue
-            if not _auto_mode:
-                progress_bar.empty()
-            status.empty()
-
-            # --- Zapisz tickery do state.json ---
-            _save_user_tickers(tickers)
-
-            # --- Sprawdź alerty cenowe ---
-            try:
-                alert_price_data = {}
-                for r in results:
-                    alert_price_data[r["Ticker"]] = {"price": r["Cena"]}
-                check_alerts(results, alert_price_data)
-            except Exception:
-                pass
-
-            if not results:
-                st.error("Brak wyników.")
-                return
-
-            df = pd.DataFrame(results).sort_values("Scoring", ascending=False).head(max_to_show)
-            st.subheader(f"🏆 TOP {len(df)} spółek")
-
-            for _, row in df.iterrows():
-                score = row["Scoring"]
-                if score >= 70:
-                    color, border, label = "rgba(34,197,94,0.25)", "2px solid #22c55e", "🔥 Mocny sygnał"
-                elif score >= 40:
-                    color, border, label = "rgba(251,146,60,0.25)", "2px solid #fb923c", "📊 Obserwacja"
-                else:
-                    color, border, label = "rgba(239,68,68,0.25)", "2px solid #ef4444", "⚠️ Słaby sygnał"
-                st.markdown(f"""
-                <div style="background-color:{color}; padding:15px; border-radius:10px; margin-bottom:10px; border:{border};">
-                    <b style="font-size:18px;">{row['Ticker']}</b><br>
-                    Cena: {fmt_price(row['Cena'])} | Trend: {row['Trend']} | RSI: {row['RSI']:.1f}<br>
-                    ADX: {row['ADX']:.1f} | RVOL: {row['RVOL']:.2f} | Sentyment: {row['Sentyment']}<br>
-                    🧠 Ruch: {row['Ruch']}<br>
-                    <b>Scoring: {score}/100</b> — {label}
-                </div>
-                """, unsafe_allow_html=True)
-
-            if st.button("💾 Zapisz CSV"):
-                st.download_button("Pobierz", df.to_csv(index=False), "skaner.csv", "text/csv")
-
-            # --- Telegram z detekcją zmian ---
-            if st.session_state.get("telegram_enabled", True):
-                last_scan = _load_last_scan()
-                changes = []
-                for _, r in df.iterrows():
-                    ticker = r["Ticker"]
-                    price_now = float(r["Cena"])
-                    vol_now = float(r["RVOL"])
-                    old = last_scan.get(ticker, {})
-                    old_price = old.get("price", None)
-                    old_vol = old.get("rvol", None)
-                    # porównaj z progiem (1% zmiany ceny lub 2% zmiany RVOL)
-                    price_changed = old_price is None or (
-                        old_price != 0 and abs(price_now - old_price) / max(abs(old_price), 0.0001) > 0.01
-                    )
-                    vol_changed = old_vol is None or (
-                        old_vol != 0 and abs(vol_now - old_vol) / max(abs(vol_now), 0.0001) > 0.02
-                    )
-                    if price_changed or vol_changed:
-                        changes.append(ticker)
-
-                if changes:
-                    top3 = df.head(3)
-                    tg_lines = [f"<b>📊 SKANER – TOP {len(df)} spółek (zmiana: {', '.join(changes[:5])})</b>"]
-                    for _, r in top3.iterrows():
-                        tg_lines.append(
-                            f"• {r['Ticker']} – {fmt_price(r['Cena'])} | {r['Scoring']}/100 | {r['Trend']} | {r['Ruch']}"
-                        )
-                    tg_lines.append(f"📅 Pełna lista: {len(df)} spółek")
-                    if send_telegram("\n".join(tg_lines)):
-                        st.toast("📲 Telegram wysłany (wykryto zmiany)", icon="✅")
-                else:
-                    st.toast("📲 Telegram: brak zmian – pominięto", icon="ℹ️")
-
-                # Zapisz bieżące wyniki jako last_scan
-                scan_data = {}
-                for _, r in df.iterrows():
-                    scan_data[r["Ticker"]] = {
-                        "price": float(r["Cena"]),
-                        "rvol": float(r["RVOL"]),
-                        "scoring": int(r["Scoring"]),
-                        "trend": str(r["Trend"]),
-                        "ruch": str(r["Ruch"]),
-                        "rsi": float(r["RSI"]) if not np.isnan(r["RSI"]) else None
-                    }
-                _save_last_scan(scan_data)
-
-            # --- Aktualizuj znacznik czasu auto-skanu ---
-            if not _auto_mode:
-                st.session_state["last_auto_scan_time"] = time.time()
-                st.session_state["auto_scan_trigger"] = False
-            else:
-                st.session_state["last_auto_scan_time"] = time.time()
-                st.rerun()  # wymuś odświeżenie by zaktualizować widok
-
-    # ------------------ ALERTY CENOWE ------------------
-    def check_alerts(tickers_data: list, price_data: dict):
-        """Sprawdza alerty i wysyła Telegram dla trafionych."""
-        alerts = _load_alerts()
-        if not alerts:
-            return
-        triggered = []
-        for t in alerts:
-            a = alerts[t]
-            target_type = a.get("type", "BUY")
-            target_price = a.get("price", 0)
-            active = a.get("active", True)
-            if not active:
-                continue
-            price_now = price_data.get(t, {}).get("price", None)
-            if price_now is None or np.isnan(price_now):
-                continue
-            hit = False
-            if target_type == "BUY_TARGET" and price_now <= target_price:
-                hit = True
-            elif target_type == "SELL_TARGET" and price_now >= target_price:
-                hit = True
-            elif target_type == "STOP_LOSS" and price_now <= target_price:
-                hit = True
-            if hit:
-                triggered.append((t, target_type, target_price, price_now))
-                alerts[t]["active"] = False  # deaktywuj po trafieniu
-        if triggered:
-            _save_alerts(alerts)
-            lines = [f"<b>🔔 ALERTY – trafione:</b>"]
-            for t, typ, tp, pn in triggered:
-                emoji = "🟢" if "BUY" in typ else ("🔴" if "STOP" in typ else "🟡")
-                lines.append(f"{emoji} {t}: {typ} @ {fmt_price(tp)} → teraz {fmt_price(pn)}")
-            msg = "\n".join(lines)
-            if st.session_state.get("telegram_enabled", True):
-                send_telegram(msg)
-
-    def render_alerts():
-        st.title("🔔 Alerty cenowe")
-        st.caption("Ustaw cele cenowe – gdy cena osiągnie target, dostaniesz powiadomienie Telegram")
-        tickers = _load_user_tickers()
-        if not tickers:
-            st.info("📌 Najpierw dodaj tickery w skanerze.")
-            return
-
-        alerts = _load_alerts()
-        col_ticker, col_type, col_price, col_btn = st.columns([2, 2, 2, 1])
-        ticker_sel = col_ticker.selectbox("Spółka", tickers, index=None, placeholder="Wybierz spółkę", key="alert_ticker")
-        type_sel = col_type.selectbox("Typ", ["BUY_TARGET", "SELL_TARGET", "STOP_LOSS"], key="alert_type")
-        price_inp = col_price.number_input("Cena docelowa", min_value=0.0, step=0.01, format="%f", key="alert_price")
-        if col_btn.button("➕ Dodaj", use_container_width=True):
-            if ticker_sel and price_inp > 0:
-                alerts[ticker_sel] = {"type": type_sel, "price": price_inp, "active": True}
-                _save_alerts(alerts)
-                st.toast(f"✅ Alert {type_sel} dla {ticker_sel} @ {fmt_price(price_inp)}", icon="🔔")
-
-        st.divider()
-        st.markdown("**Aktywne alerty:**")
-        if not alerts:
-            st.info("Brak alertów. Dodaj nowy powyżej.")
-        else:
-            to_delete = []
-            for t, a in alerts.items():
-                active = a.get("active", True)
-                typ = a.get("type", "?")
-                price = a.get("price", 0)
-                if not active:
-                    continue
-                c1, c2, c3, c4 = st.columns([2, 2, 2, 1])
-                c1.write(f"**{t}**")
-                c2.write(typ)
-                c3.write(fmt_price(price))
-                if c4.button("🗑️", key=f"del_{t}_{typ}_{price}"):
-                    to_delete.append(t)
-            for t in to_delete:
-                if t in alerts:
-                    del alerts[t]
-                    _save_alerts(alerts)
-                    st.rerun()
-
-        st.divider()
-        st.markdown("**Historia trafionych alertów:**")
-        hit_any = False
-        for t, a in alerts.items():
-            if not a.get("active", True):
-                hit_any = True
-                typ = a.get("type", "?")
-                price = a.get("price", 0)
-                st.write(f"✅ {t} – {typ} @ {fmt_price(price)} (trafiony)")
-        if not hit_any:
-            st.caption("Brak trafionych alertów.")
-
-    # ------------------ BACKTESTING SYGNAŁÓW ------------------
-    def render_backtest():
-        st.title("📊 Backtesting sygnałów")
-        st.caption("Sprawdź, jak nasze sygnały sprawdziłyby się na historycznych danych")
-
-        tickers = _load_user_tickers()
-        if not tickers:
-            st.info("📌 Najpierw dodaj tickery w skanerze.")
-            return
-
-        period_map = {"3 miesiące": "3mo", "6 miesięcy": "6mo", "1 rok": "1y"}
-        period_sel = st.selectbox("Okres testu:", list(period_map.keys()), index=1)
-        period = period_map[period_sel]
-
-        if st.button("🔍 Uruchom backtest", use_container_width=True):
-            results = []
-            progress_bar = st.progress(0)
-            status = st.empty()
-
-            for i, ticker in enumerate(tickers):
-                status.text(f"Testuję: {ticker} ({i+1}/{len(tickers)})")
-                progress_bar.progress((i + 1) / len(tickers))
-
-                try:
-                    data = yf.download(ticker, period=period, interval="1d", progress=False)
-                    if data.empty or len(data) < 30:
-                        continue
-                    if isinstance(data.columns, pd.MultiIndex):
-                        close = data["Close"].iloc[:, 0]
-                    else:
-                        close = data["Close"]
-
-                    # Symulacja sygnałów na historycznych danych
-                    # Dzielimy dane na segmenty co 10 dni
-                    window = 30
-                    buy_hold_start = to_scalar(close.iloc[0])
-                    buy_hold_end = to_scalar(close.iloc[-1])
-                    buy_hold_return = (buy_hold_end - buy_hold_start) / (buy_hold_start + 1e-9) * 100
-
-                    signal_trades = []
-                    for start_idx in range(0, len(close) - window, window):
-                        seg = close.iloc[start_idx:start_idx + window]
-                        if len(seg) < window:
-                            continue
-                        price_now_sim = to_scalar(seg.iloc[-1])
-                        # Oblicz wskaźniki dla tego okna
-                        vol_seg = volume.iloc[start_idx:start_idx + window] if not isinstance(data.columns, pd.MultiIndex) else data["Volume"].iloc[:, 0].iloc[start_idx:start_idx + window]
-                        ind_sim = compute_indicators(seg, vol_seg)
-                        sig_sim, _ = generate_signal(price_now_sim, ind_sim)
-                        if sig_sim == "BUY":
-                            # kup na początku następnego okna, sprzedaj na końcu
-                            next_start = start_idx + window
-                            next_end = min(next_start + window, len(close))
-                            if next_end > next_start:
-                                buy_p = to_scalar(close.iloc[next_start])
-                                sell_p = to_scalar(close.iloc[next_end - 1])
-                                ret = (sell_p - buy_p) / (buy_p + 1e-9) * 100
-                                signal_trades.append(ret)
-
-                    if signal_trades:
-                        avg_trade = sum(signal_trades) / len(signal_trades)
-                        total_trades = len(signal_trades)
-                        win_rate = sum(1 for r in signal_trades if r > 0) / total_trades * 100
-                    else:
-                        avg_trade = 0
-                        total_trades = 0
-                        win_rate = 0
-
-                    results.append({
-                        "Ticker": ticker,
-                        "BH_Return": buy_hold_return,
-                        "Signal_Return": avg_trade * max(1, total_trades // 2),  # approx cumulative
-                        "Avg_Trade%": avg_trade,
-                        "Win_Rate%": win_rate,
-                        "Total_Trades": total_trades,
-                        "BH_vs_Signal": avg_trade * max(1, total_trades // 2) - buy_hold_return
-                    })
-                except:
-                    continue
-
-            progress_bar.empty()
-            status.empty()
-
-            if not results:
-                st.error("Brak wyników.")
-                return
-
-            df = pd.DataFrame(results)
-            df = df.sort_values("Avg_Trade%", ascending=False)
-
-            st.subheader(f"📊 Wyniki backtestu ({period_sel})")
-
-            for _, r in df.iterrows():
-                color = "rgba(34,197,94,0.2)" if r["Avg_Trade%"] > 0 else "rgba(239,68,68,0.2)"
-                border = "2px solid #22c55e" if r["Avg_Trade%"] > 0 else "2px solid #ef4444"
-                st.markdown(f"""
-                <div style="background:{color}; padding:12px; border-radius:10px; margin-bottom:8px; border:{border};">
-                    <b style="font-size:16px;">{r['Ticker']}</b><br>
-                    📈 Kup i trzymaj: <b>{r['BH_Return']:+.2f}%</b><br>
-                    🎯 Sygnały: <b>{r['Avg_Trade%']:+.2f}% średnio</b> ({"+" if r["Avg_Trade%"] > 0 else ""}{r['Avg_Trade%']:.2f}%)<br>
-                    ✅ Win rate: {r['Win_Rate%']:.0f}% | Liczba transakcji: {r['Total_Trades']}<br>
-                    <span style="color:{"#22c55e" if r["BH_vs_Signal"] > 0 else "#ef4444"}">
-                    📊 Sygnały vs Kup-Trzymaj: <b>{r['BH_vs_Signal']:+.2f}%</b></span>
-                </div>
-                """, unsafe_allow_html=True)
-
-            # Zapis do state.json
-            backtest_data = {}
-            for _, r in df.iterrows():
-                backtest_data[r["Ticker"]] = {
-                    "bh": round(r["BH_Return"], 2),
-                    "signal": round(r["Avg_Trade%"], 2),
-                    "winrate": round(r["Win_Rate%"], 1),
-                    "trades": int(r["Total_Trades"])
-                }
-            _save_backtest_results(backtest_data)
-
-            if st.button("💾 Zapisz CSV"):
-                st.download_button("Pobierz CSV", df.to_csv(index=False), f"backtest_{period}.csv", "text/csv")
-
-            # Podsumowanie
-            avg_bh = df["BH_Return"].mean()
-            avg_sig = df["Avg_Trade%"].mean()
-            st.divider()
-            if avg_sig > avg_bh:
-                st.success(f"🏆 **Sygnały średnio lepsze od Kup-Trzymaj o {avg_sig - avg_bh:+.2f}%**")
-            else:
-                st.info(f"📊 Kup-Trzymaj lepsze o {avg_bh - avg_sig:+.2f}% – sygnały wymagają optymalizacji")
-
-    # ------------------ MODUŁ: CZAT AI ------------------
-
-    def render_ai_chat():
-            st.info("Ten historyczny czat jest wyłączony. Użyj widoku Rozmowa GPT lub Analiza GPT w bieżącym panelu KI.")
-
-    # ------------------ PANEL DIAGNOSTYCZNY ETAPU 1 ------------------
-    st.title("Etap 1 — zapis i proces skanera")
-    with _STORE.connection() as _connection:
-        _runtime = _connection.execute("SELECT payload,updated_at FROM runtime WHERE key='scanner'").fetchone()
-        _counts = {name: _connection.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
-                   for name in ("watchlist", "portfolio", "alerts", "observations", "events", "outbox", "cycles")}
-        _recent = [dict(row) for row in _connection.execute("SELECT started_at,finished_at,status FROM cycles ORDER BY started_at DESC LIMIT 10")]
-    if _runtime:
-        st.json({"ostatni_stan_procesu": json.loads(_runtime[0]), "czas_zapisu_UTC": _runtime[1]})
-        if (datetime.now(timezone.utc)-datetime.fromisoformat(_runtime[1])).total_seconds()>15:
-            st.warning("Brak świeżego heartbeat. Zapisany stan nie potwierdza, że proces nadal działa.")
-    else:
-        st.info("Brak zapisanej diagnostyki skanera.")
-    st.write("Liczba zapisanych rekordów", _counts)
-    st.dataframe(_recent, use_container_width=True)
-    st.button("Odśwież diagnostykę")
-    st.info("Widoki rynku, AI i wysyłka Telegrama nie są aktywne w etapie 1. Wybrane ustawienia zapisują się w SQLite.")
-    st.stop()
-    # ------------------ ROUTING LEGACY: DO NAPRAWY W KOLEJNYCH ETAPACH ------------------
-    if mode == "🏠 Dashboard portfela":
-        render_dashboard()
-    elif mode == "🤖 Czat AI (internet + trading)":
-        render_ai_chat()
-    elif mode == "📈 Kombajn tradingowy":
-        render_trading()
-    elif mode == "🔔 Alerty cenowe":
-        render_alerts()
-    elif mode == "📊 Backtesting sygnałów":
-        render_backtest()
-    else:
-        render_scanner()
-
 # ------------------ ETAP 2: DANE, WSKAŹNIKI I DETEKCJA ------------------
 class MarketRateLimitError(ValueError):
     pass
+
+
+class MarketDataUnavailable(ValueError):
+    def __init__(self,code,message,diagnostics=None):
+        super().__init__(message)
+        self.code=code
+        self.diagnostics=diagnostics or []
+        self.next_attempt_at=None
+
+
+class MarketFetchDeferred(ValueError):
+    def __init__(self,state):
+        super().__init__('Pobranie odroczone do '+str(state['next_attempt_at']))
+        self.state=state
+
+
+def next_market_open(ticker,now):
+    from datetime import timedelta, time as clock
+    current=parse_market_time(now)
+    local=current.astimezone(exchange_zone(ticker))
+    day=local.date()
+    opening=clock(9,0) if ticker.upper().endswith('.WA') else clock(9,30)
+    while True:
+        candidate=datetime.combine(day,opening,exchange_zone(ticker))
+        if day.weekday()<5 and candidate>current:return candidate.astimezone(timezone.utc)
+        day+=timedelta(days=1)
+
+
+def automatic_session_open(ticker,now):
+    from datetime import time as clock
+    local=parse_market_time(now).astimezone(exchange_zone(ticker))
+    start=clock(9) if ticker.upper().endswith('.WA') else clock(9,30)
+    end=clock(17) if ticker.upper().endswith('.WA') else clock(16)
+    return local.weekday()<5 and start<=local.time()<end
+
+
+def market_fetch_state(store,ticker,interval):
+    with store.connection() as c:
+        row=c.execute('SELECT payload FROM runtime WHERE key=?',('market_fetch:'+interval+':'+ticker,)).fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def market_fetch_due(store,ticker,interval,now=None):
+    current=parse_market_time(now or utc_now())
+    state=market_fetch_state(store,ticker,interval)
+    due=state.get('next_attempt_at')
+    return not due or current>=parse_market_time(due)
+
+
+def record_market_fetch(store,ticker,interval,error=None,now=None,diagnostics=None):
+    from datetime import timedelta
+    current=parse_market_time(now or utc_now())
+    key='market_fetch:'+interval+':'+ticker
+    with store.transaction() as c:
+        raw=c.execute('SELECT payload FROM runtime WHERE key=?',(key,)).fetchone()
+        old=json.loads(raw[0]) if raw else {}
+        failures=min(32,int(old.get('failures',0))+1) if error else 0
+        due=None
+        if not automatic_session_open(ticker,current):due=next_market_open(ticker,current)
+        elif error:due=current+timedelta(minutes=min(120,15*2**min(failures-1,3)))
+        state={'ticker':ticker,'interval':interval,'status':'DATA_UNAVAILABLE' if error else 'OK',
+               'failures':failures,'checked_at':current.isoformat(),
+               'next_attempt_at':due.isoformat() if due else None,
+               'error_code':getattr(error,'code','PROVIDER_ERROR') if error else None,
+               'error':str(error) if error else None,'rejected_source_rows':diagnostics or getattr(error,'diagnostics',[])}
+        c.execute('INSERT OR REPLACE INTO runtime VALUES(?,?,?)',(key,json_text(state),current.isoformat()))
+    if isinstance(error,MarketDataUnavailable):error.next_attempt_at=state['next_attempt_at']
+    return state
+
+
+def fetch_automatic_snapshot(store,ticker,now=None):
+    """Stage-specific retries; a daily-source failure cannot discard a usable cached reference."""
+    current=parse_market_time(now or utc_now())
+    daily_warning=None
+    if daily_history_refresh_due(store,ticker,current):
+        if market_fetch_due(store,ticker,'1d',current):
+            try:
+                refresh_daily_history(store,ticker,current)
+            except MarketRateLimitError:
+                raise
+            except Exception as exc:
+                record_market_fetch(store,ticker,'1d',exc,current)
+                daily_warning=str(exc)
+                with store.connection() as c:reference=_daily_reference(c,ticker,current)
+                if not reference:raise
+            else:record_market_fetch(store,ticker,'1d',now=current)
+        else:
+            state=market_fetch_state(store,ticker,'1d')
+            daily_warning='Historia dzienna: '+str(state.get('error') or 'pobranie odroczone')
+            with store.connection() as c:reference=_daily_reference(c,ticker,current)
+            if not reference:raise MarketFetchDeferred(state)
+    if not market_fetch_due(store,ticker,'1h',current):
+        raise MarketFetchDeferred(market_fetch_state(store,ticker,'1h'))
+    try:snapshot=fetch_market(ticker,'1h')
+    except MarketRateLimitError:raise
+    except Exception as exc:
+        record_market_fetch(store,ticker,'1h',exc,current)
+        raise
+    record_market_fetch(store,ticker,'1h',now=current,diagnostics=snapshot.get('rejected_source_rows'))
+    if daily_warning:snapshot['daily_history_warning']=daily_warning
+    return snapshot
+
+
 
 
 MARKET_INTERVALS = {'15m':900, '30m':1800, '1h':3600, '1d':86400}
@@ -1900,6 +639,94 @@ def market_config(settings):
     if type(cfg['observation_retention_days']) is not int or cfg['observation_retention_days']<1:
         raise ValueError('Retencja obserwacji musi być dodatnią liczbą dni.')
     return cfg
+
+
+def automatic_market_config(settings):
+    return {**market_config(settings),'market_interval':'1h',
+            'auto_scan_interval':0 if settings.get('auto_scan_interval')==0 else 15}
+
+
+def exchange_zone(ticker):
+    from zoneinfo import ZoneInfo
+    return ZoneInfo('Europe/Warsaw' if ticker.upper().endswith('.WA') else 'America/New_York')
+
+
+def _daily_session_end(ticker,session_date):
+    from datetime import date, time as clock
+    day=date.fromisoformat(session_date)
+    return datetime.combine(day,clock(17 if ticker.upper().endswith('.WA') else 16),exchange_zone(ticker))
+
+
+def load_daily_candles(store,ticker):
+    with store.connection() as c:
+        return [dict(r) for r in c.execute('SELECT * FROM daily_candles WHERE ticker=? ORDER BY session_date',(ticker,))]
+
+
+def _save_daily_history(store,ticker,rows,now=None,source='Yahoo Finance',source_diagnostics=None):
+    """Validate the complete batch before a single atomic, idempotent upsert."""
+    from datetime import date
+    current=parse_market_time(now or utc_now());zone=exchange_zone(ticker)
+    if not valid_ticker(ticker):raise ValueError('Niepoprawny instrument historii dziennej.')
+    prepared=[];seen=set()
+    for raw in rows:
+        day=raw.get('session_date') or parse_market_time(raw['time']).astimezone(zone).date().isoformat()
+        session=date.fromisoformat(day)
+        end=parse_market_time(raw['end']) if raw.get('end') else _daily_session_end(ticker,day)
+        if (raw.get('status')!='CLOSED' or session.weekday()>=5 or end>current
+                or end.astimezone(zone).date()!=session or session>current.astimezone(zone).date()):
+            raise ValueError('Historia dzienna: otwarta świeca, niepoprawna sesja lub zamknięcie z przyszłości.')
+        if day in seen:raise ValueError('Powtórzona sesja w pakiecie historii dziennej.')
+        seen.add(day)
+        if any(not finite_number(raw.get(k),True) for k in ('open','high','low','close')) or not finite_number(raw.get('volume')) or raw['volume']<0:
+            raise ValueError('Historia dzienna wymaga pełnych poprawnych OHLCV.')
+        if not raw['low']<=min(raw['open'],raw['close'])<=max(raw['open'],raw['close'])<=raw['high']:
+            raise ValueError('Sprzeczne OHLC historii dziennej.')
+        prepared.append((ticker,day,*(raw[k] for k in ('open','high','low','close','volume')),
+                         end.isoformat(),source,json_text({'timezone':str(zone),'source_time':raw.get('time'),
+                         'status_basis':raw.get('status_basis'),'acquired_at':current.isoformat()})))
+    with store.transaction() as c:
+        c.executemany('''INSERT INTO daily_candles(ticker,session_date,open,high,low,close,volume,closed_at,source,metadata)
+            VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(ticker,session_date) DO UPDATE SET
+            open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,
+            volume=excluded.volume,closed_at=excluded.closed_at,source=excluded.source,metadata=excluded.metadata''',prepared)
+        c.execute('INSERT OR REPLACE INTO runtime VALUES(?,?,?)',
+                  ('daily_history:'+ticker,json_text({'refreshed_at':current.isoformat(),'accepted_rows':len(prepared),'rejected_source_rows':source_diagnostics or []}),current.isoformat()))
+    return len(prepared)
+
+
+def daily_history_refresh_due(store,ticker,now=None):
+    current=parse_market_time(now or utc_now());zone=exchange_zone(ticker)
+    with store.connection() as c:
+        raw=c.execute('SELECT payload FROM runtime WHERE key=?',('daily_history:'+ticker,)).fetchone()
+        exists=c.execute('SELECT 1 FROM daily_candles WHERE ticker=? LIMIT 1',(ticker,)).fetchone()
+    if not raw or not exists:return True
+    refreshed=parse_market_time(json.loads(raw[0])['refreshed_at']).astimezone(zone)
+    local=current.astimezone(zone)
+    if local.weekday()>=5:
+        from datetime import timedelta
+        friday=local.date()-timedelta(days=local.weekday()-4)
+        return refreshed<_daily_session_end(ticker,friday.isoformat())
+    if refreshed.date()!=local.date():return True
+    close=_daily_session_end(ticker,local.date().isoformat())
+    return local.weekday()<5 and refreshed<close<=local
+
+
+def _daily_reference(c,ticker,when):
+    current=parse_market_time(when);day=current.astimezone(exchange_zone(ticker)).date().isoformat()
+    row=c.execute('SELECT * FROM daily_candles WHERE ticker=? AND session_date<? ORDER BY session_date DESC',
+                  (ticker,day)).fetchall()
+    for item in row:
+        if parse_market_time(item['closed_at'])<=current:return dict(item)
+    return None
+
+
+def refresh_daily_history(store,ticker,now=None):
+    current=parse_market_time(now or utc_now())
+    if not daily_history_refresh_due(store,ticker,current):return False
+    snapshot=fetch_market(ticker,'1d')
+    if not snapshot.get('daily_history'):raise MarketDataUnavailable('NO_CLOSED_DAILY','Brak zakończonych sesji dziennych Yahoo.')
+    _save_daily_history(store,ticker,snapshot['daily_history'],snapshot['acquired_at'],snapshot.get('source','Yahoo Finance'),snapshot.get('rejected_source_rows'))
+    return True
 
 
 def parse_market_time(value):
@@ -2097,7 +924,7 @@ def candle_state(row,interval,now,metadata):
             'partial_interval':partial}
 
 
-def normalize_yahoo_frame(frame,ticker,interval,now,metadata):
+def normalize_yahoo_frame(frame,ticker,interval,now,metadata,rejected_rows=None):
     import pandas as pd
     if frame is None or frame.empty:raise ValueError('Brak OHLCV z Yahoo dla '+ticker)
     if isinstance(frame.columns,pd.MultiIndex):
@@ -2113,9 +940,18 @@ def normalize_yahoo_frame(frame,ticker,interval,now,metadata):
         for label,key in (('Open','open'),('High','high'),('Low','low'),('Close','close'),('Volume','volume')):
             v=r.get(label)
             row[key]=float(v) if v is not None and pd.notna(v) and math.isfinite(float(v)) else None
-        state=candle_state(row,interval,now,metadata)
-        row.update(status=state['status'],end=state['end'],status_basis=state['basis'],
-                   partial_interval=state['partial_interval'])
+        try:
+            state=candle_state(row,interval,now,metadata)
+            row.update(status=state['status'],end=state['end'],status_basis=state['basis'],
+                       partial_interval=state['partial_interval'])
+            if rejected_rows is not None and interval=='1d':
+                if any(not finite_number(row.get(k),True) for k in ('open','high','low','close')) or not finite_number(row.get('volume')):
+                    raise ValueError('Niepełne dzienne OHLCV; nie utworzono zastępczej ceny.')
+            validate_market_rows([row])
+        except ValueError as exc:
+            if rejected_rows is None:raise
+            rejected_rows.append({'time':row['time'],'reason':str(exc),'ohlcv':{k:row.get(k) for k in ('open','high','low','close','volume')}})
+            continue
         rows.append(row)
     validate_market_rows(rows)
     return rows
@@ -2222,15 +1058,27 @@ import concurrent.futures
 
 def fetch_market(ticker, interval, timeout_sec=30):
     """Wrapper z twardym timeoutem. Zapobiega nieskonczonemu czekaniu na yfinance."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(_orig_fetch_market, ticker, interval)
-        try:
-            return future.result(timeout=timeout_sec)
-        except concurrent.futures.TimeoutError:
-            raise ValueError(f'Yahoo {ticker}: TIMEOUT ({timeout_sec}s). Pomijam ticker.')
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(_orig_fetch_market, ticker, interval)
+    try:
+        return future.result(timeout=timeout_sec)
+    except concurrent.futures.TimeoutError:
+        raise MarketDataUnavailable('TIMEOUT',f'Yahoo {ticker}: przekroczono czas oczekiwania ({timeout_sec}s).')
+    finally:
+        executor.shutdown(wait=False)
+
+def merge_daily_source_rows(recent,extended):
+    # A longer Yahoo range may have holes absent from the shorter range.
+    # Preserve the actually supplied recent OHLCV; never fill missing values.
+    by_time={parse_market_time(row['time']):row for row in extended}
+    by_time.update({parse_market_time(row['time']):row for row in recent})
+    return [by_time[key] for key in sorted(by_time)]
+
 
 def _orig_fetch_market(ticker,interval):
     import yfinance as yf
+    import warnings
+    warnings.filterwarnings('ignore', category=DeprecationWarning, module='yfinance')
     if not valid_ticker(ticker) or interval not in MARKET_INTERVALS:raise ValueError('Błędny ticker lub interwał.')
     provider=yf.Ticker(ticker)
     periods=('3mo','1y') if interval=='1d' else ('1mo','3mo') if interval=='1h' else ('1mo','59d')
@@ -2239,27 +1087,36 @@ def _orig_fetch_market(ticker,interval):
     for period in periods:
         try:
             frame=provider.history(period=period,interval=interval,prepost=False,auto_adjust=False,
-                                   actions=False,repair=False,keepna=True,timeout=20,raise_errors=True)
+                                   actions=False,repair=False,keepna=True,timeout=20)
             now=datetime.now(timezone.utc)
             try:metadata=provider.get_history_metadata()
             except Exception as exc:
                 if type(exc).__name__=='YFRateLimitError':raise
                 metadata_warning=type(exc).__name__+': '+str(exc)
-            candidate=normalize_yahoo_frame(frame,ticker,interval,now,metadata)
+            rejected_source_rows=[]
+            candidate=normalize_yahoo_frame(frame,ticker,interval,now,metadata,rejected_rows=rejected_source_rows)
             empty_tail=empty_yahoo_tail(candidate)
-            candidate,carried_prices=carry_zero_volume_prices(candidate)
+            if interval=='1d':carried_prices=[]
+            else:candidate,carried_prices=carry_zero_volume_prices(candidate)
         except Exception as exc:
             if type(exc).__name__=='YFRateLimitError':
                 raise MarketRateLimitError('Yahoo HTTP 429: przerwano cykl; bez dalszych zapytań do następnego slotu.') from exc
-            if rows is None:raise ValueError('Yahoo '+ticker+': '+type(exc).__name__+': '+str(exc)) from exc
+            if rows is None:
+                message=str(exc)
+                code=('MISSING_PRICE' if 'puste świece' in message else 'NO_OHLCV' if 'Brak OHLCV' in message else 'INVALID_SOURCE')
+                raise MarketDataUnavailable(code,'Yahoo '+ticker+': '+message,locals().get('rejected_source_rows',[])) from exc
             history_warning='Nie udało się rozszerzyć historii: '+type(exc).__name__+': '+str(exc)
             attempts.append({'period':period,'interval':interval,'error':history_warning})
             break
+        if interval=='1d' and rows is not None:
+            candidate=merge_daily_source_rows(rows,candidate)
+            rejected_source_rows=accepted_rejected_rows+rejected_source_rows
         rows=candidate
         accepted_at=now
         accepted_metadata=metadata
         accepted_empty_tail=empty_tail
         accepted_carried_prices=carried_prices
+        accepted_rejected_rows=rejected_source_rows
         attempts.append({'period':period,'rows':len(rows),'interval':interval})
         if len(rows)>=34:break
     now=accepted_at;metadata=accepted_metadata
@@ -2268,7 +1125,7 @@ def _orig_fetch_market(ticker,interval):
         session_date=parse_market_time(accepted_empty_tail[-1]['time']).date().isoformat()
         try:
             daily_frame=provider.history(period='5d',interval='1d',prepost=False,auto_adjust=False,
-                                         actions=False,repair=False,keepna=True,timeout=20,raise_errors=True)
+                                         actions=False,repair=False,keepna=True,timeout=20)
             summary_at=datetime.now(timezone.utc)
             daily_rows=normalize_yahoo_frame(daily_frame,ticker,'1d',summary_at,metadata)
             session_summary=session_summary_from_rows(daily_rows,session_date)
@@ -2283,7 +1140,7 @@ def _orig_fetch_market(ticker,interval):
         prior_ind=market_indicators(rows[:-1]);previous_closed={**rows[-2],'rvol':prior_ind['rvol']}
         previous_closed['average_volume']=prior_ind.get('average_volume_reference')
     avg_volume=ind.get('average_volume_reference')
-    if not finite_number(last['close'],True):raise ValueError('Brak poprawnej ceny ostatniej świecy.')
+    if not finite_number(last['close'],True):raise MarketDataUnavailable('MISSING_PRICE','Brak poprawnej ceny ostatniej świecy; nie podstawiono ceny zastępczej.',accepted_rejected_rows)
     snap={'ticker':ticker,'interval':interval,'source':'Yahoo Finance','acquired_at':now.isoformat(),
           'candle_time':last['time'],'candle_end':last['end'],'candle_status':last['status'],
           'status_basis':last['status_basis'],'price':last['close'],'volume':last['volume'],
@@ -2296,7 +1153,7 @@ def _orig_fetch_market(ticker,interval):
           'currency':metadata.get('currency'),'company_name':metadata.get('longName') or metadata.get('shortName'),
           'company_website':metadata.get('website'),
           'rows':len(rows),'history_attempts':attempts,
-          'empty_trailing_source_candles':accepted_empty_tail,
+          'empty_trailing_source_candles':accepted_empty_tail,'rejected_source_rows':accepted_rejected_rows,
           'carried_price_candles':accepted_carried_prices,
           'latest_price_origin':last.get('price_origin','Yahoo OHLC'),
           'latest_price_reference_time':last.get('price_reference_time'),
@@ -2304,6 +1161,7 @@ def _orig_fetch_market(ticker,interval):
           'missing_latest_fields':[k for k in ('open','high','low','volume') if last[k] is None],
           'metadata_warning':metadata_warning,'history_warning':history_warning,
           'candle_age_seconds':max(0,(now-parse_market_time(last['time'])).total_seconds())}
+    if interval=='1d':snap['daily_history']=[dict(row) for row in rows if row.get('status')=='CLOSED']
     return snap
 
 
@@ -2432,7 +1290,7 @@ def issuer_search_identity(snapshot):
     snapshot=issuer_profile_snapshot(snapshot)
     ticker=str(snapshot.get('ticker') or '').strip().upper()
     name=issuer_name(snapshot.get('company_name'),ticker)
-    domains=(['gpw.pl','newconnect.pl','gpwinfostrefa.pl','infostrefa.com','pap.pl','bankier.pl']
+    domains=(['gpw.pl','newconnect.pl','gpwinfostrefa.pl','infostrefa.com','pap.pl','bankier.pl','money.pl','stooq.pl','isbnews.pl']
              if ticker.endswith('.WA') else ['sec.gov','nasdaq.com','businesswire.com','globenewswire.com','prnewswire.com'])
     issuer_domain=issuer_domain_from_website(snapshot.get('company_website'))
     if issuer_domain and issuer_domain not in domains:domains.append(issuer_domain)
@@ -2488,7 +1346,7 @@ def issuer_source_match(result,snapshot,allow_external_domains=False):
         return 'Źródło zewnętrzne: nazwa emitenta w tytule lub początku raportu; materiał nie jest komunikatem oficjalnym.'
     if identity['name']:
         if name_in(title) or (name_in(content) and (own_site or (generic_report and name_in(content[:400])))):
-            return 'Nazwa emitenta w tytule lub w treści raportu na zapisanej domenie.'
+            return 'Nazwa emitenta w tytule lub w tresci raportu na zapisanej domenie.'
     else:
         ticker=re.escape(identity['ticker'])
         explicit=(r'(?<![\w.])'+ticker+r'(?![\w.])' if identity['ticker'].endswith('.WA') else
@@ -2525,25 +1383,29 @@ def normalize_tavily_context(payload,snapshot,window_days=7,allow_external_domai
             if source_provenance=='external' and parts.scheme!='https':
                 raise ValueError('Źródło zewnętrzne musi używać HTTPS.')
             date_unverified=True
-            if not isinstance(raw,str) or not raw.strip():raise ValueError('Brak daty publikacji; materiał nie potwierdza świeżej wiadomości.')
-            raw=raw.strip()
-            try:
-                try:published=datetime.fromisoformat(raw.replace('Z','+00:00'))
-                except ValueError:published=parsedate_to_datetime(raw)
-            except (ValueError,TypeError,OverflowError):raise ValueError('Niepoprawna data publikacji.') from None
-            # A date without a publication time cannot prove same-day availability.
-            if len(raw)==10:
-                if strict_time_window:raise ValueError('Brak godziny publikacji; nie można potwierdzić okna 24 godzin.')
-                if published.date()==cutoff.astimezone(timezone.utc).date():raise ValueError('Brak godziny publikacji w dniu odczytu; niepotwierdzona dostępność materiału w chwili analizy.')
-                published=published.replace(hour=23,minute=59,second=59,tzinfo=timezone.utc)
-            if published.tzinfo is None:raise ValueError('Brak strefy czasowej publikacji.')
-            date_unverified=False
+            if not isinstance(raw,str) or not raw.strip():
+                raise ValueError('Brak potwierdzonej daty publikacji źródła.')
+            else:
+                raw=raw.strip()
+                try:
+                    try:published=datetime.fromisoformat(raw.replace('Z','+00:00'))
+                    except ValueError:published=parsedate_to_datetime(raw)
+                except (ValueError,TypeError,OverflowError):
+                    raise ValueError('Niepoprawna data publikacji źródła.') from None
+                if len(raw)==10:
+                    if strict_time_window:raise ValueError('Brak godziny publikacji; nie można potwierdzić okna 24 godzin.')
+                    if published.date()==cutoff.astimezone(timezone.utc).date():raise ValueError('Brak godziny publikacji w dniu odczytu; niepotwierdzona dostępność materiału w chwili analizy.')
+                    published=published.replace(hour=23,minute=59,second=59,tzinfo=timezone.utc)
+                if published.tzinfo is None:raise ValueError('Brak strefy czasowej publikacji.')
+            date_unverified = raw == ""
             too_old=published<start if strict_time_window else published.date()<start.date()
             if too_old or published>cutoff:raise ValueError('Data poza oknem wyszukiwania ('+('24 godziny' if strict_time_window and window_days==1 else str(window_days)+' dni')+').')
             seen.add(url)
             if len(sources)>=5:raise ValueError()
             sources.append({'id':'S'+str(len(sources)+1),'url':url,'title':str(result.get('title') or '')[:160],
-                            'published_at':published.isoformat(),'published_date_source':result.get('published_date_source','tavily'),
+                            'published_at':published.isoformat() if raw else None,
+                            'published_date_source':result.get('published_date_source','tavily'),
+                            'date_state': 'MISSING' if date_unverified else 'KNOWN',
                             'content':content.strip()[:1800],'issuer_match':issuer_match,
                             'source_provenance':source_provenance,
                             'scope':'fresh' if published>=cutoff-timedelta(days=7) else 'background'})
@@ -2586,32 +1448,16 @@ def tavily_result_summary(research):
 
 
 def research_query(snapshot,cutoff):
+    """Search gets issuer identity; dates and domains remain enforced separately."""
     import re
-    from datetime import timedelta
+    parse_market_time(cutoff)
     identity=issuer_search_identity(snapshot)
-    ticker=(identity.get("ticker") or "").strip()
-    name=(identity.get("name") or ticker or "").strip()
-    name=re.sub(r"\s*C\.[A-Z]+\s+[A-Z]{3}\s*$","",name).strip()
-    ticker_clean=ticker.split(".")[0] if ticker else ""
-    end=parse_market_time(cutoff); start=end-timedelta(days=30)
-    is_gpw=ticker.upper().endswith(".WA")
-    cutoff_iso = cutoff.isoformat() if hasattr(cutoff,'isoformat') else str(cutoff)
-    _stop = ('Nie oceniaj inwestycji, nie generuj BUY/SELL. '
-             f'Nie podawaj materiałów opublikowanych po {cutoff_iso}.')
-    if is_gpw:
-        # GPW/NewConnect: krotko i precyzyjnie. Domeny sa w include_domains,
-        # wiec nie wyliczamy ich w tresci zapytania (to powodowalo zwrot stron-notowan).
-        return (
-            f'{name} ({ticker}) komunikat ESPI EBI raport bieżący '
-            f'wyniki finansowe raport okresowy do {cutoff_iso}. ' + _stop
-        )
-    else:
-        # US: krotko i precyzyjnie po angielsku. Dla spolek notowanych rowniez na GPW:
-        # nazwa bywa polska - dodajemy obie formy.
-        return (
-            f'{name} ({ticker_clean}) press release SEC filing '
-            f'earnings report corporate announcement up to {cutoff_iso}. ' + _stop
-        )
+    ticker=str(identity.get('ticker') or '').strip()
+    name=re.sub(r'\s*C\.[A-Z]+\s+[A-Z]{3}\s*$', '', str(identity.get('name') or '')).strip()
+    if name:return name
+    symbol=ticker.removesuffix('.WA')
+    if not symbol:raise ValueError('Brak nazwy lub symbolu emitenta do wyszukiwania.')
+    return symbol
 
 
 def load_event_research(store,event_id):
@@ -2619,6 +1465,50 @@ def load_event_research(store,event_id):
     with store.connection() as c:
         row=c.execute('SELECT * FROM research_requests WHERE event_id=?',(event_id,)).fetchone()
     return dict(row) if row else None
+
+
+MANUAL_ENGINES=('openai','deepseek')
+
+
+def manual_engine(value):
+    """Only the two documented providers are valid for a manual analysis."""
+    if value not in MANUAL_ENGINES:
+        raise ValueError('Nieznany silnik analizy. Dozwolone wartości: openai, deepseek.')
+    return value
+
+
+def saved_manual_engine(context):
+    """Resume reuses only the engine stored with the task; it never guesses a provider."""
+    if not isinstance(context,dict) or 'engine' not in context:
+        raise ValueError('Brak zapisanego silnika tego zadania. Wznowienie bez zapisanego silnika nie jest możliwe.')
+    return manual_engine(context.get('engine'))
+
+
+def manual_turn_context(store,ticker,purpose,engine,with_search):
+    """Context of a new manual turn; the engine is explicit and persisted with the task."""
+    return {**gpt_chat_context(store,ticker),'purpose':purpose,'report_version':3,
+            'engine':manual_engine(engine),
+            'research':{'sources':[],'status':'PENDING' if with_search else 'DISABLED'}}
+
+
+def manual_provider(engine,keys,request=None):
+    """Endpoint, key and request format for the stored engine.
+
+    Validates only the key of the chosen provider and, when a request is given,
+    adapts it to that provider exactly like the existing integration.
+    """
+    if engine=='deepseek':
+        if not keys.get('DEEPSEEK_API_KEY'):raise ValueError('Brak klucza DeepSeek w secrets.toml.')
+        if request is not None:
+            _schema=request.get('response_format',{}).get('json_schema',{}).get('schema',{})
+            if _schema:
+                request['messages'][0]['content']+='\n\nMusisz zwrocic odpowiedz w formacie JSON zgodnym z ponizszym schematem:\n'+json_text(_schema)
+            request['model']='deepseek-chat'
+            request['max_tokens']=request.pop('max_completion_tokens',2600)
+            request['response_format']={'type':'json_object'}
+        return 'DeepSeek','https://api.deepseek.com/v1/chat/completions',keys['DEEPSEEK_API_KEY']
+    if not keys.get('OPENAI_API_KEY'):raise ValueError('Brak klucza OpenAI w secrets.toml.')
+    return 'OpenAI','https://api.openai.com/v1/chat/completions',keys['OPENAI_API_KEY']
 
 
 def resume_manual_research(store,turn_id):
@@ -2632,26 +1522,22 @@ def resume_manual_research(store,turn_id):
                 raise ValueError('Niepotwierdzony start Research. Nie uruchomiono nowego zadania.')
             if context.get('gpt',{}).get('status') in ('REQUESTED','RECEIVED'):
                 raise ValueError('GPT był już wywołany. Wznowienie wymaga osobnej kontroli odpowiedzi.')
+            # The engine comes only from the saved task; a missing or unknown value
+            # stops the resume before any status change or service call.
+            engine=saved_manual_engine(context)
+            keys=load_service_keys()
+            manual_provider(engine,keys)
             c.execute("UPDATE gpt_chat_turns SET state='REQUESTED',error=NULL,finished_at=NULL WHERE id=?",(turn_id,))
         try:
-            keys=load_service_keys()
-            if not keys['OPENAI_API_KEY']:raise ValueError('Brak klucza OpenAI.')
             snapshot=research.get('snapshot_identity') or {**(context.get('snapshot') or {}),
                        'ticker':context.get('ticker'),'acquired_at':research['cutoff'],'_manual_research':True}
             collect_manual_research(store,turn_id,context,snapshot,keys['TAVILY_API_KEY'])
             request=gpt_chat_request(row['question'],context,[])
+            label,url,key=manual_provider(engine,keys,request)
+            # The call-attempt marker is written immediately before HTTP.
             context['gpt']={'status':'REQUESTED','requested_at':utc_now()}
             save_gpt_chat_context(store,turn_id,context)
-            if engine=='deepseek':
-                _schema=request.get('response_format',{}).get('json_schema',{}).get('schema',{})
-                if _schema:
-                    request['messages'][0]['content']+='\n\nMusisz zwrocic odpowiedz w formacie JSON zgodnym z ponizszym schematem:\n'+json_text(_schema)
-                request['model']='deepseek-chat'
-                request['max_tokens']=request.pop('max_completion_tokens',2600)
-                request['response_format']={'type':'json_object'}
-                body=service_http('DeepSeek','https://api.deepseek.com/v1/chat/completions',keys['DEEPSEEK_API_KEY'],request,uncertain=True)
-            else:
-                body=service_http('OpenAI','https://api.openai.com/v1/chat/completions',keys['OPENAI_API_KEY'],request,uncertain=True)
+            body=service_http(label,url,key,request,uncertain=True)
             context['gpt'].update(status='RECEIVED',received_at=utc_now())
             save_gpt_chat_context(store,turn_id,context)
             save_gpt_chat_metadata(store,turn_id,{**{k:body.get(k) for k in ('id','model','usage')},'raw_response':body.get('choices',[])})
@@ -2667,6 +1553,9 @@ def render_research_resume(store,turn):
     import streamlit as st
     context=json.loads(turn['context']);research=context.get('research') or {}
     if turn['state']!='DONE' and research.get('request_id') and research.get('status') in ('SUBMITTED','COMPLETED','DONE') and context.get('gpt',{}).get('status') not in ('REQUESTED','RECEIVED'):
+        if 'engine' not in context:
+            st.warning('Brak zapisanego silnika tego zadania. Wznowienie bez zapisanego silnika nie jest możliwe.')
+            return
         st.caption('Research ID zachowano. Wznowienie odczyta istniejące zadanie; po zakończeniu wykona jedno zapytanie GPT.')
         if st.button('Wznów zapisane Research i analizę GPT',key='r1_resume_'+turn['id']):
             try:
@@ -2696,6 +1585,27 @@ def record_manual_start_failure(store,turn,context,error):
     save_gpt_chat_context(store,turn,context)
 
 
+def event_search_arguments(snapshot,cutoff):
+    from datetime import timedelta
+    end=parse_market_time(cutoff)
+    return {'include_domains':issuer_search_identity(snapshot)['domains'],
+            'start_date':(end-timedelta(days=30)).date().isoformat(),'end_date':(end+timedelta(days=1)).date().isoformat()}
+
+
+def search_result_record(response,local_id):
+    import copy
+    provider_id=response.get('request_id')
+    provider_id=provider_id.strip() if isinstance(provider_id,str) and provider_id.strip() else None
+    return {'backend':'SEARCH','request_id':provider_id or local_id,
+            'provider_request_id':provider_id,'request_id_origin':'provider_search' if provider_id else 'local_search_reservation',
+            'status':'completed','answer':response.get('answer') or '',
+            'sources':[{'url':r['url'],'title':r.get('title') or ''} for r in response['results']],
+            'content':{'materials':[{'url':r['url'],'title':r.get('title') or '',
+                         'content':r.get('content') or '','published_at':r.get('published_date') or ''} for r in response['results']]},
+            'raw_response':copy.deepcopy(response),'results':copy.deepcopy(response['results']),
+            'request':copy.deepcopy(response.get('request'))}
+
+
 def collect_manual_research(store,turn,context,snapshot,key):
     from tavily_cli_adapter import search_sync,CLITransportError
     r=context['research']
@@ -2703,20 +1613,18 @@ def collect_manual_research(store,turn,context,snapshot,key):
     if not key: raise ServiceError('Tavily: brak klucza API.')
     cutoff=event_context_cutoff(snapshot).isoformat()
     q=research_query(snapshot,cutoff)
-    _domains=None
-    try:
-        if str(snapshot.get('ticker') or '').upper().endswith('.WA'):
-            from tavily_cli_adapter import GPW_DOMAINS
-            _domains=GPW_DOMAINS
-    except Exception:
-        pass
-    try: resp=search_sync(q,key,max_results=8,include_domains=_domains)
+    if r.get('status')!='PENDING':
+        raise ServiceError('Zapisane zadanie nie jest nowym Search. Ponowny płatny start i zamiana Research na Search są zablokowane.',uncertain=True)
+    arguments=event_search_arguments(snapshot,cutoff)
+    r.update(status='RESERVED',backend='SEARCH',query=q,cutoff=cutoff,requested_at=utc_now())
+    reserve_manual_research(store,turn,context)
+    try: resp=search_sync(q,key,max_results=8,**arguments)
     except (CLITransportError,OSError,ValueError) as e:
         r['status']='CALL_UNCERTAIN';r['start_error']=str(e)[:300]
         save_gpt_chat_context(store,turn,context)
         raise ServiceError('Tavily: '+str(e)[:300],uncertain=True) from None
     # Extract pelnej tresci z URL-i (Tavily extract)
-    _urls=[x.get('url') for x in (resp.get('results') or []) if x.get('url')]
+    _urls=[x.get('url') for x in (resp.get('results') or []) if x.get('url') and x.get('content_origin')!='raw_content']
     try:
         from tavily_cli_adapter import extract_urls
         _extracted=extract_urls(_urls, key)
@@ -2726,9 +1634,9 @@ def collect_manual_research(store,turn,context,snapshot,key):
         if x.get('url') in _extracted:
             x['content']=_extracted[x['url']]
     resp['_extracted_count']=len(_extracted)
-    fake={'request_id':'manual_'+(turn[:12] if turn else 'x'),'status':'completed','sources':[{'url':x['url'],'title':x['title']} for x in resp['results']],'content':{'materials':[{'url':x['url'],'title':x['title'],'content':x['content'],'published_at':x.get('published_date') or ''} for x in resp['results']],'answer':resp['answer']},'raw_response':resp,'results':resp['results']}
-    r.update(r1_research_sources(fake,cutoff,snapshot))
-    r['query']=q;r['cutoff']=cutoff;r['requested_at']=utc_now()
+    result_record=search_result_record(resp,'manual_'+(turn[:12] if turn else 'x'))
+    r.update(r1_research_sources(result_record,cutoff,snapshot))
+    r['query']=q;r['cutoff']=cutoff
     save_gpt_chat_context(store,turn,context)
 
 
@@ -2744,102 +1652,103 @@ def analysis_schema(snapshot,context):
                 'hypotheses':array(text),'risks':array(text),'missing':array(text)})
 
 
+class ValidatedAnalysis(dict):
+    """Local provenance for diagnostics; provider JSON cannot create this type."""
+    pass
+
+
+def analysis_has_valid_conclusions(result):
+    def meaningful(value):
+        if not isinstance(value,str):return False
+        value=value.strip()
+        return bool(value and not value.startswith('[') and value.casefold().rstrip('.') not in
+                    ('brak danych','brak wniosków','wymaga sprawdzenia','treść usunięta'))
+    return any(meaningful(item.get('interpretation')) for item in result.get('technical',[]) if isinstance(item,dict)) or any(
+        meaningful(item) for key in ('hypotheses','risks') for item in result.get(key,[]))
+
+
 def validate_event_analysis(result,snapshot,context):
+    import copy
     import re
-    warnings=[]
+    from decimal import Decimal, ROUND_HALF_UP
     expected={'technical','context','hypotheses','risks','missing'}
-    if not isinstance(result,dict) or set(result)!=expected:raise ValueError('Niepoprawne sekcje analizy AI.')
+    trusted=isinstance(result,ValidatedAnalysis)
+    if not isinstance(result,dict) or set(result)-{'quality_issues'}!=expected:
+        raise ValueError('Niepoprawne sekcje analizy AI.')
+    warnings=list(result.get('quality_issues',[])) if trusted else []
+    result=ValidatedAnalysis(copy.deepcopy(result))
+    result.pop('quality_issues',None)
     sources={s['id']:s for s in context['sources']};metrics=snapshot.get('indicators',{})
-    def text(value,limit=400,free=True,path='tekst',linked_metric=None):
-        if not isinstance(value,str) or not value.strip():raise ValueError(path+': pusty tekst lub błędny typ.')
-        if len(value)>limit:raise ValueError(path+': przekroczony limit długości tekstu.')
-        if free and re.search(r'\d',value):
-            # Dopuszczamy liczby ktore sa wartosciami dowolnego wskaznika z metrics
-            # lub progami interpretacyjnymi (30/70/20/1.5 itd.).
-            numbers=list(re.finditer(r'(?<![\w])[-+]?\d+(?:[.,]\d+)?(?![\w])',value))
-            remainder=value
-            for match in reversed(numbers):
-                remainder=remainder[:match.start()]+remainder[match.end():]
-            if not numbers or re.search(r'\d',remainder):
-                raise ValueError(path+': liczba bez powiazania z polem danych.')
-            _progi=(20,25,30,50,70,75,80,100,1.0,1.2,1.5,2.0,2,3.0,3,0.5,5,10,60,120,180,240,360,900,1440,24,7,14,9,12,26)
-            _all_ok=True
-            for number in numbers:
-                raw=number.group()
-                if (number.end()<len(value) and value[number.end()] in '%×'):
-                    _all_ok=False;break
-                try:
-                    val=float(raw.replace(',','.'))
-                except ValueError:
-                    _all_ok=False;break
-                if val in _progi:
-                    continue
-                digits=len(raw.split('.',1)[1]) if '.' in raw else len(raw.split(',',1)[1]) if ',' in raw else 0
-                _matched=False
-                for m_val in metrics.values():
-                    if not finite_number(m_val):
-                        continue
-                    try:
-                        if math.isclose(val,float(m_val),rel_tol=0,abs_tol=.5*10**(-digits)+1e-9):
-                            _matched=True;break
-                    except (TypeError,ValueError):
-                        continue
-                if not _matched:
-                    _all_ok=False
-                    break
-            if not _all_ok:
-                # Jesli to technical.interpretation - usun zdania z liczbami zamiast rzucac.
-                if free and path.endswith('.interpretation'):
-                    _safe=[]
-                    for _sent in re.split(r'(?<=[.!?])\s+|\n', value.strip()):
-                        if not re.search(r'\d', _sent):
-                            _safe.append(_sent.strip())
-                    if _safe:
-                        return ' '.join(_safe)
-                    raise ValueError(path+': liczba niezgodna z wartością wskaźnika '+str(linked_metric or '?')+'.')
-                raise ValueError(path+': liczba bez powiazania z polem danych.')
-        if free and re.search(r'\b(buy|sell|kup|kupuj|sprzedaj|sprzedawaj)\b',value,re.I):
-            raise ValueError(path+': niedozwolone słowo BUY/SELL lub polecenie transakcji.')
+    def text(value,limit=400):
+        if not isinstance(value,str) or not value.strip():raise ValueError('Pusty tekst lub błędny typ.')
+        if len(value)>limit:raise ValueError('Przekroczony limit długości tekstu.')
         return value.strip()
+    def advice(value):
+        return bool(re.search(r'\b(buy|sell|kup|kupuj|sprzedaj|sprzedawaj)\b',value,re.I))
+    def issue(path,reason):warnings.append(path+': '+reason+' (usunięto).')
+    removed_premise=False
     for key in expected:
         if not isinstance(result[key],list):raise ValueError(key+': niepoprawna lista.')
-        if len(result[key])>5:result[key]=result[key][:5]
-    seen=set()
-    for index,item in enumerate(result['technical']):
-        path='technical['+str(index)+']'
+        if len(result[key])>5:
+            issue(key,'przekroczony limit elementów')
+            removed_premise |= key in ('technical','context')
+            result[key]=result[key][:5]
+    technical=[];seen=set()
+    for i,item in enumerate(result['technical']):
+        path='technical['+str(i)+']'
         if not isinstance(item,dict) or set(item)!={'metric','interpretation'}:raise ValueError(path+': niepoprawne pola.')
         metric=item['metric']
-        if not isinstance(metric,str) or metric in seen or metric not in metrics or not finite_number(metrics[metric]):raise ValueError(path+'.metric: nieznany, powtórzony lub brakujący wskaźnik.')
-        seen.add(metric);item['interpretation']=text(item['interpretation'],280,path=path+'.interpretation',linked_metric=metric)
-    cited=set()
-    for index,item in enumerate(result['context']):
-        path='context['+str(index)+']'
-        if not isinstance(item,dict) or set(item)!={'source_id','fact'} or not isinstance(item.get('source_id'),str) or item['source_id'] not in sources:raise ValueError(path+': nieznane źródło lub błędne pola.')
-        fact=text(item['fact'],180,False,path+'.fact')
+        if not isinstance(metric,str) or metric in seen or metric not in metrics or not finite_number(metrics[metric]):
+            raise ValueError(path+'.metric: nieznany, powtórzony lub brakujący wskaźnik.')
+        seen.add(metric);value=text(item['interpretation'],280)
+        numbers=list(re.finditer(r'[-+−]?\d+(?:[.,]\d+)?',value))
+        invalid=value.startswith('[') or advice(value) or bool(re.search(r'[%×]|\b(USD|PLN|EUR|GBP|procent|proc|razy)\b',value,re.I))
+        for match in numbers:
+            raw=match.group().replace(',','.').replace('−','-')
+            decimals=len(raw.split('.')[1]) if '.' in raw else 0
+            actual=Decimal(str(metrics[metric])).quantize(Decimal(1).scaleb(-decimals),rounding=ROUND_HALF_UP)
+            # No exponents, parameter names, thousands grouping or embedded digits.
+            before=value[match.start()-1:match.start()] if match.start() else ''
+            after=value[match.end():match.end()+1]
+            invalid |= Decimal(raw)!=actual or bool(before and (before.isalnum() or before in '.,')) or bool(after and (after.isalnum() or after in '.,' and match.end()+1<len(value) and value[match.end()+1].isdigit()))
+        if invalid:
+            issue(path,'liczba niezgodna z przypisanym wskaźnikiem, jednostka lub polecenie BUY/SELL')
+            removed_premise=True;continue
+        technical.append({**item,'interpretation':value})
+    result['technical']=technical
+    quotes=[];cited=set()
+    for i,item in enumerate(result['context']):
+        path='context['+str(i)+']'
+        if not isinstance(item,dict) or set(item)!={'source_id','fact'} or not isinstance(item.get('source_id'),str) or item['source_id'] not in sources:
+            raise ValueError(path+': nieznane źródło lub błędne pola.')
+        fact=text(item['fact'],180)
         if item['source_id'] in cited:raise ValueError(path+': powtórzone źródło.')
-        if fact not in sources[item['source_id']]['content']:
-            warnings.append(path+'.fact: tekst nie jest dosłownym fragmentem źródła (usunięto).')
-            continue
-        if len(fact.split())>25:
-            warnings.append(path+'.fact: więcej niż 25 słów (usunięto).')
-            continue
-        cited.add(item['source_id'])
-        item['fact']=fact
+        if fact not in sources[item['source_id']].get('content','') or len(fact.split())>25 or advice(fact):
+            issue(path+'.fact','tekst nie jest dosłownym fragmentem źródła, przekracza limit lub zawiera BUY/SELL')
+            removed_premise=True;continue
+        cited.add(item['source_id']);quotes.append({**item,'fact':fact})
+    result['context']=quotes
     for key in ('hypotheses','risks','missing'):
-        _clean=[]
-        for i,v in enumerate(result[key]):
-            try:
-                _clean.append(text(v,path=key+'['+str(i)+']'))
-            except ValueError as _e:
-                warnings.append(key+'['+str(i)+']: '+str(_e)+' (usunięto).')
-        result[key]=_clean
-    if warnings:
-        result['quality_issues']=warnings
+        clean=[]
+        for i,value in enumerate(result[key]):
+            path=key+'['+str(i)+']'
+            try:value=text(value)
+            except ValueError as exc:issue(path,str(exc));continue
+            if removed_premise:
+                issue(path,'nie można potwierdzić niezależności od usuniętej przesłanki');continue
+            if re.search(r'\d',value) or advice(value):
+                issue(path,'niedozwolona liczba lub polecenie BUY/SELL');continue
+            if value.startswith('[') and ('usun' in value.lower() or 'tre' in value.lower()):
+                issue(path,'tekst zastępczy');continue
+            clean.append(value)
+        result[key]=clean
+    if warnings:result['quality_issues']=list(dict.fromkeys(warnings))
     return result
 
 
 def parse_event_analysis_response(body,snapshot,context):
-    metadata={'model':body.get('model','gpt-4o-mini'),'response_id':body.get('id'),'usage':body.get('usage',{})}
+    import copy
+    metadata={'raw_response':copy.deepcopy(body),'model':body.get('model','gpt-4o-mini'),'response_id':body.get('id'),'usage':body.get('usage',{})}
     draft={**metadata,'content':None,'finish_reason':None}
     try:
         choice=body['choices'][0];message=choice['message']
@@ -2879,7 +1788,7 @@ def event_analysis_request(evidence,context):
         'risks: konkretne ryzyka wynikające z dostarczonych danych. missing: konkretnie czego brakuje. '
         'W hipotezach, ryzykach i brakach nie wpisuj cyfr ani własnych wartości liczbowych. '
         'Nie dopisuj faktów ani ogólnych porad. '
-        'ZASADY: Jesli w snapshot jest pole market_activity, uzyj go do opisu stanu rynku (zamkniety/aktywny). Jesli jest spread_interpretation, uzyj go jako jednego z ryzyk (gotowe zdanie z liczbami). NIE pisz fraz typu brak potwierdzonego czasu bid/ask ani liczba przeniesionych przedzialow - te informacje sa juz podsumowane w market_activity i spread_interpretation. Zwróć JSON zgodny ze schematem.')
+        'ZASADY: Jesli w snapshot jest pole market_activity, uzyj go do opisu stanu rynku (zamkniety/aktywny). Jeśli jest spread_interpretation, opisz ryzyko jakościowo, bez przepisywania cyfr do risks. Liczby pozostają w danych wejściowych. NIE pisz fraz typu brak potwierdzonego czasu bid/ask ani liczba przeniesionych przedzialow - te informacje sa juz podsumowane w market_activity i spread_interpretation. Zwróć JSON zgodny ze schematem.')
     market={k:v for k,v in snap.items() if k not in ('chart_history','carried_price_candles','empty_trailing_source_candles')}
     # Usun diagnostyczne pola spreadu (GPT interpretuje je jako braki danych).
     if isinstance(market.get('spread'),dict):
@@ -2891,9 +1800,11 @@ def event_analysis_request(evidence,context):
     _cpc=snap.get('carried_price_candles')
     _cpc_cnt=len(_cpc) if isinstance(_cpc,list) else 0
     if _cpc_cnt>0:
-        market['market_activity']='{} kolejnych odczytow z ta sama cena - rynek prawdopodobnie zamkniety (normalne dla weekendu lub przerwy w handlu).'.format(_cpc_cnt)
+        market['market_activity']='Historia zawiera przedziały z przeniesioną ceną i zerowym wolumenem; nie stanowią dowodu nowej aktywności.'
     else:
-        market['market_activity']='Ceny zmieniaja sie w kazdym odczycie - rynek aktywny.'
+        market['market_activity']=('Zapisany odczyt pochodzi z regularnej sesji. Jedna migawka nie dowodzi nowej aktywności.'
+            if market_session_open(snap.get('ticker'),snap.get('acquired_at')) else
+            'Zapisany odczyt pochodzi spoza regularnej sesji. Nie potwierdza bieżącej aktywności rynku.')
     # Gotowe podsumowanie spreadu z historia.
     if isinstance(market.get('spread_history'),list) and market.get('spread_avg_pct') is not None:
         _cur=(market.get('spread') or {}).get('spread_pct')
@@ -2915,9 +1826,12 @@ def event_analysis_request(evidence,context):
     if 'ranking' in evidence_data:evidence_data['ranking']=ai_ranking
     # Operational diagnostics (failed sources, requests, attempts, credit usage) stay
     # in SQLite; do not pay to resend them to OpenAI or expose unverifiable text.
-    safe_context={'sources':context['sources'],
+    _sources = context.get('sources') or []
+    safe_context={'sources': _sources,
                   'cutoff':context.get('cutoff'),
                   'date_basis':context.get('date_basis')}
+    if not _sources:
+        instructions += ' BRAK ZRODEL ZEWNETRZNYCH. Skup sie wylacznie na analizie technicznej z snapshotu. W sekcji context zwroc pusta liste. Nie wymyslaj przyczyn ruchu.'
     return {
         'model':'gpt-4o-mini','temperature':0.2,'max_completion_tokens':1800,'store':False,
         'messages':[{'role':'system','content':instructions},
@@ -2927,6 +1841,8 @@ def event_analysis_request(evidence,context):
 
 def analyze_event(evidence,context,keys,engine='openai'):
     snap=evidence['snapshot']
+    # Brak zrodel nie blokuje analizy - wysylamy czysta analize techniczna z Yahoo.
+    pass
     if engine=='deepseek':
         if not keys.get('DEEPSEEK_API_KEY'):raise ServiceError('Brak DEEPSEEK_API_KEY w secrets.toml.')
         req=event_analysis_request(evidence,context)
@@ -2946,40 +1862,44 @@ def analyze_event(evidence,context,keys,engine='openai'):
 def message_limit(text):
     if len(text.encode('utf-16-le'))//2<=4096:return text
     # Avoid splitting Unicode surrogate pairs. Full result remains in SQLite/panel.
-    return text.encode('utf-16-le')[:8000].decode('utf-16-le',errors='ignore')+'\n[Pełna analiza w panelu KI]'
+    truncated = text
+    while len(truncated.encode('utf-16-le'))//2 > 4000 and len(truncated) > 100:
+        truncated = truncated[:-100]
+    return truncated+'\n[Pełna analiza w panelu KI]'
 
 
+_INTERVAL_MINUTES = {'15m':15,'30m':30,'1h':60,'1d':1440}
 def open_hour_fresh(snapshot,now=None):
     from datetime import timedelta
-    if snapshot.get('interval')!='1h' or snapshot.get('candle_status')!='OPEN':return False
+    interval = snapshot.get('interval')
+    if interval != '1h': return False
+    if snapshot.get('candle_status')!='OPEN': return False
     try:
         current=now or datetime.now(timezone.utc)
         start=parse_market_time(snapshot['candle_time']);end=parse_market_time(snapshot['candle_end'])
         acquired=parse_market_time(snapshot['acquired_at'])
-        return (start<=acquired<=current<end and start<end<=start+timedelta(hours=1)
+        span = timedelta(minutes=_INTERVAL_MINUTES[interval])
+        return (start<=acquired<=current<end and start<end<=start+span+timedelta(minutes=2)
                 and current-acquired<=timedelta(minutes=15))
     except (KeyError,ValueError,TypeError,OverflowError):return False
 
 
 def market_session_open(ticker,now=None):
-    """Suppress notifications outside market hours: GPW 17:00, US 22:00 Europe/Warsaw."""
-    if not isinstance(ticker,str):return True
-    try:
-        from zoneinfo import ZoneInfo
-        current=parse_market_time(now or datetime.now(timezone.utc))
-        local=current.astimezone(ZoneInfo('Europe/Warsaw'))
-        if ticker.upper().endswith('.WA'):
-            return local.hour < 17
-        return local.hour < 22
-    except (KeyError,ValueError,TypeError,OverflowError,ImportError):
-        return False
+    """Regular session in exchange time: GPW 09:00–17:00, US 09:30–16:00."""
+    if not isinstance(ticker,str) or not valid_ticker(ticker):return False
+    try:return automatic_session_open(ticker,parse_market_time(now or utc_now()))
+    except (KeyError,ValueError,TypeError,OverflowError,ImportError):return False
+
+
+def gpw_notification_session_open(ticker,now=None):
+    return market_session_open(ticker,now) if str(ticker).upper().endswith('.WA') else True
 
 
 def accepted_matrix_snapshot(snapshot):
     """Require the displayed price/time to match the last accepted matrix reading."""
     if 'price_matrix' not in snapshot:return True
     matrix=snapshot.get('price_matrix') or {}
-    if matrix.get('read_status') in ('TOO_SOON','OUT_OF_ORDER','MARKET_CLOSED'):
+    if matrix.get('read_status') in ('TOO_SOON','OUT_OF_ORDER','MARKET_CLOSED','MISSING_DAILY_REFERENCE'):
         return False
     try:
         return (parse_market_time(snapshot['acquired_at']) == parse_market_time(matrix['last_acquired_at'])
@@ -3273,8 +2193,8 @@ def record_opportunity(store,snapshot,cycle_id,now=None):
                 _cfg=store.load_section('settings',{})
                 _min_rvol=float(_cfg.get('min_rvol_for_opportunity',0.5))
                 _min_vol=int(_cfg.get('min_volume_for_opportunity',1000))
-            except Exception:
-                _min_rvol=0.5; _min_vol=1000
+            except Exception as _cfg_exc:
+                raise ServiceError('record_opportunity: nie mozna odczytac settings: '+type(_cfg_exc).__name__+': '+str(_cfg_exc)[:200]) from _cfg_exc
             _rv=snapshot.get('rvol'); _vol=snapshot.get('volume')
             if finite_number(_rv) and _rv<_min_rvol:
                 _is_confirmed=False
@@ -3396,7 +2316,7 @@ def reserve_opportunities(store,cycle_id,now=None):
     current=now or datetime.now(timezone.utc);selected=[]
     with store.transaction() as c:
         ticks=set(store.load_section('tickers',[]))
-        _min_rvol=float(store.load_section('settings',{}).get('rvol_threshold_pct',1.0))
+        _min_rvol=float(store.load_section('settings',{}).get('min_rvol_absolute',0.3))
         rows=[dict(r) for r in c.execute("SELECT * FROM opportunities WHERE state='CONFIRMED' AND cycle_id=?",(cycle_id,))]
         for r in rows:r['rank']=json.loads(r['payload'])
         rows.sort(key=lambda r:(-r['rank']['score'],-(r['rank']['rvol'] if finite_number(r['rank'].get('rvol')) else 0),r['ticker']))
@@ -3426,7 +2346,7 @@ def queue_opportunity(store,sequence_id,spread,delivery_enabled,now=None):
         if not raw:return False
         row=json.loads(raw['payload']);snap={**row['snapshot'],'spread':spread}
         _ticks=set(store.load_section('tickers',[]))
-        _min_rvol=float(store.load_section('settings',{}).get('rvol_threshold_pct',1.0))
+        _min_rvol=float(store.load_section('settings',{}).get('min_rvol_absolute',0.3))
         _rvol=row.get('rvol')
         _ok,_reason=should_alert(snap,None,_ticks,current,check_basis=False,min_rvol=_min_rvol,rvol=_rvol)
         log_alert_decision(c,sequence_id,'queue',_ok,_reason,snap)
@@ -3445,6 +2365,8 @@ def queue_opportunity(store,sequence_id,spread,delivery_enabled,now=None):
 
 
 def opportunity_message(event_id,evidence,context,result):
+    result=validate_event_analysis(result,evidence['snapshot'],context)
+    if not analysis_has_valid_conclusions(result):return 'Wymaga sprawdzenia: brak poprawnych wniosków.'
     """Krotka wiadomosc Telegram (~10 linii). Pelny raport w panelu KI."""
     row=evidence['ranking'];snap=evidence['snapshot'];risk=row['risk']
     ind=snap.get('indicators') or {}
@@ -3455,6 +2377,7 @@ def opportunity_message(event_id,evidence,context,result):
     cur=str(snap.get('currency') or '')
     base=matrix.get('anchor_price');chg=matrix.get('change_pct')
     lines=['OKAZJA · '+snap['ticker']+' · '+risk['label']]
+    if result.get('quality_issues'):lines.append('Jakość analizy — usunięcia: '+'; '.join(result['quality_issues']))
     lines.append('Cena '+num(snap['price'],4)+' '+cur+(' | baza '+num(base,4) if finite_number(base) else ''))
     if finite_number(chg):
         lines.append('Zmiana od bazy: '+('+' if chg>=0 else '')+num(chg)+'%')
@@ -3467,7 +2390,8 @@ def opportunity_message(event_id,evidence,context,result):
     if finite_number(ind.get('last_macd_hist')): key.append('MACD hist. '+(('+' if ind['last_macd_hist']>=0 else '')+num(ind['last_macd_hist'],4)))
     if finite_number(ind.get('adx')): key.append('ADX '+num(ind['adx']))
     if finite_number(snap.get('rvol')): key.append('RVOL '+num(snap['rvol'])+'x')
-    if key: lines.append(' · '.join(key))
+    if key: lines.append(opportunity_indicator_summary(snap))
+    lines.append('Świeca '+str(snap.get('interval') or '?')+': '+str(snap.get('candle_time') or 'Brak danych'))
     if risk.get('reasons'):
         lines.append('Ryzyko: '+'; '.join(risk['reasons'][:1]))
     elif finite_number(risk.get('spread_pct')) and risk['spread_pct']>=2:
@@ -3523,9 +2447,9 @@ def telegram_movement_confirmed(evidence,now=None):
             open_hour_fresh(snap,now) and two_candle_confirmation(snap,now))
 
 
-def telegram_message_status(evidence,enabled):
+def telegram_message_status(evidence,enabled,now=None):
     if not enabled:return 'PREVIEW'
-    return 'PENDING' if telegram_movement_confirmed(evidence) else 'FILTERED'
+    return 'PENDING' if telegram_movement_confirmed(evidence,now) else 'FILTERED'
 
 
 OPPORTUNITY_INDICATORS=(
@@ -3588,10 +2512,10 @@ def polish_indicator(key):
 
 def polish_status(value):
     return {'EVENT':'Wykryto zdarzenie','UNCHANGED':'Bez przekroczenia progu','BASELINE_CREATED':'Utworzono punkt odniesienia',
-            'OUT_OF_ORDER':'Odczyt poza kolejnością','RATE_LIMITED':'Ograniczenie Yahoo','ERROR':'Błąd',
+            'MISSING_DAILY_REFERENCE':'Brak zamknięcia poprzedniej sesji','FETCH_DEFERRED':'Pobranie odroczone','OUT_OF_ORDER':'Odczyt poza kolejnością','RATE_LIMITED':'Ograniczenie Yahoo','ERROR':'Błąd',
             'RUNNING':'W toku','OK':'Zakończony','PARTIAL':'Częściowy','INTERRUPTED':'Przerwany',
             'EMPTY_WATCHLIST':'Pusta lista','OPEN':'W trakcie','CLOSED':'Zamknięta',
-            'INCOMPLETE_CANDLE_STATUS':'Brak ustalonego stanu świecy'}.get(value,value)
+            'REVIEW_REQUIRED':'Wymaga sprawdzenia','INCOMPLETE_CANDLE_STATUS':'Brak ustalonego stanu świecy'}.get(value,value)
 
 
 def evidence_message(event_id,evidence):
@@ -3606,7 +2530,7 @@ def evidence_message(event_id,evidence):
            'RVOL: '+val(reference.get('rvol'))+' → '+val(snap.get('rvol')),
            'Względna zmiana RVOL: '+val(evidence.get('rvol_change_pct'))+'%',
            'Przekroczone progi detekcji w panelu: '+', '.join({'PRICE':'Cena','RVOL':'Względna zmiana RVOL','PRICE_MATRIX_3_READS':'Cena ponad stałą bazą przez trzy odczyty z nową aktywnością'}.get(r,r) for r in evidence['reasons']),
-           ('Próg matrycy: cena > '+val(evidence['thresholds']['price_threshold_pct'])+'% od pierwszego odczytu; potwierdzenie: '+val(evidence['thresholds'].get('confirmation_reads'))+' odczyty.' if evidence['reasons']==['PRICE_MATRIX_3_READS'] else 'Progi: cena > '+val(evidence['thresholds']['price_threshold_pct'])+'%; RVOL > '+val(evidence['thresholds'].get('rvol_threshold_pct'))+'%'),
+           ('Próg matrycy: cena > '+val(evidence['thresholds']['price_threshold_pct'])+'% od zamknięcia poprzedniej sesji; potwierdzenie: '+val(evidence['thresholds'].get('confirmation_reads'))+' odczyty.' if evidence['reasons']==['PRICE_MATRIX_3_READS'] else 'Progi: cena > '+val(evidence['thresholds']['price_threshold_pct'])+'%; RVOL > '+val(evidence['thresholds'].get('rvol_threshold_pct'))+'%'),
            'Filtr Telegram: |zmiana ceny| ≥ 2% ORAZ RVOL ≥ 1,20; dodatni wolumen aktualnej, otwartej świecy 1h.',
            'Źródło ceny: '+{'carried_previous_close':'Poprzednia cena zamknięcia','Yahoo OHLC':'Dane OHLC Yahoo'}.get(snap.get('latest_price_origin'),'Dane OHLC Yahoo'),
            'Analiza AI: osobny komunikat po zakończeniu.']
@@ -3614,10 +2538,13 @@ def evidence_message(event_id,evidence):
 
 
 def analysis_message(event_id,evidence,context,result,limit=True):
+    result=validate_event_analysis(result,evidence['snapshot'],context)
+    if not analysis_has_valid_conclusions(result):return 'Wymaga sprawdzenia: brak poprawnych wniosków.'
     snap=evidence['snapshot'];sources={s['id']:s for s in context['sources']}
     lines=[('TEST HISTORYCZNY — ' if evidence.get('historical_test') else '')+'ANALIZA RUCHU · '+snap['ticker'],
            'Zdarzenie: '+event_id,'Świeca: '+snap['candle_time']]
     layered=evidence.get('kind')=='CONFIRMED_OPPORTUNITY' and isinstance(evidence.get('ranking'),dict)
+    if result.get('quality_issues'):lines.append('Jakość analizy — usunięcia: '+'; '.join(result['quality_issues']))
     if layered:lines.extend(opportunity_three_layer_lines(evidence['ranking'],details=True))
     lines.append('4. INTERPRETACJA GPT — tylko dane wejściowe i zweryfikowane fakty:' if layered else 'Interpretacja wskaźników:')
     for item in result['technical']:
@@ -3635,23 +2562,24 @@ def analysis_message(event_id,evidence,context,result,limit=True):
     return message_limit(text) if limit else text
 
 
-def claim_analysis(store,event_id=None):
+def claim_analysis(store,event_id=None,now=None):
+    current=parse_market_time(now or utc_now());stamp=current.isoformat()
     with store.transaction() as c:
         rows=c.execute("SELECT j.*,e.payload FROM analysis_jobs j JOIN events e ON e.id=j.event_id WHERE j.state IN ('PENDING_CONTEXT','PENDING_AI') AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?)"+
                       (' AND j.event_id=?' if event_id else '')+' ORDER BY j.updated_at',
-                      (utc_now(),event_id) if event_id else (utc_now(),)).fetchall()
+                      (stamp,event_id) if event_id else (stamp,)).fetchall()
         row=None
         for candidate in rows:
             evidence=json.loads(candidate['payload'])
             manual=evidence.get('manual_analysis') or evidence.get('historical_test')
-            if not manual and not opportunity_delivery_valid(store,evidence):
-                c.execute("UPDATE analysis_jobs SET state='FILTERED',last_error='Zdarzenie starego skanera lub okazja wygasła; bez płatnego zapytania.',updated_at=? WHERE event_id=?",(utc_now(),candidate['event_id']))
+            if not manual and not opportunity_delivery_valid(store,evidence,current):
+                c.execute("UPDATE analysis_jobs SET state='FILTERED',last_error='Zdarzenie starego skanera lub okazja wygasła; bez płatnego zapytania.',updated_at=? WHERE event_id=?",(stamp,candidate['event_id']))
                 continue
             row=candidate;break
         if not row:return None
         job=dict(row);job['state']='BUSY_CONTEXT' if row['state']=='PENDING_CONTEXT' else 'BUSY_AI';job['attempts']+=1
         c.execute('UPDATE analysis_jobs SET state=?,attempts=?,updated_at=? WHERE event_id=?',
-                  (job['state'],job['attempts'],utc_now(),job['event_id']))
+                  (job['state'],job['attempts'],stamp,job['event_id']))
         return job
 
 
@@ -3791,17 +2719,23 @@ def save_analysis_context(store,event_id,context):
                   (json_text(context),utc_now(),event_id))
 
 
-def finish_analysis(store,event_id,result,metadata):
+def finish_analysis(store,event_id,result,metadata,now=None):
+    current=parse_market_time(now or utc_now());stamp=current.isoformat()
     with store.transaction() as c:
         job=c.execute('SELECT * FROM analysis_jobs WHERE event_id=?',(event_id,)).fetchone()
         if not job or job['state']!='BUSY_AI':return
         evidence=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(event_id,)).fetchone()[0]);context=json.loads(job['context'])
         result=validate_event_analysis(result,evidence['snapshot'],context)
-        message=opportunity_message(event_id,evidence,context,result) if evidence.get('kind')=='CONFIRMED_OPPORTUNITY' else analysis_message(event_id,evidence,context,result);now=utc_now()
-        c.execute("UPDATE analysis_jobs SET state='DONE',result=?,last_error=NULL,next_attempt_at=NULL,updated_at=? WHERE event_id=?",
-                  (json_text({'analysis':result,'provider':metadata}),now,event_id))
+        valid=analysis_has_valid_conclusions(result)
+        state='DONE' if valid else 'REVIEW_REQUIRED'
+        c.execute('UPDATE analysis_jobs SET state=?,result=?,last_error=?,next_attempt_at=NULL,updated_at=? WHERE event_id=?',
+                  (state,json_text({'analysis':result,'provider':metadata}),None if valid else 'Wymaga sprawdzenia: brak poprawnych wniosków.',stamp,event_id))
+        if not valid:
+            c.execute("UPDATE outbox SET status='FILTERED',last_error='Wymaga sprawdzenia: brak poprawnych wniosków.',next_attempt_at=NULL WHERE event_id=? AND kind='ANALYSIS' AND status IN ('PENDING','PREVIEW')",(event_id,))
+            return
+        message=opportunity_message(event_id,evidence,context,result) if evidence.get('kind')=='CONFIRMED_OPPORTUNITY' else analysis_message(event_id,evidence,context,result)
         c.execute('INSERT OR REPLACE INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)',
-                  (event_id+':analysis',event_id,'ANALYSIS',message,telegram_message_status(evidence,evidence.get('delivery_enabled')),now))
+                  (event_id+':analysis',event_id,'ANALYSIS',message,telegram_message_status(evidence,evidence.get('delivery_enabled'),current),stamp))
 
 
 def fail_analysis(store,event_id,error):
@@ -3872,22 +2806,13 @@ def submit_event_research(store, event_id, query, cutoff, api_key):
     if not reserved:
         raise ServiceError("Tavily: zadanie juz zarejestrowane.", uncertain=True)
     try:
-        _tkr=""
-        try:
-            with store.connection() as _c:
-                _row=_c.execute("SELECT ticker FROM events WHERE id=?",(event_id,)).fetchone()
-            if _row and _row[0]: _tkr=str(_row[0]).upper()
-        except Exception:
-            pass
-        _domains=None
-        if _tkr.endswith(".WA"):
-            try:
-                from tavily_cli_adapter import GPW_DOMAINS
-                _domains=GPW_DOMAINS
-            except Exception:
-                pass
-        resp = search_sync(query, api_key, max_results=8, include_domains=_domains)
-        _urls=[x.get('url') for x in (resp.get('results') or []) if x.get('url')]
+        with store.connection() as c:
+            row=c.execute('SELECT payload FROM events WHERE id=?',(event_id,)).fetchone()
+        if not row:raise ValueError('Brak zapisanego zdarzenia do wyszukiwania.')
+        snapshot=json.loads(row[0])['snapshot']
+        arguments=event_search_arguments(snapshot,cutoff)
+        resp=search_sync(query,api_key,max_results=8,**arguments)
+        _urls=[x.get('url') for x in (resp.get('results') or []) if x.get('url') and x.get('content_origin')!='raw_content']
         try:
             from tavily_cli_adapter import extract_urls
             _extracted=extract_urls(_urls, api_key)
@@ -3902,180 +2827,47 @@ def submit_event_research(store, event_id, query, cutoff, api_key):
         with store.transaction() as c:
             mark_research_uncertain(c, event_id, detail)
         raise ServiceError("Tavily search: blad. "+detail, uncertain=True) from None
-    fake = {
-        "request_id": "search_"+event_id[:12],
-        "status": "completed",
-        "sources": [{"url": r["url"], "title": r["title"]} for r in resp["results"]],
-        "content": {"materials": [
-            {"url": r["url"], "title": r["title"], "content": r["content"],
-             "published_at": r.get("published_date") or ""}
-            for r in resp["results"]
-        ], "answer": resp["answer"]},
-        "raw_response": resp,
-        "results": resp["results"],
-    }
+    result_record=search_result_record(resp,'search_'+event_id[:12])
     with store.transaction() as c:
-        mark_research_submitted(c, event_id, fake["request_id"])
-        complete_research(c, event_id, fake)
-    return fake["request_id"]
-
-
-
-def check_event_research(store, event_id, api_key):
-    """Sprawdz istniej?ce zadanie bez nowego platnego zlecenia."""
-    from tavily_cli_adapter import check_research, CLITransportError
-
-    with store.connection() as connection:
-        row = connection.execute(
-            "SELECT state,request_id FROM research_requests "
-            "WHERE event_id=?",
-            (event_id,)
-        ).fetchone()
-
-    if row is None or row["state"] != "SUBMITTED":
-        raise ServiceError(
-            "Tavily Research: brak zadania gotowego do sprawdzenia."
-        )
-
-    request_id = row["request_id"]
-
-    try:
-        result = check_research(request_id, api_key)
-    except CLITransportError:
-        raise ServiceError(
-            "Tavily Research: nie udalo sie sprawdzic statusu. "
-            "Nie uruchomiono nowego zadania.",
-            uncertain=True
-        ) from None
-
-    if result["status"] == "completed":
-        with store.transaction() as connection:
-            complete_research(connection, event_id, result)
-
-    return result
+        mark_research_submitted(c, event_id, result_record["request_id"])
+        complete_research(c, event_id, result_record)
+    return result_record["request_id"]
 
 
 
 def r1_research_sources(response, cutoff, snapshot):
-    """Prosta wersja: bierze response.results i response.answer (z search_sync).
-    Zachowuje tez stary format (research run z materials)."""
-    # Jesli response ma results (search_sync):
-    if isinstance(response, dict) and "results" in response and isinstance(response.get("results"), list):
-        sources = []
-        # Filtr: zrodlo musi zawierac nazwe spoly lub ticker.
-        _name=(snapshot.get("company_name") or "").strip()
-        _tkr=(snapshot.get("ticker") or "").strip().upper()
-        _tkr_clean=_tkr.split(".")[0] if _tkr else ""
-        _name_root=_name.split(" S.A.")[0].split(" Sp")[0].split(" Inc")[0].strip()
-        _name_parts=[p for p in _name_root.lower().split() if len(p)>=4]
-        def _matches(r):
-            blob=(str(r.get("title") or "")+" "+str(r.get("content") or "")[:500]).lower()
-            if _name and len(_name_root)>=4 and _name_root.lower() in blob: return True
-            # Dla GPW: kazda czesc nazwy (>=4 znaki) wystarcza
-            if _tkr.endswith('.WA') and _name_parts:
-                if any(part in blob for part in _name_parts): return True
-            if _tkr_clean and len(_tkr_clean)>=3 and _tkr_clean.lower() in blob: return True
-            return False
-        from datetime import timezone as _tz2
-        _now = datetime.now(_tz2.utc)
-        for i, r in enumerate((response.get("results") or []), 1):
-            if not isinstance(r, dict): continue
-            url = r.get("url")
-            if not url: continue
-            if not _matches(r):
-                continue
-            _pd = r.get("published_date")
-            if isinstance(_pd,str) and _pd.strip():
-                try:
-                    from email.utils import parsedate_to_datetime
-                    try: _pub = datetime.fromisoformat(_pd.replace("Z","+00:00"))
-                    except ValueError: _pub = parsedate_to_datetime(_pd)
-                    if _pub.tzinfo is None:
-                        _pub = _pub.replace(tzinfo=_tz2.utc)
-                    if (_now - _pub).days > 30:
-                        continue
-                except Exception:
-                    pass
-
-            sources.append({
-                "id": "S"+str(i),
-                "url": str(url)[:500],
-                "title": str(r.get("title") or "")[:200],
-                "content": str(r.get("content") or "")[:4000],
-                "published_at": r.get("published_date") or None,
-                "date_state": "KNOWN" if r.get("published_date") else "MISSING",
-                "source_provenance": "tavily_search",
-                "content_delivery_state": "SEARCH_RESULT",
-                "scope": "fresh",
-            })
-        cut = cutoff if isinstance(cutoff, str) else str(cutoff)
-        return {
-            "sources": sources, "cutoff": cut, "excluded": 0, "rejected_sources": [],
-            "received_results": len(response.get("results") or []),
-            "date_unverified_count": sum(1 for s in sources if s["date_state"] == "MISSING"),
-            "undated_sources": [s for s in sources if s["date_state"] == "MISSING"],
-            "issuer_filter_version": 1,
-            "date_basis": "Data publikacji wskazana przez Tavily Search.",
-            "backend": "SEARCH", "status": "DONE",
-            "request_id": response.get("request_id"),
-            "raw_response": response,
-            "received_at": utc_now(),
-            "answer": response.get("answer") or "",
-            "research_version": 8,
-            "window_hours": 24,
-        }
-    # Stary format (research run z materials) - deleguj do oryginalu jesli istnieje
+    """Uses the robust validator to ensure only issuer sources are returned."""
+    if isinstance(response, dict) and isinstance(response.get("results"), list):
+        result = normalize_tavily_context(
+            response, snapshot,
+            window_days=30,
+            allow_external_domains=False,
+            strict_time_window=False
+        )
+        result['backend'] = 'SEARCH'
+        result['status'] = 'DONE'
+        result['request_id'] = response.get('request_id')
+        result['provider_request_id']=response.get('provider_request_id')
+        result['request_id_origin']=response.get('request_id_origin','legacy_local')
+        result['request']=response.get('request')
+        result['issuer_identity']=issuer_search_identity(snapshot)
+        result['raw_response'] = response
+        result['received_at'] = utc_now()
+        result['answer'] = response.get('answer') or ''
+        result['research_version'] = 8
+        result['window_hours'] = 720
+        return result
     raise ServiceError("Research: nierozpoznany format odpowiedzi Tavily.", uncertain=True)
-
-
-
-def r1_wait_for_research(check, max_seconds=180):
-    """Odbior istniejacego zadania; bez ponownego uruchamiania."""
-    import time
-
-    if type(max_seconds) not in (int,float) or not math.isfinite(max_seconds) or max_seconds<0:
-        raise ValueError('Research: niepoprawny limit oczekiwania.')
-    end = time.monotonic() + max_seconds
-
-    while True:
-        response = check()
-        status = str(response.get("status") or "").lower()
-
-        if status == "completed":
-            return response
-
-        if status in ("failed", "error", "cancelled", "canceled"):
-            raise ServiceError(
-                "Tavily Research: zadanie zakonczone niepowodzeniem."
-            )
-
-        if status not in (
-            "pending", "queued", "running",
-            "in_progress", "processing", "submitted"
-        ):
-            raise ServiceError(
-                "Tavily Research: nieznany status zadania.",
-                uncertain=True
-            )
-
-        remaining = end - time.monotonic()
-        if remaining <= 0:
-            raise ResearchPending(
-                "Tavily Research: zadanie nadal trwa. "
-                "Identyfikator zachowano; nie uruchamiac ponownie.",
-                uncertain=True
-            )
-
-        time.sleep(min(5, remaining))
-
 
 def process_analysis_once(store,keys,event_id=None):
     job=claim_analysis(store,event_id)
     if not job:return False
+    stage='READ_EVENT'
     try:
         with store.connection() as c:
             evidence=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(job['event_id'],)).fetchone()[0])
         if job['state']=='BUSY_CONTEXT':
+            stage='RESEARCH_CONTEXT'
             record=load_event_research(store,job['event_id'])
             if record is None:
                 cutoff=event_context_cutoff(evidence['snapshot']).isoformat()
@@ -4084,9 +2876,6 @@ def process_analysis_once(store,keys,event_id=None):
                 record=load_event_research(store,job['event_id'])
             if record['state']=='COMPLETED':
                 response=json.loads(record['raw_response'])
-            elif record['state']=='SUBMITTED' and record['request_id']:
-                if not keys.get('TAVILY_API_KEY'):raise ServiceError('Tavily Research: brak klucza API.')
-                response=r1_wait_for_research(lambda:check_event_research(store,job['event_id'],keys['TAVILY_API_KEY']))
             else:
                 raise ServiceError('Research: rezerwacja niepewna; ponowny płatny start zablokowany.',uncertain=True)
             if response.get('request_id')!=record['request_id']:
@@ -4143,11 +2932,15 @@ def process_analysis_once(store,keys,event_id=None):
                     evidence['snapshot'] = _snap
             except Exception:
                 pass
+            stage='AI_REQUEST'
             result,metadata=analyze_event(evidence,json.loads(job['context']),keys,engine=_engine)
+            stage='SAVE_ANALYSIS'
             finish_analysis(store,job['event_id'],result,metadata)
     except ServiceError as exc:fail_analysis(store,job['event_id'],exc)
     except Exception as exc:
-        fail_analysis(store,job['event_id'],ServiceError('Błąd Research/analizy: '+type(exc).__name__+'. Wymaga kontroli.',uncertain=True))
+        from tavily_cli_adapter import sanitize_cli_diagnostic
+        detail=sanitize_cli_diagnostic(type(exc).__name__+': '+str(exc),list(keys.values()))
+        fail_analysis(store,job['event_id'],ServiceError('Błąd Research/analizy ['+stage+']: '+detail+'. Wymaga kontroli.',uncertain=True))
     return True
 
 
@@ -4179,11 +2972,11 @@ def claim_delivery(store,outbox_id=None,now=None):
             evidence=json.loads(candidate['evidence_payload'])
             if candidate['kind']!='ANALYSIS' or not opportunity_delivery_valid(store,evidence,current):
                 snap=evidence.get('snapshot') or {}
-                reason=('Telegram: sesja zamknięta; alert nie został wysłany.'
+                reason=('Telegram: sesja zamknięta (GPW po 17:00 czasu Warszawy); alert nie został wysłany.'
                         if candidate['kind']=='ANALYSIS' and not market_session_open(snap.get('ticker'),current) else
                         'Telegram: brak świeżej, aktywnej świecy lub potwierdzenia ruchu; alert nie został wysłany.')
                 c.execute("UPDATE outbox SET status='FILTERED',last_error=?,next_attempt_at=NULL WHERE id=?",(reason,candidate['id']))
-            elif row is None and (candidate['next_attempt_at'] is None or candidate['next_attempt_at']<=utc_now()):
+            elif row is None and (candidate['next_attempt_at'] is None or candidate['next_attempt_at']<=current.isoformat()):
                 row=candidate
         if not row:return None
         item=dict(row);item['attempts']+=1
@@ -4248,22 +3041,88 @@ def process_delivery_once(store,keys,outbox_id=None):
     return True
 
 
-def service_worker(store,stop,kind):
+def service_runtime_notice(key,updated,status,now=None,max_age_seconds=300):
+    current=parse_market_time(now or utc_now())
+    prefix=('Analiza AI/Tavily' if key=='service_analysis' else 'Telegram')
     try:
-        with ScannerLock(str(store.path)+'.'+kind):
-            recover_service_jobs(store,kind)
-            while not stop.is_set():
-                cfg=service_config(store.load_section('settings',{}))
-                enabled=(cfg['pipeline_enabled'] if kind=='analysis' else
-                         cfg['pipeline_enabled'] and cfg['telegram_enabled'])
-                if enabled:
-                    keys=load_service_keys()
-                    processed=process_analysis_once(store,keys) if kind=='analysis' else process_delivery_once(store,keys)
-                    if processed:continue
-                stop.wait(1)
-    except Exception as exc:
-        with store.transaction() as c:c.execute('INSERT INTO runtime VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',
-            ('service_'+kind,json_text({'status':'ERROR','error':type(exc).__name__+'; sprawdź konfigurację i uruchom ponownie skaner.'}),utc_now()))
+        stamp=parse_market_time(updated)
+        age=(current-stamp).total_seconds()
+    except (TypeError,ValueError,OverflowError):
+        return {'fresh':False,'message':prefix+': archiwalny zapis '+status+' · '+str(updated)+
+                '. Nie można potwierdzić jego aktualności ani bieżącej dostępności dostawcy.'}
+    fresh=0<=age<=max_age_seconds
+    return {'fresh':fresh,'message':prefix+': '+('ostatni zapis diagnostyczny ' if fresh else 'nieaktualny lub przyszły zapis ')+
+            status+' · '+str(updated)+'. Ten zapis nie jest bieżącym testem połączenia z dostawcą.'}
+
+
+def record_service_worker_health(store,kind,status,now=None,error=None):
+    if kind not in ('analysis','telegram') or status not in ('READY','DISABLED','ERROR','STOPPED'):
+        raise ValueError('Niepoprawny stan modułu usług.')
+    stamp=parse_market_time(now or utc_now()).isoformat()
+    payload={'pid':os.getpid(),'status':status,'error':str(error) if error else None}
+    with store.transaction() as c:
+        c.execute('INSERT OR REPLACE INTO runtime VALUES(?,?,?)',('worker_'+kind,json_text(payload),stamp))
+
+
+def load_service_worker_health(store,now=None,max_age_seconds=30):
+    current=parse_market_time(now or utc_now())
+    with store.connection() as c:
+        rows={r['key']:dict(r) for r in c.execute("SELECT * FROM runtime WHERE key IN ('scanner','worker_analysis','worker_telegram')")}
+    def decode(key):
+        row=rows.get(key)
+        if not row:return None,False
+        try:
+            payload=json.loads(row['payload'])
+            age=(current-parse_market_time(row['updated_at'])).total_seconds()
+            return payload,isinstance(payload,dict) and 0<=age<=max_age_seconds
+        except (ValueError,TypeError,OverflowError):return None,False
+    scanner,scanner_fresh=decode('scanner')
+    result=[]
+    labels={'READY':'Moduł działa; oczekuje na zadania lub sprawdza kolejkę.',
+            'DISABLED':'Moduł działa; obsługa jest wyłączona w ustawieniach.',
+            'ERROR':'Moduł zgłosił błąd.', 'STOPPED':'Moduł został zatrzymany.'}
+    for kind in ('analysis','telegram'):
+        worker,fresh=decode('worker_'+kind)
+        matched=bool(scanner_fresh and scanner.get('status')=='RUNNING' and scanner.get('pid') and
+                     worker and worker.get('pid')==scanner['pid'])
+        status=worker.get('status') if worker and fresh and matched else 'UNCONFIRMED'
+        if status not in labels:status='UNCONFIRMED'
+        result.append({'kind':kind,'status':status,'message':labels.get(status,'Brak aktualnego potwierdzenia działania modułu.'),
+                       'error':worker.get('error') if worker and status=='ERROR' else None})
+    return result
+
+
+def service_worker(store,stop,kind):
+    last_pulse=0.0
+    while not stop.is_set():
+        try:
+            with ScannerLock(str(store.path)+'.'+kind):
+                recover_service_jobs(store,kind)
+                while not stop.is_set():
+                    cfg=service_config(store.load_section('settings',{}))
+                    enabled=(cfg['pipeline_enabled'] if kind=='analysis' else
+                             cfg['pipeline_enabled'] and cfg['telegram_enabled'])
+                    if time.monotonic()-last_pulse>=5:
+                        record_service_worker_health(store,kind,'READY' if enabled else 'DISABLED')
+                        last_pulse=time.monotonic()
+                    if enabled:
+                        keys=load_service_keys()
+                        processed=process_analysis_once(store,keys) if kind=='analysis' else process_delivery_once(store,keys)
+                        if processed:continue
+                    stop.wait(1)
+        except Exception as exc:
+            try:
+                _err=type(exc).__name__+': '+str(exc)[:200]
+                print('service_worker('+kind+') error: '+_err, flush=True)
+                record_service_worker_health(store,kind,'ERROR',error=_err)
+                with store.transaction() as c:
+                    c.execute('INSERT INTO runtime VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',
+                        ('service_'+kind,json_text({'status':'ERROR','error':_err}),utc_now()))
+            except Exception: pass
+            stop.wait(10)
+
+    try:record_service_worker_health(store,kind,'STOPPED')
+    except (OSError,sqlite3.Error):pass
 
 
 def _matrix_volume_evidence(snapshot, previous_candle, previous_volume):
@@ -4302,23 +3161,29 @@ def _record_price_matrix_read(c,snapshot,threshold_pct,cadence_minutes):
     volume=snapshot.get('volume')
     raw=c.execute('SELECT payload FROM price_matrix WHERE ticker=?',(ticker,)).fetchone()
     old=json.loads(raw[0]) if raw else None
-    if old is None:
-        row={'ticker':ticker,'anchor_price':price,'anchor_at':acquired,'last_price':price,
-             'last_acquired_at':acquired,'last_candle_time':snapshot.get('candle_time'),
+    if old:
+        previous=parse_market_time(old['last_acquired_at'])
+        if when<=previous or (old.get('last_candle_time') and candle and candle<parse_market_time(old['last_candle_time'])):
+            return {**old,'read_status':'OUT_OF_ORDER','newly_confirmed':False}
+    if not market_session_open(ticker,when):
+        return {**(old or {}),'read_status':'MARKET_CLOSED','newly_confirmed':False}
+    session=when.astimezone(exchange_zone(ticker)).date().isoformat()
+    reference=_daily_reference(c,ticker,when)
+    if old is None or old.get('session_date')!=session or not finite_number(old.get('anchor_price'),True):
+        anchor=reference['close'] if reference else None
+        row={'ticker':ticker,'anchor_price':anchor,'anchor_at':reference['closed_at'] if reference else None,
+             'reference_session':reference['session_date'] if reference else None,'session_date':session,
+             'last_price':price,'last_acquired_at':acquired,'last_candle_time':snapshot.get('candle_time'),
              'last_volume':volume if finite_number(volume) and volume>=0 else None,
-             'change_pct':0.0,'state':'BASELINE_CREATED',
+             'change_pct':(price-anchor)/anchor*100 if anchor else None,
+             'state':'BASELINE_CREATED' if reference else 'MISSING_DAILY_REFERENCE',
              'consecutive_reads':0,'candidate_started_at':None,'confirmed_at':None,
              'activity_tracking_version':'E05','activity_verified':False,
-             'activity_evidence':'BASELINE_ONLY','last_activity_at':None}
-        c.execute('INSERT INTO price_matrix VALUES(?,?,?)',(ticker,json_text(row),acquired))
+             'activity_evidence':'BASELINE_ONLY','last_activity_at':None,'newly_confirmed':False,
+             'read_status':'RECORDED' if reference else 'MISSING_DAILY_REFERENCE'}
+        c.execute('INSERT OR REPLACE INTO price_matrix VALUES(?,?,?)',(ticker,json_text(row),acquired))
         return row
-    if not market_session_open(ticker,when):
-        return {**old,'read_status':'MARKET_CLOSED','newly_confirmed':False}
     previous=parse_market_time(old['last_acquired_at'])
-    if when<=previous:
-        return {**old,'read_status':'OUT_OF_ORDER','newly_confirmed':False}
-    if old.get('last_candle_time') and candle and candle<parse_market_time(old['last_candle_time']):
-        return {**old,'read_status':'OUT_OF_ORDER','newly_confirmed':False}
     elapsed=(when-previous).total_seconds()
     min_gap=max(60,cadence_minutes*60-180);max_gap=cadence_minutes*60+300
     if old.get('consecutive_reads',0) and elapsed<min_gap:
@@ -4430,12 +3295,17 @@ def detect_market(store,snapshot,config=None):
                     parse_market_time(now)<parse_market_time(old.get('acquired_at',now))):
             return {'status':'OUT_OF_ORDER','reasons':[]}
         matrix_enabled=options.get('price_matrix_enabled',False)
+        if matrix_enabled and interval!='1h':return {'status':'INTERVAL_NOT_1H','reasons':[]}
         matrix=(_record_price_matrix_read(c,snapshot,cfg['price_threshold_pct'],cfg['auto_scan_interval'] or 15)
                 if matrix_enabled else None)
         matrix=matrix or {'ticker':t,'anchor_price':old['price'] if old else snapshot['price'],
                           'anchor_at':old['acquired_at'] if old else now,'last_price':snapshot['price'],
                           'last_acquired_at':now,'change_pct':None,'state':'DISABLED',
                           'consecutive_reads':0,'newly_confirmed':False}
+        if matrix_enabled and matrix.get('read_status')=='MISSING_DAILY_REFERENCE':
+            c.execute('INSERT INTO observations(ticker,interval,candle_time,acquired_at,candle_status,payload) VALUES(?,?,?,?,?,?)',
+                      (t,interval,snapshot['candle_time'],now,snapshot['candle_status'],json_text({**snapshot,'price_matrix':matrix})))
+            return {'status':'MISSING_DAILY_REFERENCE','reasons':[],'price_matrix':matrix}
         if matrix_enabled and matrix.get('read_status') in ('TOO_SOON','OUT_OF_ORDER','MARKET_CLOSED'):
             # Rejected reads cannot update the observation/baseline or enter qualification.
             rejected=matrix['read_status']
@@ -4456,13 +3326,13 @@ def detect_market(store,snapshot,config=None):
             if baseline.get('rvol')==0 and rv is not None and rv>0:baseline['rvol']=rv
             relative_price=(price-old['price'])/abs(old['price'])*100
             dprice=matrix['change_pct'] if matrix_enabled else relative_price
-            price_delta=relative_price if not matrix_enabled else None
-            if matrix_enabled and relative_price<0:price_delta=relative_price
+            price_delta=dprice
             if price_delta is not None and abs(price_delta)>cfg['price_threshold_pct'] and not math.isclose(abs(price_delta),cfg['price_threshold_pct'],abs_tol=1e-10,rel_tol=1e-12):reasons.append('PRICE')
             reference=baseline.get('rvol')
             if not new_candle and rv is not None and reference is not None and reference>0:
                 drvol=(rv-reference)/reference*100
                 if abs(drvol)>cfg['rvol_threshold_pct'] and not math.isclose(abs(drvol),cfg['rvol_threshold_pct'],abs_tol=1e-10,rel_tol=1e-12):reasons.append('RVOL')
+            if matrix_enabled:reasons=[]  # Zdarzenie automatu powstaje dopiero po potwierdzeniu aktywności.
             status='EVENT' if reasons else 'PRICE_CANDIDATE' if matrix['state']=='CANDIDATE' else 'PRICE_CONFIRMED' if matrix['state']=='CONFIRMED' else 'UNCHANGED'
             if reasons:
                 event_id=uuid.uuid4().hex
@@ -4631,19 +3501,29 @@ def attach_historical_baseline(store,snapshot):
 
 def run_market_cycle(store,stop=None):
     from datetime import timedelta
-    settings=store.load_section('settings',{});cfg=market_config(settings);services=service_config(settings)
+    settings=store.load_section('settings',{});cfg=automatic_market_config(settings);services=service_config(settings)
     tickers=store.load_section('tickers',[])
     cid=uuid.uuid4().hex;started=utc_now();results=[]
     with store.transaction() as c:c.execute('INSERT INTO cycles VALUES(?,?,?,?,?)',(cid,started,None,'RUNNING',json_text({'mode':'MARKET'})))
     for t in tickers:
         if stop is not None and stop.is_set():break
         try:
-            snap=fetch_market(t,cfg['market_interval'])
+            snap=fetch_automatic_snapshot(store,t)
             attach_historical_baseline(store,snap)
         except MarketRateLimitError as _rl:
             results.append({'ticker':t,'status':'RATE_LIMITED','error':str(_rl)})
             print(json_text(results[-1]),flush=True)
             break
+        except MarketFetchDeferred as exc:
+            results.append({'ticker':t,'status':'FETCH_DEFERRED','reasons':[],
+                            'next_attempt_at':exc.state['next_attempt_at'],'error_code':exc.state.get('error_code')})
+            print(json_text(results[-1]),flush=True)
+            continue
+        except MarketDataUnavailable as exc:
+            results.append({'ticker':t,'status':'ERROR','error_code':exc.code,
+                            'error':str(exc),'next_attempt_at':exc.next_attempt_at})
+            print(json_text(results[-1]),flush=True)
+            continue
         except Exception as _fe:
             results.append({'ticker':t,'status':'ERROR','error':type(_fe).__name__+': '+str(_fe)[:200]})
             print(json_text(results[-1]),flush=True)
@@ -4701,17 +3581,17 @@ def run_market_cycle(store,stop=None):
                 try:
                     print('queue_opportunity FAILED for '+str(opportunity.get('ticker') or opportunity.get('sequence_id'))+': '+str(_qe)[:200],flush=True)
                 except Exception: pass
+    _processed = {r.get('ticker') for r in results if isinstance(r, dict) and r.get('ticker')}
+    _unprocessed = [t for t in tickers if t not in _processed]
     status='RATE_LIMITED' if any(r['status']=='RATE_LIMITED' for r in results) else 'EMPTY_WATCHLIST' if not tickers else 'INTERRUPTED' if stop is not None and stop.is_set() else 'ERROR' if all(r['status']=='ERROR' for r in results) else 'PARTIAL' if any(r['status']=='ERROR' for r in results) else 'OK'
-    payload={'mode':'MARKET','interval':cfg['market_interval'],'results':results,'unprocessed_tickers':tickers[len(results):],'ai_called':False,'telegram_sent':False,'selected_opportunities':[r['sequence_id'] for r in selected],'service_calls_scope':'Oddzielne zadania; te flagi dotyczą wyłącznie cyklu pobrania Yahoo.'}
+    payload={'mode':'MARKET','interval':cfg['market_interval'],'results':results,'unprocessed_tickers':_unprocessed,'ai_called':False,'telegram_sent':False,'selected_opportunities':[r['sequence_id'] for r in selected],'service_calls_scope':'Oddzielne zadania; te flagi dotyczą wyłącznie cyklu pobrania Yahoo.'}
     try:
         with store.transaction() as c:
             c.execute('UPDATE cycles SET finished_at=?,status=?,payload=? WHERE id=?',(utc_now(),status,json_text(payload),cid))
             cutoff=(datetime.now(timezone.utc)-timedelta(days=cfg['observation_retention_days'])).isoformat()
-            c.execute('DELETE FROM observations WHERE acquired_at<?',(cutoff,))
-        try:
+            # Historia godzinowa pozostaje zachowana; migracja nie usuwa obserwacji.
             _rows = c.execute('SELECT COUNT(*) FROM observations').fetchone()[0]
-            print(f'observations: {_rows} rows', flush=True)
-        except Exception: pass
+        print(f'observations: {_rows} rows', flush=True)
     except Exception as _fe:
         try: print('CYCLE finalize FAILED: '+type(_fe).__name__+': '+str(_fe)[:200], flush=True)
         except Exception: pass
@@ -4772,7 +3652,7 @@ def scanner_main(db,diagnostic=False,cycles=None):
             print('SKANER RYNKU: Yahoo → wskaźniki → detekcja → SQLite. Tavily, GPT i Telegram według przełączników panelu.',flush=True)
             try:
                 while not stop.is_set() and (cycles is None or status['cycles_this_run']<cycles):
-                    cfg=market_config(store.load_section('settings',{}))
+                    cfg=automatic_market_config(store.load_section('settings',{}))
                     if cfg['auto_scan_interval']==0:
                         status['status']='PAUSED';store.runtime_status(dict(status))
                         if cycles is not None:break
@@ -4797,7 +3677,7 @@ def scanner_main(db,diagnostic=False,cycles=None):
                     status['next_cycle_UTC']=datetime.fromtimestamp(target,timezone.utc).isoformat()
                     while time.time()<target and not stop.is_set():
                         stop.wait(min(1,max(0,target-time.time())))
-                        changed=market_config(store.load_section('settings',{}))['auto_scan_interval']
+                        changed=automatic_market_config(store.load_section('settings',{}))['auto_scan_interval']
                         if changed!=cfg['auto_scan_interval']:
                             break  # explicit schedule reconfiguration; no overlapping cycle
             finally:
@@ -4849,8 +3729,13 @@ def nasdaq_share_record(record):
     if not isinstance(name,str):return False
     # Instrument wording comes from Nasdaq, not from a ticker suffix or issuer name.
     description=name.rsplit(' - ',1)[-1]
+    # Odrzuc: warranty, units, rights, preferred, notes, bonds, debentures.
     if re.search(r'\b(warrants?|units?|rights?|preferred|preference|notes?|bonds?|debentures?)\b',description,re.I):return False
-    return bool(re.search(r'\b(common (?:stock|shares)|ordinary shares|american deposit(?:ary|ory) (?:shares|receipts)|ADS|ADR)\b',description,re.I))
+    # Odrzuc: ADR/ADS (nie sa bezposrednimi akcjami; XTB ich nie oferuje).
+    if re.search(r'\b(american deposit(?:ary|ory)|ADS|ADR)\b',description,re.I):return False
+    # Odrzuc: SPAC / blank check / acquisition corp (spolki-korpusy; XTB ich nie oferuje).
+    if re.search(r'\b(acquisition corp|acquisition corporation|blank check|SPAC)\b',name,re.I):return False
+    return bool(re.search(r'\b(common (?:stock|shares)|ordinary shares)\b',description,re.I))
 
 
 def fetch_nasdaq_directory():
@@ -5472,14 +4357,12 @@ def gpt_chat_request(question,context,history):
 
 
 def perform_manual_question(store,ticker,question,with_search,history=(),purpose='chat',engine='openai',fetch_fresh_spread=False):
+    engine=manual_engine(engine)
     keys=load_service_keys()
-    if engine=='deepseek':
-        if not keys.get('DEEPSEEK_API_KEY'):raise ValueError('Brak klucza DeepSeek w secrets.toml.')
-    else:
-        if not keys.get('OPENAI_API_KEY'):raise ValueError('Brak klucza OpenAI w secrets.toml.')
+    manual_provider(engine,keys)
     if with_search and not ticker:raise ValueError('Wybierz ticker do wyszukiwania Tavily.')
     if with_search and not keys['TAVILY_API_KEY']:raise ValueError('Brak klucza Tavily. Nie wysłano pytania do GPT.')
-    context={**gpt_chat_context(store,ticker),'purpose':purpose,'report_version':3,'research':{'sources':[],'status':'PENDING' if with_search else 'DISABLED'}}
+    context=manual_turn_context(store,ticker,purpose,engine,with_search)
     with ScannerLock(str(store.path)+'.gpt_chat'):
         turn=begin_gpt_chat(store,question,context)
         try:
@@ -5495,9 +4378,10 @@ def perform_manual_question(store,ticker,question,with_search,history=(),purpose
                 snapshot['_manual_research']=True
                 collect_manual_research(store,turn,context,snapshot,keys['TAVILY_API_KEY'])
             request=gpt_chat_request(question,context,list(history))
+            label,url,key=manual_provider(engine,keys,request)
             context['gpt']={'status':'REQUESTED','requested_at':utc_now()}
             save_gpt_chat_context(store,turn,context)
-            body=service_http('OpenAI','https://api.openai.com/v1/chat/completions',keys['OPENAI_API_KEY'],request,uncertain=True)
+            body=service_http(label,url,key,request,uncertain=True)
             context['gpt'].update(status='RECEIVED',received_at=utc_now())
             save_gpt_chat_context(store,turn,context)
             save_gpt_chat_metadata(store,turn,{**{k:body.get(k) for k in ('id','model','usage')},'raw_response':body.get('choices',[])})
@@ -5692,7 +4576,7 @@ def render_ticker_research(store):
         else:st.caption('Najnowszy dostępny zapis Yahoo (dla nowej analizy): '+snapshot.get('acquired_at','Brak czasu odczytu'))
     question=st.text_area('Pytanie do analizy spółki',value='Co pokazują dane o ruchu tej spółki, jakie są potwierdzone informacje i czego brakuje do oceny?',key='ticker_research_question')
     st.caption('Bid/ask: osobne pobranie Yahoo przy nowej analizie. Otwarcie zapisanego raportu nie ponawia pobrania.')
-    st.caption('R1: Tavily CLI Research Mini — informacje z ostatnich 24 godzin; jedno zlecenie Research i jedno zapytanie GPT na żądanie. Odświeżenie czyta zapisany raport.')
+    st.caption('Tavily Search — źródła filtrowane według emitenta, domen i daty zdarzenia. Jedno wyszukiwanie i osobna analiza AI; odświeżenie czyta zapisany raport.')
     if st.button('Analizuj dane spółki z Tavily',disabled=ticker is None):
         try:
             resolve_question_ticker(question,ticker,ticks)
@@ -5862,7 +4746,7 @@ def render_saved_company_analysis(store,snapshot):
     if job:
         evidence=json.loads(job['payload']);result=json.loads(job['result']);context=json.loads(job['context'])
         with st.expander('Zapisana analiza zdarzenia · '+ticker+' · '+job['created_at']):
-            st.text(analysis_message(job['id'],evidence,context,result['analysis'],limit=False))
+            st.text(analysis_message(job['id'],evidence,context,ValidatedAnalysis(result['analysis']),limit=False))
     if research_only:
         turn,context=research_only
         with st.expander('Zapisane źródła Tavily · '+ticker+' · '+turn['created_at']+' · bez gotowej odpowiedzi GPT'):
@@ -5903,7 +4787,7 @@ def render_gpt_analysis(store):
     by_id={j['id']:j for j in jobs}
     selected=st.selectbox('Zapisana analiza',list(by_id),format_func=lambda i:json.loads(by_id[i]['payload'])['snapshot']['candle_time']+' · '+i)
     job=by_id[selected];result=json.loads(job['result'])
-    st.text(analysis_message(selected,json.loads(job['payload']),json.loads(job['context']),result['analysis'],limit=False))
+    st.text(analysis_message(selected,json.loads(job['payload']),json.loads(job['context']),ValidatedAnalysis(result['analysis']),limit=False))
     st.caption('Model: '+str(result['provider'].get('model') or 'Brak danych'))
 
 
@@ -6190,8 +5074,9 @@ def us_report_send(store):
         if last_sent == today_key:
             return False
         # Okno 23:05 czasu polskiego: 21:05-21:30 UTC (CEST) lub 22:05-22:30 UTC (CET)
-        h = now_utc.hour; m = now_utc.minute
-        is_window = (h == 21 and m >= 5 and m <= 30) or (h == 22 and m >= 5 and m <= 30)
+        from zoneinfo import ZoneInfo
+        now_local = now_utc.astimezone(ZoneInfo('Europe/Warsaw'))
+        is_window = (now_local.hour == 23 and 5 <= now_local.minute <= 30)
         if not is_window:
             return False
         cutoff = (now_utc - _td(days=1)).isoformat()
@@ -6285,7 +5170,7 @@ def daily_report_send(store):
         # Sprawdz czy to w oknie 17:00-17:30 czasu polskiego.
         # W UTC: 15:00-15:30 (CEST) lub 16:00-16:30 (CET)
         h = now_utc.hour; m = now_utc.minute
-        is_window = (h == 15 and m >= 5) or (h == 16 and m >= 5 and m <= 30)
+        is_window = (h == 15 and 5 <= m <= 30) or (h == 16 and 5 <= m <= 30)
         if not is_window:
             return False
         # Buduj raport
@@ -6319,7 +5204,7 @@ def daily_report_send(store):
         # SL/TP alerts dzisiaj
         with store.connection() as c:
             alerts = list(c.execute("""SELECT message FROM outbox
-                                       WHERE kind='PORTFEL_ALERT' AND created_at >= ?""",
+                                       WHERE kind='PORTFOLIO_ALERT' AND created_at >= ?""",
                                     (cutoff,)))
         def _fmt(v, d=4):
             return format(v, ',.'+str(d)+'f').replace(',',' ').replace('.',',')
@@ -6343,6 +5228,7 @@ def daily_report_send(store):
         now_iso = utc_now()
         alert_id = 'daily_report:'+today_key
         with store.transaction() as c:
+            _ensure_report_event(c, alert_id, utc_now())
             c.execute("INSERT OR IGNORE INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)",
                       (alert_id, alert_id, 'PORTFOLIO_ALERT', message, 'PENDING', now_iso))
             c.execute("INSERT OR REPLACE INTO settings(key,payload) VALUES('last_daily_report',?)",
@@ -6384,10 +5270,11 @@ def portfolio_check_alerts(store):
                 if sl_hit and not entry.get('sl_fired_at'):
                     entry['sl_fired_at'] = now
                     msg = ('ALERT PORTFELA · SL · '+ticker+'\n'
-                           'Cena '+_fmt(price)+' '+cur+' <= SL '+_fmt(sl)+'\n'
-                           'Pozycja dluga, stop loss osiagniety.\n'
+                           'Cena '+_fmt(price)+' '+cur+(' <= ' if direction == 'long' else ' >= ')+'SL '+_fmt(sl)+'\n'
+                           +('Pozycja dluga, stop loss osiagniety.' if direction == 'long' else 'Pozycja krotka, stop loss osiagniety.')+'\n'
                            'Sprawdz w panelu KI.')
                     alert_id = 'portfolio:'+ticker+':sl:'+now
+                    _ensure_report_event(c, alert_id, now)
                     c.execute("INSERT OR IGNORE INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)",
                               (alert_id, alert_id, 'PORTFOLIO_ALERT', msg, 'PENDING', now))
                     fired += 1
@@ -6399,10 +5286,11 @@ def portfolio_check_alerts(store):
                 if tp_hit and not entry.get('tp_fired_at'):
                     entry['tp_fired_at'] = now
                     msg = ('ALERT PORTFELA · TP · '+ticker+'\n'
-                           'Cena '+_fmt(price)+' '+cur+' >= TP '+_fmt(tp)+'\n'
-                           'Pozycja dluga, take profit osiagniety.\n'
+                           'Cena '+_fmt(price)+' '+cur+(' >= ' if direction == 'long' else ' <= ')+'TP '+_fmt(tp)+'\n'
+                           +('Pozycja dluga, take profit osiagniety.' if direction == 'long' else 'Pozycja krotka, take profit osiagniety.')+'\n'
                            'Sprawdz w panelu KI.')
                     alert_id = 'portfolio:'+ticker+':tp:'+now
+                    _ensure_report_event(c, alert_id, now)
                     c.execute("INSERT OR IGNORE INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)",
                               (alert_id, alert_id, 'PORTFOLIO_ALERT', msg, 'PENDING', now))
                     fired += 1
@@ -6744,10 +5632,10 @@ def render_portfolio(store):
 
 
 
-def render_growth_ranking(store):
+def render_growth_ranking(store,now=None):
     import streamlit as st
     import html
-    ranking=load_growth_ranking(store)
+    ranking=load_growth_ranking(store,now)
     matrix_rows=load_price_matrix_rows(store)
     st.subheader('Ruch od stałej ceny bazowej matrycy')
     st.caption('Cena bazowa pochodzi z pierwszego poprawnego odczytu danego tickera i nie zmienia się po kolejnych skanach. Kandydat wymaga trzech potwierdzeń ruchu z nowym dowodem aktywności (przyrost wolumenu w 1H lub dodatni wolumen nowej świecy) w oknie jednej godziny. Same ponowne pobrania bez aktywności nie zwiększają licznika. Cofnięcie nie przesuwa ceny bazowej.')
@@ -6828,7 +5716,7 @@ def tradingagents_python():
     ]
     for candidate in candidates:
         if candidate.is_file():return candidate
-    return candidates[0]
+    raise RuntimeError(f'Nie znaleziono interpretera TradingAgents w: {[str(c) for c in candidates]}')
 
 
 DEEP_REPORT_CONTRACT = (
@@ -6923,7 +5811,10 @@ def deep_analysis_error(exc,stage):
     secrets=[value for name,value in os.environ.items() if value and
              any(word in name.upper() for word in ('KEY','TOKEN','SECRET','PASSWORD'))]
     try:secrets.extend(value for value in load_service_keys().values() if value)
-    except Exception:pass
+    except Exception as _ks_exc:
+        import sys as _sys2
+        try:_sys2.stderr.write('deep_analysis_error: load_service_keys FAILED: '+type(_ks_exc).__name__+': '+str(_ks_exc)[:200]+' (sekrety moga nie byc zamaskowane)\n');_sys2.stderr.flush()
+        except Exception:pass
     for value in sorted(set(secrets),key=len,reverse=True):message=message.replace(value,'[UKRYTO]')
     message=re.sub(r'(?i)Bearer\s+[^\s,;]+','Bearer [UKRYTO]',message)
     message=re.sub(r'\bsk-[A-Za-z0-9_-]+','[UKRYTO]',message)
@@ -6983,10 +5874,14 @@ def deep_analysis_worker(store,report_id):
         graph=TradingAgentsGraph(selected_analysts=('market','news'),debug=False,config=config,callbacks=[_evidence_handler])
         # LangGraph _run_graph wywoluje propagator.get_graph_args() bez argumentow,
         # wiec callbacks z konstruktora nie trafiaja do node'ow narzedzi. Patch:
-        _orig_get_graph_args=graph.propagator.get_graph_args
-        def _patched_get_graph_args(callbacks=None,_orig=_orig_get_graph_args,_handler=_evidence_handler):
-            return _orig(callbacks=callbacks or [_handler])
-        graph.propagator.get_graph_args=_patched_get_graph_args
+        try:
+            _orig_get_graph_args=graph.propagator.get_graph_args
+            def _patched_get_graph_args(callbacks=None,_orig=_orig_get_graph_args,_handler=_evidence_handler):
+                return _orig(callbacks=callbacks or [_handler])
+            graph.propagator.get_graph_args=_patched_get_graph_args
+        except Exception as _mp_exc:
+            try:_sys.stderr.write('LangGraph monkeypatch skipped: '+type(_mp_exc).__name__+': '+str(_mp_exc)[:200]+'\n');_sys.stderr.flush()
+            except Exception:pass
         day=datetime.now(ZoneInfo('Europe/Warsaw' if ticker.endswith('.WA') else 'America/New_York')).date().isoformat()
         stage='Analiza danych i wywołania modeli'
         state,decision=graph.propagate(ticker,day)
@@ -7106,7 +6001,7 @@ def render_deep_analysis(store):
             else:st.info('Proces pracuje niezależnie od panelu. Odśwież wynik za chwilę.')
 
 
-def run_streamlit(db):
+def run_streamlit(db,now=None):
     import streamlit as st
     import html
     store=Store(db)
@@ -7135,8 +6030,8 @@ def run_streamlit(db):
         st.header('Automatyczny skaner')
         with st.form('market_settings'):
             text=st.text_area('Tickery — spacja, przecinek lub nowa linia',value=' '.join(ticks))
-            iv=st.selectbox('Interwał świecy',list(MARKET_INTERVALS),index=list(MARKET_INTERVALS).index(cfg['market_interval']))
-            cadence=st.selectbox('Skanuj co (minuty)',[0,15,30,60],index=[0,15,30,60].index(cfg['auto_scan_interval']),format_func=lambda v:'Wyłączony' if v==0 else str(v))
+            iv=st.selectbox('Interwał świecy automatu',['1h'],index=0)
+            cadence=st.selectbox('Skanuj co (minuty)',[0,15],index=0 if cfg['auto_scan_interval']==0 else 1,format_func=lambda v:'Wyłączony' if v==0 else str(v))
             pt=st.number_input('Próg zmiany ceny (%)',min_value=.01,value=float(cfg['price_threshold_pct']),step=.1)
             rt=st.number_input('Próg względnej zmiany RVOL (%)',min_value=.01,value=float(cfg['rvol_threshold_pct']),step=.1)
             retention=st.number_input('Historia obserwacji (dni)',min_value=1,value=cfg['observation_retention_days'],step=1)
@@ -7148,9 +6043,9 @@ def run_streamlit(db):
             _cur_engine = settings.get('analysis_engine', 'openai')
             _engine_choice = st.radio('Silnik AI dla automatu', ['OpenAI (gpt-4o-mini)', 'DeepSeek (deepseek-chat)'], index=0 if _cur_engine == 'openai' else 1, horizontal=True)
             _engine_val = 'deepseek' if 'DeepSeek' in _engine_choice else 'openai'
-            st.caption('R1: Tavily CLI Research Mini — jeden płatny start na zdarzenie lub ręczne żądanie, potem odczyt zapisanego ID. Wybrany silnik analizuje materiały po zakończeniu Research.')
+            st.caption('Tavily Search — jedno wyszukiwanie na zdarzenie lub ręczne żądanie. Wybrany silnik analizuje wyłącznie zweryfikowane materiały; brak źródeł nie potwierdza przyczyny ruchu.')
             telegram_enabled=st.checkbox('Automatycznie wysyłaj nowe zdarzenia na Telegram',value=services['telegram_enabled'])
-            st.caption('Okazja automatyczna: trzy kolejne odczyty ponad stałą bazą matrycy w ciągu godziny. GPW: alerty po 17:00, USA: po 22:00 czasu Warszawy są blokowane. Skrócona świeca końcowa nie dostaje RVOL porównywanego z pełnymi świecami. Maksymalnie 3 analizy na 15 minut, jedna wiadomość na sekwencję.')
+            st.caption('Okazja automatyczna: trzy kolejne odczyty ponad zamknięciem poprzedniej sesji; automat: świeca 1h co 15 minut. Regularna sesja: GPW 09:00–17:00 czasu Warszawy, USA 09:30–16:00 czasu Nowego Jorku. Skrócona świeca końcowa nie dostaje RVOL porównywanego z pełnymi świecami. Jedna wiadomość na potwierdzoną sekwencję.')
             st.caption('Przy wyłączonej wysyłce wiadomości pozostają w podglądzie. Włączenie dotyczy nowych zdarzeń.')
             saved=st.form_submit_button('Zapisz ustawienia')
         if saved:
@@ -7170,6 +6065,20 @@ def run_streamlit(db):
         st.caption('GPT-4o mini analizuje wybrane, potwierdzone okazje. Tavily dostarcza datowane źródła. Automatyczna analiza wymaga świec 1h.')
     section=st.radio('Widok panelu',['Automat','Moj portfel','Analiza GPT','Rozmowa z GPT','Analiza pogłębiona','Monitor Tavily + AI','Ręczny ticker','Dodaj / wyszukaj spółki'],horizontal=True,key='panel_view')
     render_error_controls(store)
+    with st.expander('Historia dzienna i zamknięcie odniesienia'):
+        daily_ticker=st.selectbox('Instrument historii dziennej',['']+ticks,key='daily_history_ticker')
+        if daily_ticker:
+            history=load_daily_candles(store,daily_ticker)
+            with store.connection() as c:reference=_daily_reference(c,daily_ticker,utc_now())
+            st.caption(('Zamknięcie odniesienia: '+str(reference['close'])+' · sesja '+reference['session_date']) if reference else 'Brak zamknięcia poprzedniej sesji')
+            st.dataframe(history,use_container_width=True)
+            for interval in ('1d','1h'):
+                fetch_state=market_fetch_state(store,daily_ticker,interval)
+                if fetch_state:
+                    st.caption('Yahoo '+interval+': '+('Brak danych — wymaga weryfikacji' if fetch_state.get('error') else 'Ostatnie pobranie poprawne')+' · następna próba: '+str(fetch_state.get('next_attempt_at') or 'według cyklu'))
+                    if fetch_state.get('error'):st.warning(fetch_state['error'])
+                    if fetch_state.get('rejected_source_rows'):
+                        st.caption('Odrzucono niepoprawne rekordy źródłowe: '+str(len(fetch_state['rejected_source_rows'])))
     if section=='Analiza GPT':render_gpt_analysis(store);return
     if section=='Rozmowa z GPT':render_gpt_chat(store);return
     if section=='Analiza pogłębiona':render_deep_analysis(store);return
@@ -7315,7 +6224,7 @@ def run_streamlit(db):
             render_service_panel(store)
             return
         if section!='Automat':return
-        render_growth_ranking(store)
+        render_growth_ranking(store,now)
         render_confirmed_tracking(store)
         st.subheader('Pełna lista obserwowanych spółek')
         if not latest:st.info('Brak wyników automatu. Zapisz tickery i uruchom skaner: python KI.py --scanner')
@@ -7409,6 +6318,46 @@ def run_streamlit(db):
     render_manual_analysis(manual_store)
 
 
+def load_service_runtime(store,hidden):
+    """Saved service status rows; dismissal keeps the exact-revision contract."""
+    with store.connection() as c:
+        return [dict(r) for r in c.execute("SELECT * FROM runtime WHERE key IN ('service_analysis','service_telegram')")
+                if not error_is_dismissed(hidden,'runtime',r['key'],r)]
+
+
+def service_runtime_diagnostics(rows):
+    """Classify saved service rows into real errors, informational states and malformed records.
+
+    The service worker stores {'status':'ERROR','error':...} on failure. Other writers may
+    store an informational {'status':'OK'} without 'error'. No row is silently skipped and
+    a malformed record is reported with its key and the missing field.
+    """
+    errors,notices,problems=[],[],[]
+    for row in rows:
+        key=str(row.get('key') or '')
+        updated=str(row.get('updated_at') or '')
+        try:
+            payload=json.loads(row.get('payload'))
+        except (TypeError,ValueError):
+            problems.append((key,updated,"niepoprawny JSON w polu 'payload'."));continue
+        if not isinstance(payload,dict):
+            problems.append((key,updated,"pole 'payload' nie jest obiektem JSON."));continue
+        if 'status' not in payload:
+            problems.append((key,updated,"brak pola 'status'."));continue
+        status=payload.get('status')
+        if not isinstance(status,str) or not status.strip():
+            problems.append((key,updated,"pole 'status' nie jest niepustym tekstem."));continue
+        error=payload.get('error')
+        if error is not None and not isinstance(error,str):
+            problems.append((key,updated,"pole 'error' nie jest tekstem."));continue
+        if isinstance(error,str) and error.strip():
+            errors.append((key,updated,error.strip()));continue
+        if status.strip()=='ERROR':
+            problems.append((key,updated,"brak pola 'error' przy status='ERROR'."));continue
+        notices.append((key,updated,status.strip()))
+    return errors,notices,problems
+
+
 def render_service_panel(store,manual=False):
     import streamlit as st
     _settings = store.load_section('settings', {})
@@ -7420,7 +6369,7 @@ def render_service_panel(store,manual=False):
     import streamlit as st
     labels={'PENDING_CONTEXT':'Oczekuje na Tavily','BUSY_CONTEXT':'Pobieranie kontekstu',
             'PENDING_AI':'Oczekuje na GPT','BUSY_AI':'Analiza GPT','DONE':'Analiza gotowa',
-            'FAILED':'Błąd — zadanie zatrzymane','REVIEW_REQUIRED':'Wymaga sprawdzenia po przerwaniu',
+            'FAILED':'Błąd — zadanie zatrzymane','REVIEW_REQUIRED':'Wymaga sprawdzenia',
             'PREVIEW':'Podgląd — bez wysyłki','PENDING':'Oczekuje na wysyłkę','SENDING':'Wysyłanie',
             'DELIVERED':'Doręczono','FILTERED':'Tylko panel — brak aktualnego potwierdzenia okazji','UNCERTAIN':'Sprawdź czat — brak potwierdzenia'}
     hidden=dismissed_error_keys(store)
@@ -7436,8 +6385,8 @@ def render_service_panel(store,manual=False):
             ids=[j['event_id'] for j in jobs]
             messages=[dict(r) for r in c.execute("SELECT * FROM outbox WHERE kind IN ('EVIDENCE','ANALYSIS') AND event_id IN ("+','.join('?' for _ in ids)+') ORDER BY created_at',ids)]
         messages=[m for m in messages if not error_is_dismissed(hidden,'outbox',m['id'],m)]
-        errors=[json.loads(r['payload']) for r in c.execute("SELECT * FROM runtime WHERE key IN ('service_analysis','service_telegram')") if not error_is_dismissed(hidden,'runtime',r['key'],r)]
         rejections={r['event_id']:dict(r) for r in c.execute('SELECT r.* FROM analysis_rejections r WHERE r.rowid=(SELECT MAX(x.rowid) FROM analysis_rejections x WHERE x.event_id=r.event_id)')}
+    runtime_rows=load_service_runtime(store,hidden)
     st.subheader('Tavily + AI — historia ręczna' if manual else 'Tavily + AI — monitor analizy')
     cfg=service_config(store.load_section('settings',{}))
     if manual:st.info('Tryb ręczny — Tavily i AI uruchamiane wyłącznie przyciskiem po potwierdzonym ruchu.')
@@ -7447,7 +6396,21 @@ def render_service_panel(store,manual=False):
         st.dataframe([{'Ticker':j['ticker'],'Stan':labels.get(j['state'],j['state']),'Ostatnia aktywność UTC':j['updated_at'],'Zdarzenie':j['event_id']} for j in jobs],width='stretch',hide_index=True)
     st.caption('Wyświetlono '+str(len(jobs))+' zadań. Limit 30 dotyczy wybranego tickera lub widoku Wszystkie; wybór obejmuje wszystkie tickery z historią.')
     if not jobs:st.info('Brak uruchomionych analiz ręcznych.' if manual else 'Oczekiwanie na ruch — brak zapisanych zadań Tavily i AI. Pierwszy odczyt i niezmienione dane nie uruchamiają analizy.')
-    for error in errors:st.error(error['error'])
+    service_errors,service_notices,service_problems=service_runtime_diagnostics(runtime_rows)
+    for key,updated,message in service_errors:st.error('Usługa '+key+(' · '+updated if updated else '')+': '+message)
+    for key,updated,description in service_problems:st.warning('Diagnostyka usług '+key+(' · '+updated if updated else '')+': '+description)
+    for key,updated,status in service_notices:
+        notice=service_runtime_notice(key,updated,status)
+        if notice['fresh']:st.caption(notice['message'])
+        else:st.warning(notice['message'])
+    if not manual:
+        for health in load_service_worker_health(store):
+            name='Analiza AI/Tavily' if health['kind']=='analysis' else 'Telegram'
+            text=name+': '+health['message']
+            if health['status']=='ERROR':st.error(text+' '+str(health.get('error') or ''))
+            elif health['status']=='UNCONFIRMED':st.warning(text)
+            else:st.caption(text)
+        st.caption('Działający moduł i włączona konfiguracja nie potwierdzają wykonania zapytania AI ani doręczenia wiadomości.')
     for job in jobs:
         with st.expander(job['ticker']+' · '+labels.get(job['state'],job['state'])+' · '+job['event_id'],expanded=job is jobs[0]):
             ev=json.loads(job['payload'])
@@ -7488,7 +6451,7 @@ def render_service_panel(store,manual=False):
                 st.caption('Przyjęto źródeł: '+str(len(context['sources']))+' · odrzucono: '+str(context['excluded'])+' · granica czasu: '+context['cutoff'])
             if job['result']:
                 result=json.loads(job['result']);ev=json.loads(job['payload'])
-                st.text(analysis_message(job['event_id'],ev,context,result['analysis'],limit=False))
+                st.text(analysis_message(job['event_id'],ev,context,ValidatedAnalysis(result['analysis']),limit=False))
                 st.caption('Model: '+str(result['provider'].get('model')))
             for message in (m for m in messages if m['event_id']==job['event_id']):
                 st.markdown('**'+('Dowód ruchu' if message['kind']=='EVIDENCE' else 'Uzupełnienie AI')+' · '+labels.get(message['status'],message['status'])+'**')
@@ -7597,6 +6560,9 @@ def opportunity_test_snapshot(now,ticker='AAA',price=105.,rvol=2.):
                 'status':'CLOSED','open':100.,'high':104.,'low':100.,'close':103.,'volume':200000.,'rvol':2.,'average_volume':100000.}}
 
 
+TEST_NOW=datetime(2026,10,5,14,30,tzinfo=timezone.utc)
+
+
 def run_market_tests():
     import unittest
     import tempfile
@@ -7611,7 +6577,7 @@ def run_market_tests():
                      'close':100 if flat else 100+i,'volume':100.0,'status':'CLOSED'} for i in range(n)]
 
         def snap(self,price=100,rvol=1,candle='2026-09-01T08:00:00+00:00'):
-            return {'ticker':'AAA','interval':'1h','candle_time':candle,'acquired_at':utc_now(),
+            return {'ticker':'AAA','interval':'1h','candle_time':candle,'acquired_at':TEST_NOW.isoformat(),
                     'candle_status':'OPEN','price':price,'rvol':rvol,'volume':100,
                     'indicators':{},'scoring':{'score':None},'currency':'PLN'}
 
@@ -7656,20 +6622,21 @@ def run_market_tests():
             directory=parse_nasdaq_directory(header+rows+'File Creation Time: 1006202612:11|||||||\n')
             quote={'symbol':'BLZR','quoteType':'EQUITY','exchange':'NMS','currency':'USD','regularMarketPrice':9.9}
             self.assertIsNone(discovery_quote(quote,'NASDAQ',.01,10.))
-            self.assertEqual(discovery_quote(quote,'NASDAQ',.01,10.,directory)['instrument_type'],'Akcje / ADR')
+            self.assertIsNone(discovery_quote(quote,'NASDAQ',.01,10.,directory))
             for ticker in ('BLZRW','BLZRU','UNKNOWN'):
                 self.assertIsNone(discovery_quote({**quote,'symbol':ticker},'NASDAQ',.01,10.,directory))
             base={'Security Name':'Example - Common Stock','Test Issue':'N','ETF':'N'}
             self.assertTrue(nasdaq_share_record(base))
-            self.assertTrue(nasdaq_share_record({**base,'Security Name':'Example - American Depositary Shares'}))
-            for description in ('Warrants','Unit','Rights','Preferred Stock','Senior Notes','Unclassified'):
+            for description in ('American Depositary Shares','American Depositary Receipts','ADS','ADR','Warrants','Unit','Rights','Preferred Stock','Senior Notes','Unclassified'):
                 self.assertFalse(nasdaq_share_record({**base,'Security Name':'Example - '+description}))
+            for spac_name in ('Example Acquisition Corp - Common Stock','Example Acquisition Corporation - Ordinary Shares','Example Blank Check Co - Common Stock'):
+                self.assertFalse(nasdaq_share_record({**base,'Security Name':spac_name}))
             self.assertFalse(nasdaq_share_record({**base,'ETF':'Y'}))
             self.assertFalse(nasdaq_share_record({**base,'Test Issue':'Y'}))
             with self.assertRaises(ValueError):parse_nasdaq_directory(header+rows)
 
         def test_43_hold_requires_exact_detector_evidence_and_direction(self):
-            snap={'price':12.,'indicators':{'ma_fast':11.,'ma_slow':10.},'candle_status':'CLOSED','acquired_at':utc_now()}
+            snap={'price':12.,'indicators':{'ma_fast':11.,'ma_slow':10.},'candle_status':'CLOSED','acquired_at':TEST_NOW.isoformat()}
             self.assertTrue(market_wait_status(snap)['label'].startswith('HOLD'))
             proof={'snapshot':snap,'reasons':['PRICE']}
             self.assertTrue(market_wait_status(snap,proof)['label'].startswith('RUCH POTWIERDZONY'))
@@ -7879,7 +6846,7 @@ def run_market_tests():
         def test_26_concurrent_detectors_one_event(self):
             with tempfile.TemporaryDirectory() as d:
                 from datetime import timedelta
-                path=Path(d)/'x.db';st=Store(path);now=datetime.now(timezone.utc);first=self.snap();first['acquired_at']=now.isoformat();detect_market(st,first)
+                path=Path(d)/'x.db';st=Store(path);now=TEST_NOW;first=self.snap();first['acquired_at']=now.isoformat();detect_market(st,first)
                 for minute in (15,30):detect_market(st,{**self.snap(102),'acquired_at':(now+timedelta(minutes=minute)).isoformat()})
                 source=Path(__file__).resolve()
                 code="import runpy,sys,json; m=runpy.run_path(sys.argv[1],run_name='ki'); m['detect_market'](m['Store'](sys.argv[2]),json.loads(sys.argv[3]))"
@@ -8022,18 +6989,18 @@ def run_ranking_tests():
     class RankingTests(unittest.TestCase):
         def setUp(self):
             self.temp=tempfile.TemporaryDirectory();self.store=Store(Path(self.temp.name)/'rank.db')
-            self.now=datetime(2026,10,5,12,30,tzinfo=timezone.utc)
+            self.now=datetime(2026,10,5,14,30,tzinfo=timezone.utc)
             self.store.save_section('tickers',['AAA'])
         def tearDown(self):self.temp.cleanup()
         def snap(self,price=102,minutes=20,ticker='AAA'):
-            return {'ticker':ticker,'interval':'1h','candle_time':'2026-10-05T12:00:00+00:00',
-                    'candle_end':'2026-10-05T13:00:00+00:00','candle_status':'OPEN',
+            return {'ticker':ticker,'interval':'1h','candle_time':'2026-10-05T14:00:00+00:00',
+                    'candle_end':'2026-10-05T15:00:00+00:00','candle_status':'OPEN',
                     'acquired_at':self.now.replace(minute=minutes).isoformat(),'price':price,'rvol':3.,'volume':1000.,
                     'ohlc':{'open':100.,'high':102.,'low':99.,'close':price},'currency':'PLN',
                     'indicators':{'last_macd_hist':.1,'ma_fast':101.,'plus_di':30.,'minus_di':20.}}
         def test_01_exact_score_and_missing_data(self):
             snap=self.snap();previous={**self.snap(101,5),'volume':500.}
-            row=score_growth_candidate(snap,{'price':100.,'acquired_at':'2026-10-05T11:45:00Z'},previous,None,self.now)
+            row=score_growth_candidate(snap,{'price':100.,'acquired_at':'2026-10-05T13:45:00Z'},previous,None,self.now)
             self.assertEqual(row['score'],90);self.assertEqual(row['parts'],{'Ruch':30,'Aktywność':30,'Technika':30,'Kontekst':0})
             self.assertEqual(row['context_label'],'Przyczyna nieustalona')
             row=score_growth_candidate({**snap,'indicators':{},'ohlc':{}},{'price':100.},None,None,self.now)
@@ -8045,12 +7012,12 @@ def run_ranking_tests():
                 self.assertEqual(row['group'] if row else None,group)
             for changes in ({'price':99.},{'rvol':1.19},{'volume':0.},{'candle_status':'CLOSED'},{'interval':'1d'}):
                 self.assertIsNone(score_growth_candidate({**self.snap(),**changes},ref,None,None,self.now))
-            self.assertIsNone(score_growth_candidate(self.snap(),ref,None,None,self.now.replace(hour=13,minute=0)))
+            self.assertIsNone(score_growth_candidate(self.snap(),ref,None,None,self.now.replace(hour=15,minute=0)))
         def test_03_rvol_boundaries_and_same_candle_confirmation(self):
             for rv,points in ((1.2,5),(1.499,5),(1.5,10),(2.,15),(3.,20)):
                 row=score_growth_candidate({**self.snap(),'rvol':rv},{'price':100.},None,None,self.now)
                 self.assertEqual(row['parts']['Aktywność'],points)
-            prev={**self.snap(101,5),'volume':500.,'candle_time':'2026-10-05T11:00:00Z'}
+            prev={**self.snap(101,5),'volume':500.,'candle_time':'2026-10-05T13:00:00Z'}
             row=score_growth_candidate(self.snap(),{'price':100.},prev,None,self.now)
             self.assertEqual(row['parts']['Aktywność'],20)
         def test_04_reference_survives_detector_reset_and_restart(self):
@@ -8065,11 +7032,11 @@ def run_ranking_tests():
             self.assertEqual(latest['price'],107.)
 
         def test_05_context_requires_current_candle_valid_dated_source(self):
-            saved={'candle_time':self.snap()['candle_time'],'context':{'sources':[{'id':'S1','published_at':'2026-10-05T11:00:00Z','content':'Emitent opublikował raport.','url':'https://example.org/report'}]},
+            saved={'candle_time':self.snap()['candle_time'],'context':{'sources':[{'id':'S1','published_at':'2026-10-05T13:00:00Z','content':'Emitent opublikował raport.','url':'https://example.org/report'}]},
                    'result':{'context':[{'source_id':'S1','fact':'Emitent opublikował raport.'}]}}
             row=score_growth_candidate(self.snap(),{'price':100.},None,saved,self.now)
             self.assertEqual(row['parts']['Kontekst'],10)
-            saved['candle_time']='2026-10-05T11:00:00Z'
+            saved['candle_time']='2026-10-05T13:00:00Z'
             self.assertEqual(score_growth_candidate(self.snap(),{'price':100.},None,saved,self.now)['parts']['Kontekst'],0)
         def test_06_top_limit_ties_and_removed_tickers(self):
             ticks=['A'+str(i).zfill(2) for i in range(25)];self.store.save_section('tickers',ticks)
@@ -8113,14 +7080,14 @@ def run_opportunity_tests():
       self.assertIn('local_analysis',data)
       self.assertIn('RVOL poniżej 1,50',json_text(data['local_analysis']))
      def test_local_research_uses_exact_saved_snapshot_and_prior_reading(self):
-      snap=self.snap(ticker='MREO');old={**snap,'price':100.,'acquired_at':'2026-10-05T12:15:00Z','chart_history':[{'large':'excluded'}]}
-      other=self.snap(ticker='HUMA');different={**old,'interval':'1d','acquired_at':'2026-10-05T12:20:00Z'}
+      snap=self.snap(ticker='MREO');old={**snap,'price':100.,'acquired_at':'2026-10-05T14:15:00Z','chart_history':[{'large':'excluded'}]}
+      other=self.snap(ticker='HUMA');different={**old,'interval':'1d','acquired_at':'2026-10-05T14:20:00Z'}
       for reading in (old,other,different,snap):detect_market(self.s,reading)
       context=gpt_chat_context(Store(self.s.path),'MREO')
       self.assertEqual(context['previous_snapshot']['price'],100.)
       self.assertEqual(context['previous_snapshot']['interval'],'1h')
       self.assertNotIn('chart_history',context['previous_snapshot'])
-      frozen=json_text(context);newer={**snap,'price':108.,'acquired_at':'2026-10-05T12:45:00Z'};detect_market(self.s,newer)
+      frozen=json_text(context);newer={**snap,'price':108.,'acquired_at':'2026-10-05T14:45:00Z'};detect_market(self.s,newer)
       report=local_research_analysis(context)
       self.assertEqual(report['prices'][0]['Wartość'],'105,0000 USD')
       self.assertEqual(next(x['Wartość'] for x in report['prices'] if x['Dane']=='Od poprzedniego odczytu'),'+5,00%')
@@ -8178,12 +7145,12 @@ def run_opportunity_tests():
 
      def test_dismiss_errors_preserves_audit_active_work_and_reveals_new_errors(self):
       with self.s.transaction() as c:
-       c.execute("INSERT INTO deep_reports VALUES('bad','AAA','FAILED',NULL,'błąd',?,?)",(utc_now(),utc_now()))
-       c.execute("INSERT INTO deep_reports VALUES('active','AAA','RUNNING',NULL,NULL,?,NULL)",(utc_now(),))
-       c.execute("INSERT INTO events VALUES('event','AAA','1h',?,'{}')",(utc_now(),))
-       c.execute("INSERT INTO analysis_jobs(event_id,state,last_error,updated_at) VALUES('event','FAILED','błąd',?)",(utc_now(),))
-       c.execute("INSERT INTO outbox(id,event_id,kind,message,status,last_error,created_at) VALUES('msg','event','ANALYSIS','tekst','UNCERTAIN','błąd',?)",(utc_now(),))
-       c.execute("INSERT INTO runtime VALUES('service_analysis',?,?)",(json_text({'status':'ERROR','error':'błąd'}),utc_now()))
+       c.execute("INSERT INTO deep_reports VALUES('bad','AAA','FAILED',NULL,'błąd',?,?)",(TEST_NOW.isoformat(),TEST_NOW.isoformat()))
+       c.execute("INSERT INTO deep_reports VALUES('active','AAA','RUNNING',NULL,NULL,?,NULL)",(TEST_NOW.isoformat(),))
+       c.execute("INSERT INTO events VALUES('event','AAA','1h',?,'{}')",(TEST_NOW.isoformat(),))
+       c.execute("INSERT INTO analysis_jobs(event_id,state,last_error,updated_at) VALUES('event','FAILED','błąd',?)",(TEST_NOW.isoformat(),))
+       c.execute("INSERT INTO outbox(id,event_id,kind,message,status,last_error,created_at) VALUES('msg','event','ANALYSIS','tekst','UNCERTAIN','błąd',?)",(TEST_NOW.isoformat(),))
+       c.execute("INSERT INTO runtime VALUES('service_analysis',?,?)",(json_text({'status':'ERROR','error':'błąd'}),TEST_NOW.isoformat()))
       self.assertEqual(dismiss_saved_errors(self.s),4)
       self.assertEqual(dismiss_saved_errors(self.s),0)
       hidden=dismissed_error_keys(Store(self.s.path))
@@ -8239,7 +7206,7 @@ def run_opportunity_tests():
      def test_manual_response_audit_survives_failed_validation_and_restart(self):
       context={'ticker':'STX.WA','snapshot':None,'purpose':'ticker_analysis','research':{'status':'REQUESTED','sources':[]}}
       turn=begin_gpt_chat(self.s,'Jawne pytanie testowe',context)
-      context['research'].update(status='RECEIVED',received_at=utc_now(),received_results=0)
+      context['research'].update(status='RECEIVED',received_at=TEST_NOW.isoformat(),received_results=0)
       save_gpt_chat_context(self.s,turn,context)
       metadata={'id':'jawny-identyfikator-testu','model':'test-zapisu','usage':{'total_tokens':12}}
       save_gpt_chat_metadata(self.s,turn,metadata)
@@ -8263,17 +7230,17 @@ def run_opportunity_tests():
 
      def setUp(self):
       self.tmp=tempfile.TemporaryDirectory();self.s=Store(Path(self.tmp.name)/'test.db');self.s.save_section('tickers',['AAA'])
-      self.now=datetime(2026,10,5,12,30,tzinfo=timezone.utc)
+      self.now=datetime(2026,10,5,14,30,tzinfo=timezone.utc)
      def tearDown(self):self.tmp.cleanup()
      def snap(self,ticker='AAA',rv=2.,price=105.):
-      return {'ticker':ticker,'interval':'1h','candle_time':'2026-10-05T12:00:00Z','candle_end':'2026-10-05T13:00:00Z','candle_status':'OPEN','acquired_at':self.now.isoformat(),'price':price,'volume':200000.,'rvol':rv,'ohlc':{'open':104.,'high':106.,'low':104.,'close':price},'indicators':{'last_macd_hist':.1,'ma_fast':103.,'plus_di':30.,'minus_di':20.},'currency':'USD','previous_closed':{'time':'2026-10-05T11:00:00Z','end':'2026-10-05T12:00:00Z','status':'CLOSED','open':100.,'high':104.,'low':100.,'close':103.,'volume':200000.,'rvol':2.,'average_volume':100000.}}
+      return {'ticker':ticker,'interval':'1h','candle_time':'2026-10-05T14:00:00Z','candle_end':'2026-10-05T15:00:00Z','candle_status':'OPEN','acquired_at':self.now.isoformat(),'price':price,'volume':200000.,'rvol':rv,'ohlc':{'open':104.,'high':106.,'low':104.,'close':price},'indicators':{'last_macd_hist':.1,'ma_fast':103.,'plus_di':30.,'minus_di':20.},'currency':'USD','previous_closed':{'time':'2026-10-05T13:00:00Z','end':'2026-10-05T14:00:00Z','status':'CLOSED','open':100.,'high':104.,'low':100.,'close':103.,'volume':200000.,'rvol':2.,'average_volume':100000.}}
      def test_boundaries_and_gap(self):
       self.assertTrue(two_candle_confirmation(self.snap(),self.now))
       for change in ({'rvol':1.499},{'price':104.},{'volume':0.},{'candle_status':'CLOSED'}):self.assertFalse(two_candle_confirmation({**self.snap(),**change},self.now))
       for opening in (102.,103.):self.assertFalse(two_candle_confirmation({**self.snap(),'ohlc':{**self.snap()['ohlc'],'open':opening}},self.now))
       p=self.snap()['previous_closed']
-      for change in ({'rvol':1.499},{'close':101.99},{'status':'OPEN'},{'end':'2026-10-05T11:00:00Z'}):self.assertFalse(two_candle_confirmation({**self.snap(),'previous_closed':{**p,**change}},self.now))
-      self.assertFalse(two_candle_confirmation(self.snap(),self.now.replace(hour=13,minute=0)))
+      for change in ({'rvol':1.499},{'close':101.99},{'status':'OPEN'},{'end':'2026-10-05T13:00:00Z'}):self.assertFalse(two_candle_confirmation({**self.snap(),'previous_closed':{**p,**change}},self.now))
+      self.assertFalse(two_candle_confirmation(self.snap(),self.now.replace(hour=15,minute=0)))
      def test_strong_and_risk(self):
       self.assertEqual(opportunity_quality(self.snap(rv=3.)),'Duża okazja')
       self.assertEqual(opportunity_quality(self.snap(rv=2.)),'Okazja')
@@ -8329,21 +7296,21 @@ def run_opportunity_tests():
       self.assertEqual(reserve_opportunities(self.s,'cycle',self.now+timedelta(minutes=1)),[])
      def test_only_one_combined_message_after_done_and_no_repeat(self):
       # Use the actual clock for delivery freshness; the test still performs no network calls.
-      self.now=datetime.now(timezone.utc);s=opportunity_test_snapshot(self.now)
-      detect_market(self.s,s);detect_market(self.s,s);a=record_opportunity(self.s,s,'cycle')
-      reserve_opportunities(self.s,'cycle');queue_opportunity(self.s,a['sequence_id'],spread_from_info({'bid':104.,'ask':108.}),True)
-      eid=a['sequence_id'];claim_analysis(self.s)
-      context={'sources':[],'cutoff':s['acquired_at'],'excluded':0};save_analysis_context(self.s,eid,context);claim_analysis(self.s)
+      self.now=TEST_NOW;s=opportunity_test_snapshot(self.now)
+      detect_market(self.s,s);detect_market(self.s,s);a=record_opportunity(self.s,s,'cycle', now=TEST_NOW)
+      reserve_opportunities(self.s,'cycle', now=TEST_NOW);queue_opportunity(self.s,a['sequence_id'],spread_from_info({'bid':104.,'ask':108.}, now=TEST_NOW),True, now=TEST_NOW)
+      eid=a['sequence_id'];claim_analysis(self.s, now=TEST_NOW)
+      context={'sources':[],'cutoff':s['acquired_at'],'excluded':0};save_analysis_context(self.s,eid,context);claim_analysis(self.s, now=TEST_NOW)
       result={'technical':[{'metric':'rsi','interpretation':'Wskaźnik powyżej poziomu neutralnego.'}],'context':[],'hypotheses':[],'risks':[],'missing':[]}
-      finish_analysis(self.s,eid,result,{'model':'gpt-4o-mini'});finish_analysis(self.s,eid,result,{})
+      finish_analysis(self.s,eid,result,{'model':'gpt-4o-mini'}, now=TEST_NOW);finish_analysis(self.s,eid,result,{}, now=TEST_NOW)
       with self.s.connection() as c:
        rows=c.execute('SELECT kind,message FROM outbox').fetchall();self.assertEqual(len(rows),1);self.assertEqual(rows[0]['kind'],'ANALYSIS')
        self.assertIn('Ryzyko podwyższone',rows[0]['message']);self.assertIn('przyczyna nieustalona',rows[0]['message'])
-      self.assertIsNotNone(claim_delivery(self.s));self.assertIsNone(claim_delivery(self.s))
+      self.assertIsNotNone(claim_delivery(self.s, now=TEST_NOW));self.assertIsNone(claim_delivery(self.s, now=TEST_NOW))
      def test_removed_ticker_blocks_paid_calls_and_delivery(self):
-      self.now=datetime.now(timezone.utc);s=opportunity_test_snapshot(self.now)
-      detect_market(self.s,s);detect_market(self.s,s);a=record_opportunity(self.s,s,'cycle');reserve_opportunities(self.s,'cycle');queue_opportunity(self.s,a['sequence_id'],{},True)
-      self.s.save_section('tickers',[]);self.assertIsNone(claim_analysis(self.s))
+      self.now=TEST_NOW;s=opportunity_test_snapshot(self.now)
+      detect_market(self.s,s);detect_market(self.s,s);a=record_opportunity(self.s,s,'cycle', now=TEST_NOW);reserve_opportunities(self.s,'cycle', now=TEST_NOW);queue_opportunity(self.s,a['sequence_id'],{},True, now=TEST_NOW)
+      self.s.save_section('tickers',[]);self.assertIsNone(claim_analysis(self.s, now=TEST_NOW))
      def test_confirmed_opportunities_continue_after_restart_in_same_slot(self):
       ticks=['A'+str(i) for i in range(5)];self.s.save_section('tickers',ticks)
       for t in ticks[:3]:
@@ -8382,12 +7349,12 @@ def run_panel_tests():
             checks=[item.label for item in self.app.checkbox]
             self.assertNotIn('Wariant Tavily',labels)
             self.assertNotIn('CLI: potwierdzam koszt Search + Extract w automacie',checks)
-            self.assertIn('Tavily CLI Research Mini',' '.join(item.value for item in self.app.caption))
+            self.assertIn('Tavily Search',' '.join(item.value for item in self.app.caption))
 
         def test_r1_saved_manual_id_can_resume_but_refresh_does_not_call_api(self):
-            context={'ticker':'MREO','purpose':'ticker_analysis','research':{'backend':'RESEARCH',
+            context={'ticker':'MREO','purpose':'ticker_analysis','engine':'openai','research':{'backend':'RESEARCH',
                      'status':'SUBMITTED','request_id':'r1-panel-existing','query':'Saved query',
-                     'cutoff':utc_now(),'sources':[]}}
+                     'cutoff':TEST_NOW.isoformat(),'sources':[]}}
             turn=begin_gpt_chat(self.store,'Saved question',context)
             fail_gpt_chat(self.store,turn,'Status read interrupted.')
             next(item for item in self.app.radio if item.label=='Widok panelu').set_value('Analiza GPT').run(timeout=30)
@@ -8403,7 +7370,7 @@ def run_panel_tests():
 
         def test_v3_saved_report_shows_attempts_background_and_own_timestamp(self):
             self.store.save_section('tickers',['HUMA'])
-            snap={**opportunity_test_snapshot(datetime.now(timezone.utc),'HUMA',.4659,.05),'currency':'USD','spread':spread_from_info({'bid':.46,'ask':.47})}
+            snap={**opportunity_test_snapshot(TEST_NOW,'HUMA',.4659,.05),'currency':'USD','spread':spread_from_info({'bid':.46,'ask':.47}, now=TEST_NOW)}
             request={'query':research_query(snap,event_context_cutoff(snap).isoformat())}
             context={'ticker':'HUMA','snapshot':snap,'purpose':'ticker_analysis','report_version':3,
                      'research':{'status':'DONE','sources':[],'received_results':0,'issuer_filter_version':1,
@@ -8427,7 +7394,7 @@ def run_panel_tests():
 
         def test_full_saved_report_survives_gpt_failure_without_paid_jobs(self):
             self.store.save_section('tickers',['MREO'])
-            snap={**opportunity_test_snapshot(datetime.now(timezone.utc),'MREO',.361,.08),'currency':'USD','volume':17591.,'average_volume':219887.5,'rvol_incomplete':True,'indicators':{'rsi':41.5344,'ma_fast':.3802,'ma_slow':.3761,'last_macd':-.01,'last_macd_signal':-.005,'last_macd_hist':-.005,'stoch_k':20.,'stoch_d':25.,'adx':17.,'plus_di':10.,'minus_di':20.,'roc':-4.,'last_upper_bb':.42,'bb_sma':.39,'last_lower_bb':.36,'atr':.02,'vwma':.385,'obv':-1000.}}
+            snap={**opportunity_test_snapshot(TEST_NOW,'MREO',.361,.08),'currency':'USD','volume':17591.,'average_volume':219887.5,'rvol_incomplete':True,'indicators':{'rsi':41.5344,'ma_fast':.3802,'ma_slow':.3761,'last_macd':-.01,'last_macd_signal':-.005,'last_macd_hist':-.005,'stoch_k':20.,'stoch_d':25.,'adx':17.,'plus_di':10.,'minus_di':20.,'roc':-4.,'last_upper_bb':.42,'bb_sma':.39,'last_lower_bb':.36,'atr':.02,'vwma':.385,'obv':-1000.}}
             context={'ticker':'MREO','snapshot':snap,'purpose':'ticker_analysis','report_version':2,'research':{'status':'DONE','sources':[],'received_results':0,'issuer_filter_version':1}}
             turn=begin_gpt_chat(self.store,'Jawne pytanie testowe',context);fail_gpt_chat(self.store,turn,'Jawny błąd walidacji GPT')
             next(x for x in self.app.radio if x.label=='Widok panelu').set_value('Analiza GPT').run(timeout=30)
@@ -8444,7 +7411,7 @@ def run_panel_tests():
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM outbox').fetchone()[0],0)
         def test_local_report_before_first_gpt_request_is_read_only(self):
             self.store.save_section('tickers',['MREO'])
-            snap=opportunity_test_snapshot(datetime.now(timezone.utc),'MREO',.361,.08);snap['currency']='USD'
+            snap=opportunity_test_snapshot(TEST_NOW,'MREO',.361,.08);snap['currency']='USD'
             detect_market(self.store,snap)
             with self.store.connection() as c:before={t:c.execute('SELECT COUNT(*) FROM '+t).fetchone()[0] for t in ('observations','events','gpt_chat_turns','analysis_jobs','outbox')}
             next(x for x in self.app.radio if x.label=='Widok panelu').set_value('Analiza GPT').run(timeout=30)
@@ -8461,7 +7428,7 @@ def run_panel_tests():
                 self.assertEqual(len(self.app.exception),0)
                 self.assertTrue(any(x.label=='Wyczyść zapisane błędy' for x in self.app.button))
             with self.store.transaction() as c:
-                c.execute("INSERT INTO deep_reports VALUES('failed','AAA','FAILED',NULL,'testowy błąd',?,?)",(utc_now(),utc_now()))
+                c.execute("INSERT INTO deep_reports VALUES('failed','AAA','FAILED',NULL,'testowy błąd',?,?)",(TEST_NOW.isoformat(),TEST_NOW.isoformat()))
             next(x for x in self.app.radio if x.label=='Widok panelu').set_value('Analiza pogłębiona').run(timeout=30)
             self.assertTrue(any(x.value=='testowy błąd' for x in self.app.error))
             self.button('Wyczyść zapisane błędy').click().run(timeout=30)
@@ -8473,7 +7440,7 @@ def run_panel_tests():
 
         def test_detail_selection_survives_new_tickers_and_view_switch(self):
             self.store.save_section('tickers',['HUMA','MREO'])
-            now=datetime.now(timezone.utc)
+            now=TEST_NOW
             for ticker in ('HUMA','MREO'):
                 snap=opportunity_test_snapshot(now,ticker);snap.update(scoring=market_score(snap['indicators'],snap['price']),direction=market_direction(snap['indicators'],snap['price']))
                 detect_market(self.store,snap)
@@ -8492,14 +7459,14 @@ def run_panel_tests():
             self.assertIn('HUMA · 1h',[x.value for x in self.app.subheader])
         def test_company_report_joins_only_selected_ticker_without_jobs(self):
             self.store.save_section('tickers',['MREO','HUMA'])
-            now=datetime.now(timezone.utc)
+            now=TEST_NOW
             for ticker in ('MREO','HUMA'):
                 snap=opportunity_test_snapshot(now,ticker)
                 snap.update(scoring=market_score(snap['indicators'],snap['price']),direction=market_direction(snap['indicators'],snap['price']))
                 detect_market(self.store,snap)
                 turn=begin_gpt_chat(self.store,'Pytanie testowe o '+ticker,{'ticker':ticker,'snapshot':snap,'purpose':'ticker_analysis'})
                 finish_gpt_chat(self.store,turn,'Zapisana odpowiedź testowa '+ticker,{})
-            research_context={'ticker':'MREO','snapshot':{'interval':'1h'},'purpose':'ticker_analysis','research':{'status':'DONE','sources':[{'id':'s1','title':'Źródło testowe MREO','published_at':utc_now(),'content':'Jawne dane wejściowe testu odczytu.','url':'https://example.org/mreo'}]}}
+            research_context={'ticker':'MREO','snapshot':{'interval':'1h'},'purpose':'ticker_analysis','research':{'status':'DONE','sources':[{'id':'s1','title':'Źródło testowe MREO','published_at':TEST_NOW.isoformat(),'content':'Jawne dane wejściowe testu odczytu.','url':'https://example.org/mreo'}]}}
             turn=begin_gpt_chat(self.store,'Pytanie bez gotowej odpowiedzi',research_context)
             fail_gpt_chat(self.store,turn,'Zapisany błąd testowy')
             baseline=self.store.get_baseline('MREO','1h')
@@ -8548,8 +7515,8 @@ def run_panel_tests():
 
         def test_manual_analysis_shows_tavily_after_gpt_rejection_without_api_jobs(self):
             self.store.save_section('tickers',['STX.WA'])
-            source={'id':'S1','title':'Jawne źródło testowe STX','published_at':utc_now(),'content':'Jawna treść wejścia do testu panelu.','url':'https://example.org/stx'}
-            context={'ticker':'STX.WA','snapshot':None,'purpose':'ticker_analysis','research':{'status':'DONE','received_at':utc_now(),'received_results':1,'excluded':0,'sources':[source]}}
+            source={'id':'S1','title':'Jawne źródło testowe STX','published_at':TEST_NOW.isoformat(),'content':'Jawna treść wejścia do testu panelu.','url':'https://example.org/stx'}
+            context={'ticker':'STX.WA','snapshot':None,'purpose':'ticker_analysis','research':{'status':'DONE','received_at':TEST_NOW.isoformat(),'received_results':1,'excluded':0,'sources':[source]}}
             turn=begin_gpt_chat(self.store,'Jawne pytanie testowe',context)
             save_gpt_chat_metadata(self.store,turn,{'id':'jawny-test-panelu','model':'test-zapisu','usage':{'total_tokens':12}})
             fail_gpt_chat(self.store,turn,'Jawny błąd testowy GPT')
@@ -8565,7 +7532,7 @@ def run_panel_tests():
             fail_gpt_chat(self.store,second,'Drugi jawny błąd testowy GPT')
             self.app.run(timeout=30)
             self.assertTrue(any('Nie przyjęto datowanych źródeł' in x.value for x in self.app.info))
-            context['research']={'status':'REQUESTED','sources':[],'requested_at':utc_now()}
+            context['research']={'status':'REQUESTED','sources':[],'requested_at':TEST_NOW.isoformat()}
             third=begin_gpt_chat(self.store,'Test bez potwierdzenia odpowiedzi',context)
             fail_gpt_chat(self.store,third,'Jawny błąd testowy połączenia')
             self.app.run(timeout=30)
@@ -8580,7 +7547,7 @@ def run_panel_tests():
                 next(x for x in self.app.radio if x.label=='Widok panelu').set_value(view).run(timeout=30)
                 self.assertEqual(len(self.app.exception),0)
                 self.assertIn(title,[x.value for x in self.app.subheader])
-            self.button('Wyślij pytanie do GPT').click().run(timeout=30)
+            self.button('Wyślij pytanie').click().run(timeout=30)
             self.assertTrue(any('Wpisz pytanie' in x.value for x in self.app.warning))
             with self.store.connection() as c:
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM gpt_chat_turns').fetchone()[0],0)
@@ -8591,17 +7558,17 @@ def run_panel_tests():
             self.store.save_section('tickers',['AAA'])
             next(x for x in self.app.radio if x.label=='Widok panelu').set_value('Rozmowa z GPT').run(timeout=30)
             next(x for x in self.app.selectbox if x.label=='Dane spółki do rozmowy').set_value('AAA')
-            self.button('Wyślij pytanie do GPT').click().run(timeout=30)
+            self.button('Wyślij pytanie').click().run(timeout=30)
             self.assertEqual(len(self.app.exception),0)
             self.assertEqual(next(x for x in self.app.selectbox if x.label=='Dane spółki do rozmowy').value,'AAA')
             self.app.run(timeout=30)
             self.assertEqual(next(x for x in self.app.selectbox if x.label=='Dane spółki do rozmowy').value,'AAA')
 
         def test_12_rank_tables_are_polish_and_refresh_does_not_write(self):
-            now=datetime.now(timezone.utc);self.store.save_section('tickers',['AAA','BBB'])
+            now=TEST_NOW;self.store.save_section('tickers',['AAA','BBB'])
             for ticker,price in (('AAA',105.),('BBB',104.)):
                 snap=opportunity_test_snapshot(now,ticker,price)
-                detect_market(self.store,snap);detect_market(self.store,snap);record_opportunity(self.store,snap,'cycle')
+                detect_market(self.store,snap);detect_market(self.store,snap);record_opportunity(self.store,snap,'cycle', now=TEST_NOW)
             with self.store.connection() as c:
                 before=[c.execute('SELECT COUNT(*) FROM '+t).fetchone()[0] for t in ('observations','events','analysis_jobs','outbox','opportunities')]
             self.app.run(timeout=30);self.assertEqual(len(self.app.exception),0)
@@ -8627,7 +7594,7 @@ def run_panel_tests():
         def test_09_gpt_chat_context_and_restart_preserve_real_sqlite(self):
             self.store.save_section('tickers',['AAA'])
             snap={'ticker':'AAA','interval':'1h','candle_time':'2026-10-05T08:00:00+00:00',
-                  'acquired_at':utc_now(),'candle_status':'OPEN','price':100.,'rvol':1.2,'volume':10.,'indicators':{'rsi':55.}}
+                  'acquired_at':TEST_NOW.isoformat(),'candle_status':'OPEN','price':100.,'rvol':1.2,'volume':10.,'indicators':{'rsi':55.}}
             detect_market(self.store,snap)
             context=gpt_chat_context(self.store,'AAA')
             self.assertEqual(context['snapshot']['price'],100.)
@@ -8654,7 +7621,7 @@ def run_panel_tests():
         def setUp(self):
             self.temp=tempfile.TemporaryDirectory();self.db=Path(self.temp.name)/'panel.db';self.store=Store(self.db)
             source=str(Path(__file__).resolve())
-            self.app=AppTest.from_string('import runpy\nfrom pathlib import Path\nm=runpy.run_path('+repr(source)+",run_name='ki_panel')\nm['run_streamlit'](Path("+repr(str(self.db))+'))\n').run(timeout=30)
+            self.app=AppTest.from_string('import runpy\nfrom pathlib import Path\nm=runpy.run_path('+repr(source)+",run_name='ki_panel')\nm['run_streamlit'](Path("+repr(str(self.db))+"),now=m['TEST_NOW'])\n").run(timeout=30)
             self.assertEqual(len(self.app.exception),0)
 
         def tearDown(self):self.temp.cleanup()
@@ -8688,7 +7655,7 @@ def run_panel_tests():
             rows=[{'time':(start+timedelta(hours=i)).isoformat(),'open':6.,'high':6.1,'low':5.9,'close':6.,'volume':100.,'status':'CLOSED'} for i in range(50)]
             ind=market_indicators(rows)
             snap={'ticker':'AAA','interval':'1h','price':6.,'volume':100.,'rvol':ind['rvol'],
-                  'candle_time':rows[-1]['time'],'candle_end':None,'candle_status':'CLOSED','acquired_at':utc_now(),
+                  'candle_time':rows[-1]['time'],'candle_end':None,'candle_status':'CLOSED','acquired_at':TEST_NOW.isoformat(),
                   'currency':'PLN','indicators':ind,'scoring':market_score(ind,6.),'direction':market_direction(ind,6.),
                   'rvol_incomplete':False,'ohlc':{k:rows[-1][k] for k in ('open','high','low','close')},
                   'chart_history':build_chart_history(rows),'latest_price_origin':'Yahoo OHLC'}
@@ -8721,7 +7688,7 @@ def run_panel_tests():
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0],0)
 
         def test_04_service_settings_and_preview_read_real_sqlite_without_http(self):
-            next(x for x in self.app.checkbox if x.label=='Tavily + GPT po potwierdzeniu okazji').set_value(True)
+            next(x for x in self.app.checkbox if x.label=='Tavily + AI po potwierdzeniu okazji').set_value(True)
             self.button('Zapisz ustawienia').click().run(timeout=30)
             self.assertEqual(len(self.app.exception),0)
             cfg=self.store.load_section('settings',{})
@@ -8734,14 +7701,14 @@ def run_panel_tests():
             with self.store.transaction() as c:
                 ev=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(eid,)).fetchone()[0]);ev['manual_analysis']=True;ev['delivery_enabled']=False
                 c.execute('UPDATE events SET payload=? WHERE id=?',(json_text(ev),eid))
-            queue_manual_analysis(self.store,eid);claim_analysis(self.store)
+            queue_manual_analysis(self.store,eid);claim_analysis(self.store, now=TEST_NOW)
             context={'sources':[{'id':'S1','url':'https://example.org/report','published_at':snap['candle_time'],'content':'Raport emitenta.'}],
                      'cutoff':snap['candle_end'],'excluded':0}
-            save_analysis_context(self.store,eid,context);claim_analysis(self.store)
+            save_analysis_context(self.store,eid,context);claim_analysis(self.store, now=TEST_NOW)
             result={'technical':[{'metric':'rsi','interpretation':'Powyżej poziomu neutralnego.'}],
                     'context':[{'source_id':'S1','fact':'Raport emitenta.'}],
                     'hypotheses':[],'risks':['Ruch może się odwrócić.'],'missing':[]}
-            finish_analysis(self.store,eid,result,{'model':'gpt-4o-mini'})
+            finish_analysis(self.store,eid,result,{'model':'gpt-4o-mini'}, now=TEST_NOW)
             source=str(Path(__file__).resolve())
             component=AppTest.from_string('import runpy\nfrom pathlib import Path\nm=runpy.run_path('+repr(source)+",run_name='ki_services_panel')\nm['render_service_panel'](m['Store'](Path("+repr(str(self.db))+')))\n').run(timeout=30)
             self.assertEqual(len(component.exception),0)
@@ -8766,7 +7733,7 @@ def run_panel_tests():
             self.store.save_section('tickers',ticks)
             for ticker in ticks:
                 detect_market(self.store,{'ticker':ticker,'interval':'1h','price':6.,'volume':100.,'rvol':ind['rvol'],
-                    'candle_time':rows[-1]['time'],'candle_end':None,'candle_status':'CLOSED','acquired_at':utc_now(),
+                    'candle_time':rows[-1]['time'],'candle_end':None,'candle_status':'CLOSED','acquired_at':TEST_NOW.isoformat(),
                     'currency':'PLN','indicators':ind,'scoring':market_score(ind,6.),'chart_history':build_chart_history(rows)})
             self.app.run(timeout=30)
             self.assertEqual(len(self.app.exception),0)
@@ -8803,9 +7770,9 @@ def run_panel_tests():
             cfg={'pipeline_enabled':True,'telegram_enabled':False}
             for i in range(32):
                 snap={'ticker':'T'+str(i).zfill(3),'interval':'1h','candle_time':'2026-10-05T08:00:00+00:00',
-                      'acquired_at':utc_now(),'candle_status':'CLOSED','price':100.,'rvol':1.,'volume':10.,'indicators':{}}
+                      'acquired_at':TEST_NOW.isoformat(),'candle_status':'CLOSED','price':100.,'rvol':1.,'volume':10.,'indicators':{}}
                 detect_market(self.store,snap,cfg)
-                event=record_manual_read(self.store,{**snap,'price':102.,'acquired_at':utc_now()},cfg)
+                event=record_manual_read(self.store,{**snap,'price':102.,'acquired_at':TEST_NOW.isoformat()},cfg)
                 queue_manual_analysis(self.store,event['event_id'])
             source=str(Path(__file__).resolve())
             component=AppTest.from_string('import runpy\nfrom pathlib import Path\nm=runpy.run_path('+repr(source)+",run_name='ki_history_test')\nm['render_service_panel'](m['Store'](Path("+repr(str(self.db))+')))\n').run(timeout=30)
@@ -9030,12 +7997,12 @@ def run_service_tests():
 
     class ServiceTests(unittest.TestCase):
         def test_26_telegram_requires_both_price_and_volume(self):
-            snap=opportunity_test_snapshot(datetime.now(timezone.utc))
+            snap=opportunity_test_snapshot(TEST_NOW)
             evidence={'kind':'CONFIRMED_OPPORTUNITY','snapshot':snap}
-            self.assertTrue(telegram_movement_confirmed(evidence))
+            self.assertTrue(telegram_movement_confirmed(evidence, now=TEST_NOW))
             for change in ({'rvol':1.49},{'price':104.},{'volume':0.}):
-                self.assertFalse(telegram_movement_confirmed({**evidence,'snapshot':{**snap,**change}}))
-            self.assertFalse(telegram_movement_confirmed({'snapshot':snap,'price_change_pct':20.}))
+                self.assertFalse(telegram_movement_confirmed({**evidence,'snapshot':{**snap,**change}}, now=TEST_NOW))
+            self.assertFalse(telegram_movement_confirmed({'snapshot':snap,'price_change_pct':20.}, now=TEST_NOW))
 
         def test_27_old_queue_is_filtered_before_claim_without_network(self):
             eid=self.event()
@@ -9044,23 +8011,23 @@ def run_service_tests():
                 c.execute('UPDATE events SET payload=? WHERE id=?',(json_text(evidence),eid))
                 for kind in ('EVIDENCE','ANALYSIS'):
                     c.execute('INSERT INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)',
-                              (eid+':'+kind.lower(),eid,kind,'old message','PENDING',utc_now()))
-            self.assertIsNone(claim_delivery(Store(self.store.path)))
-            self.assertIsNone(claim_analysis(self.store))
+                              (eid+':'+kind.lower(),eid,kind,'old message','PENDING',TEST_NOW.isoformat()))
+            self.assertIsNone(claim_delivery(Store(self.store.path), now=TEST_NOW))
+            self.assertIsNone(claim_analysis(self.store, now=TEST_NOW))
             with self.store.connection() as c:
                 self.assertEqual([r[0] for r in c.execute('SELECT status FROM outbox')],['FILTERED','FILTERED'])
                 self.assertEqual(c.execute('SELECT SUM(attempts) FROM outbox').fetchone()[0],0)
 
         def test_28_eligible_event_survives_restart_and_claim(self):
             eid=self.finished();approve_preview(self.store,eid+':analysis')
-            item=claim_delivery(Store(self.store.path));self.assertEqual(item['event_id'],eid)
+            item=claim_delivery(Store(self.store.path), now=TEST_NOW);self.assertEqual(item['event_id'],eid)
 
         def test_29_preview_approval_cannot_bypass_filter(self):
             eid=self.finished()
             with self.store.transaction() as c:
                 evidence=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(eid,)).fetchone()[0]);evidence['snapshot']['rvol']=1.49
                 c.execute('UPDATE events SET payload=? WHERE id=?',(json_text(evidence),eid))
-            approve_preview(self.store,eid+':analysis');self.assertIsNone(claim_delivery(self.store,eid+':analysis'))
+            approve_preview(self.store,eid+':analysis');self.assertIsNone(claim_delivery(self.store,eid+':analysis', now=TEST_NOW))
 
         def test_30_new_unconfirmed_event_and_ai_stay_in_panel(self):
             detect_market(self.store,self.snap(),{**self.cfg,'telegram_enabled':True})
@@ -9069,35 +8036,67 @@ def run_service_tests():
             with self.store.connection() as c:
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM outbox').fetchone()[0],0)
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0],0)
-            self.assertIsNone(claim_delivery(self.store))
+            self.assertIsNone(claim_delivery(self.store, now=TEST_NOW))
 
         def test_31_telegram_requires_current_open_hour(self):
             from datetime import timedelta
-            now=datetime(2026,10,5,12,20,tzinfo=timezone.utc);snap=opportunity_test_snapshot(now)
+            now=datetime(2026,10,5,14,20,tzinfo=timezone.utc);snap=opportunity_test_snapshot(now)
             ev={'kind':'CONFIRMED_OPPORTUNITY','snapshot':snap}
             self.assertTrue(telegram_movement_confirmed(ev,now=now))
             for changes in ({'candle_status':'CLOSED'},{'interval':'1d'},
                             {'candle_end':None},{'acquired_at':(now+timedelta(seconds=1)).isoformat()},
-                            {'candle_time':'2026-10-05T13:00:00+00:00'}):
+                            {'candle_time':'2026-10-05T15:00:00+00:00'}):
                 self.assertFalse(telegram_movement_confirmed({**ev,'snapshot':{**snap,**changes}},now=now))
-            self.assertFalse(telegram_movement_confirmed(ev,now=datetime(2026,10,5,13,tzinfo=timezone.utc)))
+            self.assertFalse(telegram_movement_confirmed(ev,now=datetime(2026,10,5,15,tzinfo=timezone.utc)))
 
         def test_32_expired_analysis_queue_filtered_after_restart(self):
             from datetime import timedelta
             eid=self.event()
             with self.store.transaction() as c:
                 ev=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(eid,)).fetchone()[0])
-                now=datetime.now(timezone.utc)
+                now=TEST_NOW
                 ev['snapshot'].update(candle_time=(now-timedelta(hours=2)).isoformat(),
                     candle_end=(now-timedelta(hours=1)).isoformat(),acquired_at=(now-timedelta(hours=1,minutes=1)).isoformat())
                 c.execute('UPDATE events SET payload=? WHERE id=?',(json_text(ev),eid))
                 c.execute("UPDATE outbox SET status='PENDING'")
                 c.execute('INSERT INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)',
-                          (eid+':analysis',eid,'ANALYSIS','saved analysis','PENDING',utc_now()))
-            self.assertIsNone(claim_delivery(Store(self.store.path)))
+                          (eid+':analysis',eid,'ANALYSIS','saved analysis','PENDING',TEST_NOW.isoformat()))
+            self.assertIsNone(claim_delivery(Store(self.store.path), now=TEST_NOW))
             with self.store.connection() as c:
                 self.assertEqual([r[0] for r in c.execute('SELECT status FROM outbox')],['FILTERED'])
                 self.assertEqual(c.execute('SELECT SUM(attempts) FROM outbox').fetchone()[0],0)
+
+        def test_33_service_runtime_status_contract(self):
+            # Panel reads real rows from SQLite: informational rows are not errors,
+            # real errors stay visible, malformed rows are reported with key and field.
+            hidden=dismissed_error_keys(Store(self.store.path))
+            with self.store.transaction() as c:
+                c.execute("INSERT INTO runtime VALUES('service_analysis',?,?)",(json_text({'status':'OK'}),'2026-10-21 15:07:03'))
+                c.execute("INSERT INTO runtime VALUES('service_telegram',?,?)",(json_text({'status':'OK'}),'2026-10-21 15:07:03'))
+            errors,notices,problems=service_runtime_diagnostics(load_service_runtime(Store(self.store.path),hidden))
+            self.assertEqual((errors,problems),([],[]))
+            self.assertEqual([(key,status) for key,updated,status in notices],
+                             [('service_analysis','OK'),('service_telegram','OK')])
+            with self.store.transaction() as c:
+                c.execute("UPDATE runtime SET payload=? WHERE key='service_telegram'",
+                          (json_text({'status':'ERROR','error':'Telegram HTTP 400: Bad Request'}),))
+            errors,notices,problems=service_runtime_diagnostics(load_service_runtime(Store(self.store.path),hidden))
+            self.assertEqual([(key,message) for key,updated,message in errors],
+                             [('service_telegram','Telegram HTTP 400: Bad Request')])
+            self.assertEqual([key for key,updated,status in notices],['service_analysis'])
+            with self.store.transaction() as c:
+                c.execute("UPDATE runtime SET payload=? WHERE key='service_telegram'",(json_text({'status':'ERROR'}),))
+            errors,notices,problems=service_runtime_diagnostics(load_service_runtime(Store(self.store.path),hidden))
+            self.assertEqual(errors,[])
+            self.assertEqual(len(problems),1)
+            self.assertEqual(problems[0][0],'service_telegram')
+            self.assertIn("brak pola 'error'",problems[0][2])
+            with self.store.transaction() as c:
+                c.execute("UPDATE runtime SET payload=? WHERE key='service_analysis'",('{nie-json',))
+            errors,notices,problems=service_runtime_diagnostics(load_service_runtime(Store(self.store.path),hidden))
+            self.assertEqual(notices,[])
+            self.assertEqual(sorted(key for key,updated,description in problems),
+                             ['service_analysis','service_telegram'])
 
         def setUp(self):
             self.temp=tempfile.TemporaryDirectory();self.store=Store(Path(self.temp.name)/'services.db')
@@ -9105,23 +8104,23 @@ def run_service_tests():
         def tearDown(self):self.temp.cleanup()
         def snap(self,price=100,live=False):
             from datetime import timedelta
-            now=datetime.now(timezone.utc) if live else datetime(2026,10,2,15,1,tzinfo=timezone.utc)
+            now=TEST_NOW if live else datetime(2026,10,2,15,1,tzinfo=timezone.utc)
             start=now.replace(minute=0,second=0,microsecond=0) if live else datetime(2026,10,2,14,tzinfo=timezone.utc)
             return {'ticker':'AAA','interval':'1h','candle_time':start.isoformat(),
                     'candle_end':(start+timedelta(hours=1)).isoformat(),'acquired_at':now.isoformat(),
                     'candle_status':'OPEN' if live else 'CLOSED','price':price,'rvol':1.2,'volume':123,'indicators':{'rsi':55.},'currency':'PLN'}
         def event(self):
             self.store.save_section('tickers',['AAA'])
-            snap=opportunity_test_snapshot(datetime.now(timezone.utc))
+            snap=opportunity_test_snapshot(TEST_NOW)
             detect_market(self.store,snap);detect_market(self.store,snap)
             cid=uuid.uuid4().hex
-            result=record_opportunity(self.store,snap,cid)
-            reserve_opportunities(self.store,cid)
-            queue_opportunity(self.store,result['sequence_id'],spread_from_info({}),False)
+            result=record_opportunity(self.store,snap,cid, now=TEST_NOW)
+            reserve_opportunities(self.store,cid, now=TEST_NOW)
+            queue_opportunity(self.store,result['sequence_id'],spread_from_info({}, now=TEST_NOW),False, now=TEST_NOW)
             return result['sequence_id']
         def finished(self):
-            eid=self.event();claim_analysis(self.store);save_analysis_context(self.store,eid,self.context());claim_analysis(self.store)
-            finish_analysis(self.store,eid,self.analysis(),{})
+            eid=self.event();claim_analysis(self.store, now=TEST_NOW);save_analysis_context(self.store,eid,self.context());claim_analysis(self.store, now=TEST_NOW)
+            finish_analysis(self.store,eid,self.analysis(),{}, now=TEST_NOW)
             return eid
         def context(self):
             return {'sources':[{'id':'S1','url':'https://example.org/report','title':'Raport',
@@ -9152,25 +8151,25 @@ def run_service_tests():
             detect_market(self.store,self.snap());detect_market(self.store,self.snap(102))
             with self.store.connection() as c:self.assertEqual(c.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0],0)
         def test_04_event_queue_and_baseline_roll_back_together(self):
-            self.store.save_section('tickers',['AAA']);snap=opportunity_test_snapshot(datetime.now(timezone.utc))
+            self.store.save_section('tickers',['AAA']);snap=opportunity_test_snapshot(TEST_NOW)
             detect_market(self.store,snap);detect_market(self.store,snap)
-            rid=record_opportunity(self.store,snap,'atomic')['sequence_id'];reserve_opportunities(self.store,'atomic')
+            rid=record_opportunity(self.store,snap,'atomic', now=TEST_NOW)['sequence_id'];reserve_opportunities(self.store,'atomic', now=TEST_NOW)
             with self.store.connection() as c:c.execute("CREATE TRIGGER reject_job BEFORE INSERT ON analysis_jobs BEGIN SELECT RAISE(ABORT,'reject'); END")
-            with self.assertRaises(sqlite3.IntegrityError):queue_opportunity(self.store,rid,{},False)
+            with self.assertRaises(sqlite3.IntegrityError):queue_opportunity(self.store,rid,{},False, now=TEST_NOW)
             with self.store.connection() as c:
                 self.assertEqual(c.execute("SELECT COUNT(*) FROM events WHERE id=?",(rid,)).fetchone()[0],0)
                 self.assertEqual(c.execute('SELECT state FROM opportunities').fetchone()[0],'RESERVED')
 
         def test_05_concurrent_claims_and_restart_keep_context(self):
             eid=self.event()
-            with ThreadPoolExecutor(2) as pool:claims=list(pool.map(lambda _:claim_analysis(self.store),range(2)))
+            with ThreadPoolExecutor(2) as pool:claims=list(pool.map(lambda _:claim_analysis(self.store, now=TEST_NOW),range(2)))
             self.assertEqual(sum(x is not None for x in claims),1)
             save_analysis_context(self.store,eid,self.context())
-            job=claim_analysis(Store(self.store.path))
+            job=claim_analysis(Store(self.store.path), now=TEST_NOW)
             self.assertEqual(job['state'],'BUSY_AI');self.assertEqual(json.loads(job['context']),self.context())
         def test_06_unknown_completion_requires_review(self):
-            self.event();claim_analysis(self.store);recover_service_jobs(self.store,'analysis')
-            self.assertIsNone(claim_analysis(self.store))
+            self.event();claim_analysis(self.store, now=TEST_NOW);recover_service_jobs(self.store,'analysis')
+            self.assertIsNone(claim_analysis(self.store, now=TEST_NOW))
             with self.store.connection() as c:self.assertEqual(c.execute('SELECT state FROM analysis_jobs').fetchone()[0],'REVIEW_REQUIRED')
         def test_07_context_dates_urls_and_duplicates(self):
             src=self.context()['sources'][0]
@@ -9183,12 +8182,18 @@ def run_service_tests():
             context=normalize_tavily_context(payload,self.snap())
             self.assertEqual(len(context['sources']),1);self.assertEqual(context['excluded'],4)
         def test_research_query_uses_verified_name_ticker_and_cutoff(self):
+            # User-approved policy: short query; ticker and cutoff remain in metadata.
             snap={**self.snap(),'ticker':'06N.WA','company_name':'Magna Polonia S.A.'}
-            query=research_query(snap,event_context_cutoff(snap).isoformat())
-            self.assertIn('Magna Polonia',query)
-            self.assertIn('06N.WA',query)
-            self.assertIn(event_context_cutoff(snap).isoformat(),query)
-            self.assertIn('Nie oceniaj inwestycji',query)
+            cutoff=event_context_cutoff(snap).isoformat()
+            query=research_query(snap,cutoff)
+            self.assertEqual(query,'Magna Polonia')
+            context=r1_research_sources({'results':[],'request_id':'test-metadata'},cutoff,snap)
+            self.assertEqual(context['issuer_identity']['ticker'],'06N.WA')
+            self.assertEqual(context['cutoff'],cutoff)
+            request=event_search_arguments(snap,cutoff)
+            self.assertIn('gpw.pl',request['include_domains'])
+            self.assertEqual(request['start_date'],'2026-09-02')
+            self.assertEqual(request['end_date'],'2026-10-03')
         def test_manual_volume_question_is_separate_from_research_query(self):
             snap={**self.snap(),'ticker':'06N.WA','company_name':'Magna Polonia S.A.'}
             query=research_query(snap,event_context_cutoff(snap).isoformat())
@@ -9253,14 +8258,24 @@ def run_service_tests():
             bad=self.analysis();bad['technical'][0]['metric']='nonexistent'
             with self.assertRaises(ValueError):validate_event_analysis(bad,self.snap(),self.context())
         def test_09_reject_advice_and_empty_generalities(self):
-            bad=self.analysis();bad['hypotheses']=['BUY teraz']
-            with self.assertRaises(ValueError):validate_event_analysis(bad,self.snap(),self.context())
+            # fix107: niedozwolona porada jest usuwana z ostrzezeniem, nie odrzuca calej analizy.
+            bad=self.analysis();bad['hypotheses']=['BUY teraz','Raport może zwiększyć zainteresowanie spółką.']
+            expected=self.analysis()
+            clean=validate_event_analysis(bad,self.snap(),self.context())
+            self.assertEqual(clean['hypotheses'],['Raport może zwiększyć zainteresowanie spółką.'])
+            self.assertTrue(any(issue.startswith('hypotheses[0]:') and 'BUY' in issue
+                                for issue in clean.get('quality_issues',[])))
+            self.assertEqual(clean['technical'],expected['technical'])
+            self.assertEqual(clean['context'],expected['context'])
+            self.assertEqual(clean['risks'],expected['risks'])
+            self.assertEqual(clean['missing'],expected['missing'])
+            # Pusty interpretation nadal jest bledem strukturalnym.
             bad=self.analysis();bad['technical'][0]['interpretation']=''
             with self.assertRaises(ValueError):validate_event_analysis(bad,self.snap(),self.context())
         def test_10_result_and_analysis_message_are_atomic_and_idempotent(self):
-            eid=self.event();claim_analysis(self.store);save_analysis_context(self.store,eid,self.context());claim_analysis(self.store)
-            finish_analysis(self.store,eid,self.analysis(),{'model':'gpt-4o-mini'})
-            finish_analysis(self.store,eid,self.analysis(),{'model':'gpt-4o-mini'})
+            eid=self.event();claim_analysis(self.store, now=TEST_NOW);save_analysis_context(self.store,eid,self.context());claim_analysis(self.store, now=TEST_NOW)
+            finish_analysis(self.store,eid,self.analysis(),{'model':'gpt-4o-mini'}, now=TEST_NOW)
+            finish_analysis(self.store,eid,self.analysis(),{'model':'gpt-4o-mini'}, now=TEST_NOW)
             with self.store.connection() as c:
                 self.assertEqual(c.execute('SELECT state FROM analysis_jobs').fetchone()[0],'DONE')
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM outbox WHERE event_id=?',(eid,)).fetchone()[0],1)
@@ -9268,10 +8283,10 @@ def run_service_tests():
                 self.assertIn('Fakt:',message);self.assertIn('https://example.org/report',message)
                 self.assertLessEqual(len(message.encode('utf-16-le'))//2,4096)
         def test_11_preview_not_claimed_and_uncertain_not_repeated(self):
-            eid=self.finished();self.assertIsNone(claim_delivery(self.store))
-            approve_preview(self.store,eid+':analysis');item=claim_delivery(self.store)
+            eid=self.finished();self.assertIsNone(claim_delivery(self.store, now=TEST_NOW))
+            approve_preview(self.store,eid+':analysis');item=claim_delivery(self.store, now=TEST_NOW)
             self.assertIsNotNone(item);recover_service_jobs(self.store,'telegram')
-            self.assertIsNone(claim_delivery(self.store))
+            self.assertIsNone(claim_delivery(self.store, now=TEST_NOW))
             with self.store.connection() as c:self.assertEqual(c.execute('SELECT status FROM outbox').fetchone()[0],'UNCERTAIN')
 
         def test_12_delivery_receipt_requires_message_and_destination(self):
@@ -9279,9 +8294,9 @@ def run_service_tests():
             with self.assertRaises(ServiceError):telegram_receipt({'ok':True,'result':{'message_id':1,'chat':{'id':456}}},'123')
             self.assertEqual(telegram_receipt({'ok':True,'result':{'message_id':1,'chat':{'id':123}}},'123')['message_id'],1)
         def test_13_retry_has_limit_and_preserves_stage(self):
-            eid=self.event();claim_analysis(self.store)
+            eid=self.event();claim_analysis(self.store, now=TEST_NOW)
             fail_analysis(self.store,eid,ServiceError('Tavily HTTP 429',retryable=True))
-            self.assertIsNone(claim_analysis(self.store))
+            self.assertIsNone(claim_analysis(self.store, now=TEST_NOW))
             with self.store.connection() as c:self.assertEqual(c.execute('SELECT state FROM analysis_jobs').fetchone()[0],'FAILED')
 
         def test_14_current_candle_context_cutoff_uses_acquisition(self):
@@ -9305,28 +8320,36 @@ def run_service_tests():
             message=message_limit('📈'*5000)
             self.assertLessEqual(len(message.encode('utf-16-le'))//2,4096)
         def test_18_context_fact_must_be_exact_source_fragment(self):
+            # fix107: fragment niezgodny ze zrodlem jest usuwany, a ostrzezenie zapisane.
             bad=self.analysis();bad['context'][0]['fact']='Emitent zarobił milion.'
-            with self.assertRaises(ValueError):validate_event_analysis(bad,self.snap(),self.context())
+            expected=self.analysis()
+            clean=validate_event_analysis(bad,self.snap(),self.context())
+            self.assertEqual(clean['context'],[])
+            self.assertTrue(any(issue.startswith('context[0].fact:') and 'nie jest dosłownym fragmentem' in issue
+                                for issue in clean.get('quality_issues',[])))
+            self.assertEqual(clean['technical'],expected['technical'])
+            self.assertEqual(clean['hypotheses'],[])
+            self.assertEqual(clean['risks'],[])
+            self.assertEqual(clean['missing'],[])
         def test_19_failed_outbox_insert_rolls_back_finished_analysis(self):
-            eid=self.event();claim_analysis(self.store);save_analysis_context(self.store,eid,self.context());claim_analysis(self.store)
+            eid=self.event();claim_analysis(self.store, now=TEST_NOW);save_analysis_context(self.store,eid,self.context());claim_analysis(self.store, now=TEST_NOW)
             with self.store.connection() as c:c.execute("CREATE TRIGGER reject_analysis BEFORE INSERT ON outbox WHEN NEW.kind='ANALYSIS' BEGIN SELECT RAISE(ABORT,'reject'); END")
-            with self.assertRaises(sqlite3.IntegrityError):finish_analysis(self.store,eid,self.analysis(),{})
+            with self.assertRaises(sqlite3.IntegrityError):finish_analysis(self.store,eid,self.analysis(),{}, now=TEST_NOW)
             with self.store.connection() as c:
                 self.assertEqual(c.execute('SELECT state FROM analysis_jobs').fetchone()[0],'BUSY_AI')
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM outbox').fetchone()[0],0)
-        def test_20_rejected_response_preserves_reason_and_draft_without_delivery(self):
-            eid=self.event();claim_analysis(self.store);save_analysis_context(self.store,eid,self.context());claim_analysis(self.store)
-            # Contradiction with the recorded RSI=55 must still be rejected,
-            # even though the actual source-linked RSI=55 is now permitted.
+        def test_20_cleaned_response_preserves_raw_without_empty_delivery(self):
+            eid=self.event();claim_analysis(self.store,now=TEST_NOW);save_analysis_context(self.store,eid,self.context());claim_analysis(self.store,now=TEST_NOW)
             bad=self.analysis();bad['technical'][0]['interpretation']='RSI 95 wskazuje przewagę.'
             body={'id':'response_contract','model':'gpt-4o-mini','choices':[{'finish_reason':'stop','message':{'content':json_text(bad)}}]}
-            with self.assertRaises(AnalysisRejected) as caught:parse_event_analysis_response(body,self.snap(),self.context())
-            self.assertIn('technical[0].interpretation',str(caught.exception))
-            fail_analysis(self.store,eid,caught.exception)
+            result,metadata=parse_event_analysis_response(body,self.snap(),self.context())
+            self.assertEqual(result['technical'],[])
+            self.assertEqual(metadata['raw_response'],body)
+            finish_analysis(self.store,eid,result,metadata,now=TEST_NOW)
             with self.store.connection() as c:
-                row=c.execute('SELECT reason,payload FROM analysis_rejections WHERE event_id=?',(eid,)).fetchone()
-                self.assertIn('niezgodna z wartością wskaźnika',row['reason']);self.assertEqual(json.loads(row['payload'])['content'],json_text(bad))
-                self.assertEqual(c.execute('SELECT state FROM analysis_jobs').fetchone()[0],'FAILED')
+                row=c.execute('SELECT state,result FROM analysis_jobs WHERE event_id=?',(eid,)).fetchone()
+                self.assertEqual(row['state'],'REVIEW_REQUIRED')
+                self.assertEqual(json.loads(row['result'])['provider']['raw_response'],body)
                 self.assertEqual(c.execute("SELECT COUNT(*) FROM outbox WHERE kind='ANALYSIS'").fetchone()[0],0)
         def test_21_response_finish_reason_and_json_have_distinct_diagnostics(self):
             body={'choices':[{'finish_reason':'length','message':{'content':'{'}}]}
@@ -9347,12 +8370,15 @@ def run_service_tests():
             self.assertEqual(set(metric['enum']),{'rsi','last_macd_hist','ma_fast'})
             self.assertNotIn('RSI',metric['enum']);self.assertNotIn('MACD',metric['enum'])
             self.assertEqual(schema['properties']['context']['items']['properties']['source_id']['enum'],['S1'])
-        def test_25_research_query_has_event_ticker_and_cutoff(self):
-            cutoff=event_context_cutoff(self.snap()).isoformat()
-            query=research_query(self.snap(),cutoff)
-            self.assertIn(self.snap()['ticker'],query)
-            self.assertIn(cutoff,query)
-            self.assertIn('Nie podawaj materiałów opublikowanych po',query)
+        def test_25_search_keeps_event_ticker_and_cutoff_in_metadata(self):
+            snap=self.snap();cutoff=event_context_cutoff(snap).isoformat()
+            query=research_query(snap,cutoff)
+            self.assertEqual(query,'AAA')
+            context=r1_research_sources({'results':[],'request_id':'metadata-contract'},cutoff,snap)
+            self.assertEqual(context['issuer_identity']['ticker'],snap['ticker'])
+            self.assertEqual(context['cutoff'],cutoff)
+            self.assertIn('sec.gov',event_search_arguments(snap,cutoff)['include_domains'])
+            self.assertNotIn('BUY/SELL',query)
 
         def test_24_empty_data_schema_still_has_valid_enum_but_validator_rejects_invention(self):
             schema=analysis_schema({'indicators':{}},{'sources':[]})
@@ -9582,7 +8608,9 @@ def main(argv=None):
             service_result = run_service_tests()
             ranking_result = run_ranking_tests()
             opportunity_result = run_opportunity_tests()
-            return 1 if foundation_result or market_result or service_result or ranking_result or opportunity_result else 0
+            import unittest
+            repair_result=unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromName('test_repair_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_yahoo_retry_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_service_status_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_reference_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_us_session_20261024')]))
+            return 1 if foundation_result or market_result or service_result or ranking_result or opportunity_result or not repair_result.wasSuccessful() else 0
         if args.migration_report:
             plan = prepare_migration(args.migration_report)
             print(json.dumps(public_migration_report(plan),ensure_ascii=False,indent=2))

@@ -1,4 +1,4 @@
-"""KI R1: Tavily CLI Research Mini only. No Search/Extract transport."""
+"""KI: transport SDK Search/Extract oraz zgodność ze starszymi zadaniami CLI Research."""
 from __future__ import annotations
 import ipaddress
 import json
@@ -56,7 +56,7 @@ def parse_cli_result(returncode, stdout, stderr, secrets=()):
 
 
 GPW_DOMAINS = [
-    "bankier.pl", "stooq.pl", "biznesradar.pl", "pap.pl", "gpw.pl",
+    "bankier.pl", "stooq.pl", "pap.pl", "gpw.pl",
     "infostrefa.com", "money.pl", "stockwatch.pl", "forsal.pl",
     "parkiet.com", "rp.pl", "pulsbiznesu.pl", "wnp.pl", "eog.pl",
     "pulsinwestora.pl", "comparic.pl", "gpwinfostrefa.pl", "newconnect.pl",
@@ -68,6 +68,9 @@ DEFAULT_EXCLUDE_DOMAINS = [
     "tradingview.com", "marketscreener.com", "yahoo.com",
     "investing.com", "marketwatch.com", "zacks.com",
     "wisesheets.io", "stockinvest.us", "public.com", "last10k.com",
+    "stockopedia.com", "marketbeat.com", "tipranks.com",
+    "seekingalpha.com", "theglobeandmail.com", "pluang.com",
+    "stocktitan.net", "xtb.com", "biznesradar.pl",
 ]
 
 # Wzorce sciezek w URL: strony-notowania, wykresy, karty spolek, fora.
@@ -89,64 +92,68 @@ def _looks_like_noise(url):
     return any(pat in u for pat in _URL_NOISE_PATTERNS)
 
 
-def search_sync(query, api_key, max_results=5, include_domains=None):
-    """Proste synchroniczne wyszukiwanie Tavily - jak w py.py wlasciciela.
-    Bez async, bez statusow, bez --no-wait. Zwraca dict:
-    {'answer': str, 'results': [{'url','title','content','score'}], 'request_id': str}
-    """
-    if not api_key or not isinstance(api_key, str):
-        raise CLITransportError("Tavily search: brak klucza API.")
-    if not isinstance(query, str) or not query.strip():
-        raise CLITransportError("Tavily search: puste zapytanie.")
+def build_search_arguments(query,max_results=5,include_domains=None,start_date=None,end_date=None):
+    from datetime import date
+    if not isinstance(query,str) or not query.strip():raise CLITransportError('Tavily Search: puste zapytanie.')
+    if type(max_results) is not int or not 1<=max_results<=20:raise CLITransportError('Tavily Search: niepoprawny limit wyników.')
+    domains=[]
+    if include_domains is not None:
+        if not isinstance(include_domains,(list,tuple)) or not include_domains:
+            raise CLITransportError('Tavily Search: pusta lub niepoprawna lista dozwolonych domen.')
+        for domain in include_domains:
+            if not isinstance(domain,str) or not re.fullmatch(r'[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+',domain):
+                raise CLITransportError('Tavily Search: niepoprawna domena; nie wykonano zapytania bez ograniczenia.')
+            domains.append(domain.lower())
+    for stamp in (start_date,end_date):
+        if stamp is not None:
+            try:
+                if not isinstance(stamp,str) or date.fromisoformat(stamp).isoformat()!=stamp:raise ValueError()
+            except ValueError:raise CLITransportError('Tavily Search: niepoprawna granica daty.') from None
+    if start_date and end_date and start_date>end_date:raise CLITransportError('Tavily Search: odwrócony zakres dat.')
+    request={'query':query.strip(),'search_depth':'advanced','topic':'general','max_results':max_results,
+             'include_published_date':True,'include_raw_content':'text','include_usage':True,'auto_parameters':False}
+    if domains:request.update(include_domains=list(dict.fromkeys(domains)),include_domains_mode='restrict')
+    if start_date or end_date:
+        if start_date:request['start_date']=start_date
+        if end_date:request['end_date']=end_date
+        request['filter_by_published_date']=True
+    else:request['time_range']='month'
+    return request
+
+
+def normalize_search_response(response,request):
+    import copy
+    if not isinstance(response,dict) or not isinstance(response.get('results'),list):
+        raise CLITransportError('Tavily Search: niepoprawna struktura odpowiedzi.')
+    results=[];rejected=[]
+    for raw in response['results']:
+        if not isinstance(raw,dict):rejected.append({'reason':'Niepoprawny rekord źródła.'});continue
+        url=raw.get('url')
+        if not isinstance(url,str) or not url.strip():rejected.append({'reason':'Brak adresu źródła.'});continue
+        if _looks_like_noise(url):rejected.append({'url':url,'reason':'Strona notowań, wykres lub forum.'});continue
+        full=raw.get('raw_content')
+        use_full=isinstance(full,str) and bool(full.strip())
+        item=copy.deepcopy(raw)
+        item.update(url=url.strip(),title=str(raw.get('title') or '')[:200],
+                    content=full if use_full else str(raw.get('content') or ''),
+                    content_origin='raw_content' if use_full else 'search_snippet')
+        results.append(item)
+    return {'answer':str(response.get('answer') or ''),'results':results,
+            'request_id':response.get('request_id') or None,'query':request['query'],
+            'request':copy.deepcopy(request),'raw_response':copy.deepcopy(response),
+            'usage':copy.deepcopy(response.get('usage')),'transport_rejections':rejected}
+
+
+def search_sync(query,api_key,max_results=5,include_domains=None,start_date=None,end_date=None):
+    if not isinstance(api_key,str) or not api_key.strip():raise CLITransportError('Tavily Search: brak klucza API.')
+    request=build_search_arguments(query,max_results,include_domains,start_date,end_date)
     try:
         from tavily import TavilyClient
-    except ImportError:
-        raise CLITransportError("Brak pakietu tavily-python. pip install tavily-python")
-    try:
-        client = TavilyClient(api_key=api_key)
-        # Najpierw news z ostatnich 24h
-        _base = {
-            "query": query.strip(),
-            "search_depth": "advanced",
-            "max_results": int(max_results),
-            "include_answer": True,
-            "include_published_date": True,
-            "include_raw_content": True,
-        }
-        if include_domains:
-            _base["include_domains"] = list(include_domains)
-            # Uwaga: country="poland" + pelna lista include_domains (18 GPW)
-            # zwraca 0 wynikow — to bug Tavily API. Sama lista domen wystarcza
-            # do promowania polskich zrodel, wiec country/language pomijamy.
-        # Domyslny filtr agregatorow — dziala w obie strony (GPW i US).
-        _base["exclude_domains"] = list(DEFAULT_EXCLUDE_DOMAINS)
-        # Tavily: news+advanced+include_domains zwraca 0 (bug API).
-        # General z time_range=week dziala niezawodnie, daje te same wyniki.
-        _gen = dict(_base); _gen["topic"]="general"; _gen["time_range"]="week"
-        resp = client.search(**_gen)
+    except ImportError:raise CLITransportError('Brak pakietu tavily-python.') from None
+    try:response=TavilyClient(api_key=api_key).search(**request)
     except Exception as exc:
-        raise CLITransportError("Tavily search: "+type(exc).__name__+": "+str(exc)[:300]) from None
-    if not isinstance(resp, dict):
-        raise CLITransportError("Tavily search: odpowiedz nie jest obiektem.")
-    results = []
-    for r in (resp.get("results") or []):
-        if not isinstance(r, dict): continue
-        u = r.get("url")
-        if not isinstance(u, str) or not u.strip(): continue
-        if _looks_like_noise(u): continue
-        results.append({
-            "url": u.strip(),
-            "title": str(r.get("title") or "")[:200],
-            "content": str(r.get("content") or r.get("raw_content") or ""),
-            "score": r.get("score"),
-            "published_date": r.get("published_date"),
-        })
-    return {
-        "answer": str(resp.get("answer") or ""),
-        "results": results,
-        "request_id": str(resp.get("request_id") or ""),
-        "query": query.strip(),
-    }
+        raise CLITransportError('Tavily Search: '+type(exc).__name__+': '+sanitize_cli_diagnostic(str(exc),[api_key])) from None
+    return normalize_search_response(response,request)
 
 
 def _safe_url(url):

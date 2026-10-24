@@ -13,7 +13,10 @@ class EContractTests(unittest.TestCase):
         self.store=KI.Store(Path(self.temp.name)/'isolated_e.sqlite3')
         self.cfg={'price_matrix_enabled':True,'auto_scan_interval':15,'price_threshold_pct':1.0,
                   'pipeline_enabled':False,'telegram_enabled':False}
-        self.start=datetime(2026,10,9,12,0,tzinfo=timezone.utc)
+        self.start=datetime(2026,10,9,14,0,tzinfo=timezone.utc)
+        for ticker in ('AAA','AAA.WA'):
+            KI._save_daily_history(self.store,ticker,[{'session_date':'2026-10-08','status':'CLOSED',
+                'open':100.,'high':100.,'low':100.,'close':100.,'volume':1000}],self.start)
 
     def snap(self,m,price,ticker='AAA'):
         at=self.start+timedelta(minutes=m)
@@ -89,10 +92,10 @@ class EContractTests(unittest.TestCase):
         snap={**self.snap(17,103),'price_matrix':old}
         self.assertFalse(KI.two_candle_candidate(snap,self.start+timedelta(minutes=33)))
         self.assertEqual(self.store.get_price_matrix('AAA')['anchor_price'],100)
-        self.assertEqual(self.store.get_price_matrix('AAA')['anchor_at'],self.snap(2,100)['acquired_at'])
+        self.assertEqual(self.store.get_price_matrix('AAA')['reference_session'],'2026-10-08')
 
     def insert_pending_delivery(self):
-        now=datetime.now(timezone.utc)
+        now=datetime(2026,10,9,14,30,tzinfo=timezone.utc)
         s=KI.opportunity_test_snapshot(now)
         evidence={'kind':'CONFIRMED_OPPORTUNITY','snapshot':s}
         eid='test_e03'
@@ -121,7 +124,7 @@ class EContractTests(unittest.TestCase):
         self.assertTrue(KI.telegram_delivery_active(self.store))
         self.assertEqual(original,self.delivery_state(item))
         # No network: database can claim a valid message only after reactivation.
-        claim=KI.claim_delivery(self.store,item)
+        claim=KI.claim_delivery(self.store,item,now=datetime(2026,10,9,14,30,tzinfo=timezone.utc))
         self.assertIsNotNone(claim)
         self.assertEqual(claim['status'],'PENDING')
 

@@ -11,6 +11,9 @@ class PriceMatrixTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.store = KI.Store(Path(self.temp.name) / 'matrix.sqlite3')
         self.anchor_time = datetime(2026, 10, 8, 8, 0, tzinfo=timezone.utc)
+        for ticker,close in (('STX.WA',1.),('AAA.WA',1.),('BBB.WA',2.)):
+            KI._save_daily_history(self.store,ticker,[{'session_date':'2026-10-07','status':'CLOSED',
+                'open':close,'high':close,'low':close,'close':close,'volume':1000}],self.anchor_time)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -23,7 +26,7 @@ class PriceMatrixTests(unittest.TestCase):
             'ticker': ticker, 'interval': '1h', 'candle_time': candle.isoformat(),
             'candle_end': (candle + timedelta(hours=1)).isoformat(),
             'acquired_at': acquired.isoformat(), 'candle_status': 'OPEN',
-            'price': price, 'rvol': 1.0, 'volume': 100 + minutes % 60, 'average_volume': 100,
+            'price': price, 'rvol': 1.0, 'volume': 100000 + (minutes % 60)*1000, 'average_volume': 100000,
             'ohlc': {'open': 1.00, 'high': max(price, 1.00), 'low': min(price, 1.00), 'close': price},
             'previous_closed': {'time': previous.isoformat(), 'end': candle.isoformat(), 'status': 'CLOSED',
                                 'open': 1.00, 'high': 1.00, 'low': 1.00, 'close': 1.00,
@@ -32,7 +35,7 @@ class PriceMatrixTests(unittest.TestCase):
             'currency': 'PLN',
         }
 
-    def test_first_successful_price_is_immutable_anchor_across_days(self):
+    def test_previous_session_close_is_anchor_and_new_session_resets_proofs(self):
         first = KI.record_price_matrix_read(self.store, self.snapshot(1.00, 0), 2.0, 15)
         later = KI.record_price_matrix_read(self.store, self.snapshot(1.30, 15), 2.0, 15)
         next_day = KI.record_price_matrix_read(self.store, self.snapshot(1.25, 24 * 60), 2.0, 15)
@@ -41,7 +44,7 @@ class PriceMatrixTests(unittest.TestCase):
         self.assertAlmostEqual(later['change_pct'], 30.0)
         self.assertEqual(next_day['anchor_price'], 1.00)
         self.assertAlmostEqual(next_day['change_pct'], 25.0)
-        self.assertEqual(next_day['state'], 'CANDIDATE')
+        self.assertEqual(next_day['state'], 'BASELINE_CREATED')
         self.assertEqual(KI.Store(self.store.path).get_price_matrix('STX.WA')['anchor_price'], 1.00)
 
     def test_three_consecutive_above_threshold_reads_confirm_candidate(self):

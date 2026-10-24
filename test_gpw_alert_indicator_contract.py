@@ -1,4 +1,5 @@
 import tempfile
+import KI
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -46,6 +47,8 @@ class GPWAlertIndicatorContractTests(unittest.TestCase):
         now = datetime(2026, 10, 8, 15, 10, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
             store = Store(Path(directory) / "matrix.sqlite3")
+            KI._save_daily_history(store,'TOS.WA',[{'session_date':'2026-10-07','status':'CLOSED',
+                'open':2.96,'high':2.96,'low':2.96,'close':2.96,'volume':1000}],datetime(2026,10,8,12,tzinfo=timezone.utc))
             store.save_section("tickers", ["TOS.WA"])
             snapshot = {
                 "ticker": "TOS.WA", "interval": "1h", "candle_time": "2026-10-08T15:00:00+00:00",
@@ -74,6 +77,8 @@ class GPWAlertIndicatorContractTests(unittest.TestCase):
     def test_closed_session_reads_do_not_advance_gpws_confirmation_count(self):
         with tempfile.TemporaryDirectory() as directory:
             store = Store(Path(directory) / "matrix.sqlite3")
+            KI._save_daily_history(store,'TOS.WA',[{'session_date':'2026-10-07','status':'CLOSED',
+                'open':2.96,'high':2.96,'low':2.96,'close':2.96,'volume':1000}],datetime(2026,10,8,12,tzinfo=timezone.utc))
             store.save_section("tickers", ["TOS.WA"])
             base = {"ticker": "TOS.WA", "price": 2.96, "volume": 100,
                     "candle_time": "2026-10-08T14:00:00+00:00",
@@ -90,6 +95,8 @@ class GPWAlertIndicatorContractTests(unittest.TestCase):
     def test_matrix_table_labels_gpw_alerts_as_held_after_close(self):
         with tempfile.TemporaryDirectory() as directory:
             store = Store(Path(directory) / "matrix.sqlite3")
+            KI._save_daily_history(store,'TOS.WA',[{'session_date':'2026-10-07','status':'CLOSED',
+                'open':2.96,'high':2.96,'low':2.96,'close':2.96,'volume':1000}],datetime(2026,10,8,12,tzinfo=timezone.utc))
             store.save_section("tickers", ["TOS.WA"])
             start = datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc)
             for count, price in enumerate((2.96, 3.06, 3.05)):
@@ -159,7 +166,7 @@ class GPWAlertIndicatorContractTests(unittest.TestCase):
         ranking = opportunity_local_rank(snapshot)
         evidence = {"snapshot": snapshot, "ranking": ranking}
         message = opportunity_message("event-1", evidence, {"sources": []},
-                                      {"context": [], "risks": [], "technical": []})
+                                      {"context": [], "risks": [], "hypotheses":[], "missing":[], "technical": [{"metric":"rsi","interpretation":"Wskaźnik poniżej poziomu neutralnego."}]})
         self.assertIn("RSI: 44,20", message)
         self.assertIn("SMA 30: 2,9800 PLN", message)
         self.assertIn("Świeca 1h:", message)

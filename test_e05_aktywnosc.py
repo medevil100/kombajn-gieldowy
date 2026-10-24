@@ -13,7 +13,9 @@ class E05ActivityTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.db=Path(self.tmp.name)/'matrix_e05.sqlite3'
         self.store=KI.Store(self.db)
-        self.base=datetime(2026,10,9,12,0,tzinfo=timezone.utc)
+        self.base=datetime(2026,10,9,14,0,tzinfo=timezone.utc)
+        KI._save_daily_history(self.store,'XYZ',[{'session_date':'2026-10-08','status':'CLOSED',
+            'open':100.,'high':100.,'low':100.,'close':100.,'volume':1000}],self.base)
         self.cfg={'price_matrix_enabled':True,'auto_scan_interval':15,'price_threshold_pct':2.0,
                   'pipeline_enabled':False,'telegram_enabled':False}
 
@@ -131,8 +133,8 @@ class E05ActivityTests(unittest.TestCase):
 
     def test_11_proved_event_flows_to_job_once_after_three_activity_steps(self):
         self.store.save_section('tickers',['XYZ'])
-        self.read(17,100,10)
-        for m,price,volume in ((32,104,20),(47,103,30),(62,103,8)):
+        self.read(17,100,10000)
+        for m,price,volume in ((32,104,20000),(47,103,30000),(62,103,8000)):
             r=self.read(m,price,volume)
             s={**self.snap(m,price,volume),'price_matrix':r['price_matrix']}
             opportunity=KI.record_opportunity(self.store,s,'cycle'+str(m),self.base+timedelta(minutes=m))
@@ -149,7 +151,7 @@ class E05ActivityTests(unittest.TestCase):
 
     def test_12_old_job_without_new_activity_proof_filtered_before_api(self):
         self.store.save_section('tickers',['XYZ'])
-        now=datetime.now(timezone.utc).replace(second=0,microsecond=0)
+        now=datetime(2026,10,9,14,30,tzinfo=timezone.utc).replace(second=0,microsecond=0)
         snap=KI.opportunity_test_snapshot(now,ticker='XYZ',price=105)
         matrix={'anchor_price':100.,'anchor_at':(now-timedelta(minutes=45)).isoformat(),
                 'last_price':105.,'last_acquired_at':snap['acquired_at'],'state':'CONFIRMED',
@@ -163,7 +165,7 @@ class E05ActivityTests(unittest.TestCase):
             c.execute('INSERT INTO analysis_jobs(event_id,state,updated_at) VALUES(?,?,?)',('old','PENDING_CONTEXT',snap['acquired_at']))
             c.execute('INSERT INTO observations(ticker,interval,candle_time,acquired_at,candle_status,payload) VALUES(?,?,?,?,?,?)',
                       ('XYZ','1h',snap['candle_time'],snap['acquired_at'],snap['candle_status'],KI.json_text(snap)))
-        self.assertIsNone(KI.claim_analysis(self.store))
+        self.assertIsNone(KI.claim_analysis(self.store,now=now))
         with self.store.connection() as c:
             self.assertEqual(c.execute("SELECT state FROM analysis_jobs WHERE event_id='old'").fetchone()[0],'FILTERED')
 
