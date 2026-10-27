@@ -52,7 +52,7 @@ class USSessionTests(unittest.TestCase):
             with store.connection() as c:
                 row=c.execute('SELECT state,last_error FROM analysis_jobs').fetchone()
             self.assertEqual(row['state'],'REVIEW_REQUIRED')
-            self.assertIn('AI_REQUEST',row['last_error'])
+            self.assertIn('AI_PREFLIGHT',row['last_error'])
             self.assertIn('JSONDecodeError',row['last_error'])
 
 

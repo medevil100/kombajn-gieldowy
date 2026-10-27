@@ -52,20 +52,27 @@ class EtapAB(unittest.TestCase):
     def test_B_number_not_matching_metric_is_rejected(self):
         bad=copy.deepcopy(self.result)
         bad['technical'][0]['interpretation']='RSI 95 potwierdza przewagę popytu.'
-        with self.assertRaisesRegex(ValueError,'technical\\[0\\].interpretation'):
-            KI.validate_event_analysis(bad,self.snapshot,self.context)
+        clean=KI.validate_event_analysis(bad,self.snapshot,self.context)
+        self.assertEqual(clean['technical'],[])
+        self.assertTrue(clean['quality_issues'])
+        self.assertEqual(clean['hypotheses'],[])
 
     def test_B_unverified_numbers_and_commands_remain_forbidden(self):
         for k,text in [('risks','Spread 25 procent.'),('missing','Brak 123 zapisów.'),('hypotheses','BUY teraz.')]:
             with self.subTest(k=k):
                 bad=copy.deepcopy(self.result)
                 bad[k]=[text]
-                with self.assertRaises(ValueError):KI.validate_event_analysis(bad,self.snapshot,self.context)
+                clean=KI.validate_event_analysis(bad,self.snapshot,self.context)
+                self.assertEqual(clean[k],[])
+                self.assertTrue(clean['quality_issues'])
 
     def test_B_source_literal_still_required(self):
         bad=copy.deepcopy(self.result)
         bad['context'][0]['fact']='Spółka uzyskała milion zysku.'
-        with self.assertRaises(ValueError):KI.validate_event_analysis(bad,self.snapshot,self.context)
+        clean=KI.validate_event_analysis(bad,self.snapshot,self.context)
+        self.assertEqual(clean['context'],[])
+        self.assertEqual(clean['technical'],self.result['technical'])
+        self.assertTrue(clean['quality_issues'])
 
     def test_B_response_parser_preserves_provider_usage(self):
         body={'model':'gpt-4o-mini','usage':{'prompt_tokens':500,'completion_tokens':100,'total_tokens':600},

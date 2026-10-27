@@ -166,10 +166,10 @@ class GPWAlertIndicatorContractTests(unittest.TestCase):
         ranking = opportunity_local_rank(snapshot)
         evidence = {"snapshot": snapshot, "ranking": ranking}
         message = opportunity_message("event-1", evidence, {"sources": []},
-                                      {"context": [], "risks": [], "hypotheses":[], "missing":[], "technical": [{"metric":"rsi","interpretation":"Wskaźnik poniżej poziomu neutralnego."}]})
-        self.assertIn("RSI: 44,20", message)
-        self.assertIn("SMA 30: 2,9800 PLN", message)
-        self.assertIn("Świeca 1h:", message)
+                                      {"context": [], "risks": [], "hypotheses":[], "missing":[], "technical": [{"metric":"rsi","interpretation":"Wskaźnik poniżej poziomu neutralnego."},{"metric":"ma_fast","interpretation":"Cena powyżej szybkiej średniej."}]})
+        self.assertIn("Ocena:", message)
+        self.assertNotIn("MACD hist.", message)
+        self.assertIn("świeca trwa", message)
 
 
 if __name__ == "__main__":

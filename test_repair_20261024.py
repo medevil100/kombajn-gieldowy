@@ -124,9 +124,10 @@ class RepairTests(unittest.TestCase):
         snap['indicators']=self.snap['indicators']
         ranking=KI.opportunity_local_rank(snap)
         result=self.result();result['context'][0]['fact']='Nieprawidłowy cytat.'
+        result['technical'].append({'metric':'adx','interpretation':'ADX opisuje siłę, nie kierunek ruchu.'})
         clean=KI.validate_event_analysis(result,snap,self.context)
         text=KI.opportunity_message('e',{'snapshot':snap,'ranking':ranking},self.context,clean)
-        self.assertIn('Jakość analizy',text)
+        self.assertIn('Analiza częściowa',text)
         self.assertNotIn('Nieprawidłowy cytat.',text)
 
     def seed(self):
@@ -241,7 +242,7 @@ class RepairTests(unittest.TestCase):
         eid=row['sequence_id'];self.assertIsNotNone(KI.claim_analysis(self.store,eid,at))
         context={'sources':[]};KI.save_analysis_context(self.store,eid,context)
         self.assertIsNotNone(KI.claim_analysis(self.store,eid,at))
-        result={'technical':[{'metric':'rsi','interpretation':'Wskaźnik wskazuje przewagę ruchu.'}],
+        result={'technical':[{'metric':'rsi','interpretation':'Wskaźnik wskazuje przewagę ruchu.'},{'metric':'ma_fast','interpretation':'Cena powyżej szybkiej średniej wspiera ruch.'}],
                 'context':[],'hypotheses':[],'risks':[],'missing':[]}
         KI.finish_analysis(self.store,eid,result,{'raw_response':{'test':'lokalny'}},at)
         with self.store.connection() as c:

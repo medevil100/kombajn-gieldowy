@@ -28,19 +28,17 @@ class ResearchV3Tests(unittest.TestCase):
         with self.assertRaises(ValueError):KI.render_manual_research_reply(reply,context)
         reply['answer']='Cena wynosi 99 USD.'
         with self.assertRaises(ValueError):KI.render_manual_research_reply(reply,context)
-    def test_background_cache_identity_and_expiry(self):
-        with tempfile.TemporaryDirectory() as folder:
-            store=KI.Store(Path(folder)/'test.sqlite')
-            snap=self.snapshot()
-            KI.save_issuer_background(store,snap,{'sources':[]},now='2026-10-07T16:00:00Z')
-            self.assertIsNotNone(KI.load_issuer_background(store,snap,now='2026-10-07T17:00:00Z'))
-            self.assertIsNone(KI.load_issuer_background(store,snap,now='2026-10-08T17:00:00Z'))
-            self.assertIsNone(KI.load_issuer_background(store,{**snap,'ticker':'GOSS'},now='2026-10-07T17:00:00Z'))
-    def test_manual_search_plan_bounded(self):
-        plans=KI.manual_search_plan(self.snapshot())
-        self.assertEqual([x[0] for x in plans],['fresh','fallback','background'])
-        self.assertNotIn(',',plans[0][1]['query'])
-        self.assertNotEqual(plans[0][1]['query'],plans[1][1]['query'])
+    def test_finished_manual_research_is_reused_without_key(self):
+        context={'research':{'status':'DONE','sources':[]}}
+        KI.collect_manual_research(None,None,context,self.snapshot(),'')
+        self.assertEqual(context['research']['status'],'DONE')
+    def test_manual_search_uses_same_single_search_contract(self):
+        import tavily_cli_adapter as adapter
+        s=self.snapshot()
+        r=adapter.build_search_arguments(KI.research_query(s,s['acquired_at']),8,**KI.event_search_arguments(s,s['acquired_at']))
+        self.assertEqual(r['query'],'Humacyte')
+        self.assertEqual(r['include_domains_mode'],'restrict')
+        self.assertEqual(r['start_date'],'2026-09-07')
 
     def test_mreo_alias_on_syndicated_domain_and_goss_identity(self):
         snap={**self.snapshot(),'ticker':'MREO','company_name':'Mereo BioPharma Group plc'}
@@ -51,15 +49,12 @@ class ResearchV3Tests(unittest.TestCase):
         goss=KI.issuer_search_identity({**self.snapshot(),'ticker':'GOSS','company_name':'Gossamer Bio, Inc.'})
         self.assertEqual(goss['name'],'Gossamer Bio')
         self.assertIn('gossamerbio.com',goss['domains'])
-    def test_v3_request_and_legacy_automatic_search_isolation(self):
-        snap=self.snapshot()
-        legacy=KI.issuer_search_identity({k:v for k,v in snap.items() if k!='_manual_research'})
-        self.assertNotIn('humacyte.com',legacy['domains'])
-        self.assertEqual(KI.event_context_request({'snapshot':snap})['max_results'],5)
+    def test_v3_request_retains_numeric_contract_and_model(self):
         context={'ticker':'HUMA','report_version':3,'snapshot':{'ticker':'HUMA','price':.4659,'currency':'USD','candle_status':'OPEN'},'research':{'sources':[]}}
         request=KI.gpt_chat_request('Co pokazują dane?',context,[])
         self.assertIn('{{metric:price}}',request['messages'][0]['content'])
         self.assertIn('nie potwierdza słabej aktywności',request['messages'][0]['content'])
-        self.assertEqual(request['max_completion_tokens'],2600)
+        self.assertEqual(request['max_completion_tokens'],5000)
+        self.assertEqual(request['model'],'gpt-4o-mini')
 
 if __name__=='__main__':unittest.main()

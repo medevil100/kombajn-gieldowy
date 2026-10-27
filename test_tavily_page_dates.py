@@ -4,19 +4,20 @@ import KI
 
 
 class IssuerPageDateTests(unittest.TestCase):
-    def test_reads_article_publication_metadata(self):
-        html = '<html><head><meta property="article:published_time" content="2026-10-01T14:49:00+02:00"></head></html>'
-        result = KI.issuer_page_publication_date(html)
-        self.assertEqual(result['value'], '2026-10-01T14:49:00+02:00')
+    def test_missing_provider_date_is_not_inferred_from_article_text(self):
+        self.check_date(None,False)
 
-    def test_reads_structured_data_and_time_tag(self):
-        structured = '<script type="application/ld+json">{"@type":"NewsArticle","datePublished":"2026-10-01"}</script>'
-        self.assertEqual(KI.issuer_page_publication_date(structured)['value'], '2026-10-01')
-        time_tag = '<time datetime="2026-10-01T14:49:00Z">1 października</time>'
-        self.assertEqual(KI.issuer_page_publication_date(time_tag)['value'], '2026-10-01T14:49:00Z')
+    def test_invalid_and_unzoned_metadata_cannot_prove_publication(self):
+        for value in ('bad','2026-10-01T14:49:00'):
+            self.check_date(value,False)
 
-    def test_ignores_pages_without_publication_metadata(self):
-        self.assertIsNone(KI.issuer_page_publication_date('<html><body>Aktualności spółki</body></html>'))
+    def check_date(self,value,accepted):
+        s={'ticker':'STX.WA','company_name':'Stalexport Autostrady','company_website':'https://stalexport-autostrady.pl','acquired_at':'2026-10-08T13:00:00Z'}
+        raw={'url':'https://stalexport-autostrady.pl/report','title':'Stalexport Autostrady raport','content':'Stalexport Autostrady opublikował raport.','published_date':value}
+        self.assertEqual(bool(KI.r1_research_sources({'results':[raw]},s['acquired_at'],s)['sources']),accepted)
+
+    def test_future_metadata_is_rejected(self):
+        self.check_date('2026-10-08T13:00:01Z',False)
 
     def test_direct_page_date_is_accepted_by_existing_date_window_rules(self):
         snapshot = {'ticker': 'STX.WA', 'company_name': 'Stalexport Autostrady S.A.',

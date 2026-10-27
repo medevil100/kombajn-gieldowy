@@ -150,7 +150,7 @@ def search_sync(query,api_key,max_results=5,include_domains=None,start_date=None
     try:
         from tavily import TavilyClient
     except ImportError:raise CLITransportError('Brak pakietu tavily-python.') from None
-    try:response=TavilyClient(api_key=api_key).search(**request)
+    try:response=TavilyClient(api_key=api_key).search(**request,timeout=60)
     except Exception as exc:
         raise CLITransportError('Tavily Search: '+type(exc).__name__+': '+sanitize_cli_diagnostic(str(exc),[api_key])) from None
     return normalize_search_response(response,request)
@@ -269,29 +269,63 @@ def check_research(request_id,api_key):
         raise CLITransportError('Research: niepoprawna odpowiedź statusu. ID zachowano.') from None
 
 
+class ExtractResult(dict):
+    """Treści zgodne z dawnym dict oraz jawny wynik dodatkowego pobrania."""
+    def __init__(self, contents=(), *, status, error=None, usage=None, failed_results=None,attempted_count=0):
+        super().__init__(contents)
+        self.diagnostics={'status':status,'error':error,'usage':usage,
+                          'failed_results':failed_results or [],'extracted_count':len(self),'attempted_count':attempted_count}
+
+
+MAX_EXTRACT_URLS = 8
+
+
+def enrich_search_response(response, api_key, eligible_urls=None):
+    """Jeden Extract dla kwalifikujących się źródeł bez pełnej treści; bez ponowień."""
+    urls=[item.get('url') for item in response.get('results',[])
+          if item.get('url') and item.get('content_origin')!='raw_content'
+          and (eligible_urls is None or item['url'] in eligible_urls)]
+    extracted=extract_urls(list(dict.fromkeys(urls)),api_key)
+    for item in response.get('results',[]):
+        if item.get('url') in extracted:
+            item['content']=extracted[item['url']]
+            item['content_origin']='extract'
+    response['_extracted_count']=len(extracted)
+    response['extract_diagnostics']=extracted.diagnostics
+    response['extract_diagnostics'].update(requested_count=len(set(urls)))
+    if extracted and len(extracted)<len(set(urls)):
+        response['extract_diagnostics']['status']='PARTIAL'
+    return response
+
+
 def extract_urls(urls, api_key):
     """Pobiera pelna tresc URL-i przez TavilyClient.extract.
     Zwraca dict {url: content}. Kosztuje 1 kredyt za 5 URL (basic).
     """
-    if not urls or not api_key:
-        return {}
+    if not urls:
+        return ExtractResult(status='NOT_NEEDED')
+    if not api_key:
+        return ExtractResult(status='FAILED',error='Tavily Extract: brak klucza API.')
     try:
         from tavily import TavilyClient
     except ImportError:
-        return {}
-    # Max 5 URL na raz
-    urls = [u for u in urls if isinstance(u, str) and u.strip().startswith("http")][:5]
+        return ExtractResult(status='FAILED',error='Tavily Extract: brak pakietu tavily-python.')
+    urls = list(dict.fromkeys(u for u in urls if isinstance(u, str) and u.strip().startswith("http")))[:MAX_EXTRACT_URLS]
     if not urls:
-        return {}
+        return ExtractResult(status='NOT_NEEDED')
     try:
         client = TavilyClient(api_key=api_key)
-        resp = client.extract(urls=urls, extract_depth="basic")
-    except Exception:
-        return {}
+        resp = client.extract(urls=urls, extract_depth="basic",timeout=30,include_usage=True)
+        if not isinstance(resp,dict) or not isinstance(resp.get('results'),list):
+            raise ValueError('Niepoprawna struktura odpowiedzi.')
+    except Exception as exc:
+        return ExtractResult(status='FAILED',attempted_count=len(urls),error='Tavily Extract: '+type(exc).__name__+': '+sanitize_cli_diagnostic(str(exc),[api_key]))
     out = {}
     for item in (resp.get("results") or []):
         if not isinstance(item, dict): continue
         u = item.get("url"); c = item.get("raw_content") or item.get("content") or ""
         if isinstance(u, str) and isinstance(c, str) and c.strip():
             out[u] = c.strip()
-    return out
+    failures=resp.get('failed_results') or []
+    return ExtractResult(out,status='COMPLETED' if out and not failures else 'PARTIAL' if out else 'EMPTY',
+                         usage=resp.get('usage'),failed_results=failures,attempted_count=len(urls))

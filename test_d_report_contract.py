@@ -39,7 +39,7 @@ class ReportContractTests(unittest.TestCase):
 
     def test_02_missing_spread_does_not_mean_safe_or_no_growth(self):
         got=KI.opportunity_report_sections(self.sample())
-        self.assertIn('nieustalone',got['risk']['summary'].lower())
+        self.assertIn('niepotwierdzona',got['risk']['summary'].lower())
         self.assertNotIn('Brak ruchu',got['detection']['summary'])
         self.assertIn('2 275', '\n'.join(got['risk']['details']))
         self.assertIn('Szacowany', '\n'.join(got['risk']['details']))
@@ -65,7 +65,8 @@ class ReportContractTests(unittest.TestCase):
 
     def test_05_autoreport_prints_three_layers_without_claiming_cause(self):
         row=self.sample();evidence={'kind':'CONFIRMED_OPPORTUNITY','snapshot':row['snapshot'],'ranking':row}
-        response={'technical':[],'context':[],'hypotheses':[],'risks':[],'missing':[]}
+        row['snapshot']['indicators']={'rsi':55.}
+        response={'technical':[{'metric':'rsi','interpretation':'RSI wynosi 55.'}],'context':[],'hypotheses':[],'risks':[],'missing':[]}
         output=KI.analysis_message('id',evidence,{'sources':[]},response,limit=False)
         self.assertIn('1. DETEKCJA RUCHU',output)
         self.assertIn('2. JAKOŚĆ RUCHU',output)
@@ -75,11 +76,12 @@ class ReportContractTests(unittest.TestCase):
 
     def test_06_compact_telegram_has_sections_but_never_calls_api(self):
         row=self.sample();evidence={'kind':'CONFIRMED_OPPORTUNITY','snapshot':row['snapshot'],'ranking':row}
-        response={'technical':[],'context':[],'hypotheses':[],'risks':[],'missing':[]}
+        row['snapshot']['indicators']={'rsi':55.,'adx':30.}
+        response={'technical':[{'metric':'rsi','interpretation':'Momentum jest powyżej poziomu neutralnego.'},{'metric':'adx','interpretation':'ADX opisuje siłę, nie kierunek ruchu.'}],'context':[],'hypotheses':[],'risks':[],'missing':[]}
         msg=KI.opportunity_message('id',evidence,{'sources':[]},response)
-        self.assertIn('1. DETEKCJA RUCHU',msg)
-        self.assertIn('2. JAKOŚĆ RUCHU',msg)
-        self.assertIn('3. RYZYKO',msg)
+        self.assertIn('Ruch:',msg)
+        self.assertIn('Ocena:',msg)
+        self.assertIn('Ryzyko: nie można ocenić spreadu i warunków wykonania — brak bid/ask.',msg)
         self.assertIn('przyczyna nieustalona',msg.lower())
 
 

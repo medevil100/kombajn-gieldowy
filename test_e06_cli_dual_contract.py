@@ -5,9 +5,9 @@ import tavily_cli_adapter as cli
 
 
 class R1ConfigurationContract(unittest.TestCase):
-    def test_research_is_only_backend_even_with_old_settings(self):
+    def test_search_is_only_backend_even_with_old_settings(self):
         for mode in (None, 'REST', 'CLI', 'INNY', 'RESEARCH'):
-            self.assertEqual(KI.service_config({'tavily_mode': mode})['tavily_mode'], 'RESEARCH')
+            self.assertEqual(KI.service_config({'tavily_mode': mode})['tavily_mode'], 'SEARCH')
 
     def test_switches_stay_strict(self):
         with self.assertRaises(ValueError):
@@ -525,7 +525,7 @@ class R1ResumeAndSourceContracts(unittest.TestCase):
                       (self.event,'MREO','1h',self.snapshot['acquired_at'],KI.json_text({'snapshot':self.snapshot,'manual_analysis':True})))
             c.execute("INSERT INTO analysis_jobs(event_id,state,updated_at) VALUES(?,'PENDING_CONTEXT',?)",(self.event,KI.utc_now()))
         self.raw={'request_id':'r1-saved-id','status':'completed','content':'Unverified report',
-                  'sources':[{'url':'https://www.sec.gov/Archives/r1','title':'Mereo BioPharma Group: report',
+                  'results':[{'url':'https://www.sec.gov/Archives/r1','title':'Mereo BioPharma Group: report',
                               'content':'Mereo BioPharma Group filed a report.',
                               'published_date':'2026-10-10T19:00:00Z'}]}
 
@@ -539,7 +539,7 @@ class R1ResumeAndSourceContracts(unittest.TestCase):
 
     def test_completed_record_resumes_automatic_pipeline_without_key(self):
         self.submitted()
-        with self.store.transaction() as c:KI.complete_research(c,self.event,self.raw)
+        with self.store.transaction() as c:KI.complete_research(c,self.event,KI.search_result_record(self.raw,'local'))
         self.assertTrue(KI.process_analysis_once(self.store,{},self.event))
         with self.store.connection() as c:
             row=c.execute('SELECT * FROM analysis_jobs WHERE event_id=?',(self.event,)).fetchone()
@@ -568,16 +568,10 @@ class R1ResumeAndSourceContracts(unittest.TestCase):
         self.assertEqual(KI.load_event_research(self.store,self.event)['state'],'RESERVED')
 
     def test_completed_manual_record_is_reused_without_api_key(self):
-        context={'ticker':'MREO','research':{'backend':'RESEARCH','status':'COMPLETED',
-                 'request_id':self.raw['request_id'],'query':'ORIGINAL QUERY',
-                 'cutoff':self.snapshot['acquired_at'],'raw_response':self.raw}}
-        with self.store.transaction() as c:
-            c.execute("INSERT INTO gpt_chat_turns(id,question,context,state,created_at) VALUES(?,?,?,'REQUESTED',?)",
-                      ('r1-turn','Question',KI.json_text(context),KI.utc_now()))
-        KI.collect_manual_research(self.store,'r1-turn',context,self.snapshot,'')
+        context={'ticker':'MREO','research':{'backend':'SEARCH','status':'DONE','query':'ORIGINAL QUERY','sources':[]}}
+        KI.collect_manual_research(self.store,'unused',context,self.snapshot,'')
         self.assertEqual(context['research']['status'],'DONE')
         self.assertEqual(context['research']['query'],'ORIGINAL QUERY')
-        self.assertEqual(len(context['research']['sources']),1)
 
     def test_uncertain_manual_record_blocks_start_without_key(self):
         context={'research':{'status':'CALL_UNCERTAIN','query':'ORIGINAL QUERY'}}
@@ -586,31 +580,29 @@ class R1ResumeAndSourceContracts(unittest.TestCase):
         self.assertEqual(context['research']['status'],'CALL_UNCERTAIN')
 
     def test_metadata_does_not_become_source_text_or_publication_date(self):
-        raw={**self.raw,'sources':[{'url':'https://www.sec.gov/Archives/r1','title':'Mereo BioPharma Group'}]}
+        raw={**self.raw,'results':[{'url':'https://www.sec.gov/Archives/r1','title':'Mereo BioPharma Group'}]}
         result=KI.r1_research_sources(raw,self.snapshot['acquired_at'],self.snapshot)
         self.assertEqual(result['sources'],[])
         self.assertEqual(result['excluded'],1)
-        self.assertEqual(result['raw_response'],raw)
+        self.assertNotIn('raw_response',result)
+        self.assertEqual(result['raw_response_ref']['table'],'research_requests')
 
     def test_unsafe_future_undated_unrelated_sources_are_excluded(self):
         import copy
-        good=copy.deepcopy(self.raw['sources'][0])
+        good=copy.deepcopy(self.raw['results'][0])
         values=[good,{**good,'url':'https://127.0.0.1/a'},
                 {**good,'url':'https://www.sec.gov/future','published_date':'2026-10-12T00:00:00Z'},
                 {**good,'url':'https://www.sec.gov/undated','published_date':None},
                 {**good,'url':'https://www.sec.gov/other','title':'Other company','content':'Other company report.'}]
-        result=KI.r1_research_sources({**self.raw,'sources':values},self.snapshot['acquired_at'],self.snapshot)
+        result=KI.r1_research_sources({**self.raw,'results':values},self.snapshot['acquired_at'],self.snapshot)
         self.assertEqual(len(result['sources']),1)
         self.assertEqual(result['excluded'],4)
         self.assertEqual(result['date_unverified_count'],1)
 
-    def test_structured_report_material_must_have_provider_citation(self):
-        material={**self.raw['sources'][0],'published_at':'2026-10-10T19:00:00Z'}
-        raw={**self.raw,'sources':[{'url':material['url'],'title':material['title']}],
-             'content':{'materials':[material,{**material,'url':'https://www.sec.gov/not-cited'}]}}
-        result=KI.r1_research_sources(raw,self.snapshot['acquired_at'],self.snapshot)
-        self.assertEqual(len(result['sources']),1)
-        self.assertEqual(result['sources'][0]['url'],material['url'])
+    def test_legacy_research_material_is_not_misread_as_search(self):
+        raw={'request_id':'legacy','status':'completed','content':{'materials':self.raw['results']},'sources':self.raw['results']}
+        with self.assertRaises(KI.ServiceError):
+            KI.r1_research_sources(raw,self.snapshot['acquired_at'],self.snapshot)
 
     def test_raw_research_response_is_not_sent_twice_to_gpt(self):
         context={'ticker':'MREO','research':KI.r1_research_sources(self.raw,self.snapshot['acquired_at'],self.snapshot)}
@@ -662,9 +654,14 @@ class R1ResumeAndSourceContracts(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cli._normalize_research_response(raw,'r1-saved-id')
 
-    def test_wait_budget_must_be_finite(self):
-        for budget in (-1,float('nan'),float('inf')):
-            with self.assertRaises(ValueError):KI.r1_wait_for_research(None,budget)
+    def test_submitted_legacy_research_never_starts_new_paid_search(self):
+        self.submitted()
+        KI.process_analysis_once(self.store,{},self.event)
+        with self.store.connection() as c:
+            row=c.execute('SELECT state,last_error FROM analysis_jobs').fetchone()
+            self.assertEqual(row['state'],'REVIEW_REQUIRED')
+            self.assertTrue(row['last_error'])
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM research_requests').fetchone()[0],1)
 
 
 class R1CLIDiagnosticContracts(unittest.TestCase):
@@ -798,24 +795,24 @@ class ADTXWatchlistRestoreContract(unittest.TestCase):
                                  ['STX.WA','MREO','ADTX'])
 
 
-class ResearchLast24HoursContracts(unittest.TestCase):
+class SearchMonthWindowContracts(unittest.TestCase):
     def snapshot(self,manual=False):
         return {'ticker':'MREO','company_name':'Mereo BioPharma Group',
                 'acquired_at':'2026-10-11T18:00:00+00:00','_manual_research':manual}
 
     def raw(self,date):
         return {'request_id':'window-test','status':'completed','content':{},
-                'sources':[{'url':'https://www.sec.gov/Archives/window-test',
+                'results':[{'url':'https://www.sec.gov/Archives/window-test',
                             'title':'Mereo BioPharma Group report','content':'Mereo BioPharma Group filed a report.',
                             'published_date':date}]}
 
-    def test_query_has_explicit_start_and_end_for_both_modes(self):
+    def test_query_and_time_bounds_are_separate_for_both_modes(self):
         for manual in (False,True):
-            snapshot=self.snapshot(manual)
-            query=KI.research_query(snapshot,snapshot['acquired_at'])
-            self.assertIn('2026-10-10T18:00:00+00:00',query)
-            self.assertIn('2026-10-11T18:00:00+00:00',query)
-            self.assertIn('24 godzin',query)
+            s=self.snapshot(manual)
+            self.assertEqual(KI.research_query(s,s['acquired_at']),'Mereo BioPharma Group')
+            args=KI.event_search_arguments(s,s['acquired_at'])
+            self.assertEqual(args['start_date'],'2026-09-11')
+            self.assertEqual(args['end_date'],'2026-10-12')
 
     def test_exact_boundaries_are_accepted_in_both_modes(self):
         for manual in (False,True):
@@ -824,28 +821,26 @@ class ResearchLast24HoursContracts(unittest.TestCase):
                 result=KI.r1_research_sources(self.raw(date),snapshot['acquired_at'],snapshot)
                 self.assertEqual(len(result['sources']),1)
 
-    def test_older_same_calendar_day_is_rejected_in_both_modes(self):
-        for manual in (False,True):
-            snapshot=self.snapshot(manual)
-            result=KI.r1_research_sources(self.raw('2026-10-10T17:59:59Z'),snapshot['acquired_at'],snapshot)
-            self.assertEqual(result['sources'],[])
-            self.assertEqual(result['excluded'],1)
+    def test_source_older_than_seven_days_is_background_in_month_window(self):
+        s=self.snapshot()
+        r=KI.r1_research_sources(self.raw('2026-09-24T18:54:00Z'),s['acquired_at'],s)
+        self.assertEqual(r['sources'][0]['scope'],'background')
 
     def test_old_and_future_dates_are_not_used_as_background(self):
-        for date in ('2024-10-10T20:00:00Z','2026-09-24T18:54:00Z','2026-10-11T18:00:01Z'):
+        for date in ('2024-10-10T20:00:00Z','2026-09-01T18:54:00Z','2026-10-11T18:00:01Z'):
             snapshot=self.snapshot(True)
             result=KI.r1_research_sources(self.raw(date),snapshot['acquired_at'],snapshot)
             self.assertEqual(result['sources'],[])
 
-    def test_date_without_time_cannot_prove_membership_in_24_hours(self):
-        snapshot=self.snapshot(True)
-        result=KI.r1_research_sources(self.raw('2026-10-10'),snapshot['acquired_at'],snapshot)
-        self.assertEqual(result['sources'],[])
-        self.assertEqual(result['date_unverified_count'],1)
+    def test_same_day_without_time_cannot_prove_publication_before_cutoff(self):
+        s=self.snapshot(True)
+        r=KI.r1_research_sources(self.raw('2026-10-11'),s['acquired_at'],s)
+        self.assertEqual(r['sources'],[])
+        self.assertEqual(r['date_unverified_count'],1)
 
     def test_empty_recent_excerpt_is_still_rejected(self):
         snapshot=self.snapshot(True);raw=self.raw('2026-10-11T12:00:00Z')
-        raw['sources'][0]['content']=''
+        raw['results'][0]['content']=''
         result=KI.r1_research_sources(raw,snapshot['acquired_at'],snapshot)
         self.assertEqual(result['sources'],[])
         self.assertEqual(result['excluded'],1)

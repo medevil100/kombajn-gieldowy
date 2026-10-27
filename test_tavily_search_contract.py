@@ -22,38 +22,23 @@ def source(date='2026-10-01T12:49:00Z', url='https://www.stalexport-autostrady.p
 
 
 class TavilySearchContractTests(unittest.TestCase):
-    def test_polish_plan_has_local_terms_simple_fallback_and_no_sector_bias(self):
-        plans=dict(KI.manual_search_plan(snap()))
-        self.assertEqual(set(plans),{'fresh','fallback','background'})
-        self.assertIn('raport',plans['fresh']['query'])
-        self.assertEqual(plans['fallback']['query'],'Stalexport Autostrady')
-        for request in plans.values():
-            self.assertNotIn('STX.WA',request['query'])
-            for term in ('clinical','financing','news press'):self.assertNotIn(term,request['query'])
-            self.assertEqual(request['language'],'pl')
-            self.assertFalse(request['exact_match'])
-            self.assertFalse(request['filter_by_published_date'])
-            self.assertTrue(request['include_published_date'])
-            self.assertEqual(request['max_results'],5)
-            self.assertEqual(request['search_depth'],'basic')
-            self.assertFalse(request['auto_parameters'])
-        self.assertEqual(plans['fallback']['include_domains_mode'],'prefer')
-        self.assertEqual(plans['fresh']['start_date'],'2026-10-01')
-        self.assertEqual(plans['background']['start_date'],'2026-04-11')
+    def test_single_search_arguments_are_strict_and_absolute(self):
+        import tavily_cli_adapter as adapter
+        s=snap();r=adapter.build_search_arguments(KI.research_query(s,s['acquired_at']),8,**KI.event_search_arguments(s,s['acquired_at']))
+        self.assertEqual(r['query'],'Stalexport Autostrady')
+        self.assertEqual(r['search_depth'],'advanced')
+        self.assertEqual(r['max_results'],8)
+        self.assertTrue(r['filter_by_published_date'])
+        self.assertEqual(r['include_domains_mode'],'restrict')
 
-    def test_plan_is_generic_for_polish_and_us_issuers(self):
-        for ticker,name in [('AAT.WA','Alta S.A.'),('3RG.WA','3R Games S.A.'),('HUMA','Humacyte, Inc.'),('XYZ','Other Holdings Inc.')]:
-            with self.subTest(ticker=ticker):
-                plans=KI.manual_search_plan(snap(ticker,name))
-                for _,r in plans:
-                    self.assertEqual(r['language'],'pl' if ticker.endswith('.WA') else 'en')
-                    self.assertNotIn('clinical',r['query']);self.assertNotIn(ticker,r['query'])
-        self.assertIn('STX.WA',KI.manual_search_plan(snap(name=None))[0][1]['query'])
+    def test_query_is_generic_for_polish_and_us_issuers(self):
+        for ticker,name,expected in [('AAT.WA','Alta S.A.','Alta'),('3RG.WA','3R Games S.A.','3R Games'),('HUMA','Humacyte, Inc.','Humacyte')]:
+            self.assertEqual(KI.research_query(snap(ticker,name),snap()['acquired_at']),expected)
+        self.assertEqual(KI.research_query(snap(name=None),snap()['acquired_at']),'STX')
 
-    def test_automatic_request_uses_same_search_rules_without_extra_calls(self):
-        r=KI.event_context_request({'snapshot':snap()})
-        self.assertNotIn('STX.WA',r['query']);self.assertFalse(r['filter_by_published_date'])
-        self.assertEqual(r['language'],'pl');self.assertEqual(r['max_results'],5)
+    def test_manual_and_automatic_dates_share_same_window(self):
+        s=snap()
+        self.assertEqual(KI.event_search_arguments(s,s['acquired_at']),KI.event_search_arguments({**s,'_manual_research':True},s['acquired_at']))
 
     def test_existing_quote_response_supplies_website_without_changing_spread(self):
         info={'symbol':'STX.WA','longName':'Stalexport Autostrady S.A.',
@@ -64,7 +49,7 @@ class TavilySearchContractTests(unittest.TestCase):
         KI.attach_manual_quote(c,quote)
         self.assertEqual(c['snapshot']['company_website'],info['website'])
         self.assertEqual(original,snap())
-        self.assertIn('stalexport-autostrady.pl',KI.manual_search_plan(c['snapshot'])[0][1]['include_domains'])
+        self.assertIn('stalexport-autostrady.pl',KI.event_search_arguments(c['snapshot'],c['snapshot']['acquired_at'])['include_domains'])
         # Automatic opportunity snapshots retain the same quote object.
         identity=KI.issuer_search_identity({**snap(),'spread':quote})
         self.assertEqual(identity['issuer_domain'],'stalexport-autostrady.pl')
@@ -79,7 +64,7 @@ class TavilySearchContractTests(unittest.TestCase):
 
     def test_known_website_and_missing_website_are_explicit(self):
         s=snap(website='https://www.stalexport-autostrady.pl')
-        self.assertIn('stalexport-autostrady.pl',KI.event_context_request({'snapshot':s})['include_domains'])
+        self.assertIn('stalexport-autostrady.pl',KI.event_search_arguments(s,s['acquired_at'])['include_domains'])
         for website in ('javascript:bad','https://user:password@example.org','https://localhost','https://127.0.0.1','not a URL'):
             self.assertIsNone(KI.issuer_search_identity(snap(website=website))['issuer_domain'])
 
@@ -140,43 +125,38 @@ class TavilySearchContractTests(unittest.TestCase):
         self.assertNotIn('SECRET_UNVERIFIED_SOURCE_TEXT',event['messages'][-1]['content'])
         self.assertEqual(KI.manual_research_schema(c)['properties']['facts']['items']['properties']['source_id']['enum'],['UNAVAILABLE'])
 
-    def test_old_empty_cache_does_not_suppress_new_search_policy(self):
+    def test_new_manual_turn_does_not_reuse_empty_previous_turn(self):
         with tempfile.TemporaryDirectory() as folder:
-            store=KI.Store(Path(folder)/'test.sqlite');s=snap()
-            identity=KI.issuer_search_identity({**s,'_manual_research':True})
-            oldkey=KI.json_text({'ticker':identity['ticker'],'name':identity['name'],'domains':identity['domains'],'version':3})
-            KI.save_issuer_background(store,s,{'sources':[]},now=s['acquired_at'])
-            with store.transaction() as con:
-                con.execute('UPDATE manual_issuer_context SET identity=?',(oldkey,))
-            self.assertIsNone(KI.load_issuer_background(store,s,now=s['acquired_at']))
+            store=KI.Store(Path(folder)/'test.sqlite')
+            context={'ticker':'STX.WA','snapshot':snap(),'report_version':3,'research':{'status':'PENDING','sources':[]}}
+            ids=[KI.begin_gpt_chat(store,'Co wiadomo?',context) for _ in range(2)]
+            self.assertNotEqual(ids[0],ids[1])
+            with store.connection() as c:
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM gpt_chat_turns').fetchone()[0],2)
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0],0)
 
     def test_diagnostic_counts_survive_sqlite_without_jobs_or_delivery(self):
         with tempfile.TemporaryDirectory() as folder:
             store=KI.Store(Path(folder)/'test.sqlite');s=snap(website='https://stalexport-autostrady.pl')
-            c={'ticker':s['ticker'],'snapshot':s,'report_version':3,'research':{'sources':[],'excluded':0,'rejected_sources':[],
-                 'undated_sources':[],'date_unverified_count':0}}
-            turn=KI.begin_gpt_chat(store,'Co wiadomo?',c)
-            n=KI.normalize_tavily_context({'results':[source(None)]},s)
-            KI.merge_manual_research_result(store,turn,c,n)
-            with store.connection() as con:
-                saved=json.loads(con.execute('SELECT context FROM gpt_chat_turns WHERE id=?',(turn,)).fetchone()[0])
+            context={'ticker':s['ticker'],'snapshot':s,'report_version':3,'research':{'status':'PENDING','sources':[]}}
+            turn=KI.begin_gpt_chat(store,'Co wiadomo?',context)
+            context['research'].update(KI.r1_research_sources({'results':[source(None)]},s['acquired_at'],s))
+            KI.save_gpt_chat_context(store,turn,context)
+            with store.connection() as c:
+                saved=json.loads(c.execute('SELECT context FROM gpt_chat_turns WHERE id=?',(turn,)).fetchone()[0])
                 self.assertEqual(saved['research']['date_unverified_count'],1)
                 self.assertEqual(saved['research']['sources'],[])
-                self.assertEqual(con.execute('SELECT COUNT(*) FROM outbox').fetchone()[0],0)
-                self.assertEqual(con.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0],0)
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM outbox').fetchone()[0],0)
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0],0)
 
-    def test_later_verified_date_removes_url_from_unverified_list(self):
-        with tempfile.TemporaryDirectory() as folder:
-            store=KI.Store(Path(folder)/'test.sqlite');s=snap(website='https://stalexport-autostrady.pl')
-            c={'ticker':s['ticker'],'snapshot':s,'report_version':3,'research':{'sources':[],'excluded':0,'rejected_sources':[]}}
-            turn=KI.begin_gpt_chat(store,'Co wiadomo?',c)
-            for item in (source(None),source()):
-                KI.merge_manual_research_result(store,turn,c,KI.normalize_tavily_context({'results':[item]},s))
-            self.assertEqual(len(c['research']['sources']),1)
-            self.assertEqual(c['research']['undated_sources'],[])
-            KI.save_issuer_background(store,s,{'sources':[], 'undated_sources':[{'url':source()['url'],'title':'Zapis diagnostyczny','reason':'Brak daty'}]},now=s['acquired_at'])
-            cached=KI.load_issuer_background(store,s,now=s['acquired_at'])
-            self.assertEqual(len(cached['undated_sources']),1)
+    def test_verified_date_changes_diagnostic_into_accepted_source(self):
+        s=snap(website='https://stalexport-autostrady.pl')
+        before=KI.r1_research_sources({'results':[source(None)]},s['acquired_at'],s)
+        after=KI.r1_research_sources({'results':[source()]},s['acquired_at'],s)
+        self.assertEqual(before['date_unverified_count'],1)
+        self.assertEqual(before['sources'],[])
+        self.assertEqual(after['undated_sources'],[])
+        self.assertEqual(len(after['sources']),1)
 
 
 if __name__=='__main__':unittest.main(verbosity=2)
