@@ -5837,8 +5837,8 @@ def render_portfolio(store):
     """Panel: osobista lista spolek, tylko podglad swiec."""
     import streamlit as st
     import re
-    st.subheader('Moj portfel')
-    st.caption('Osobista lista spolek (max 10). Bez analizy GPT, bez Telegrama. Dane z ostatniego odczytu skanera (co 15 min).')
+    st.subheader('Mój portfel')
+    st.caption('Do 10 spółek. Ostatnie zapisane dane skanera; podgląd nie pobiera danych ani nie uruchamia AI. Ręczne progi SL/TP służą istniejącym alertom Telegram, nie są zleceniami.')
     tickers = portfolio_tickers(store)
 
     # Dodawanie / usuwanie
@@ -5881,11 +5881,21 @@ def render_portfolio(store):
 
     # Tabela
     rows = []
+    config_by_ticker={entry['ticker']:entry for entry in portfolio_get(store)}
     for t in tickers:
         snap = portfolio_snapshot(store, t, '1h')
         if not snap:
+            entry=config_by_ticker.get(t,{})
+            def manual_level(name):
+                value=entry.get(name)
+                return format(value,'.4f').replace('.',',') if finite_number(value,True) else '—'
             rows.append({'Ticker':t, 'Cena':'brak odczytu', 'Zmiana 1H':'—',
                          'Otwarcie':'—', 'Max':'—', 'Min':'—', 'Wolumen':'—',
+                         'SL':manual_level('sl'),'TP':manual_level('tp'),
+                         'SL status':('FIRED' if entry.get('sl_fired_at') else 'armed') if finite_number(entry.get('sl'),True) else '—',
+                         'TP status':('FIRED' if entry.get('tp_fired_at') else 'armed') if finite_number(entry.get('tp'),True) else '—',
+                         '_fresh':False,'_fresh_reason':'Brak zapisanego odczytu ceny.',
+                         '_acquired_at':None,'_risk_at':None,
                          'Odczyt':'oczekuje na cykl skanera (do 15 min)'})
             continue
         price = snap.get('price')
@@ -5928,6 +5938,7 @@ def render_portfolio(store):
         risk_label = '—'
         risk_reasons = '—'
         risk_missing = '—'
+        risk_at = None
         try:
             with store.connection() as _c:
                 _r = _c.execute("""SELECT payload FROM opportunities
@@ -5935,6 +5946,7 @@ def render_portfolio(store):
                                     ORDER BY updated_at DESC LIMIT 1""", (t,)).fetchone()
             if _r:
                 _p = json.loads(_r[0])
+                risk_at=(_p.get('snapshot') or {}).get('acquired_at')
                 _risk = _p.get('risk') or {}
                 if isinstance(_risk, dict):
                     if _risk.get('label'):
@@ -5956,7 +5968,10 @@ def render_portfolio(store):
                 break
         def _fmt_lvl(v):
             return format(v, ',.4f').replace(',',' ').replace('.',',') if finite_number(v) else '—'
+        price_fresh,price_reason=portfolio_price_status(snap)
         rows.append({
+            '_fresh':price_fresh,'_fresh_reason':price_reason,
+            '_acquired_at':snap.get('_acquired_at') or snap.get('acquired_at'),'_risk_at':risk_at,
             'Ticker':t,
             'Cena':(fmt(price,4)+' '+cur).strip() if finite_number(price) else '—',
             'Zmiana 1H':(('+' if change>=0 else '')+format(change,',.2f').replace(',',' ').replace('.',',')+'%') if finite_number(change) else '—',
@@ -5977,6 +5992,9 @@ def render_portfolio(store):
             'Wol./Sr.':(format(vol_vs_avg,',.2f').replace(',',' ').replace('.',',')+'x' if finite_number(vol_vs_avg) else '—'),
             'Odczyt':str(snap.get('_acquired_at') or '')[:19],
         })
+
+    from portfolio_view import cards_html as portfolio_cards_html
+    st.html(portfolio_cards_html(rows))
 
     import pandas as pd
     df_all = pd.DataFrame(rows)
@@ -6045,68 +6063,71 @@ def render_portfolio(store):
             styles.append(css)
         return styles
 
-    st.markdown('**Ceny i wolumen**')
-    try:
-        st.dataframe(df_price.style.apply(_color_row, axis=1), width='stretch', hide_index=True, column_config=_col_cfg_price)
-    except Exception:
-        st.dataframe(df_price, width='stretch', hide_index=True, column_config=_col_cfg_price)
-
-    st.markdown('**Ryzyko i progi SL/TP**')
-    if len(df_risk.columns) > 1:
+    with st.expander('Tabele cen, wolumenu i ryzyka'):
+        st.markdown('**Ceny i wolumen**')
         try:
-            st.dataframe(df_risk.style.apply(_color_risk_row, axis=1), width='stretch', hide_index=True, column_config=_col_cfg_risk)
+            st.dataframe(df_price.style.apply(_color_row, axis=1), width='stretch', hide_index=True, column_config=_col_cfg_price)
         except Exception:
-            st.dataframe(df_risk, width='stretch', hide_index=True, column_config=_col_cfg_risk)
-    else:
-        st.caption('Brak analizy ryzyka - dodaj ticker do portfela i poczekaj na cykl skanera.')
+            st.dataframe(df_price, width='stretch', hide_index=True, column_config=_col_cfg_price)
 
-    # Progi SL/TP
-    st.markdown('---')
-    st.subheader('Progi SL / TP (alerty Telegram)')
-    st.caption('Ustaw cene stop-loss i take-profit. 0 = brak progu. Alert raz; re-arm po powrocie ceny w strefe.')
-    config = portfolio_get(store)
-    if config:
-        st.markdown('**Progi**')
-        new_sl = {}
-        new_tp = {}
-        for entry in config:
-            t = entry['ticker']
-            c1, c2, c3 = st.columns([2, 3, 3])
-            c1.markdown('**'+t+'**')
-            cur_sl = float(entry.get('sl') or 0.0)
-            cur_tp = float(entry.get('tp') or 0.0)
-            new_sl[t] = c2.number_input('SL '+t, min_value=0.0, value=cur_sl, step=0.01, format='%.4f', key='sl_'+t)
-            new_tp[t] = c3.number_input('TP '+t, min_value=0.0, value=cur_tp, step=0.01, format='%.4f', key='tp_'+t)
-        if st.button('Zapisz progi SL/TP', key='portfolio_save_thresholds'):
+        st.markdown('**Ryzyko i progi SL/TP**')
+        if len(df_risk.columns) > 1:
+            try:
+                st.dataframe(df_risk.style.apply(_color_risk_row, axis=1), width='stretch', hide_index=True, column_config=_col_cfg_risk)
+            except Exception:
+                st.dataframe(df_risk, width='stretch', hide_index=True, column_config=_col_cfg_risk)
+        else:
+            st.caption('Brak analizy ryzyka - dodaj ticker do portfela i poczekaj na cykl skanera.')
+
+    with st.expander('Edytuj moje progi SL/TP — alerty Telegram'):
+        # Progi SL/TP
+        st.markdown('---')
+        st.subheader('Progi SL / TP (alerty Telegram)')
+        st.caption('Ustaw cene stop-loss i take-profit. 0 = brak progu. Alert raz; re-arm po powrocie ceny w strefe.')
+        config = portfolio_get(store)
+        if config:
+            st.markdown('**Progi**')
+            new_sl = {}
+            new_tp = {}
             for entry in config:
                 t = entry['ticker']
-                entry['sl'] = new_sl[t] if new_sl[t] > 0 else None
-                entry['tp'] = new_tp[t] if new_tp[t] > 0 else None
-            portfolio_save(store, config)
-            st.success('Zapisano progi. Alerty beda wysylane po nastepnym cyklu skanera.')
-            st.rerun()
-        # Status
-        st.markdown('**Status alertow**')
-        for entry in config:
-            t = entry['ticker']
-            sl_f = entry.get('sl_fired_at')
-            tp_f = entry.get('tp_fired_at')
-            sl = entry.get('sl'); tp = entry.get('tp')
-            status = []
-            if sl: status.append('SL '+('FIRED' if sl_f else 'armed'))
-            if tp: status.append('TP '+('FIRED' if tp_f else 'armed'))
-            st.caption(t+': '+(' · '.join(status) if status else 'bez progow'))
-    st.markdown('---')
+                c1, c2, c3 = st.columns([2, 3, 3])
+                c1.markdown('**'+t+'**')
+                cur_sl = float(entry.get('sl') or 0.0)
+                cur_tp = float(entry.get('tp') or 0.0)
+                new_sl[t] = c2.number_input('SL '+t, min_value=0.0, value=cur_sl, step=0.01, format='%.4f', key='sl_'+t)
+                new_tp[t] = c3.number_input('TP '+t, min_value=0.0, value=cur_tp, step=0.01, format='%.4f', key='tp_'+t)
+            if st.button('Zapisz progi SL/TP', key='portfolio_save_thresholds'):
+                for entry in config:
+                    t = entry['ticker']
+                    entry['sl'] = new_sl[t] if new_sl[t] > 0 else None
+                    entry['tp'] = new_tp[t] if new_tp[t] > 0 else None
+                portfolio_save(store, config)
+                st.success('Zapisano progi. Alerty beda wysylane po nastepnym cyklu skanera.')
+                st.rerun()
+            # Status
+            st.markdown('**Status alertow**')
+            for entry in config:
+                t = entry['ticker']
+                sl_f = entry.get('sl_fired_at')
+                tp_f = entry.get('tp_fired_at')
+                sl = entry.get('sl'); tp = entry.get('tp')
+                status = []
+                if sl: status.append('SL '+('FIRED' if sl_f else 'armed'))
+                if tp: status.append('TP '+('FIRED' if tp_f else 'armed'))
+                st.caption(t+': '+(' · '.join(status) if status else 'bez progow'))
+        st.markdown('---')
 
-    # Usuwanie
-    st.markdown('**Zarzadzanie**')
-    for t in tickers:
-        c1, c2 = st.columns([4, 1])
-        c1.write(t)
-        if c2.button('Usun', key='portfolio_del_'+t):
-            new_list = [x for x in tickers if x != t]
-            portfolio_set(store, new_list)
-            st.rerun()
+    with st.expander('Zarządzaj pozycjami portfela'):
+        # Usuwanie
+        st.markdown('**Zarzadzanie**')
+        for t in tickers:
+            c1, c2 = st.columns([4, 1])
+            c1.write(t)
+            if c2.button('Usun', key='portfolio_del_'+t):
+                new_list = [x for x in tickers if x != t]
+                portfolio_set(store, new_list)
+                st.rerun()
 
 
 
@@ -9170,7 +9191,7 @@ def main(argv=None):
             ranking_result = run_ranking_tests()
             opportunity_result = run_opportunity_tests()
             import unittest
-            repair_result=unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromName('test_repair_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_yahoo_retry_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_service_status_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_reference_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_us_session_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_readiness_20261025'),unittest.defaultTestLoader.loadTestsFromName('test_alert_quality_20261026'),unittest.defaultTestLoader.loadTestsFromName('test_ai_preflight_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_full_package_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_optimization_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_message_synthesis_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_c_tavily_contract'),unittest.defaultTestLoader.loadTestsFromName('test_e06_tavily_issuer'),unittest.defaultTestLoader.loadTestsFromName('test_e06_cli_dual_contract'),unittest.defaultTestLoader.loadTestsFromName('test_research_v3'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_search_contract'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_page_dates'),unittest.defaultTestLoader.loadTestsFromName('test_daily_readiness_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_tracking_levels_20261029')]))
+            repair_result=unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromName('test_repair_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_yahoo_retry_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_service_status_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_reference_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_us_session_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_readiness_20261025'),unittest.defaultTestLoader.loadTestsFromName('test_alert_quality_20261026'),unittest.defaultTestLoader.loadTestsFromName('test_ai_preflight_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_full_package_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_optimization_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_message_synthesis_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_c_tavily_contract'),unittest.defaultTestLoader.loadTestsFromName('test_e06_tavily_issuer'),unittest.defaultTestLoader.loadTestsFromName('test_e06_cli_dual_contract'),unittest.defaultTestLoader.loadTestsFromName('test_research_v3'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_search_contract'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_page_dates'),unittest.defaultTestLoader.loadTestsFromName('test_daily_readiness_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_tracking_levels_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_portfolio_cards_20261029')]))
             return 1 if foundation_result or market_result or service_result or ranking_result or opportunity_result or not repair_result.wasSuccessful() else 0
         if args.migration_report:
             plan = prepare_migration(args.migration_report)
