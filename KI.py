@@ -5355,10 +5355,12 @@ def load_price_matrix_rows(store,now=None):
     return rows
 
 
-def tracking_confirmed_opportunities(store,days=7):
+def tracking_confirmed_opportunities(store,days=7,now=None):
     """Spolki ktore przeszly CONFIRMED w ostatnich N dniach; aktualna cena i zmiana."""
     from datetime import timedelta
-    cutoff=(datetime.now(timezone.utc)-timedelta(days=days)).isoformat()
+    current_time=now or datetime.now(timezone.utc)
+    cutoff=(current_time-timedelta(days=days)).isoformat()
+    from tracking_view import level_view
     result=[]
     with store.connection() as c:
         rows=c.execute("""SELECT sequence_id,ticker,state,updated_at,payload
@@ -5380,7 +5382,7 @@ def tracking_confirmed_opportunities(store,days=7):
             obs=c.execute("""SELECT payload FROM observations
                              WHERE ticker=? AND interval='1h'
                              ORDER BY id DESC LIMIT 1""",(r[1],)).fetchone()
-            current=None; acquired=None
+            current=None; acquired=None; latest=None
             if obs:
                 try:
                     latest=json.loads(obs[0])
@@ -5388,6 +5390,9 @@ def tracking_confirmed_opportunities(store,days=7):
                     acquired=latest.get('acquired_at')
                 except Exception:
                     pass
+            source=latest or snap
+            if not obs:
+                current=source.get('price');acquired=source.get('acquired_at')
             change_pct=None
             if finite_number(anchor) and finite_number(current) and anchor>0:
                 change_pct=(current-anchor)/anchor*100
@@ -5408,59 +5413,50 @@ def tracking_confirmed_opportunities(store,days=7):
                 'change_pct':change_pct,
                 'direction':direction,
                 'current_at':acquired,
-                'currency':snap.get('currency') or '',
+                'currency':source.get('currency') or snap.get('currency') or '',
+                'levels':level_view(source,
+                    (source.get('price_matrix') or {}).get('change_pct') if source.get('price_matrix') else change_pct,
+                    now=current_time,reference_ready=daily_matrix_reference_ready(source)),
             })
     return result
 
 
 def render_confirmed_tracking(store):
-    """Panel: spolki ktore przeszly CONFIRMED w ostatnich 7 dniach."""
+    """Read-only tracking with touch-friendly cards; no provider requests."""
     import streamlit as st
-    st.subheader('Sledzenie potwierdzonych spolek (ostatnie 7 dni)')
-    st.caption('Spolki ktore przeszly 3 potwierdzenia. Widok pokazuje, czy po potwierdzeniu cena rosnie dalej, spada, czy jest stabilna.')
+    import pandas as pd
+    from tracking_view import cards_html,level_values,number_text,time_text
+    st.subheader('Śledzenie potwierdzonych spółek (ostatnie 7 dni)')
+    st.caption('Historia spółek po trzech potwierdzeniach. Poziomy liczymy lokalnie z zapisanych świec 1h; stare dane są oznaczone jako historyczne. Bez dodatkowego AI.')
     rows=tracking_confirmed_opportunities(store,days=7)
     if not rows:
-        st.info('Brak potwierdzonych spolek w ostatnich 7 dniach.')
+        st.info('Brak potwierdzonych spółek w ostatnich 7 dniach.')
         return
-    # Statystyki
-    up=sum(1 for r in rows if r['direction']=='rosnie dalej')
-    down=sum(1 for r in rows if r['direction']=='spada')
-    flat=sum(1 for r in rows if r['direction']=='stabilnie')
-    nodata=sum(1 for r in rows if r['direction']=='brak danych')
-    st.caption(f'Rosnie dalej: {up} · Spada: {down} · Stabilnie: {flat} · Brak danych: {nodata}')
-    def fmt_price(v,c):
-        return (pl_number(v,4,' '+c) if finite_number(v) else 'brak')
-    def fmt_change(v):
-        return (pl_number(v,suffix='%',digits=2) if finite_number(v) else 'brak')
-    import pandas as pd
-    table=[]
-    for r in rows:
-        table.append({
-            'Ticker':r['ticker'],
-            'Stan':r['state'],
-            'Potwierdzone':r['confirmed_at'][:19] if r['confirmed_at'] else '',
-            'Cena bazowa':fmt_price(r['anchor_price'],r['currency']),
-            'Aktualna':fmt_price(r['current_price'],r['currency']),
-            'Zmiana od bazy':fmt_change(r['change_pct']),
-            'Kierunek':r['direction'],
-            'Czas aktualnej':r['current_at'][:19] if r['current_at'] else '',
-        })
-    df=pd.DataFrame(table)
-    def _color_row(row):
-        d=row['Kierunek']
-        if d=='rosnie dalej':
-            return ['background-color: #143b2c; color: #f0fdf4']*len(row)
-        if d=='spada':
-            return ['background-color: #4c1d24; color: #fff1f2']*len(row)
-        if d=='stabilnie':
-            return ['background-color: #443713; color: #fefce8']*len(row)
-        return ['']*len(row)
-    try:
-        styled=df.style.apply(_color_row,axis=1)
-        st.dataframe(styled,width='stretch',hide_index=True)
-    except Exception:
-        st.dataframe(df,width='stretch',hide_index=True)
-
+    up=sum(r['direction']=='rosnie dalej' for r in rows)
+    down=sum(r['direction']=='spada' for r in rows)
+    flat=sum(r['direction']=='stabilnie' for r in rows)
+    st.caption(f'Rośnie dalej: {up} · Spada: {down} · Stabilnie: {flat} · Brak danych: {len(rows)-up-down-flat}')
+    choice=st.selectbox('Spółka w śledzeniu',['Wszystkie']+sorted({r['ticker'] for r in rows}),key='tracking_levels_ticker')
+    visible=rows if choice=='Wszystkie' else [r for r in rows if r['ticker']==choice]
+    pages=max(1,(len(visible)+9)//10)
+    page_key='tracking_levels_page_'+choice
+    if st.session_state.get(page_key,1)>pages:st.session_state[page_key]=pages
+    page=int(st.number_input('Strona kart (po 10 wpisów)',min_value=1,max_value=pages,value=1,step=1,key=page_key))
+    st.caption(f'Wpisy {(page-1)*10+1}–{min(page*10,len(visible))} z {len(visible)}. Niebieski: wsparcie · fioletowy: opór · czerwony: SL · zielony: TP.')
+    st.html(cards_html(visible[(page-1)*10:page*10]))
+    with st.expander('Tabela wszystkich widocznych wpisów i poziomów'):
+        table=[]
+        for row in visible:
+            table.append({'Ticker':row['ticker'],'Stan':row['state'],
+                'Zapis śledzenia':time_text(row['confirmed_at']),
+                'Baza śledzenia':number_text(row['anchor_price'],row['currency']),
+                'Ostatnia cena':number_text(row['current_price'],row['currency']),
+                'Zmiana od bazy':number_text(row['change_pct'],'%',2),
+                **{label:number_text(value,row['currency']) for label,value in level_values(row).items()},
+                'Dane poziomów':time_text(row['levels'].get('as_of')),
+                'Aktualność':row['levels'].get('label'),
+                'Ograniczenia':row['levels']['plan'].get('reason','')})
+        st.dataframe(pd.DataFrame(table),width='stretch',hide_index=True)
 
 
 def portfolio_get(store):
@@ -9174,7 +9170,7 @@ def main(argv=None):
             ranking_result = run_ranking_tests()
             opportunity_result = run_opportunity_tests()
             import unittest
-            repair_result=unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromName('test_repair_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_yahoo_retry_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_service_status_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_reference_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_us_session_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_readiness_20261025'),unittest.defaultTestLoader.loadTestsFromName('test_alert_quality_20261026'),unittest.defaultTestLoader.loadTestsFromName('test_ai_preflight_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_full_package_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_optimization_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_message_synthesis_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_c_tavily_contract'),unittest.defaultTestLoader.loadTestsFromName('test_e06_tavily_issuer'),unittest.defaultTestLoader.loadTestsFromName('test_e06_cli_dual_contract'),unittest.defaultTestLoader.loadTestsFromName('test_research_v3'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_search_contract'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_page_dates'),unittest.defaultTestLoader.loadTestsFromName('test_daily_readiness_20261029')]))
+            repair_result=unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromName('test_repair_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_yahoo_retry_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_service_status_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_reference_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_us_session_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_readiness_20261025'),unittest.defaultTestLoader.loadTestsFromName('test_alert_quality_20261026'),unittest.defaultTestLoader.loadTestsFromName('test_ai_preflight_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_full_package_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_optimization_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_message_synthesis_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_c_tavily_contract'),unittest.defaultTestLoader.loadTestsFromName('test_e06_tavily_issuer'),unittest.defaultTestLoader.loadTestsFromName('test_e06_cli_dual_contract'),unittest.defaultTestLoader.loadTestsFromName('test_research_v3'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_search_contract'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_page_dates'),unittest.defaultTestLoader.loadTestsFromName('test_daily_readiness_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_tracking_levels_20261029')]))
             return 1 if foundation_result or market_result or service_result or ranking_result or opportunity_result or not repair_result.wasSuccessful() else 0
         if args.migration_report:
             plan = prepare_migration(args.migration_report)
