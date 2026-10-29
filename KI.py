@@ -5837,6 +5837,7 @@ def render_portfolio(store):
     """Panel: osobista lista spolek, tylko podglad swiec."""
     import streamlit as st
     import re
+    from tracking_view import level_view
     st.subheader('Mój portfel')
     st.caption('Do 10 spółek. Ostatnie zapisane dane skanera; podgląd nie pobiera danych ani nie uruchamia AI. Ręczne progi SL/TP służą istniejącym alertom Telegram, nie są zleceniami.')
     tickers = portfolio_tickers(store)
@@ -5895,7 +5896,7 @@ def render_portfolio(store):
                          'SL status':('FIRED' if entry.get('sl_fired_at') else 'armed') if finite_number(entry.get('sl'),True) else '—',
                          'TP status':('FIRED' if entry.get('tp_fired_at') else 'armed') if finite_number(entry.get('tp'),True) else '—',
                          '_fresh':False,'_fresh_reason':'Brak zapisanego odczytu ceny.',
-                         '_acquired_at':None,'_risk_at':None,
+                         '_acquired_at':None,'_risk_at':None,'_analysis_levels':level_view({},None),'_currency':'',
                          'Odczyt':'oczekuje na cykl skanera (do 15 min)'})
             continue
         price = snap.get('price')
@@ -5969,8 +5970,11 @@ def render_portfolio(store):
         def _fmt_lvl(v):
             return format(v, ',.4f').replace(',',' ').replace('.',',') if finite_number(v) else '—'
         price_fresh,price_reason=portfolio_price_status(snap)
+        analysis_levels=level_view(snap,(snap.get('price_matrix') or {}).get('change_pct'),
+                                   reference_ready=bool(snap.get('price_matrix')) and daily_matrix_reference_ready(snap))
         rows.append({
             '_fresh':price_fresh,'_fresh_reason':price_reason,
+            '_analysis_levels':analysis_levels,'_currency':cur,
             '_acquired_at':snap.get('_acquired_at') or snap.get('acquired_at'),'_risk_at':risk_at,
             'Ticker':t,
             'Cena':(fmt(price,4)+' '+cur).strip() if finite_number(price) else '—',

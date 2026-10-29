@@ -1,12 +1,14 @@
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 import KI
 import portfolio_view
+import tracking_view
+import test_sl_tp_20261027 as plan_fixtures
 
 
 class PortfolioCardsTests(unittest.TestCase):
@@ -91,6 +93,53 @@ class PortfolioCardsTests(unittest.TestCase):
         self.assertNotIn('<img',markup)
         self.assertIn('&lt;script&gt;',markup)
         self.assertIn('Ryzyko z zapisanej analizy',markup)
+
+    def test_manual_thresholds_and_automatic_plan_are_in_separate_sections(self):
+        snapshot,now=plan_fixtures.TradePlanTests().sample()
+        row={'Ticker':'AAA','SL':'1,2000','TP':'2,5000','SL status':'armed','TP status':'armed',
+             '_currency':'USD','_analysis_levels':tracking_view.level_view(snapshot,3,now)}
+        markup=portfolio_view.cards_html([row])
+        manual,analysis=markup.split('Poziomy z analizy KI',1)
+        self.assertIn('Moje progi alertów',manual)
+        self.assertIn('1,2000',manual)
+        self.assertNotIn('7,7500',manual)
+        for value in ('7,7500 USD','12,0000 USD','14,0000 USD','Wsparcie','Opór','TP1','TP2','Dane analizy'):
+            self.assertIn(value,analysis)
+        self.assertEqual(row['SL'],'1,2000')
+        self.assertEqual(row['TP'],'2,5000')
+
+    def test_analysis_missing_or_historical_is_visible_without_changing_manual_values(self):
+        snapshot,now=plan_fixtures.TradePlanTests().sample()
+        view=tracking_view.level_view(snapshot,3,now+timedelta(minutes=20))
+        markup=portfolio_view.cards_html([{'Ticker':'AAA','SL':'1,2000','_analysis_levels':view}])
+        self.assertIn('Dane historyczne',markup)
+        self.assertIn('7,7500',markup)
+        snapshot['indicators']={}
+        view=tracking_view.level_view(snapshot,3,now)
+        markup=portfolio_view.cards_html([{'Ticker':'AAA','SL':'1,2000','_analysis_levels':view}])
+        self.assertIn('Brak poprawnego ATR',markup)
+        self.assertIn('1,2000',markup)
+        self.assertNotIn('7,7500',markup)
+
+    def test_render_computes_same_local_plan_without_writing_thresholds(self):
+        snapshot,now=plan_fixtures.TradePlanTests().sample()
+        start=now.replace(minute=0,second=0,microsecond=0)
+        snapshot.update(candle_time=start.isoformat(),candle_end=(start+timedelta(hours=1)).isoformat(),
+                        candle_status='OPEN',price_matrix={'change_pct':3.,'anchor_price':9.7})
+        with self.store.transaction() as c:
+            c.execute('INSERT INTO observations(ticker,interval,candle_time,acquired_at,candle_status,payload) VALUES(?,?,?,?,?,?)',
+                ('AAA','1h',snapshot['candle_time'],snapshot['acquired_at'],'OPEN',json.dumps(snapshot)))
+        with self.store.connection() as c:before=list(c.iterdump())
+        original=portfolio_view.cards_html
+        with patch.object(portfolio_view,'cards_html',side_effect=original) as renderer,patch.object(KI,'service_http',side_effect=AssertionError('paid request')):
+            app=self.app()
+            self.assertEqual(len(app.exception),0)
+            row=renderer.call_args.args[0][0]
+        self.assertEqual(row['_analysis_levels']['plan']['sl'],7.75)
+        self.assertEqual(row['SL'],'1,2000')
+        self.assertEqual(row['TP'],'2,5000')
+        self.assertEqual(KI.portfolio_get(self.store),self.config)
+        with self.store.connection() as c:self.assertEqual(before,list(c.iterdump()))
 
 
 if __name__=='__main__':unittest.main()
