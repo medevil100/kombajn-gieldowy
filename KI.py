@@ -9007,7 +9007,11 @@ def start_application(db,port=8501,diagnostic=False,no_browser=False,smoke_secon
             # Do not adopt or terminate processes launched independently by the user.
             with ScannerLock(db):pass
             try:
-                with socket.socket() as sock:sock.bind(('127.0.0.1',port))
+                with socket.socket() as sock:
+                    # Linux TIME_WAIT after a healthy shutdown is not another listener.
+                    # Keep Windows exclusive-bind behavior unchanged.
+                    if os.name!='nt':sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+                    sock.bind(('127.0.0.1',port))
             except OSError:raise RuntimeError('Port '+str(port)+' jest zajęty. Zatrzymaj poprzedni panel albo wybierz --port 8502.') from None
             store=Store(db);commands=app_commands(db,port,diagnostic)
             paths=[db.with_suffix('.scanner.log'),db.with_suffix('.panel.log')]
