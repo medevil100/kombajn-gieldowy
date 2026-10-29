@@ -5,11 +5,19 @@ import re
 AXES=('movement','activity','risk')
 
 
-def quote_candidates(source):
+def quote_candidates(source,aliases=None):
+    import unicodedata
+    def normalized(value):
+        value=unicodedata.normalize('NFKD',value.casefold().replace('ł','l'))
+        return ' '.join(re.findall(r'[^\W_]+',''.join(c for c in value if not unicodedata.combining(c))))
+    identities=[normalized(a) for a in aliases or [] if isinstance(a,str) and a.strip()]
     candidates=[]
     for match in re.finditer(r'[^.!?\n]+(?:[.!?]|$)',source.get('content') or ''):
         sentence=match.group().strip()
         if not 5<=len(sentence.split())<=25 or len(sentence)>180:continue
+        if re.search(r'\bImage\s+\d+|https?://|\]\(|###',sentence,re.I):continue
+        if re.search(r'\b(?:S|Sp|Inc|Ltd)\.$',sentence):continue
+        if aliases is not None and not any(' '+alias+' ' in ' '+normalized(sentence)+' ' for alias in identities):continue
         if re.search(r'cookie|copyright|privacy|disclaimer|forward.looking|subscribe|register|log.?in|polityk\w*\s+prywatno|wszelkie prawa|\b(?:buy|sell|kupuj|sprzedaj)\b',sentence,re.I):continue
         if sentence not in candidates:candidates.append(sentence)
         if len(candidates)==5:break

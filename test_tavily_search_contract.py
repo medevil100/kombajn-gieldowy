@@ -34,7 +34,7 @@ class TavilySearchContractTests(unittest.TestCase):
     def test_query_is_generic_for_polish_and_us_issuers(self):
         for ticker,name,expected in [('AAT.WA','Alta S.A.','Alta'),('3RG.WA','3R Games S.A.','3R Games'),('HUMA','Humacyte, Inc.','Humacyte')]:
             self.assertEqual(KI.research_query(snap(ticker,name),snap()['acquired_at']),expected)
-        self.assertEqual(KI.research_query(snap(name=None),snap()['acquired_at']),'STX')
+        with self.assertRaises(ValueError):KI.research_query(snap(name=None),snap()['acquired_at'])
 
     def test_manual_and_automatic_dates_share_same_window(self):
         s=snap()
@@ -97,7 +97,7 @@ class TavilySearchContractTests(unittest.TestCase):
         for date in ('2026-10-08T12:06:00Z','2026-09-01T12:00:00Z'):
             result=KI.normalize_tavily_context({'results':[source(date)]},snap(website='https://stalexport-autostrady.pl'))
             self.assertEqual(result['sources'],[]);self.assertEqual(result['date_unverified_count'],0)
-        result=KI.normalize_tavily_context({'results':[source('2026-09-01')]},snap(website='https://stalexport-autostrady.pl'),180)
+        result=KI.normalize_tavily_context({'results':[source('2026-09-01T12:00:00Z')]},snap(website='https://stalexport-autostrady.pl'),180)
         self.assertEqual(result['sources'][0]['scope'],'background')
 
     def test_preferred_domains_do_not_allow_unverified_sites_or_wrong_issuers(self):

@@ -166,7 +166,7 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(result['status'],'MISSING_DAILY_REFERENCE')
         self.assertIsNone(result['price_matrix']['anchor_price'])
         self.assertFalse(KI.two_candle_candidate({**snap,'price_matrix':result['price_matrix']},NOW))
-        self.assertEqual(KI.polish_status(result['status']),'Brak zamknięcia poprzedniej sesji')
+        self.assertEqual(KI.polish_status(result['status']),'Niepotwierdzona baza poprzedniej sesji — kwalifikacja wstrzymana')
 
     def test_daily_upserts_and_rejected_batch_are_atomic(self):
         self.seed();self.seed()

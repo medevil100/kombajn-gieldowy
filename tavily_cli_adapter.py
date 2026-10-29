@@ -121,6 +121,37 @@ def build_search_arguments(query,max_results=5,include_domains=None,start_date=N
     return request
 
 
+def deduplicate_results(results):
+    """Exact URL/tracking variants or identical full documents, never title alone."""
+    import hashlib
+    from urllib.parse import parse_qsl,urlencode,urlunsplit
+    unique=[];urls={};bodies={};rejected=[]
+    for item in results:
+        if not isinstance(item,dict):unique.append(item);continue
+        try:part=urlsplit(str(item.get('url') or ''))
+        except ValueError:
+            rejected.append({'reason':'Niepoprawny adres źródła.'});continue
+        query=[(k,v) for k,v in parse_qsl(part.query,keep_blank_values=True) if not k.lower().startswith('utm_') and k.lower() not in ('fbclid','gclid')]
+        key=urlunsplit((part.scheme.lower(),part.netloc.lower(),part.path,urlencode(query),''))
+        complete=item.get('content_origin') in ('raw_content','extract')
+        text=' '.join(str(item.get('content') or '').split())
+        body=(part.hostname,item.get('published_date'),hashlib.sha256(text.encode('utf-8')).hexdigest()) if complete and text else None
+        index=urls.get(key)
+        if index is None and body is not None:index=bodies.get(body)
+        if index is not None:
+            old=unique[index]
+            old_complete=old.get('content_origin') in ('raw_content','extract')
+            if complete and not old_complete:unique[index]=item
+            urls[key]=index
+            if body is not None:bodies[body]=index
+            rejected.append({'url':item.get('url'),'reason':'Duplikat adresu lub identycznego pełnego komunikatu; bez dodatkowego wyszukiwania.'})
+            continue
+        urls[key]=len(unique)
+        if body is not None:bodies[body]=len(unique)
+        unique.append(item)
+    return unique,rejected
+
+
 def normalize_search_response(response,request):
     import copy
     if not isinstance(response,dict) or not isinstance(response.get('results'),list):
@@ -138,6 +169,7 @@ def normalize_search_response(response,request):
                     content=full if use_full else str(raw.get('content') or ''),
                     content_origin='raw_content' if use_full else 'search_snippet')
         results.append(item)
+    results,duplicates=deduplicate_results(results);rejected.extend(duplicates)
     return {'answer':str(response.get('answer') or ''),'results':results,
             'request_id':response.get('request_id') or None,'query':request['query'],
             'request':copy.deepcopy(request),'raw_response':copy.deepcopy(response),
@@ -295,6 +327,8 @@ def enrich_search_response(response, api_key, eligible_urls=None):
     response['extract_diagnostics'].update(requested_count=len(set(urls)))
     if extracted and len(extracted)<len(set(urls)):
         response['extract_diagnostics']['status']='PARTIAL'
+    response['results'],duplicates=deduplicate_results(response.get('results',[]))
+    response.setdefault('transport_rejections',[]).extend(duplicates)
     return response
 
 
@@ -304,13 +338,19 @@ def extract_urls(urls, api_key):
     """
     if not urls:
         return ExtractResult(status='NOT_NEEDED')
+    if not isinstance(urls,(list,tuple)) or any(not isinstance(u,str) or not u.strip().startswith(('https://','http://')) for u in urls):
+        raise CLITransportError('Tavily Extract: niepoprawna lista adresów; nie wykonano wywołania.')
+    urls=list(dict.fromkeys(urls))
+    if len(urls)>MAX_EXTRACT_URLS:
+        result=ExtractResult(status='LIMIT_EXCEEDED',error='Partia przekracza limit '+str(MAX_EXTRACT_URLS)+' URL; bez obcinania i bez wywołania.')
+        result.diagnostics['requested_count']=len(urls)
+        return result
     if not api_key:
         return ExtractResult(status='FAILED',error='Tavily Extract: brak klucza API.')
     try:
         from tavily import TavilyClient
     except ImportError:
         return ExtractResult(status='FAILED',error='Tavily Extract: brak pakietu tavily-python.')
-    urls = list(dict.fromkeys(u for u in urls if isinstance(u, str) and u.strip().startswith("http")))[:MAX_EXTRACT_URLS]
     if not urls:
         return ExtractResult(status='NOT_NEEDED')
     try:

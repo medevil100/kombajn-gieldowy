@@ -18,10 +18,10 @@ class TavilyReferenceTests(unittest.TestCase):
                 'title':'Stalexport Autostrady raport',
                 'content':'Stalexport Autostrady opublikował raport.','published_date':date}
 
-    def test_search_query_is_only_verified_name_with_safe_symbol_fallback(self):
+    def test_search_query_uses_only_verified_name(self):
         cases=[('GMT.WA','Genomtec S.A.','Genomtec'),
                ('MREO','Mereo BioPharma Group plc','Mereo BioPharma Group'),
-               ('GMT.WA',None,'GMT'),('BRK.B',None,'BRK.B'),
+
                ('MIG.WA','MIG C.XNCO PLN','MIG')]
         for ticker,name,expected in cases:
             with self.subTest(ticker=ticker,name=name):

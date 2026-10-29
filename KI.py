@@ -666,6 +666,28 @@ def _daily_session_end(ticker,session_date):
     return datetime.combine(day,clock(17 if ticker.upper().endswith('.WA') else 16),exchange_zone(ticker))
 
 
+def required_daily_session(ticker,when,include_completed_today=False):
+    """Conservative weekday contract, without inventing holiday-session data."""
+    from datetime import timedelta
+    current=parse_market_time(when);local=current.astimezone(exchange_zone(ticker))
+    day=local.date()
+    if not (include_completed_today and day.weekday()<5 and current>=_daily_session_end(ticker,day.isoformat())):
+        day-=timedelta(days=1)
+    while day.weekday()>=5:day-=timedelta(days=1)
+    return day.isoformat()
+
+
+def daily_matrix_reference_ready(snapshot):
+    matrix=snapshot.get('price_matrix') or {}
+    if matrix.get('reference_status')=='MISSING_PREVIOUS_SESSION':return False
+    # Pre-matrix legacy/manual records have no daily-reference contract.
+    if 'reference_session' not in matrix:return True
+    try:
+        return (matrix.get('reference_session')==required_daily_session(snapshot['ticker'],snapshot['acquired_at'])
+                and finite_number(matrix.get('anchor_price'),True))
+    except (KeyError,ValueError,TypeError):return False
+
+
 def load_daily_candles(store,ticker):
     with store.connection() as c:
         return [dict(r) for r in c.execute('SELECT * FROM daily_candles WHERE ticker=? ORDER BY session_date',(ticker,))]
@@ -717,7 +739,14 @@ def daily_history_refresh_due(store,ticker,now=None):
         return refreshed<_daily_session_end(ticker,friday.isoformat())
     if refreshed.date()!=local.date():return True
     close=_daily_session_end(ticker,local.date().isoformat())
-    return local.weekday()<5 and refreshed<close<=local
+    if local.weekday()<5 and refreshed<close<=local:return True
+    if not automatic_session_open(ticker,current):return False
+    required=required_daily_session(ticker,current)
+    with store.connection() as c:
+        complete=c.execute('SELECT 1 FROM daily_candles WHERE ticker=? AND session_date=? AND closed_at<=?',
+                           (ticker,required,current.isoformat())).fetchone()
+    # A partial successful response is not complete readiness. Retry at most once per 15 minutes.
+    return not complete and (current-refreshed).total_seconds()>=900
 
 
 def _daily_reference(c,ticker,when):
@@ -1193,7 +1222,7 @@ def _orig_fetch_market(ticker,interval):
     return snap
 
 
-SERVICE_KEYS=('TAVILY_API_KEY','OPENAI_API_KEY','DEEPSEEK_API_KEY','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')
+SERVICE_KEYS=('TAVILY_API_KEY','OPENAI_API_KEY','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID')
 
 
 def load_service_keys(home=None,project=None,environ=None):
@@ -1242,7 +1271,7 @@ def service_http(label,url,key=None,payload=None,uncertain=False):
     except requests.RequestException as exc:
         raise ServiceError(label+': brak potwierdzenia odpowiedzi ('+type(exc).__name__+').',
                            retryable=not uncertain,uncertain=uncertain) from None
-    # Never expose a URL, credentials, raw exception or provider response body.
+    # Never expose credentials, URLs or a complete provider response body.
     if response.status_code!=200:
         wait=response.headers.get('Retry-After','0')
         try:wait=int(wait)
@@ -1251,6 +1280,10 @@ def service_http(label,url,key=None,payload=None,uncertain=False):
             try:wait=response.json().get('parameters',{}).get('retry_after',wait)
             except (ValueError,AttributeError):pass
         _detail=''
+        if label=='OpenAI' and response.status_code in (400,422):
+            from provider_diagnostics import openai_error_detail
+            try:_detail=openai_error_detail(response.json(),key,response.headers.get('x-request-id'))
+            except (ValueError,TypeError,AttributeError):pass
         if label=='Telegram':
             try:
                 _rjson=response.json()
@@ -1420,10 +1453,7 @@ def normalize_tavily_context(payload,snapshot,window_days=7,allow_external_domai
                     except ValueError:published=parsedate_to_datetime(raw)
                 except (ValueError,TypeError,OverflowError):
                     raise ValueError('Niepoprawna data publikacji źródła.') from None
-                if len(raw)==10:
-                    if strict_time_window:raise ValueError('Brak godziny publikacji; nie można potwierdzić okna 24 godzin.')
-                    if published.date()==cutoff.astimezone(timezone.utc).date():raise ValueError('Brak godziny publikacji w dniu odczytu; niepotwierdzona dostępność materiału w chwili analizy.')
-                    published=published.replace(hour=23,minute=59,second=59,tzinfo=timezone.utc)
+                if len(raw)==10:raise ValueError('Brak godziny publikacji; nie potwierdzono czasu dostępności materiału.')
                 if published.tzinfo is None:raise ValueError('Brak strefy czasowej publikacji.')
             date_unverified = raw == ""
             too_old=published<start if strict_time_window else published.date()<start.date()
@@ -1485,9 +1515,7 @@ def research_query(snapshot,cutoff):
     ticker=str(identity.get('ticker') or '').strip()
     name=re.sub(r'\s*C\.[A-Z]+\s+[A-Z]{3}\s*$', '', str(identity.get('name') or '')).strip()
     if name:return name
-    symbol=ticker.removesuffix('.WA')
-    if not symbol:raise ValueError('Brak nazwy lub symbolu emitenta do wyszukiwania.')
-    return symbol
+    raise ValueError('Brak potwierdzonej nazwy emitenta; nie wykonano wyszukiwania po samym tickerze.')
 
 
 def load_event_research(store,event_id):
@@ -1497,13 +1525,13 @@ def load_event_research(store,event_id):
     return dict(row) if row else None
 
 
-MANUAL_ENGINES=('openai','deepseek')
+MANUAL_ENGINES=('openai',)
 
 
 def manual_engine(value):
-    """Only the two documented providers are valid for a manual analysis."""
+    """Only OpenAI is supported; retired or unknown providers are rejected."""
     if value not in MANUAL_ENGINES:
-        raise ValueError('Nieznany silnik analizy. Dozwolone wartości: openai, deepseek.')
+        raise ValueError('Nieznany silnik analizy. Obsługiwany jest wyłącznie OpenAI; zapisany dostawca został wycofany lub jest nieznany.')
     return value
 
 
@@ -1527,16 +1555,7 @@ def manual_provider(engine,keys,request=None):
     Validates only the key of the chosen provider and, when a request is given,
     adapts it to that provider exactly like the existing integration.
     """
-    if engine=='deepseek':
-        if not keys.get('DEEPSEEK_API_KEY'):raise ValueError('Brak klucza DeepSeek w secrets.toml.')
-        if request is not None:
-            _schema=request.get('response_format',{}).get('json_schema',{}).get('schema',{})
-            if _schema:
-                request['messages'][0]['content']+='\n\nMusisz zwrocic odpowiedz w formacie JSON zgodnym z ponizszym schematem:\n'+json_text(_schema)
-            request['model']='deepseek-chat'
-            request['max_tokens']=request.pop('max_completion_tokens',2600)
-            request['response_format']={'type':'json_object'}
-        return 'DeepSeek','https://api.deepseek.com/v1/chat/completions',keys['DEEPSEEK_API_KEY']
+    manual_engine(engine)
     if not keys.get('OPENAI_API_KEY'):raise ValueError('Brak klucza OpenAI w secrets.toml.')
     return 'OpenAI','https://api.openai.com/v1/chat/completions',keys['OPENAI_API_KEY']
 
@@ -1682,7 +1701,8 @@ def analysis_schema(snapshot,context):
             if context['analysis_manifest']['version']>=3 else text)
         schema['required'].append('assessment')
         if context['analysis_manifest']['version']>=3:
-            quotes=list(dict.fromkeys(q for source in context['sources'] for q in quote_candidates(source)))
+            aliases=(context.get('issuer_identity') or issuer_search_identity(snapshot)).get('aliases',[])
+            quotes=list(dict.fromkeys(q for source in context['sources'] for q in quote_candidates(source,aliases)))
             schema['properties']['context']['items']['properties']['fact']={'type':'string','enum':quotes or ['UNAVAILABLE']}
     return schema
 
@@ -1908,6 +1928,7 @@ def automatic_ai_preflight(evidence,context):
     snap=evidence.get('snapshot') or {};ind=snap.get('indicators') or {}
     previous=evidence.get('previous_snapshot') or {};issues=[];limitations=[];signals=[];support=[];questions=[];relation=None
     ticker=snap.get('ticker');interval=snap.get('interval');matrix=snap.get('price_matrix') or {}
+    if not daily_matrix_reference_ready(snap):issues.append('Niepotwierdzona baza poprzedniej sesji; bez płatnej analizy.')
     try:
         cutoff=event_context_cutoff(snap)
         if context.get('cutoff') and parse_market_time(context['cutoff'])!=cutoff:
@@ -2120,7 +2141,8 @@ def event_analysis_request(evidence,context):
     # in SQLite; do not pay to resend them to OpenAI or expose unverifiable text.
     _sources = context.get('sources') or []
     if context.get('analysis_manifest',{}).get('version',0)>=3:
-        _sources=[{**source,'quote_candidates':quote_candidates(source)} for source in _sources]
+        aliases=(context.get('issuer_identity') or issuer_search_identity(snap)).get('aliases',[])
+        _sources=[{**source,'quote_candidates':quote_candidates(source,aliases)} for source in _sources]
     safe_context={'sources': _sources,
                   'cutoff':context.get('cutoff'),
                   'date_basis':context.get('date_basis')}
@@ -2138,19 +2160,9 @@ def analyze_event(evidence,context,keys,engine='openai'):
     snap=evidence['snapshot']
     request=copy.deepcopy(context.get('prepared_ai_request')) if context.get('prepared_ai_request') else event_analysis_request(evidence,context)
     # Brak źródeł dopuszcza wyłącznie interpretację danych technicznych.
-    if engine=='deepseek':
-        if not keys.get('DEEPSEEK_API_KEY'):raise ServiceError('Brak DEEPSEEK_API_KEY w secrets.toml.')
-        req=request
-        _schema=req.get('response_format',{}).get('json_schema',{}).get('schema',{})
-        if _schema:
-            req['messages'][0]['content']+='\n\nMusisz zwrocic odpowiedz w formacie JSON zgodnym z ponizszym schematem:\n'+json_text(_schema)
-        req['model']='deepseek-chat'
-        if 'max_completion_tokens' in req:req['max_tokens']=req.pop('max_completion_tokens')
-        req['response_format']={'type':'json_object'}
-        body=service_http('DeepSeek','https://api.deepseek.com/v1/chat/completions',keys['DEEPSEEK_API_KEY'],req,uncertain=True)
-    else:
-        if not keys['OPENAI_API_KEY']:raise ServiceError('Brak OPENAI_API_KEY.')
-        body=service_http('OpenAI','https://api.openai.com/v1/chat/completions',keys['OPENAI_API_KEY'],request,uncertain=True)
+    if engine!='openai':raise ServiceError('Obsługiwany jest wyłącznie OpenAI; nie wykonano zapytania.')
+    if not keys.get('OPENAI_API_KEY'):raise ServiceError('Brak OPENAI_API_KEY.')
+    body=service_http('OpenAI','https://api.openai.com/v1/chat/completions',keys['OPENAI_API_KEY'],request,uncertain=True)
     return parse_event_analysis_response(body,snap,context)
 
 
@@ -2193,6 +2205,7 @@ def gpw_notification_session_open(ticker,now=None):
 def accepted_matrix_snapshot(snapshot):
     """Require the displayed price/time to match the last accepted matrix reading."""
     if 'price_matrix' not in snapshot:return True
+    if not daily_matrix_reference_ready(snapshot):return False
     matrix=snapshot.get('price_matrix') or {}
     if matrix.get('read_status') in ('TOO_SOON','OUT_OF_ORDER','MARKET_CLOSED','MISSING_DAILY_REFERENCE'):
         return False
@@ -2340,6 +2353,33 @@ def opportunity_risk(snapshot):
 
 
 from sl_tp import build_plan as build_trade_plan, plan_lines as trade_plan_lines, movement_space_line
+
+
+def bid_ask_summary(snapshot,quote=None,now=None):
+    """One quote display; acquisition time never substitutes for quote time."""
+    q=quote if isinstance(quote,dict) else snapshot.get('spread') or {}
+    if not isinstance(q,dict):q={}
+    bid=q.get('bid');ask=q.get('ask');currency=str(snapshot.get('currency') or '')
+    def price(value):return pl_number(value,4,(' '+currency) if currency else '') if finite_number(value,True) else '—'
+    valid=finite_number(bid,True) and finite_number(ask,True) and bid<=ask
+    spread=pl_number((ask-bid)/((ask+bid)/2)*100,2,'%') if valid else '—'
+    fresh=False
+    try:
+        quote_time=parse_market_time(q.get('quote_time'))
+        acquired=parse_market_time(q.get('acquired_at'))
+        current=parse_market_time(now or utc_now())
+        fresh=bool(q.get('freshness_confirmed') is True and valid and quote_time<=acquired<=current
+                   and (current-quote_time).total_seconds()<=60)
+    except (ValueError,TypeError,KeyError,OverflowError):pass
+    line='Oferty: bid '+price(bid)+' · ask '+price(ask)+' · spread '+spread
+    if not valid:line+=' · '+('niespójne bid/ask' if finite_number(bid,True) and finite_number(ask,True) else 'dane niepełne')
+    line+=' · świeżość '+('potwierdzona' if fresh else 'niepotwierdzona')
+    if q.get('acquired_at'):
+        try:
+            from zoneinfo import ZoneInfo
+            line+=' · pobrano '+parse_market_time(q['acquired_at']).astimezone(ZoneInfo('Europe/Berlin')).strftime('%Y-%m-%d %H:%M:%S %Z')
+        except (ValueError,TypeError,KeyError,OverflowError):line+=' · brak poprawnego czasu pobrania'
+    return line
 
 
 def opportunity_report_sections(row):
@@ -2610,6 +2650,21 @@ def log_alert_decision(c, seq, stage, ok, reason, snapshot=None):
     )
 
 
+def rebase_research_already_reserved(c,snapshot,event_id=None):
+    """A reference correction must not create a second paid identity that day."""
+    matrix=snapshot.get('price_matrix') or {}
+    if not matrix.get('reference_rebased'):return False
+    day=parse_market_time(snapshot['acquired_at']).astimezone(exchange_zone(snapshot['ticker'])).date()
+    rows=c.execute("SELECT e.id,e.payload FROM events e JOIN research_requests r ON r.event_id=e.id WHERE e.ticker=?",
+                   (snapshot['ticker'],)).fetchall()
+    for row in rows:
+        if row['id']==event_id:continue
+        prior=json.loads(row['payload']).get('snapshot') or {}
+        if not prior.get('acquired_at'):continue
+        if parse_market_time(prior['acquired_at']).astimezone(exchange_zone(snapshot['ticker'])).date()==day:return True
+    return False
+
+
 def reserve_opportunities(store,cycle_id,now=None):
     # E04: confirmation determines eligibility, not a per-slot number of GPT
     # jobs.  Process all qualifying records, in stable ranking order; the
@@ -2623,6 +2678,9 @@ def reserve_opportunities(store,cycle_id,now=None):
         for r in rows:r['rank']=json.loads(r['payload'])
         rows.sort(key=lambda r:(-r['rank']['score'],-(r['rank']['rvol'] if finite_number(r['rank'].get('rvol')) else 0),r['ticker']))
         for r in rows:
+            if rebase_research_already_reserved(c,r['rank']['snapshot'],r['sequence_id']):
+                log_alert_decision(c,r['sequence_id'],'reserve/reference',False,'Zmieniona baza; research tej spółki zarezerwowano już w tej sesji.',r['rank']['snapshot'])
+                continue
             latest=c.execute("SELECT payload FROM observations WHERE ticker=? AND interval='1h' ORDER BY id DESC LIMIT 1",(r['ticker'],)).fetchone()
             if latest:
                 snap=json.loads(latest[0])
@@ -2647,6 +2705,7 @@ def queue_opportunity(store,sequence_id,spread,delivery_enabled,now=None):
         raw=c.execute("SELECT * FROM opportunities WHERE sequence_id=? AND state='RESERVED'",(sequence_id,)).fetchone()
         if not raw:return False
         row=json.loads(raw['payload']);snap={**row['snapshot'],'spread':spread}
+        if rebase_research_already_reserved(c,snap,sequence_id):return False
         _ticks=set(store.load_section('tickers',[]))
         _min_rvol=float(store.load_section('settings',{}).get('min_rvol_absolute',0.3))
         _rvol=row.get('rvol')
@@ -2689,6 +2748,7 @@ def opportunity_message(event_id,evidence,context,result):
     reasons='; '.join(risk.get('reasons',[]))
     if not has_quotes:lines.append('Ryzyko: nie można ocenić spreadu i warunków wykonania — brak bid/ask.'+(' '+reasons[:140]+'.' if reasons else ''))
     else:lines.append('Ryzyko: '+risk['label']+' · '+quote_note+('. '+reasons[:140] if reasons else '')+'.')
+    lines.append(bid_ask_summary(snap,quotes))
     if analysis_assessment_text(result):lines.append('Wniosek AI: '+analysis_assessment_text(result))
     lines.extend(trade_plan_lines(manifest.get('trade_plan') or build_trade_plan(snap,change)))
     lines.append('Kontekst źródłowy w pełnym raporcie; związek z ruchem niepotwierdzony.' if result.get('context') else 'Przyczyna nieustalona.')
@@ -2781,7 +2841,7 @@ def polish_indicator(key):
 
 def polish_status(value):
     return {'EVENT':'Wykryto zdarzenie','UNCHANGED':'Bez przekroczenia progu','BASELINE_CREATED':'Utworzono punkt odniesienia',
-            'MISSING_DAILY_REFERENCE':'Brak zamknięcia poprzedniej sesji','FETCH_DEFERRED':'Pobranie odroczone','OUT_OF_ORDER':'Odczyt poza kolejnością','RATE_LIMITED':'Ograniczenie Yahoo','ERROR':'Błąd',
+            'MISSING_DAILY_REFERENCE':'Niepotwierdzona baza poprzedniej sesji — kwalifikacja wstrzymana','FETCH_DEFERRED':'Pobranie odroczone','OUT_OF_ORDER':'Odczyt poza kolejnością','RATE_LIMITED':'Ograniczenie Yahoo','ERROR':'Błąd',
             'RUNNING':'W toku','OK':'Zakończony','PARTIAL':'Częściowy','INTERRUPTED':'Przerwany',
             'EMPTY_WATCHLIST':'Pusta lista','OPEN':'W trakcie','CLOSED':'Zamknięta',
             'REVIEW_REQUIRED':'Wymaga sprawdzenia','INCOMPLETE_CANDLE_STATUS':'Brak ustalonego stanu świecy'}.get(value,value)
@@ -2812,6 +2872,7 @@ def analysis_message(event_id,evidence,context,result,limit=True):
     snap=evidence['snapshot'];sources={s['id']:s for s in context['sources']}
     lines=[('TEST HISTORYCZNY — ' if evidence.get('historical_test') else '')+'ANALIZA RUCHU · '+snap['ticker'],
            'Zdarzenie: '+event_id,'Świeca: '+snap['candle_time']]
+    lines.append(bid_ask_summary(snap,(context.get('analysis_manifest') or {}).get('quotes')))
     layered=evidence.get('kind')=='CONFIRMED_OPPORTUNITY' and isinstance(evidence.get('ranking'),dict)
     if result.get('quality_issues'):lines.append('Jakość analizy — usunięcia: '+'; '.join(result['quality_issues']))
     if layered:lines.extend(opportunity_three_layer_lines(evidence['ranking'],details=True))
@@ -3126,6 +3187,8 @@ def r1_research_sources(response, cutoff, snapshot):
             strict_time_window=False
         )
         result['extract_diagnostics']=response.get('extract_diagnostics',{})
+        if result['extract_diagnostics'].get('status')=='LIMIT_EXCEEDED':
+            raise ServiceError('Tavily Extract: przekroczono limit partii; bez obcinania i bez wywołania AI.')
         result['backend'] = 'SEARCH'
         result['status'] = 'DONE'
         result['request_id'] = response.get('request_id')
@@ -3150,6 +3213,25 @@ def process_analysis_once(store,keys,event_id=None):
     try:
         with store.connection() as c:
             evidence=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(job['event_id'],)).fetchone()[0])
+        if evidence.get('kind')=='CONFIRMED_OPPORTUNITY':
+            stage='DAILY_REFERENCE_PREFLIGHT'
+            snap=evidence['snapshot'];matrix=snap.get('price_matrix') or {}
+            invalid=not daily_matrix_reference_ready(snap)
+            if 'reference_session' in matrix:
+                with store.connection() as c:
+                    available=_daily_reference(c,snap['ticker'],snap['acquired_at'])
+                    current_matrix=c.execute('SELECT payload FROM price_matrix WHERE ticker=?',(snap['ticker'],)).fetchone()
+                with store.connection() as c:
+                    invalid=invalid or rebase_research_already_reserved(c,snap,job['event_id'])
+                invalid=invalid or not available or available['session_date']!=matrix.get('reference_session') or available['close']!=matrix.get('anchor_price')
+                if current_matrix:
+                    active=json.loads(current_matrix[0])
+                    invalid=invalid or active.get('anchor_at')!=matrix.get('anchor_at') or active.get('anchor_price')!=matrix.get('anchor_price') or active.get('reference_status')=='MISSING_PREVIOUS_SESSION'
+            if invalid:
+                with store.transaction() as c:
+                    c.execute("UPDATE analysis_jobs SET state='FILTERED',last_error=?,next_attempt_at=NULL,updated_at=? WHERE event_id=? AND state IN ('BUSY_CONTEXT','BUSY_AI')",
+                              ('Niepotwierdzona lub zmieniona baza poprzedniej sesji; bez wywołań dostawców.',utc_now(),job['event_id']))
+                return True
         if job['state']=='BUSY_CONTEXT':
             stage='RESEARCH_CONTEXT'
             record=load_event_research(store,job['event_id'])
@@ -3168,7 +3250,7 @@ def process_analysis_once(store,keys,event_id=None):
             context['query']=record['query']
             save_analysis_context(store,job['event_id'],context)
         else:
-            _engine=store.load_section('settings',{}).get('analysis_engine','openai')
+            _engine='openai'
             try:
                 _snap = evidence.get('snapshot') or {}
                 _ticker = _snap.get('ticker')
@@ -3483,10 +3565,31 @@ def _record_price_matrix_read(c,snapshot,threshold_pct,cadence_minutes):
         return {**(old or {}),'read_status':'MARKET_CLOSED','newly_confirmed':False}
     session=when.astimezone(exchange_zone(ticker)).date().isoformat()
     reference=_daily_reference(c,ticker,when)
-    if old is None or old.get('session_date')!=session or not finite_number(old.get('anchor_price'),True):
+    expected=required_daily_session(ticker,when)
+    ready=bool(reference and reference['session_date']==expected)
+    if not ready:
+        row={**(old or {}),'ticker':ticker,'session_date':session,
+             'anchor_price':reference['close'] if reference else None,
+             'anchor_at':reference['closed_at'] if reference else None,
+             'reference_session':reference['session_date'] if reference else None,
+             'expected_reference_session':expected,'reference_status':'MISSING_PREVIOUS_SESSION',
+             'last_price':price,'last_acquired_at':acquired,'last_candle_time':snapshot.get('candle_time'),
+             'last_volume':volume if finite_number(volume) and volume>=0 else None,
+             'change_pct':None,'state':'MISSING_DAILY_REFERENCE','read_status':'MISSING_DAILY_REFERENCE',
+             'consecutive_reads':0,'candidate_started_at':None,'confirmed_at':None,
+             'activity_tracking_version':'E05','activity_verified':False,'activity_evidence':'REFERENCE_UNVERIFIED',
+             'last_activity_at':None,'newly_confirmed':False}
+        c.execute('INSERT OR REPLACE INTO price_matrix VALUES(?,?,?)',(ticker,json_text(row),acquired))
+        return row
+    changed=bool(old and (old.get('reference_session')!=reference['session_date']
+                         or old.get('anchor_price')!=reference['close'] or old.get('anchor_at')!=reference['closed_at']))
+    if (old is None or old.get('session_date')!=session or not finite_number(old.get('anchor_price'),True)
+            or old.get('reference_status')=='MISSING_PREVIOUS_SESSION' or changed):
         anchor=reference['close'] if reference else None
         row={'ticker':ticker,'anchor_price':anchor,'anchor_at':reference['closed_at'] if reference else None,
              'reference_session':reference['session_date'] if reference else None,'session_date':session,
+             'expected_reference_session':expected,'reference_status':'READY',
+             'reference_rebased':bool(old and old.get('session_date')==session and (changed or old.get('reference_status')=='MISSING_PREVIOUS_SESSION' or old.get('reference_rebased'))),
              'last_price':price,'last_acquired_at':acquired,'last_candle_time':snapshot.get('candle_time'),
              'last_volume':volume if finite_number(volume) and volume>=0 else None,
              'change_pct':(price-anchor)/anchor*100 if anchor else None,
@@ -4782,6 +4885,7 @@ def render_manual_service_status(turn):
     """Only reads saved evidence; opening this section never starts a service call."""
     import streamlit as st
     context=json.loads(turn['context']);research=context.get('research') or {};status=research.get('status')
+    if context.get('snapshot'):st.caption(bid_ask_summary(context['snapshot']))
     sources=research.get('sources') or []
     if status=='DONE':
         st.caption('Tavily: wyszukiwanie zakończone · wariant: '+str(research.get('backend','zapis historyczny'))+' · zapisanych wyników: '+str(len(sources))+' · odrzuconych: '+str(research.get('excluded',0)))
@@ -4851,7 +4955,7 @@ def render_gpt_chat(store):
         question=st.text_area('Pytanie do GPT',max_chars=4000)
         with_search=st.checkbox('Pytanie z wyszukiwaniem Tavily',value=True,key='chat_with_search')
         fetch_fresh_spread=st.checkbox('Pobierz świeże bid/ask (Yahoo)',value=False,key='chat_fetch_spread')
-        engine_choice=st.radio('Silnik AI',['OpenAI (gpt-4o-mini)','DeepSeek (deepseek-chat)'],horizontal=True,key='chat_engine')
+        st.caption('Silnik AI: OpenAI (gpt-4o-mini).')
         st.caption('Po wysłaniu: jedno wyszukiwanie Tavily i jedno zapytanie do wybranego silnika. Odświeżenie nie wykonuje wywołań API.')
         send=st.form_submit_button('Wyślij pytanie')
     _col_clear, _ = st.columns([1, 5])
@@ -4868,7 +4972,7 @@ def render_gpt_chat(store):
             try:
                 ticker=resolve_question_ticker(question,None if selected=='Bez danych spółki' else selected,ticks)
                 with st.spinner('Tavily wyszukuje źródła, GPT analizuje dane…' if with_search else 'GPT analizuje zapisane dane…'):
-                    _eng='deepseek' if 'DeepSeek' in engine_choice else 'openai'
+                    _eng='openai'
                     perform_manual_question(store,ticker,question,with_search,history,engine=_eng,fetch_fresh_spread=fetch_fresh_spread)
                 st.rerun()
             except (ServiceError,ValueError,RuntimeError) as exc:st.error(str(exc))
@@ -5345,11 +5449,11 @@ def render_confirmed_tracking(store):
     def _color_row(row):
         d=row['Kierunek']
         if d=='rosnie dalej':
-            return ['background-color: rgba(34,197,94,0.25); color: #bbf7d0']*len(row)
+            return ['background-color: #143b2c; color: #f0fdf4']*len(row)
         if d=='spada':
-            return ['background-color: rgba(239,68,68,0.25); color: #fecaca']*len(row)
+            return ['background-color: #4c1d24; color: #fff1f2']*len(row)
         if d=='stabilnie':
-            return ['background-color: rgba(234,179,8,0.25); color: #fef08a']*len(row)
+            return ['background-color: #443713; color: #fefce8']*len(row)
         return ['']*len(row)
     try:
         styled=df.style.apply(_color_row,axis=1)
@@ -5887,16 +5991,16 @@ def render_portfolio(store):
 
     _cols_risk = ['Ticker','Ryzyko','Powody','Braki','Spread %','SL','TP','SL status','TP status']
     _cols_risk = [c for c in _cols_risk if c in df_all.columns]
-    df_risk = df_all[_cols_risk].copy() if _cols_risk else pd.DataFrame()
+    df_risk = df_all[_cols_risk].copy().fillna('—') if _cols_risk else pd.DataFrame()
 
     def _color_row(row):
         try:
             ch = row['Zmiana 1H']
             if isinstance(ch, str):
                 if ch.startswith('+'):
-                    return ['background-color: rgba(34,197,94,0.20); color: #bbf7d0']*len(row)
+                    return ['background-color: #143b2c; color: #f0fdf4']*len(row)
                 if ch.startswith('-'):
-                    return ['background-color: rgba(239,68,68,0.20); color: #fecaca']*len(row)
+                    return ['background-color: #4c1d24; color: #fff1f2']*len(row)
         except Exception:
             pass
         return ['']*len(row)
@@ -5915,18 +6019,35 @@ def render_portfolio(store):
     }
 
     def _color_risk_row(row):
-        try:
-            _sl = row.get('SL status', '—')
-            _tp = row.get('TP status', '—')
-            if _sl == 'FIRED':
-                return ['background-color: rgba(239,68,68,0.20); color: #fecaca']*len(row)
-            if _tp == 'FIRED':
-                return ['background-color: rgba(34,197,94,0.20); color: #bbf7d0']*len(row)
-            if _sl == 'armed' or _tp == 'armed':
-                return ['background-color: rgba(59,130,246,0.10)']*len(row)
-        except Exception:
-            pass
-        return ['']*len(row)
+        styles=[]
+        missing={'', '—', '-', 'none', 'nan', 'brak danych'}
+        for column in row.index:
+            value=str(row.get(column,'—')).strip()
+            text=value.casefold()
+            css=''
+            if text in missing:
+                css='background-color: #18212d; color: #94a3b8'
+            elif column=='Ryzyko':
+                if 'podwyższ' in text:css='background-color: #4c1d24; color: #fecaca; font-weight: bold'
+                elif 'częściow' in text or 'nieocen' in text:css='background-color: #4a2c16; color: #fed7aa'
+            elif column=='Braki':
+                css='background-color: #4a2c16; color: #fed7aa'
+            elif column=='SL':
+                css='background-color: #4c1d24; color: #fecaca'
+            elif column=='TP':
+                css='background-color: #143b2c; color: #bbf7d0'
+            elif column in ('SL status','TP status'):
+                if text=='fired':
+                    css=('background-color: #7f1d1d; color: #ffffff; font-weight: bold' if column=='SL status' else
+                         'background-color: #14532d; color: #ffffff; font-weight: bold')
+                elif text=='armed':css='background-color: #142b45; color: #bfdbfe'
+            elif column=='Spread %':
+                try:
+                    if float(text.replace('%','').replace(',','.').replace(' ',''))>=2:
+                        css='background-color: #4c1d24; color: #fecaca'
+                except ValueError:pass
+            styles.append(css)
+        return styles
 
     st.markdown('**Ceny i wolumen**')
     try:
@@ -6033,6 +6154,7 @@ def render_growth_ranking(store,now=None):
                 st.write('**1. Detekcja ruchu:** '+sections['detection']['summary'])
                 st.write('**2. Jakość ruchu:** '+sections['quality']['summary'])
                 st.write('**3. Ryzyko:** '+sections['risk']['summary'])
+                st.caption(bid_ask_summary(snap))
                 plan=build_trade_plan(snap,matrix.get('change_pct',r.get('change_pct')))
                 st.markdown('---')
                 st.markdown('**4. Plan SL/TP**')
@@ -6397,7 +6519,7 @@ def run_streamlit(db,now=None):
     import streamlit as st
     import html
     store=Store(db)
-    st.set_page_config(page_title='KI — rynek i detekcja',page_icon='📈',layout='wide')
+    st.set_page_config(page_title='KI — rynek i detekcja',page_icon='📈',layout='wide',initial_sidebar_state='collapsed')
     # Translatory zmieniają węzły zarządzane przez React (m.in. OBV -> „OCZYWIŚCIE”).
     # Oznaczenie polskiej aplikacji zapobiega takiej ingerencji przy kolejnych renderach.
     st.html('''<script>
@@ -6416,6 +6538,8 @@ def run_streamlit(db,now=None):
     .stButton>button,.stFormSubmitButton>button{background:#274d70;color:#fff;border:1px solid #7c9ab8}
     input,textarea{background:#182330!important;color:#fff!important}
     [data-baseweb="select"]>div{background:#182330!important;color:#fff!important}
+    [data-testid="stSidebarCollapseButton"],[data-testid="stSidebarCollapsedControl"]{visibility:visible!important;opacity:1!important;pointer-events:auto!important}
+    [data-testid="stSidebarCollapseButton"] button,[data-testid="stSidebarCollapsedControl"] button{min-width:48px;min-height:48px;touch-action:manipulation}
     .ki-card{background:#182330;border:1px solid #61758b;border-radius:10px;padding:18px;margin:12px 0}
     .ki-green{color:#6ee7a0}.ki-yellow{color:#ffe082}.ki-red{color:#ff9292}.ki-gray{color:#c6d0dc}
     .ki-score{font-size:26px;font-weight:700}.ki-label{font-size:14px;color:#c6d0dc}
@@ -6444,9 +6568,8 @@ def run_streamlit(db,now=None):
             tpm=st.number_input('Mnożnik ATR dla TP',min_value=.1,value=float(settings.get('tp_atr_multiplier',3.)),step=.1)
             st.markdown('**Dalsza analiza potwierdzonego ruchu**')
             pipeline_enabled=st.checkbox('Tavily + AI po potwierdzeniu okazji',value=services['pipeline_enabled'])
-            _cur_engine = settings.get('analysis_engine', 'openai')
-            _engine_choice = st.radio('Silnik AI dla automatu', ['OpenAI (gpt-4o-mini)', 'DeepSeek (deepseek-chat)'], index=0 if _cur_engine == 'openai' else 1, horizontal=True)
-            _engine_val = 'deepseek' if 'DeepSeek' in _engine_choice else 'openai'
+            _engine_val='openai'
+            st.caption('Silnik AI: OpenAI (gpt-4o-mini).')
             st.caption('Tavily Search — jedno wyszukiwanie na zdarzenie lub ręczne żądanie. Wybrany silnik analizuje wyłącznie zweryfikowane materiały; brak źródeł nie potwierdza przyczyny ruchu.')
             telegram_enabled=st.checkbox('Automatycznie wysyłaj nowe zdarzenia na Telegram',value=services['telegram_enabled'])
             st.caption('Potwierdzony ruch automatyczny: wzrost lub spadek od zamknięcia poprzedniej sesji i trzy odczyty z nową aktywnością rynku; automat: świeca 1h co 15 minut. Regularna sesja: GPW 09:00–17:00 czasu Warszawy, USA 09:30–16:00 czasu Nowego Jorku. Skrócona świeca końcowa nie dostaje RVOL porównywanego z pełnymi świecami. Jedna wiadomość na potwierdzoną sekwencję.')
@@ -6764,13 +6887,7 @@ def service_runtime_diagnostics(rows):
 
 def render_service_panel(store,manual=False):
     import streamlit as st
-    _settings = store.load_section('settings', {})
-    _cur_engine = _settings.get('analysis_engine', 'openai')
-    _new_engine = st.radio('Silnik AI dla automatu (Tavily + AI)', ['openai', 'deepseek'], index=0 if _cur_engine == 'openai' else 1, horizontal=True, key=f'service_engine_{manual}')
-    if _new_engine != _cur_engine:
-        store.update_settings({'analysis_engine': _new_engine})
-        st.rerun()
-    import streamlit as st
+    st.caption('Silnik analizy: OpenAI (gpt-4o-mini).')
     labels={'PENDING_CONTEXT':'Oczekuje na Tavily','BUSY_CONTEXT':'Pobieranie kontekstu',
             'PENDING_AI':'Oczekuje na GPT','BUSY_AI':'Analiza GPT','DONE':'Analiza gotowa',
             'FAILED':'Błąd — zadanie zatrzymane','REVIEW_REQUIRED':'Wymaga sprawdzenia',
@@ -7808,7 +7925,7 @@ def run_panel_tests():
 
         def test_v3_saved_report_shows_attempts_background_and_own_timestamp(self):
             self.store.save_section('tickers',['HUMA'])
-            snap={**opportunity_test_snapshot(TEST_NOW,'HUMA',.4659,.05),'currency':'USD','spread':spread_from_info({'bid':.46,'ask':.47}, now=TEST_NOW)}
+            snap={**opportunity_test_snapshot(TEST_NOW,'HUMA',.4659,.05),'company_name':'Humacyte, Inc.','currency':'USD','spread':spread_from_info({'bid':.46,'ask':.47}, now=TEST_NOW)}
             request={'query':research_query(snap,event_context_cutoff(snap).isoformat())}
             context={'ticker':'HUMA','snapshot':snap,'purpose':'ticker_analysis','report_version':3,
                      'research':{'status':'DONE','sources':[],'received_results':0,'issuer_filter_version':1,
@@ -8812,8 +8929,10 @@ def run_service_tests():
             self.assertEqual(schema['properties']['context']['items']['properties']['source_id']['enum'],['S1'])
         def test_25_search_keeps_event_ticker_and_cutoff_in_metadata(self):
             snap=self.snap();cutoff=event_context_cutoff(snap).isoformat()
+            with self.assertRaises(ValueError):research_query(snap,cutoff)
+            snap['company_name']='AAA Laboratories Inc.'
             query=research_query(snap,cutoff)
-            self.assertEqual(query,'AAA')
+            self.assertEqual(query,'AAA Laboratories')
             context=r1_research_sources({'results':[],'request_id':'metadata-contract'},cutoff,snap)
             self.assertEqual(context['issuer_identity']['ticker'],snap['ticker'])
             self.assertEqual(context['cutoff'],cutoff)
@@ -9051,7 +9170,7 @@ def main(argv=None):
             ranking_result = run_ranking_tests()
             opportunity_result = run_opportunity_tests()
             import unittest
-            repair_result=unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromName('test_repair_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_yahoo_retry_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_service_status_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_reference_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_us_session_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_readiness_20261025'),unittest.defaultTestLoader.loadTestsFromName('test_alert_quality_20261026'),unittest.defaultTestLoader.loadTestsFromName('test_ai_preflight_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_full_package_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_optimization_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_message_synthesis_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_c_tavily_contract'),unittest.defaultTestLoader.loadTestsFromName('test_e06_tavily_issuer'),unittest.defaultTestLoader.loadTestsFromName('test_e06_cli_dual_contract'),unittest.defaultTestLoader.loadTestsFromName('test_research_v3'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_search_contract'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_page_dates')]))
+            repair_result=unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromName('test_repair_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_yahoo_retry_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_service_status_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_reference_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_us_session_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_readiness_20261025'),unittest.defaultTestLoader.loadTestsFromName('test_alert_quality_20261026'),unittest.defaultTestLoader.loadTestsFromName('test_ai_preflight_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_full_package_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_optimization_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_message_synthesis_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_c_tavily_contract'),unittest.defaultTestLoader.loadTestsFromName('test_e06_tavily_issuer'),unittest.defaultTestLoader.loadTestsFromName('test_e06_cli_dual_contract'),unittest.defaultTestLoader.loadTestsFromName('test_research_v3'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_search_contract'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_page_dates'),unittest.defaultTestLoader.loadTestsFromName('test_daily_readiness_20261029')]))
             return 1 if foundation_result or market_result or service_result or ranking_result or opportunity_result or not repair_result.wasSuccessful() else 0
         if args.migration_report:
             plan = prepare_migration(args.migration_report)

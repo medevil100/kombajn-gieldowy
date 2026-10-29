@@ -14,7 +14,8 @@ class ReadinessTests(unittest.TestCase):
         import builtins
         import inspect
         import symtable
-        scope=symtable.symtable(inspect.getsource(KI.analyze_event),'<analyze_event>','exec').get_children()[0]
+        table=symtable.symtable(inspect.getsource(KI.analyze_event),'<analyze_event>','exec')
+        scope=next(child for child in table.get_children() if child.get_name()=='analyze_event' and child.get_type()=='function')
         unresolved=[symbol.get_name() for symbol in scope.get_symbols()
                     if symbol.is_referenced() and symbol.is_global()
                     and symbol.get_name() not in vars(KI)

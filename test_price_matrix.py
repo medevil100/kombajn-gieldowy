@@ -38,6 +38,8 @@ class PriceMatrixTests(unittest.TestCase):
     def test_previous_session_close_is_anchor_and_new_session_resets_proofs(self):
         first = KI.record_price_matrix_read(self.store, self.snapshot(1.00, 0), 2.0, 15)
         later = KI.record_price_matrix_read(self.store, self.snapshot(1.30, 15), 2.0, 15)
+        KI._save_daily_history(self.store,'STX.WA',[{'session_date':'2026-10-08','status':'CLOSED',
+            'open':1.,'high':1.,'low':1.,'close':1.,'volume':1000}],self.anchor_time+timedelta(days=1))
         next_day = KI.record_price_matrix_read(self.store, self.snapshot(1.25, 24 * 60), 2.0, 15)
         self.assertEqual(first['state'], 'BASELINE_CREATED')
         self.assertEqual(later['anchor_price'], 1.00)

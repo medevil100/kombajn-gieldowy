@@ -8,7 +8,7 @@ from pathlib import Path
 import KI
 
 
-def stored_context(engine='deepseek', with_engine=True, status='SUBMITTED'):
+def stored_context(engine='openai', with_engine=True, status='SUBMITTED'):
     context={'ticker':'AAT.WA','report_version':3,'purpose':'chat',
              'snapshot':{'ticker':'AAT.WA','interval':'1h','currency':'PLN',
                          'acquired_at':'2026-10-08T11:33:31+00:00',
@@ -32,7 +32,7 @@ def sample_request():
 
 class ManualEngineValueTests(unittest.TestCase):
     def test_supported_values_are_accepted(self):
-        for value in ('openai','deepseek'):
+        for value in ('openai',):
             self.assertEqual(KI.manual_engine(value),value)
 
     def test_unknown_or_missing_value_is_rejected(self):
@@ -41,7 +41,7 @@ class ManualEngineValueTests(unittest.TestCase):
                 KI.manual_engine(value)
 
     def test_stored_engine_is_read_verbatim(self):
-        self.assertEqual(KI.saved_manual_engine({'engine':'deepseek'}),'deepseek')
+        with self.assertRaises(ValueError):KI.saved_manual_engine({'engine':'deepseek'})
         self.assertEqual(KI.saved_manual_engine({'engine':'openai'}),'openai')
 
     def test_task_without_saved_engine_cannot_resume(self):
@@ -51,22 +51,15 @@ class ManualEngineValueTests(unittest.TestCase):
 
 
 class ManualProviderTests(unittest.TestCase):
-    def test_deepseek_uses_its_own_endpoint_and_key(self):
-        req=sample_request()
-        label,url,key=KI.manual_provider('deepseek',{'DEEPSEEK_API_KEY':'ds'},req)
-        self.assertEqual((label,key),('DeepSeek','ds'))
-        self.assertEqual(url,'https://api.deepseek.com/v1/chat/completions')
-        self.assertEqual(req['model'],'deepseek-chat')
-        self.assertEqual(req['response_format'],{'type':'json_object'})
-        self.assertIn('max_tokens',req)
-        self.assertNotIn('max_completion_tokens',req)
-
-    def test_deepseek_does_not_require_openai_key(self):
-        KI.manual_provider('deepseek',{'DEEPSEEK_API_KEY':'ds'},sample_request())
-
-    def test_deepseek_without_its_key_is_rejected(self):
+    def test_retired_provider_is_rejected_before_any_network_or_request_changes(self):
+        req=sample_request();before=KI.json_text(req)
         with self.assertRaises(ValueError):
-            KI.manual_provider('deepseek',{'OPENAI_API_KEY':'oa'},sample_request())
+            KI.manual_provider('deepseek',{'DEEPSEEK_API_KEY':'ds','OPENAI_API_KEY':'oa'},req)
+        self.assertEqual(KI.json_text(req),before)
+
+    def test_automatic_retired_provider_is_rejected_without_request(self):
+        with self.assertRaises(KI.ServiceError):
+            KI.analyze_event({'snapshot':{}},{'prepared_ai_request':{'model':'gpt-4o-mini'}},{},engine='deepseek')
 
     def test_openai_keeps_existing_model_and_endpoint(self):
         req=sample_request()
@@ -84,7 +77,6 @@ class ManualProviderTests(unittest.TestCase):
             KI.manual_provider('openai',{'DEEPSEEK_API_KEY':'ds'},sample_request())
 
     def test_key_only_validation_without_request(self):
-        KI.manual_provider('deepseek',{'DEEPSEEK_API_KEY':'ds'})
         KI.manual_provider('openai',{'OPENAI_API_KEY':'oa'})
         with self.assertRaises(ValueError):
             KI.manual_provider('deepseek',{})
@@ -98,7 +90,7 @@ class ManualTurnContextTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_new_turn_context_stores_explicit_engine(self):
-        for engine in ('openai','deepseek'):
+        for engine in ('openai',):
             context=KI.manual_turn_context(self.store,'MREO','chat',engine,False)
             self.assertEqual(context['engine'],engine)
             self.assertEqual(context['research'],{'sources':[],'status':'DISABLED'})
@@ -115,11 +107,11 @@ class ManualTurnContextTests(unittest.TestCase):
         with self.store.transaction() as c:
             c.execute("INSERT INTO observations(ticker,interval,candle_time,acquired_at,candle_status,payload) VALUES(?,?,?,?,?,?)",
                       ('MREO','1h',snapshot['candle_time'],snapshot['acquired_at'],'CLOSED',KI.json_text(snapshot)))
-        context=KI.manual_turn_context(self.store,'MREO','chat','deepseek',True)
+        context=KI.manual_turn_context(self.store,'MREO','chat','openai',True)
         turn=KI.begin_gpt_chat(self.store,'Pytanie do modelu',context)
         with self.store.connection() as c:
             saved=json.loads(c.execute('SELECT context FROM gpt_chat_turns WHERE id=?',(turn,)).fetchone()[0])
-        self.assertEqual(saved['engine'],'deepseek')
+        self.assertEqual(saved['engine'],'openai')
         self.assertEqual(saved['research']['status'],'PENDING')
 
 
@@ -154,6 +146,9 @@ class ResumeStopsBeforeChangeTests(unittest.TestCase):
 
     def test_task_without_engine_is_not_modified(self):
         self.assert_untouched(stored_context(with_engine=False))
+
+    def test_retired_engine_is_not_modified_or_redirected(self):
+        self.assert_untouched(stored_context(engine='deepseek'))
 
     def test_unknown_stored_engine_is_not_modified(self):
         self.assert_untouched(stored_context(engine='gpt5'))

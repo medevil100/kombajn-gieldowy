@@ -82,6 +82,7 @@ class AssessmentAxesTests(unittest.TestCase):
 
     def test_source_quote_enum_contains_only_literal_source_fragments(self):
         ev,result,ctx=self.sample()
+        ev['snapshot']['company_name']='Emitent'
         source={'id':'S1','content':'Emitent opublikował dzisiaj raport o wynikach finansowych. Privacy policy and copyright reserved here.'}
         ctx['sources']=[source]
         fact=KI.analysis_schema(ev['snapshot'],ctx)['properties']['context']['items']['properties']['fact']
