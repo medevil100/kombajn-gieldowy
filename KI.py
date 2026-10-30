@@ -19,6 +19,7 @@ from contextlib import contextmanager
 import argparse
 import hashlib
 import json
+from observation_storage import loads as load_payload, encode_observation, prune_observations
 import math
 import os
 import signal
@@ -66,6 +67,7 @@ CREATE TABLE IF NOT EXISTS observations(
  payload TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS observation_lookup ON observations(ticker,interval,acquired_at);
 CREATE INDEX IF NOT EXISTS observation_latest ON observations(ticker,interval,id DESC);
+CREATE INDEX IF NOT EXISTS observation_retention_time ON observations(acquired_at,id);
 CREATE TABLE IF NOT EXISTS baselines(
  ticker TEXT NOT NULL, interval TEXT NOT NULL, payload TEXT NOT NULL,
  updated_at TEXT NOT NULL, PRIMARY KEY(ticker,interval));
@@ -203,12 +205,12 @@ class Store:
 
     def load_state(self):
         with self.connection() as c:
-            return {r['section']: json.loads(r['payload']) for r in c.execute('SELECT section,payload FROM legacy_state')}
+            return {r['section']: load_payload(r['payload']) for r in c.execute('SELECT section,payload FROM legacy_state')}
 
     def load_section(self, section, default):
         with self.connection() as c:
             r = c.execute('SELECT payload FROM legacy_state WHERE section=?', (section,)).fetchone()
-            return json.loads(r[0]) if r else default
+            return load_payload(r[0]) if r else default
 
     def _write_section(self, c, section, data):
         payload = json_text(data)
@@ -249,7 +251,7 @@ class Store:
         """Merge under the write lock: independent updates cannot erase each other."""
         with self.transaction() as c:
             row = c.execute("SELECT payload FROM legacy_state WHERE section='settings'").fetchone()
-            current = json.loads(row[0]) if row else {}
+            current = load_payload(row[0]) if row else {}
             current.update(changes)
             errors = validate_state({'settings': current})
             if errors:
@@ -265,12 +267,12 @@ class Store:
     def get_baseline(self, ticker, interval):
         with self.connection() as c:
             row = c.execute('SELECT payload FROM baselines WHERE ticker=? AND interval=?', (ticker,interval)).fetchone()
-            return json.loads(row[0]) if row else None
+            return load_payload(row[0]) if row else None
 
     def get_price_matrix(self, ticker):
         with self.connection() as c:
             row = c.execute('SELECT payload FROM price_matrix WHERE ticker=?', (ticker,)).fetchone()
-            return json.loads(row[0]) if row else None
+            return load_payload(row[0]) if row else None
 
     def record_event(self, ticker, interval, evidence, message=None):
         event_id = uuid.uuid4().hex
@@ -388,7 +390,7 @@ def prepare_migration(source):
     try:
         raw = path.read_bytes()
         sha = hashlib.sha256(raw).hexdigest()
-        data = json.loads(raw.decode('utf-8-sig'),object_pairs_hook=reject_duplicate_keys)
+        data = load_payload(raw.decode('utf-8-sig'),object_pairs_hook=reject_duplicate_keys)
         data = normalize_legacy(data,warnings,errors)
         errors.extend(validate_state(data))
     except (OSError,UnicodeError,ValueError) as exc:
@@ -564,7 +566,7 @@ def automatic_session_open(ticker,now):
 def market_fetch_state(store,ticker,interval):
     with store.connection() as c:
         row=c.execute('SELECT payload FROM runtime WHERE key=?',('market_fetch:'+interval+':'+ticker,)).fetchone()
-    return json.loads(row[0]) if row else {}
+    return load_payload(row[0]) if row else {}
 
 
 def market_fetch_due(store,ticker,interval,now=None):
@@ -580,7 +582,7 @@ def record_market_fetch(store,ticker,interval,error=None,now=None,diagnostics=No
     key='market_fetch:'+interval+':'+ticker
     with store.transaction() as c:
         raw=c.execute('SELECT payload FROM runtime WHERE key=?',(key,)).fetchone()
-        old=json.loads(raw[0]) if raw else {}
+        old=load_payload(raw[0]) if raw else {}
         failures=min(32,int(old.get('failures',0))+1) if error else 0
         due=None
         if not automatic_session_open(ticker,current):due=next_market_open(ticker,current)
@@ -731,7 +733,7 @@ def daily_history_refresh_due(store,ticker,now=None):
         raw=c.execute('SELECT payload FROM runtime WHERE key=?',('daily_history:'+ticker,)).fetchone()
         exists=c.execute('SELECT 1 FROM daily_candles WHERE ticker=? LIMIT 1',(ticker,)).fetchone()
     if not raw or not exists:return True
-    refreshed=parse_market_time(json.loads(raw[0])['refreshed_at']).astimezone(zone)
+    refreshed=parse_market_time(load_payload(raw[0])['refreshed_at']).astimezone(zone)
     local=current.astimezone(zone)
     if local.weekday()>=5:
         from datetime import timedelta
@@ -1566,7 +1568,7 @@ def resume_manual_research(store,turn_id):
         with store.transaction() as c:
             row=c.execute('SELECT * FROM gpt_chat_turns WHERE id=?',(turn_id,)).fetchone()
             if not row or row['state']=='DONE':raise ValueError('Brak ręcznej analizy do wznowienia.')
-            context=json.loads(row['context']);research=context.get('research') or {}
+            context=load_payload(row['context']);research=context.get('research') or {}
             if research.get('status') not in ('SUBMITTED','COMPLETED','DONE') or not research.get('request_id'):
                 raise ValueError('Niepotwierdzony start Research. Nie uruchomiono nowego zadania.')
             if context.get('gpt',{}).get('status') in ('REQUESTED','RECEIVED'):
@@ -1600,7 +1602,7 @@ def resume_manual_research(store,turn_id):
 
 def render_research_resume(store,turn):
     import streamlit as st
-    context=json.loads(turn['context']);research=context.get('research') or {}
+    context=load_payload(turn['context']);research=context.get('research') or {}
     if turn['state']!='DONE' and research.get('request_id') and research.get('status') in ('SUBMITTED','COMPLETED','DONE') and context.get('gpt',{}).get('status') not in ('REQUESTED','RECEIVED'):
         if 'engine' not in context:
             st.warning('Brak zapisanego silnika tego zadania. Wznowienie bez zapisanego silnika nie jest możliwe.')
@@ -1617,7 +1619,7 @@ def reserve_manual_research(store,turn,context):
     """Commit one manual reservation before allowing a paid start."""
     with store.transaction() as c:
         row=c.execute('SELECT state,context FROM gpt_chat_turns WHERE id=?',(turn,)).fetchone()
-        if not row or row['state']!='REQUESTED' or json.loads(row['context']).get('research',{}).get('status')!='PENDING':
+        if not row or row['state']!='REQUESTED' or load_payload(row['context']).get('research',{}).get('status')!='PENDING':
             raise ServiceError('Research: ręczne zadanie już zarezerwowane. Nie uruchomiono nowego zlecenia.',uncertain=True)
         c.execute('UPDATE gpt_chat_turns SET context=? WHERE id=?',(json_text(context),turn))
 
@@ -1874,7 +1876,7 @@ def parse_event_analysis_response(body,snapshot,context):
         if message.get('refusal'):raise ValueError('Model odmówił przygotowania analizy.')
         if choice.get('finish_reason')=='length':raise ValueError('Odpowiedź urwana przez limit tokenów.')
         if choice.get('finish_reason')!='stop':raise ValueError('Odpowiedź nie została normalnie zakończona.')
-        try:decoded=json.loads(message['content'])
+        try:decoded=load_payload(message['content'])
         except (ValueError,TypeError):raise ValueError('Niepoprawny JSON odpowiedzi.') from None
         result=validate_event_analysis(decoded,snapshot,context)
     except ValueError as exc:raise AnalysisRejected(str(exc),draft) from None
@@ -2526,7 +2528,7 @@ def record_opportunity(store,snapshot,cycle_id,now=None):
         # The first acquisition is an anchor; do not send a historical opportunity on startup.
         reads=c.execute("SELECT id,payload FROM observations WHERE ticker=? AND interval='1h' ORDER BY id DESC LIMIT 2",(ticker,)).fetchall()
         if len(reads)<2:return {'state':'BASELINE','sequence_id':sequence_id}
-        previous=json.loads(reads[1]['payload'])
+        previous=load_payload(reads[1]['payload'])
         row=opportunity_local_rank(snapshot,previous)
         # Filtr mikrospolek: CANDIDATE zostaje widoczny, ale bez awansu do CONFIRMED
         _is_confirmed = two_candle_confirmation(snapshot,current)
@@ -2574,7 +2576,7 @@ def record_opportunity(store,snapshot,cycle_id,now=None):
                 except Exception:
                     pass
             retained=(state if existing['state'] in ('CANDIDATE','CONFIRMED','SKIPPED_LIMIT') or _expired else existing['state'])
-            stored=json.loads(c.execute('SELECT payload FROM opportunities WHERE sequence_id=?',(sequence_id,)).fetchone()[0])
+            stored=load_payload(c.execute('SELECT payload FROM opportunities WHERE sequence_id=?',(sequence_id,)).fetchone()[0])
             if stored['snapshot'].get('spread'):
                 row['snapshot']['spread']=stored['snapshot']['spread'];row['risk']=opportunity_risk(row['snapshot'])
             c.execute("UPDATE opportunities SET candle_end=?,payload=?,updated_at=?,state=?,cycle_id=CASE WHEN state IN ('CANDIDATE','CONFIRMED','SKIPPED_LIMIT') THEN ? ELSE cycle_id END WHERE sequence_id=?",
@@ -2659,7 +2661,7 @@ def rebase_research_already_reserved(c,snapshot,event_id=None):
                    (snapshot['ticker'],)).fetchall()
     for row in rows:
         if row['id']==event_id:continue
-        prior=json.loads(row['payload']).get('snapshot') or {}
+        prior=load_payload(row['payload']).get('snapshot') or {}
         if not prior.get('acquired_at'):continue
         if parse_market_time(prior['acquired_at']).astimezone(exchange_zone(snapshot['ticker'])).date()==day:return True
     return False
@@ -2675,7 +2677,7 @@ def reserve_opportunities(store,cycle_id,now=None):
         ticks=set(store.load_section('tickers',[]))
         _min_rvol=float(store.load_section('settings',{}).get('min_rvol_absolute',0.3))
         rows=[dict(r) for r in c.execute("SELECT * FROM opportunities WHERE state='CONFIRMED' AND cycle_id=?",(cycle_id,))]
-        for r in rows:r['rank']=json.loads(r['payload'])
+        for r in rows:r['rank']=load_payload(r['payload'])
         rows.sort(key=lambda r:(-r['rank']['score'],-(r['rank']['rvol'] if finite_number(r['rank'].get('rvol')) else 0),r['ticker']))
         for r in rows:
             if rebase_research_already_reserved(c,r['rank']['snapshot'],r['sequence_id']):
@@ -2683,7 +2685,7 @@ def reserve_opportunities(store,cycle_id,now=None):
                 continue
             latest=c.execute("SELECT payload FROM observations WHERE ticker=? AND interval='1h' ORDER BY id DESC LIMIT 1",(r['ticker'],)).fetchone()
             if latest:
-                snap=json.loads(latest[0])
+                snap=load_payload(latest[0])
                 _rvol=r['rank'].get('rvol')
                 ok_latest,reason_latest=should_alert(snap,r['rank']['snapshot'],ticks,current,check_basis=True,min_rvol=_min_rvol,rvol=_rvol)
                 log_alert_decision(c,r['sequence_id'],'reserve/latest',ok_latest,reason_latest,snap)
@@ -2704,7 +2706,7 @@ def queue_opportunity(store,sequence_id,spread,delivery_enabled,now=None):
     with store.transaction() as c:
         raw=c.execute("SELECT * FROM opportunities WHERE sequence_id=? AND state='RESERVED'",(sequence_id,)).fetchone()
         if not raw:return False
-        row=json.loads(raw['payload']);snap={**row['snapshot'],'spread':spread}
+        row=load_payload(raw['payload']);snap={**row['snapshot'],'spread':spread}
         if rebase_research_already_reserved(c,snap,sequence_id):return False
         _ticks=set(store.load_section('tickers',[]))
         _min_rvol=float(store.load_section('settings',{}).get('min_rvol_absolute',0.3))
@@ -2765,7 +2767,7 @@ def opportunity_delivery_valid(store,evidence,now=None):
         raw=c.execute('SELECT payload FROM observations WHERE ticker=? AND interval=? ORDER BY id DESC LIMIT 1',
                       (ticker,snap.get('interval'))).fetchone()
     if not raw:return False
-    latest=json.loads(raw[0])
+    latest=load_payload(raw[0])
     return same_opportunity_basis(latest,snap) and telegram_movement_confirmed({**evidence,'snapshot':latest},current)
 
 
@@ -2903,7 +2905,7 @@ def claim_analysis(store,event_id=None,now=None):
                       (stamp,event_id) if event_id else (stamp,)).fetchall()
         row=None
         for candidate in rows:
-            evidence=json.loads(candidate['payload'])
+            evidence=load_payload(candidate['payload'])
             manual=evidence.get('manual_analysis') or evidence.get('historical_test')
             if not manual and not opportunity_delivery_valid(store,evidence,current):
                 c.execute("UPDATE analysis_jobs SET state='FILTERED',last_error='Zdarzenie starego skanera lub potwierdzenie ruchu wygasło; bez płatnego zapytania.',updated_at=? WHERE event_id=?",(stamp,candidate['event_id']))
@@ -3057,7 +3059,7 @@ def finish_analysis(store,event_id,result,metadata,now=None):
     with store.transaction() as c:
         job=c.execute('SELECT * FROM analysis_jobs WHERE event_id=?',(event_id,)).fetchone()
         if not job or job['state']!='BUSY_AI':return
-        evidence=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(event_id,)).fetchone()[0]);context=json.loads(job['context'])
+        evidence=load_payload(c.execute('SELECT payload FROM events WHERE id=?',(event_id,)).fetchone()[0]);context=load_payload(job['context'])
         result=validate_event_analysis(result,evidence['snapshot'],context)
         publication_issues=analysis_publication_issues(result,context.get('analysis_manifest',{}).get('version',0)>=2) if evidence.get('kind')=='CONFIRMED_OPPORTUNITY' else []
         valid=analysis_has_valid_conclusions(result) and not publication_issues
@@ -3092,7 +3094,7 @@ def fail_analysis(store,event_id,error):
             c.execute('INSERT INTO analysis_rejections VALUES(?,?,?,?,?)',
                       (uuid.uuid4().hex,event_id,str(error),json_text(error.payload),utc_now()))
         with store.connection() as read:
-            evidence=json.loads(read.execute('SELECT payload FROM events WHERE id=?',(event_id,)).fetchone()[0])
+            evidence=load_payload(read.execute('SELECT payload FROM events WHERE id=?',(event_id,)).fetchone()[0])
         # A confirmed sequence gets one Tavily request and one AI request; uncertain calls are never repeated automatically.
         retry=evidence.get('kind')!='CONFIRMED_OPPORTUNITY' and error.retryable and not error.uncertain and job['attempts']<3
         state=('PENDING_CONTEXT' if job['state']=='BUSY_CONTEXT' else 'PENDING_AI') if retry else 'REVIEW_REQUIRED' if error.uncertain else 'FAILED'
@@ -3147,7 +3149,7 @@ def submit_event_research(store, event_id, query, cutoff, api_key):
         with store.connection() as c:
             row=c.execute('SELECT payload FROM events WHERE id=?',(event_id,)).fetchone()
         if not row:raise ValueError('Brak zapisanego zdarzenia do wyszukiwania.')
-        snapshot=json.loads(row[0])['snapshot']
+        snapshot=load_payload(row[0])['snapshot']
         arguments=event_search_arguments(snapshot,cutoff)
         resp=search_sync(query,api_key,max_results=8,**arguments)
         from tavily_cli_adapter import enrich_search_response
@@ -3212,7 +3214,7 @@ def process_analysis_once(store,keys,event_id=None):
     stage='READ_EVENT'
     try:
         with store.connection() as c:
-            evidence=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(job['event_id'],)).fetchone()[0])
+            evidence=load_payload(c.execute('SELECT payload FROM events WHERE id=?',(job['event_id'],)).fetchone()[0])
         if evidence.get('kind')=='CONFIRMED_OPPORTUNITY':
             stage='DAILY_REFERENCE_PREFLIGHT'
             snap=evidence['snapshot'];matrix=snap.get('price_matrix') or {}
@@ -3225,7 +3227,7 @@ def process_analysis_once(store,keys,event_id=None):
                     invalid=invalid or rebase_research_already_reserved(c,snap,job['event_id'])
                 invalid=invalid or not available or available['session_date']!=matrix.get('reference_session') or available['close']!=matrix.get('anchor_price')
                 if current_matrix:
-                    active=json.loads(current_matrix[0])
+                    active=load_payload(current_matrix[0])
                     invalid=invalid or active.get('anchor_at')!=matrix.get('anchor_at') or active.get('anchor_price')!=matrix.get('anchor_price') or active.get('reference_status')=='MISSING_PREVIOUS_SESSION'
             if invalid:
                 with store.transaction() as c:
@@ -3241,7 +3243,7 @@ def process_analysis_once(store,keys,event_id=None):
                 submit_event_research(store,job['event_id'],query,cutoff,keys.get('TAVILY_API_KEY',''))
                 record=load_event_research(store,job['event_id'])
             if record['state']=='COMPLETED':
-                response=json.loads(record['raw_response'])
+                response=load_payload(record['raw_response'])
             else:
                 raise ServiceError('Research: rezerwacja niepewna; ponowny płatny start zablokowany.',uncertain=True)
             if response.get('request_id')!=record['request_id']:
@@ -3264,7 +3266,7 @@ def process_analysis_once(store,keys,event_id=None):
                             "ORDER BY acquired_at DESC LIMIT 10",
                             (_ticker, _interval, _acq)).fetchall()
                     for _r in _rows:
-                        _previous=json.loads(_r[0])
+                        _previous=load_payload(_r[0])
                         if (_previous.get('ticker')==_ticker and _previous.get('interval')==_interval
                             and parse_market_time(_previous['acquired_at'])<parse_market_time(_acq)
                             and parse_market_time(_previous['candle_time'])<=parse_market_time(_snap['candle_time'])):
@@ -3274,7 +3276,7 @@ def process_analysis_once(store,keys,event_id=None):
                     _spread_history = []
                     for _r in _rows:
                         try:
-                            _p = json.loads(_r[0])
+                            _p = load_payload(_r[0])
                             _sp = _p.get('spread') or {}
                             if isinstance(_sp, dict) and finite_number(_sp.get('spread_pct')):
                                 _spread_history.append({
@@ -3307,7 +3309,7 @@ def process_analysis_once(store,keys,event_id=None):
             except Exception as exc:
                 evidence['collection_error']=type(exc).__name__
             stage='AI_PREFLIGHT'
-            context=json.loads(job['context'])
+            context=load_payload(job['context'])
             if evidence.get('kind')=='CONFIRMED_OPPORTUNITY':
                 stage='AI_PREFLIGHT'
                 context['analysis_manifest']=build_analysis_manifest(evidence,context)
@@ -3356,7 +3358,7 @@ def claim_delivery(store,outbox_id=None,now=None):
                       (outbox_id,) if outbox_id else ()).fetchall()
         row=None
         for candidate in rows:
-            evidence=json.loads(candidate['evidence_payload'])
+            evidence=load_payload(candidate['evidence_payload'])
             if candidate['kind']!='ANALYSIS' or not opportunity_delivery_valid(store,evidence,current):
                 snap=evidence.get('snapshot') or {}
                 reason=('Telegram: sesja zamknięta (GPW po 17:00 czasu Warszawy); alert nie został wysłany.'
@@ -3459,7 +3461,7 @@ def load_service_worker_health(store,now=None,max_age_seconds=30):
         row=rows.get(key)
         if not row:return None,False
         try:
-            payload=json.loads(row['payload'])
+            payload=load_payload(row['payload'])
             age=(current-parse_market_time(row['updated_at'])).total_seconds()
             return payload,isinstance(payload,dict) and 0<=age<=max_age_seconds
         except (ValueError,TypeError,OverflowError):return None,False
@@ -3556,7 +3558,7 @@ def _record_price_matrix_read(c,snapshot,threshold_pct,cadence_minutes):
     candle=parse_market_time(snapshot['candle_time']) if snapshot.get('candle_time') else None
     volume=snapshot.get('volume')
     raw=c.execute('SELECT payload FROM price_matrix WHERE ticker=?',(ticker,)).fetchone()
-    old=json.loads(raw[0]) if raw else None
+    old=load_payload(raw[0]) if raw else None
     if old:
         previous=parse_market_time(old['last_acquired_at'])
         if when<=previous or (old.get('last_candle_time') and candle and candle<parse_market_time(old['last_candle_time'])):
@@ -3672,7 +3674,7 @@ def initialize_matrix_database(source_db,target_db):
         try:
             exists=connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_state'").fetchone()
             if not exists:raise ValueError('Stara baza nie zawiera zapisanej listy skanera.')
-            state={row[0]:json.loads(row[1]) for row in connection.execute(
+            state={row[0]:load_payload(row[1]) for row in connection.execute(
                 "SELECT section,payload FROM legacy_state WHERE section IN ('tickers','settings')")}
         finally:connection.close()
         tickers=state.get('tickers',[]);settings=state.get('settings',{})
@@ -3707,7 +3709,7 @@ def detect_market(store,snapshot,config=None):
     now=snapshot['acquired_at']
     with store.transaction() as c:
         raw=c.execute('SELECT payload FROM baselines WHERE ticker=? AND interval=?',(t,interval)).fetchone()
-        old=json.loads(raw[0]) if raw else None
+        old=load_payload(raw[0]) if raw else None
         if old and (parse_market_time(snapshot['candle_time'])<parse_market_time(old['candle_time']) or
                     parse_market_time(now)<parse_market_time(old.get('acquired_at',now))):
             return {'status':'OUT_OF_ORDER','reasons':[]}
@@ -3721,14 +3723,14 @@ def detect_market(store,snapshot,config=None):
                           'consecutive_reads':0,'newly_confirmed':False}
         if matrix_enabled and matrix.get('read_status')=='MISSING_DAILY_REFERENCE':
             c.execute('INSERT INTO observations(ticker,interval,candle_time,acquired_at,candle_status,payload) VALUES(?,?,?,?,?,?)',
-                      (t,interval,snapshot['candle_time'],now,snapshot['candle_status'],json_text({**snapshot,'price_matrix':matrix})))
+                      (t,interval,snapshot['candle_time'],now,snapshot['candle_status'],encode_observation({**snapshot,'price_matrix':matrix})))
             return {'status':'MISSING_DAILY_REFERENCE','reasons':[],'price_matrix':matrix}
         if matrix_enabled and matrix.get('read_status') in ('TOO_SOON','OUT_OF_ORDER','MARKET_CLOSED'):
             # Rejected reads cannot update the observation/baseline or enter qualification.
             rejected=matrix['read_status']
             return {'status':rejected,'reasons':[],'price_matrix':matrix}
         stored_snapshot={**snapshot,'price_matrix':matrix} if matrix_enabled else snapshot
-        encoded=json_text(stored_snapshot)
+        encoded=encode_observation(stored_snapshot)
         c.execute('INSERT INTO observations(ticker,interval,candle_time,acquired_at,candle_status,payload) VALUES(?,?,?,?,?,?)',
                   (t,interval,snapshot['candle_time'],now,snapshot['candle_status'],encoded))
         price=snapshot['price'];reasons=[];dprice=None;drvol=None;event_id=None
@@ -3908,7 +3910,7 @@ def attach_historical_baseline(store,snapshot):
         snapshot['historical_52w']=None
         return snapshot
     try:
-        stats=json.loads(row[0])
+        stats=load_payload(row[0])
     except Exception:
         snapshot['historical_52w']=None
         return snapshot
@@ -4009,8 +4011,7 @@ def run_market_cycle(store,stop=None):
     try:
         with store.transaction() as c:
             c.execute('UPDATE cycles SET finished_at=?,status=?,payload=? WHERE id=?',(utc_now(),status,json_text(payload),cid))
-            cutoff=(datetime.now(timezone.utc)-timedelta(days=cfg['observation_retention_days'])).isoformat()
-            # Historia godzinowa pozostaje zachowana; migracja nie usuwa obserwacji.
+            prune_observations(c,cfg['observation_retention_days'])
             _rows = c.execute('SELECT COUNT(*) FROM observations').fetchone()[0]
         print(f'observations: {_rows} rows', flush=True)
     except Exception as _fe:
@@ -4265,7 +4266,7 @@ def record_manual_read(store,snapshot,config):
     if result.get('event_id'):
         with store.transaction() as c:
             row=c.execute('SELECT payload FROM events WHERE id=?',(result['event_id'],)).fetchone()
-            evidence=json.loads(row[0]);evidence['manual_analysis']=True;evidence['delivery_enabled']=False
+            evidence=load_payload(row[0]);evidence['manual_analysis']=True;evidence['delivery_enabled']=False
             c.execute('UPDATE events SET payload=? WHERE id=?',(json_text(evidence),result['event_id']))
     return result
 
@@ -4274,7 +4275,7 @@ def queue_manual_analysis(store,event_id):
     with store.transaction() as c:
         row=c.execute('SELECT payload FROM events WHERE id=?',(event_id,)).fetchone()
         if not row:raise ValueError('Brak potwierdzonego zdarzenia ręcznego.')
-        evidence=json.loads(row[0])
+        evidence=load_payload(row[0])
         if not evidence.get('manual_analysis') or not evidence.get('reasons') or evidence.get('delivery_enabled'):
             raise ValueError('Zdarzenie nie jest niezależnym dowodem ręcznym.')
         if c.execute('SELECT 1 FROM analysis_jobs WHERE event_id=?',(event_id,)).fetchone():return False
@@ -4297,7 +4298,7 @@ def render_manual_analysis(store):
             format_func=lambda eid:by_id[eid]['ticker']+' · '+by_id[eid]['interval']+' · '+by_id[eid]['created_at'],key='manual_analysis_event')
         if selected is None:
             st.info('Wybierz spółkę i zdarzenie do ręcznej analizy.');render_service_panel(store,manual=True);return
-        event=by_id[selected];st.text(evidence_message(selected,json.loads(event['payload'])))
+        event=by_id[selected];st.text(evidence_message(selected,load_payload(event['payload'])))
         enabled=event['state'] is None or event['state'] in ('PENDING_CONTEXT','PENDING_AI')
         fetch_spread=st.checkbox('Pobierz świeże bid/ask (Yahoo) przed analizą',value=False,key='manual_fetch_spread')
         if st.button('Analizuj potwierdzony ruch — Tavily + AI',disabled=not enabled):
@@ -4306,14 +4307,14 @@ def render_manual_analysis(store):
                 if not keys['TAVILY_API_KEY'] or not keys['OPENAI_API_KEY']:raise ValueError('Brak klucza Tavily lub OpenAI w secrets.toml.')
                 if fetch_spread:
                     with st.spinner('Pobieram bid/ask z Yahoo…'):
-                        _ev_obj=json.loads(event['payload']) if event.get('payload') else {}
+                        _ev_obj=load_payload(event['payload']) if event.get('payload') else {}
                         _ticker=((_ev_obj.get('snapshot') or {}).get('ticker')) or event.get('ticker') or ''
                         _quote=fetch_opportunity_spread(_ticker) if _ticker else {'error':'brak tickera w zdarzeniu'}
                         if _quote and not _quote.get('error'):
                             with store.transaction() as _c:
                                 _row=_c.execute('SELECT payload FROM events WHERE id=?',(selected,)).fetchone()
                                 if _row:
-                                    _ev=json.loads(_row[0])
+                                    _ev=load_payload(_row[0])
                                     if isinstance(_ev,dict) and isinstance(_ev.get('snapshot'),dict):
                                         _ev['snapshot']['spread']=dict(_quote)
                                         _ev['snapshot']['spread_acquired_at']=utc_now()
@@ -4342,15 +4343,15 @@ def gpt_chat_context(store,ticker):
     with store.connection() as c:
         row=c.execute('SELECT payload FROM observations WHERE ticker=? ORDER BY id DESC LIMIT 1',(ticker,)).fetchone()
         job=c.execute("SELECT e.payload,j.result FROM analysis_jobs j JOIN events e ON e.id=j.event_id WHERE e.ticker=? AND j.state='DONE' ORDER BY e.rowid DESC LIMIT 1",(ticker,)).fetchone()
-    snap=json.loads(row[0]) if row else None;previous=None
+    snap=load_payload(row[0]) if row else None;previous=None
     if snap:
         with store.connection() as c:
             prior=c.execute('SELECT payload FROM observations WHERE ticker=? AND interval=? AND acquired_at<? ORDER BY acquired_at DESC,id DESC LIMIT 1',
                             (ticker,snap['interval'],snap['acquired_at'])).fetchone()
-        previous=json.loads(prior[0]) if prior else None
+        previous=load_payload(prior[0]) if prior else None
     def compact(value):
         return {k:v for k,v in value.items() if k!='chart_history'} if value else None
-    return {'ticker':ticker,'snapshot':compact(snap),'previous_snapshot':compact(previous),'saved_analysis':json.loads(job['result']) if job else None,
+    return {'ticker':ticker,'snapshot':compact(snap),'previous_snapshot':compact(previous),'saved_analysis':load_payload(job['result']) if job else None,
             'note':'Dane zapisane w KI, nie nowe pobranie rynku. Czas danych jest podany w odczycie.'}
 
 
@@ -4534,7 +4535,7 @@ def manual_research_metrics(context):
 
 def manual_numeric_context(safe_context,context):
     """API-only copy: values live in a catalog beside their explicit references."""
-    result=json.loads(json_text(safe_context));metrics=manual_research_metrics(context)
+    result=load_payload(json_text(safe_context));metrics=manual_research_metrics(context)
     if not manual_previous_snapshot(context):result['previous_snapshot']=None
     result['numeric_references']={key:'{{metric:'+key+'}}' for key in metrics}
     result['numeric_catalog']={key:{**item,'reference':result['numeric_references'][key]} for key,item in metrics.items()}
@@ -4757,7 +4758,7 @@ def gpt_chat_request(question,context,history):
             'Nie przypisuj ruchu wiadomości bez dowodu związku. Brak świeżych źródeł nie oznacza braku starszego kontekstu. ')
     messages=[{'role':'system','content':instructions}]
     for turn in ([] if context.get('report_version')==3 else history[-6:]):
-        old=json.loads(turn['context'])
+        old=load_payload(turn['context'])
         if turn.get('state')=='DONE' and turn.get('answer') and old.get('ticker')==context.get('ticker') and old.get('purpose')==context.get('purpose') and old.get('research',{}).get('issuer_filter_version')==1:
             messages.extend([{'role':'user','content':turn['question']},{'role':'assistant','content':turn['answer']}])
     # Keep rejected titles in SQLite diagnostics; they are not research for GPT.
@@ -4855,7 +4856,7 @@ def parse_gpt_chat_response(body,context=None):
     except (KeyError,IndexError,TypeError,ValueError):
         raise ServiceError('GPT: brak pełnej odpowiedzi. Nie ponowiono pytania automatycznie.',uncertain=True) from None
     if context is not None:
-        try:answer=render_manual_research_reply(json.loads(answer),context)
+        try:answer=render_manual_research_reply(load_payload(answer),context)
         except (ValueError,TypeError,KeyError) as exc:raise ServiceError('GPT: odpowiedź nie przeszła weryfikacji. '+str(exc)+' Bez automatycznego ponawiania.',uncertain=True) from None
     return answer.strip(),{k:body.get(k) for k in ('id','model','usage')}
 
@@ -4884,7 +4885,7 @@ def fail_gpt_chat(store,turn,error):
 def render_manual_service_status(turn):
     """Only reads saved evidence; opening this section never starts a service call."""
     import streamlit as st
-    context=json.loads(turn['context']);research=context.get('research') or {};status=research.get('status')
+    context=load_payload(turn['context']);research=context.get('research') or {};status=research.get('status')
     if context.get('snapshot'):st.caption(bid_ask_summary(context['snapshot']))
     sources=research.get('sources') or []
     if status=='DONE':
@@ -4933,7 +4934,7 @@ def render_manual_service_status(turn):
             for item in research.get('undated_sources',[]):
                 st.caption('Materiał bez potwierdzonej daty — poza źródłami GPT: '+str(item.get('title') or 'Źródło'))
                 st.link_button('Sprawdź datę w materiale',item['url'])
-    metadata=json.loads(turn['metadata']) if turn.get('metadata') else {}
+    metadata=load_payload(turn['metadata']) if turn.get('metadata') else {}
     if context.get('gpt',{}).get('status')=='RECEIVED' or metadata.get('id') or metadata.get('usage'):
         st.caption('GPT: odpowiedź odebrana · '+('weryfikacja zakończona' if turn['state']=='DONE' else 'brak zatwierdzonej odpowiedzi'))
         usage=metadata.get('usage') or {}
@@ -4949,7 +4950,7 @@ def render_gpt_chat(store):
     with store.connection() as c:
         ticks=sorted(set(store.load_section('tickers',[]))|{r[0] for r in c.execute('SELECT DISTINCT ticker FROM observations')})
         hidden=dismissed_error_keys(store)
-        history=[dict(r) for r in c.execute('SELECT * FROM gpt_chat_turns ORDER BY rowid DESC') if not error_is_dismissed(hidden,'gpt_chat_turns',r['id'],r) and json.loads(r['context']).get('purpose','chat')=='chat'][:20][::-1]
+        history=[dict(r) for r in c.execute('SELECT * FROM gpt_chat_turns ORDER BY rowid DESC') if not error_is_dismissed(hidden,'gpt_chat_turns',r['id'],r) and load_payload(r['context']).get('purpose','chat')=='chat'][:20][::-1]
     with st.form('gpt_chat_form',clear_on_submit=False):
         selected=stable_ticker_select('Dane spółki do rozmowy',['Bez danych spółki']+ticks,'chat_ticker',in_form=True)
         question=st.text_area('Pytanie do GPT',max_chars=4000)
@@ -4962,7 +4963,7 @@ def render_gpt_chat(store):
     if _col_clear.button('Wyczyść rozmowę', key='gpt_chat_clear', help='Usuwa całą historię rozmowy z GPT. Nie usuwa analiz automatycznych ani wpisów innych celów.'):
         with store.transaction() as _c:
             _rows = list(_c.execute("SELECT id, context FROM gpt_chat_turns"))
-            _ids = [r[0] for r in _rows if (json.loads(r[1]).get('purpose','chat') == 'chat')]
+            _ids = [r[0] for r in _rows if (load_payload(r[1]).get('purpose','chat') == 'chat')]
             for _i in _ids:
                 _c.execute("DELETE FROM gpt_chat_turns WHERE id=?", (_i,))
         st.rerun()
@@ -4981,7 +4982,7 @@ def render_gpt_chat(store):
         with st.chat_message('assistant'):
             if turn['state']=='DONE':st.write(turn['answer'])
             else:st.warning(turn['error'] or 'Brak zapisanego potwierdzenia odpowiedzi. Pytanie nie jest ponawiane automatycznie.')
-            context=json.loads(turn['context'])
+            context=load_payload(turn['context'])
             if context.get('ticker'):st.caption('Spółka: '+context['ticker']+' · czas danych: '+(context.get('snapshot') or {}).get('acquired_at','Brak odczytu rynku'))
             render_manual_service_status(turn)
             render_research_resume(store,turn)
@@ -5017,14 +5018,14 @@ def render_ticker_research(store):
             st.rerun()
         except (ValueError,ServiceError,RuntimeError) as exc:st.error(str(exc))
     hidden=dismissed_error_keys(store)
-    with store.connection() as c:reports=[dict(r) for r in c.execute('SELECT * FROM gpt_chat_turns ORDER BY rowid DESC') if json.loads(r['context']).get('purpose')=='ticker_analysis' and json.loads(r['context']).get('ticker')==ticker and not error_is_dismissed(hidden,'gpt_chat_turns',r['id'],r)][:5]
+    with store.connection() as c:reports=[dict(r) for r in c.execute('SELECT * FROM gpt_chat_turns ORDER BY rowid DESC') if load_payload(r['context']).get('purpose')=='ticker_analysis' and load_payload(r['context']).get('ticker')==ticker and not error_is_dismissed(hidden,'gpt_chat_turns',r['id'],r)][:5]
     if ticker:
         with st.expander('Ostatni zapis Yahoo · '+ticker+' · analiza lokalna bez zapytania GPT',expanded=not reports):
             render_local_research_analysis(live_context)
             st.caption('To ostatni zapis skanera. Dane starszego raportu poniżej pozostają związane z jego własnym czasem odczytu.')
     for report in reports:
         with st.expander(ticker+' · '+polish_status(report['state'])+' · '+report['created_at'],expanded=report is reports[0]):
-            saved_context=json.loads(report['context'])
+            saved_context=load_payload(report['context'])
             st.caption('Raport: '+report['id']+' · utworzony: '+report['created_at']+' · dane Yahoo: '+str((saved_context.get('snapshot') or {}).get('acquired_at','Brak odczytu')))
             render_local_research_analysis(saved_context)
             st.markdown('### Interpretacja GPT — nie zastępuje trzech ocen KI')
@@ -5166,7 +5167,7 @@ def render_saved_company_analysis(store,snapshot):
         job=c.execute("SELECT e.id,e.payload,e.created_at,j.context,j.result FROM events e JOIN analysis_jobs j ON j.event_id=e.id WHERE e.ticker=? AND e.interval=? AND j.state='DONE' ORDER BY e.rowid DESC LIMIT 1",(ticker,interval)).fetchone()
         turns=[];research_only=None
         for row in c.execute("SELECT * FROM gpt_chat_turns ORDER BY rowid DESC"):
-            context=json.loads(row['context'])
+            context=load_payload(row['context'])
             if context.get('ticker')==ticker and (context.get('snapshot') or {}).get('interval',interval)==interval:
                 if research_only is None and row['state']!='DONE' and (context.get('research') or {}).get('status')=='DONE' and (context.get('research') or {}).get('sources'):
                     research_only=(dict(row),context)
@@ -5177,7 +5178,7 @@ def render_saved_company_analysis(store,snapshot):
     if not job and not turns:
         st.info('Brak zapisanej analizy GPT dla tej spółki. Przyczyna ruchu nieustalona — raport techniczny nie ustala przyczyny.')
     if job:
-        evidence=json.loads(job['payload']);result=json.loads(job['result']);context=json.loads(job['context'])
+        evidence=load_payload(job['payload']);result=load_payload(job['result']);context=load_payload(job['context'])
         with st.expander('Zapisana analiza zdarzenia · '+ticker+' · '+job['created_at']):
             st.text(analysis_message(job['id'],evidence,context,ValidatedAnalysis(result['analysis']),limit=False))
     if research_only:
@@ -5218,9 +5219,9 @@ def render_gpt_analysis(store):
     with analysis_store.connection() as c:
         jobs=[dict(r) for r in c.execute("SELECT e.id,e.payload,j.context,j.result FROM events e JOIN analysis_jobs j ON j.event_id=e.id WHERE e.ticker=? AND j.state='DONE' ORDER BY e.rowid DESC LIMIT 30",(ticker,))]
     by_id={j['id']:j for j in jobs}
-    selected=st.selectbox('Zapisana analiza',list(by_id),format_func=lambda i:json.loads(by_id[i]['payload'])['snapshot']['candle_time']+' · '+i)
-    job=by_id[selected];result=json.loads(job['result'])
-    st.text(analysis_message(selected,json.loads(job['payload']),json.loads(job['context']),ValidatedAnalysis(result['analysis']),limit=False))
+    selected=st.selectbox('Zapisana analiza',list(by_id),format_func=lambda i:load_payload(by_id[i]['payload'])['snapshot']['candle_time']+' · '+i)
+    job=by_id[selected];result=load_payload(job['result'])
+    st.text(analysis_message(selected,load_payload(job['payload']),load_payload(job['context']),ValidatedAnalysis(result['analysis']),limit=False))
     st.caption('Model: '+str(result['provider'].get('model') or 'Brak danych'))
 
 
@@ -5300,11 +5301,11 @@ def load_growth_ranking(store,now=None):
     with store.connection() as c:
         rows=c.execute("SELECT * FROM opportunities WHERE candle_end>? ORDER BY updated_at DESC",(current.astimezone(timezone.utc).isoformat(),)).fetchall()
         for raw in rows:
-            stored=json.loads(raw['payload']);snap=stored['snapshot']
+            stored=load_payload(raw['payload']);snap=stored['snapshot']
             latest=c.execute("SELECT payload FROM observations WHERE ticker=? AND interval='1h' ORDER BY id DESC LIMIT 2",(raw['ticker'],)).fetchall()
-            previous=json.loads(latest[1][0]) if len(latest)>1 else None
+            previous=load_payload(latest[1][0]) if len(latest)>1 else None
             if latest:
-                candidate=json.loads(latest[0][0])
+                candidate=load_payload(latest[0][0])
                 if not same_opportunity_basis(candidate,snap):continue
                 snap={**candidate,'spread':stored['snapshot'].get('spread',{})}
             if raw['ticker'] not in ticks or not two_candle_candidate(snap,current):continue
@@ -5314,11 +5315,11 @@ def load_growth_ranking(store,now=None):
             if job:
                 row['analysis_state']=polish_status(job['state']) or job['state']
                 if job['state']=='DONE' and job['context'] and job['result']:
-                    saved=json.loads(job['result'])['analysis'];saved_context=json.loads(job['context']);sources={x['id']:x for x in saved_context['sources']}
+                    saved=load_payload(job['result'])['analysis'];saved_context=load_payload(job['context']);sources={x['id']:x for x in saved_context['sources']}
                     row['saved_ai_summary']=analysis_assessment_text(saved)
                     original=c.execute('SELECT payload FROM events WHERE id=?',(raw['sequence_id'],)).fetchone()
                     if original:
-                        original_evidence=json.loads(original[0])
+                        original_evidence=load_payload(original[0])
                         row['saved_ai_at']=original_evidence['snapshot'].get('acquired_at')
                         try:row['saved_ai_report']=analysis_message(raw['sequence_id'],original_evidence,saved_context,saved,limit=False)
                         except (ValueError,KeyError,TypeError):row['saved_ai_report']='Historyczny format: pełny zapis dostępny w monitorze analizy.'
@@ -5343,7 +5344,7 @@ def load_price_matrix_rows(store,now=None):
         records=c.execute('SELECT ticker,payload FROM price_matrix').fetchall()
     for record in records:
         if record['ticker'] not in active:continue
-        item=json.loads(record['payload'])
+        item=load_payload(record['payload'])
         if item.get('state') not in ('CANDIDATE','CONFIRMED'):continue
         rows.append({'Ticker':record['ticker'],'Stan':'Potwierdzony' if item['state']=='CONFIRMED' else 'Kandydat',
                      'Cena bazowa':item['anchor_price'],'Czas bazy UTC':item['anchor_at'],
@@ -5370,7 +5371,7 @@ def tracking_confirmed_opportunities(store,days=7,now=None):
                           ORDER BY updated_at DESC""",(cutoff,)).fetchall()
         for r in rows:
             try:
-                payload=json.loads(r[4])
+                payload=load_payload(r[4])
             except Exception:
                 continue
             snap=payload.get('snapshot') or {}
@@ -5385,7 +5386,7 @@ def tracking_confirmed_opportunities(store,days=7,now=None):
             current=None; acquired=None; latest=None
             if obs:
                 try:
-                    latest=json.loads(obs[0])
+                    latest=load_payload(obs[0])
                     current=latest.get('price')
                     acquired=latest.get('acquired_at')
                 except Exception:
@@ -5465,14 +5466,14 @@ def portfolio_get(store):
         with store.connection() as c:
             row = c.execute("SELECT payload FROM settings WHERE key='portfolio_config'").fetchone()
         if row:
-            cfg = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+            cfg = load_payload(row[0]) if isinstance(row[0], str) else row[0]
             if isinstance(cfg, list):
                 return cfg
         # Migracja ze starego portfolio_tickers
         with store.connection() as c:
             old = c.execute("SELECT payload FROM settings WHERE key='portfolio_tickers'").fetchone()
         if old:
-            tickers = json.loads(old[0]) if isinstance(old[0], str) else old[0]
+            tickers = load_payload(old[0]) if isinstance(old[0], str) else old[0]
             return [{'ticker': t, 'sl': None, 'tp': None, 'direction': 'long',
                      'sl_fired_at': None, 'tp_fired_at': None} for t in tickers]
         return []
@@ -5507,7 +5508,7 @@ def us_report_send(store):
         last_sent = None
         if row:
             try:
-                last_sent = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                last_sent = load_payload(row[0]) if isinstance(row[0], str) else row[0]
             except Exception:
                 last_sent = None
         if last_sent == today_key:
@@ -5530,7 +5531,7 @@ def us_report_send(store):
             if not t: continue
             if str(t).upper().endswith('.WA'): continue
             if t in by_t: continue
-            try: snap = json.loads(r[1])
+            try: snap = load_payload(r[1])
             except Exception: continue
             by_t[t] = snap
         data = []
@@ -5601,7 +5602,7 @@ def daily_report_send(store):
         last_sent = None
         if row:
             try:
-                last_sent = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                last_sent = load_payload(row[0]) if isinstance(row[0], str) else row[0]
             except Exception:
                 last_sent = None
         if last_sent == today_key:
@@ -5624,7 +5625,7 @@ def daily_report_send(store):
         for r in rows:
             t = r[0]
             if t in by_t: continue
-            try: snap = json.loads(r[1])
+            try: snap = load_payload(r[1])
             except Exception: continue
             by_t[t] = snap
         # Sortuj wzgledem otwarcia swiecy
@@ -5714,7 +5715,7 @@ def portfolio_check_alerts(store,now=None):
                                WHERE ticker=? AND interval='1h'
                                ORDER BY id DESC LIMIT 1""", (ticker,)).fetchone()
             if not row: continue
-            try: snap = json.loads(row[0])
+            try: snap = load_payload(row[0])
             except Exception: continue
             valid,reason=portfolio_price_status(snap,now)
             c.execute('INSERT INTO runtime VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',
@@ -5802,7 +5803,7 @@ def portfolio_snapshot(store, ticker, interval='1h'):
                                ORDER BY id DESC LIMIT 1""", (ticker, interval)).fetchone()
         if not row:
             return None
-        snap = json.loads(row[0])
+        snap = load_payload(row[0])
         snap['_acquired_at'] = row[1]
         return snap
     except Exception:
@@ -5925,7 +5926,7 @@ def render_portfolio(store):
                                          WHERE ticker=?
                                          ORDER BY updated_at DESC LIMIT 1""", (t,)).fetchone()
                 if _row:
-                    _p = json.loads(_row[0])
+                    _p = load_payload(_row[0])
                     _sp = (_p.get('snapshot') or {}).get('spread') or {}
                     if isinstance(_sp, dict):
                         spread_pct = _sp.get('spread_pct')
@@ -5946,7 +5947,7 @@ def render_portfolio(store):
                                     WHERE ticker=?
                                     ORDER BY updated_at DESC LIMIT 1""", (t,)).fetchone()
             if _r:
-                _p = json.loads(_r[0])
+                _p = load_payload(_r[0])
                 risk_at=(_p.get('snapshot') or {}).get('acquired_at')
                 _risk = _p.get('risk') or {}
                 if isinstance(_risk, dict):
@@ -6367,7 +6368,7 @@ def deep_analysis_worker(store,report_id):
     with store.transaction() as c:
         raw=c.execute("SELECT * FROM deep_reports WHERE id=? AND state='QUEUED'",(report_id,)).fetchone()
         if not raw:return 2
-        ticker=raw['ticker'];initial=json.loads(raw['payload']) if raw['payload'] else {};c.execute("UPDATE deep_reports SET state='RUNNING' WHERE id=?",(report_id,))
+        ticker=raw['ticker'];initial=load_payload(raw['payload']) if raw['payload'] else {};c.execute("UPDATE deep_reports SET state='RUNNING' WHERE id=?",(report_id,))
     deadline=None
     stage="Ładowanie TradingAgents"
     try:
@@ -6471,11 +6472,11 @@ def dismiss_saved_errors(store):
             for raw in c.execute('SELECT * FROM '+table+' WHERE '+where):
                 row=dict(raw)
                 if table=='runtime':
-                    payload=json.loads(row['payload'])
+                    payload=load_payload(row['payload'])
                     if not isinstance(payload,dict) or not (payload.get('error') or payload.get('status')=='ERROR'):continue
                 items.append((table,str(row[key]),error_revision(row),utc_now()))
         for raw in c.execute('SELECT id,payload FROM cycles'):
-            for result in json.loads(raw['payload']).get('results',[]):
+            for result in load_payload(raw['payload']).get('results',[]):
                 if result.get('error'):items.append(('cycle_error',raw['id']+':'+result['ticker'],error_revision(result),utc_now()))
         before=c.total_changes
         c.executemany('INSERT OR IGNORE INTO dismissed_errors VALUES(?,?,?,?)',items)
@@ -6514,7 +6515,7 @@ def render_deep_analysis(store):
     for row in rows:
         with st.expander(row['ticker']+' · '+{'QUEUED':'Oczekuje','RUNNING':'Analiza trwa','FAILED':'Błąd','DONE':'Gotowa','REVIEW_REQUIRED':'Wymaga sprawdzenia'}.get(row['state'],row['state'])+' · '+row['created_at'],expanded=row['state']!='DONE'):
             if row['state']=='DONE':
-                payload=json.loads(row['payload']);st.write('**Ocena modelu: '+payload['rating']+'**');st.caption(payload['scope'])
+                payload=load_payload(row['payload']);st.write('**Ocena modelu: '+payload['rating']+'**');st.caption(payload['scope'])
                 if payload.get('question'):st.write('Pytanie: '+payload['question'])
                 snapshot=payload.get('ki_context',{}).get('snapshot')
                 if snapshot:
@@ -6651,7 +6652,7 @@ def run_streamlit(db,now=None):
         if view=='auto':
             with store.connection() as c:
                 event=c.execute('SELECT payload FROM events WHERE ticker=? AND interval=? ORDER BY rowid DESC LIMIT 1',(s['ticker'],s['interval'])).fetchone()
-            if event:evidence=json.loads(event[0])
+            if event:evidence=load_payload(event[0])
         wait_status=market_wait_status(s,evidence)
         st.markdown('<div class="ki-card"><b class="ki-'+wait_status['color']+'">'+html.escape(wait_status['label'])+'</b><br>'+html.escape(wait_status['reason'])+'</div>',unsafe_allow_html=True)
         if view=='manual':st.caption('Ruch oceniany względem osobnego punktu odniesienia ręcznego. Analizę AI uruchamia osobny przycisk.')
@@ -6664,7 +6665,7 @@ def run_streamlit(db,now=None):
         saved_snapshot=(evidence or {}).get('snapshot') or {}
         if not s.get('spread') and saved_snapshot.get('spread') and saved_snapshot.get('ticker')==s['ticker'] and saved_snapshot.get('interval')==s['interval'] and saved_snapshot.get('candle_time')==s['candle_time']:
             report_snapshot={**s,'spread':saved_snapshot['spread']}
-        report=company_snapshot_report(report_snapshot,json.loads(previous_row[0]) if previous_row else None)
+        report=company_snapshot_report(report_snapshot,load_payload(previous_row[0]) if previous_row else None)
         st.markdown('### Raport spółki · '+s['ticker'])
         st.caption(str(s.get('company_name') or s['ticker'])+' · '+s['interval']+' · Yahoo Finance · odczyt '+when(s['acquired_at']))
         st.caption('Świeca: '+when(s['candle_time'])+' → '+when(s.get('candle_end'))+' · '+polish_status(s.get('candle_status','UNKNOWN')))
@@ -6754,8 +6755,8 @@ def run_streamlit(db,now=None):
             events=[dict(r) for r in c.execute('SELECT id,ticker,interval,created_at,payload FROM events ORDER BY created_at DESC LIMIT 30')]
             recent=[dict(r) for r in c.execute('SELECT id,started_at,finished_at,status,payload FROM cycles ORDER BY started_at DESC LIMIT 10')]
             counts={t:c.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0] for t in ('watchlist','observations','baselines','events','cycles')}
-            bases={(r['ticker'],r['interval']):json.loads(r['payload']) for r in c.execute('SELECT * FROM baselines')}
-        runtime_data=json.loads(runtime[0]) if runtime else {}
+            bases={(r['ticker'],r['interval']):load_payload(r['payload']) for r in c.execute('SELECT * FROM baselines')}
+        runtime_data=load_payload(runtime[0]) if runtime else {}
         age=(datetime.now(timezone.utc)-parse_market_time(runtime[1])).total_seconds() if runtime else None
         status=runtime_data.get('status','NOT_STARTED')
         active=age is not None and age<=15 and status in ('RUNNING','WAITING')
@@ -6764,7 +6765,7 @@ def run_streamlit(db,now=None):
             st.caption('Baza: '+str(store.path));st.write('Liczba zapisanych rekordów',dict(zip(['Spółki','Odczyty','Punkty odniesienia','Zdarzenia','Cykle'],counts.values())))
             if runtime:st.json({'ostatni_stan_procesu':runtime_data,'czas_zapisu_UTC':runtime[1]})
             st.dataframe([{'Początek':r['started_at'],'Koniec':r['finished_at'],'Stan':polish_status(r['status'])} for r in recent],width='stretch')
-            st.json([{**r,'payload':json.loads(r['payload'])} for r in recent])
+            st.json([{**r,'payload':load_payload(r['payload'])} for r in recent])
         if section=='Moj portfel':
             render_portfolio(store)
             return
@@ -6776,12 +6777,12 @@ def run_streamlit(db,now=None):
         render_confirmed_tracking(store)
         st.subheader('Pełna lista obserwowanych spółek')
         if not latest:st.info('Brak wyników automatu. Zapisz tickery i uruchom skaner: python KI.py --scanner')
-        snapshots=[json.loads(row[0]) for row in latest]
+        snapshots=[load_payload(row[0]) for row in latest]
         current={(x['ticker'],x['interval']):x for x in snapshots}
         cycle={}
         for _r in recent:
             try:
-                _p=json.loads(_r['payload'])
+                _p=load_payload(_r['payload'])
                 if _p.get('results'):
                     cycle=_p;break
             except Exception:pass
@@ -6819,7 +6820,7 @@ def run_streamlit(db,now=None):
             st.subheader('Wykryte zdarzenia')
             if not events:st.caption('Brak zdarzeń. Pierwszy odczyt tworzy punkt odniesienia; niezmieniona cena nie tworzy zdarzenia cenowego.')
             for event in events:
-                ev=json.loads(event['payload']);delta=ev.get('price_change_pct');color='ki-red' if delta is not None and delta<0 else 'ki-green' if delta is not None and delta>0 else 'ki-yellow'
+                ev=load_payload(event['payload']);delta=ev.get('price_change_pct');color='ki-red' if delta is not None and delta<0 else 'ki-green' if delta is not None and delta>0 else 'ki-yellow'
                 st.markdown('<div class="ki-card '+color+'">'+html.escape(event['ticker']+' · '+when(event['created_at'])+' · zmiana ceny między odczytami '+pl_number(delta,suffix='%')+' · względna zmiana RVOL '+pl_number(ev.get('rvol_change_pct'),suffix='%')+' · RVOL '+pl_number(ev.get('snapshot',{}).get('rvol'),suffix='×'))+'</div>',unsafe_allow_html=True)
                 with st.expander('Dowody zdarzenia '+event['id']):st.json(ev)
     live_view()
@@ -6860,7 +6861,7 @@ def run_streamlit(db,now=None):
         if result.get('event_id'):
             with manual_store.connection() as c:
                 row=c.execute('SELECT payload FROM events WHERE id=?',(result['event_id'],)).fetchone()
-            if row:evidence=json.loads(row[0])
+            if row:evidence=load_payload(row[0])
         st.caption('Wynik ręczny · '+polish_status(result.get('status','Brak zapisanego wyniku detektora'))+' · osobna baza: '+str(manual_store.path))
         card(st.session_state['manual_market_snapshot'],'manual',evidence)
     render_manual_analysis(manual_store)
@@ -6885,7 +6886,7 @@ def service_runtime_diagnostics(rows):
         key=str(row.get('key') or '')
         updated=str(row.get('updated_at') or '')
         try:
-            payload=json.loads(row.get('payload'))
+            payload=load_payload(row.get('payload'))
         except (TypeError,ValueError):
             problems.append((key,updated,"niepoprawny JSON w polu 'payload'."));continue
         if not isinstance(payload,dict):
@@ -6980,7 +6981,7 @@ def render_service_panel(store,manual=False):
         st.caption('Działający moduł i włączona konfiguracja nie potwierdzają wykonania zapytania AI ani doręczenia wiadomości.')
     for job in jobs:
         with st.expander(job['ticker']+' · '+labels.get(job['state'],job['state'])+' · '+job['event_id'],expanded=job is jobs[0]):
-            ev=json.loads(job['payload'])
+            ev=load_payload(job['payload'])
             st.text(evidence_message(job['event_id'],ev))
             st.caption('Ostatnia aktywność UTC: '+job['updated_at']+' · próby bieżącego etapu: '+str(job['attempts']))
             if job['last_error']:st.error(job['last_error'])
@@ -6988,9 +6989,9 @@ def render_service_panel(store,manual=False):
             if rejection:
                 st.caption('Odrzucona odpowiedź GPT została zachowana do diagnostyki. Nie jest zaakceptowaną analizą i nie jest wysyłana.')
                 if st.checkbox('Pokaż odrzuconą odpowiedź',key=('manual_rejected_' if manual else 'rejected_')+job['event_id']):
-                    st.text(json.loads(rejection['payload']).get('content') or 'Brak tekstu odpowiedzi.')
+                    st.text(load_payload(rejection['payload']).get('content') or 'Brak tekstu odpowiedzi.')
             if job['next_attempt_at']:st.caption('Ponowienie po: '+job['next_attempt_at'])
-            context=json.loads(job['context']) if job['context'] else None
+            context=load_payload(job['context']) if job['context'] else None
             if context:
                 if context.get('request'):
                     st.markdown('**Tavily — zapisane zapytanie**')
@@ -7020,7 +7021,7 @@ def render_service_panel(store,manual=False):
                 for rejected in context.get('rejected_sources',[]):st.caption('Odrzucono: '+rejected['title']+' · '+rejected['reason'])
                 st.caption('Przyjęto źródeł: '+str(len(context['sources']))+' · odrzucono: '+str(context['excluded'])+' · granica czasu: '+context['cutoff'])
             if job['result']:
-                result=json.loads(job['result']);ev=json.loads(job['payload'])
+                result=load_payload(job['result']);ev=load_payload(job['payload'])
                 if result.get('local_only'):
                     check=result['ai_preflight']
                     st.info('Ocena lokalna KI — AI nie zostało wywołane.')
@@ -7073,7 +7074,7 @@ def pipeline_probe(ticker,interval,db):
     cfg={'pipeline_enabled':True,'telegram_enabled':False}
     detect_market(store,pair[0],cfg);result=detect_market(store,pair[1],cfg);eid=result['event_id']
     with store.transaction() as c:
-        ev=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(eid,)).fetchone()[0]);ev['historical_test']=True
+        ev=load_payload(c.execute('SELECT payload FROM events WHERE id=?',(eid,)).fetchone()[0]);ev['historical_test']=True
         c.execute('UPDATE events SET payload=? WHERE id=?',(json_text(ev),eid))
         c.execute('INSERT INTO analysis_jobs(event_id,state,updated_at) VALUES(?,?,?)',(eid,'PENDING_CONTEXT',utc_now()))
     print('TEST HISTORYCZNY NA PRAWDZIWYCH DANYCH YAHOO. Telegram: wyłącznie podgląd.',flush=True)
@@ -7109,7 +7110,7 @@ def resume_analysis(db,event_id):
             job=c.execute('SELECT * FROM analysis_jobs WHERE event_id=?',(event_id,)).fetchone()
             if not job or job['state']=='DONE':raise ValueError('Brak zadania do ponowienia albo analiza jest już zakończona.')
             c.execute('UPDATE analysis_jobs SET state=?,attempts=0,next_attempt_at=NULL,last_error=NULL WHERE event_id=?',
-                      ('PENDING_AI' if job['context'] and 'sources' in json.loads(job['context']) else 'PENDING_CONTEXT',event_id))
+                      ('PENDING_AI' if job['context'] and 'sources' in load_payload(job['context']) else 'PENDING_CONTEXT',event_id))
         process_analysis_once(store,keys,event_id);process_analysis_once(store,keys,event_id)
     with store.connection() as c:
         job=c.execute('SELECT state,last_error FROM analysis_jobs WHERE event_id=?',(event_id,)).fetchone()
@@ -7119,7 +7120,7 @@ def resume_analysis(db,event_id):
     if job['last_error']:print(job['last_error'])
     if job['state']!='DONE' and rejection:
         print('ODRZUCONA ODPOWIEDŹ GPT — materiał diagnostyczny, nie zaakceptowana analiza:')
-        print(json.loads(rejection['payload']).get('content') or 'Brak tekstu odpowiedzi.')
+        print(load_payload(rejection['payload']).get('content') or 'Brak tekstu odpowiedzi.')
     for item in messages:print('\n'+item['id']+' · '+item['status']+'\n'+item['message'])
     return 0 if job['state']=='DONE' else 2
 
@@ -7652,7 +7653,7 @@ def run_opportunity_tests():
       self.assertTrue(any('nie są końcowe' in x for x in report['notes']))
       self.assertFalse(report['confirmed']);self.assertEqual(before,json_text(context))
       request=gpt_chat_request('Co pokazują dane?',context,[])
-      data=json.loads(request['messages'][-1]['content'])['context']
+      data=load_payload(request['messages'][-1]['content'])['context']
       self.assertIn('local_analysis',data)
       self.assertIn('RVOL poniżej 1,50',json_text(data['local_analysis']))
      def test_local_research_uses_exact_saved_snapshot_and_prior_reading(self):
@@ -7789,8 +7790,8 @@ def run_opportunity_tests():
       fail_gpt_chat(self.s,turn,'Jawny błąd testowy walidacji')
       with Store(self.s.path).connection() as c:
        row=c.execute('SELECT * FROM gpt_chat_turns WHERE id=?',(turn,)).fetchone()
-       self.assertEqual(json.loads(row['metadata']),metadata)
-       self.assertEqual(json.loads(row['context'])['research']['status'],'RECEIVED')
+       self.assertEqual(load_payload(row['metadata']),metadata)
+       self.assertEqual(load_payload(row['context'])['research']['status'],'RECEIVED')
        self.assertEqual(row['state'],'REVIEW_REQUIRED')
        for table in ('analysis_jobs','outbox','events'):
         self.assertEqual(c.execute('SELECT COUNT(*) FROM '+table).fetchone()[0],0)
@@ -7939,7 +7940,7 @@ def run_panel_tests():
             self.assertIn('Wznów zapisane Research i analizę GPT',[item.label for item in self.app.button])
             self.app.run(timeout=30)
             with self.store.connection() as c:
-                saved=json.loads(c.execute('SELECT context FROM gpt_chat_turns WHERE id=?',(turn,)).fetchone()[0])
+                saved=load_payload(c.execute('SELECT context FROM gpt_chat_turns WHERE id=?',(turn,)).fetchone()[0])
                 self.assertEqual(saved['research']['request_id'],'r1-panel-existing')
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM analysis_jobs').fetchone()[0],0)
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM outbox').fetchone()[0],0)
@@ -8277,7 +8278,7 @@ def run_panel_tests():
             detect_market(self.store,snap,cfg)
             eid=detect_market(self.store,{**snap,'price':102.},cfg)['event_id']
             with self.store.transaction() as c:
-                ev=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(eid,)).fetchone()[0]);ev['manual_analysis']=True;ev['delivery_enabled']=False
+                ev=load_payload(c.execute('SELECT payload FROM events WHERE id=?',(eid,)).fetchone()[0]);ev['manual_analysis']=True;ev['delivery_enabled']=False
                 c.execute('UPDATE events SET payload=? WHERE id=?',(json_text(ev),eid))
             queue_manual_analysis(self.store,eid);claim_analysis(self.store, now=TEST_NOW)
             context={'sources':[{'id':'S1','url':'https://example.org/report','published_at':snap['candle_time'],'content':'Raport emitenta.'}],
@@ -8585,7 +8586,7 @@ def run_service_tests():
         def test_27_old_queue_is_filtered_before_claim_without_network(self):
             eid=self.event()
             with self.store.transaction() as c:
-                evidence=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(eid,)).fetchone()[0]);evidence.pop('kind')
+                evidence=load_payload(c.execute('SELECT payload FROM events WHERE id=?',(eid,)).fetchone()[0]);evidence.pop('kind')
                 c.execute('UPDATE events SET payload=? WHERE id=?',(json_text(evidence),eid))
                 for kind in ('EVIDENCE','ANALYSIS'):
                     c.execute('INSERT INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)',
@@ -8603,7 +8604,7 @@ def run_service_tests():
         def test_29_preview_approval_cannot_bypass_filter(self):
             eid=self.finished()
             with self.store.transaction() as c:
-                evidence=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(eid,)).fetchone()[0]);evidence['snapshot']['rvol']=1.49
+                evidence=load_payload(c.execute('SELECT payload FROM events WHERE id=?',(eid,)).fetchone()[0]);evidence['snapshot']['rvol']=1.49
                 c.execute('UPDATE events SET payload=? WHERE id=?',(json_text(evidence),eid))
             approve_preview(self.store,eid+':analysis');self.assertIsNone(claim_delivery(self.store,eid+':analysis', now=TEST_NOW))
 
@@ -8631,7 +8632,7 @@ def run_service_tests():
             from datetime import timedelta
             eid=self.event()
             with self.store.transaction() as c:
-                ev=json.loads(c.execute('SELECT payload FROM events WHERE id=?',(eid,)).fetchone()[0])
+                ev=load_payload(c.execute('SELECT payload FROM events WHERE id=?',(eid,)).fetchone()[0])
                 now=TEST_NOW
                 ev['snapshot'].update(candle_time=(now-timedelta(hours=2)).isoformat(),
                     candle_end=(now-timedelta(hours=1)).isoformat(),acquired_at=(now-timedelta(hours=1,minutes=1)).isoformat())
@@ -8744,7 +8745,7 @@ def run_service_tests():
             self.assertEqual(sum(x is not None for x in claims),1)
             save_analysis_context(self.store,eid,self.context())
             job=claim_analysis(Store(self.store.path), now=TEST_NOW)
-            self.assertEqual(job['state'],'BUSY_AI');self.assertEqual(json.loads(job['context']),self.context())
+            self.assertEqual(job['state'],'BUSY_AI');self.assertEqual(load_payload(job['context']),self.context())
         def test_06_unknown_completion_requires_review(self):
             self.event();claim_analysis(self.store, now=TEST_NOW);recover_service_jobs(self.store,'analysis')
             self.assertIsNone(claim_analysis(self.store, now=TEST_NOW))
@@ -8927,7 +8928,7 @@ def run_service_tests():
             with self.store.connection() as c:
                 row=c.execute('SELECT state,result FROM analysis_jobs WHERE event_id=?',(eid,)).fetchone()
                 self.assertEqual(row['state'],'REVIEW_REQUIRED')
-                self.assertEqual(json.loads(row['result'])['provider']['raw_response'],body)
+                self.assertEqual(load_payload(row['result'])['provider']['raw_response'],body)
                 self.assertEqual(c.execute("SELECT COUNT(*) FROM outbox WHERE kind='ANALYSIS'").fetchone()[0],0)
         def test_21_response_finish_reason_and_json_have_distinct_diagnostics(self):
             body={'choices':[{'finish_reason':'length','message':{'content':'{'}}]}
@@ -9006,7 +9007,7 @@ def app_ready(store,scanner,panel,url):
     from urllib.error import URLError
     if scanner.poll() is not None or panel.poll() is not None:return False
     with store.connection() as c:row=c.execute("SELECT payload FROM runtime WHERE key='scanner'").fetchone()
-    if not row or json.loads(row[0]).get('pid')!=scanner.pid:return False
+    if not row or load_payload(row[0]).get('pid')!=scanner.pid:return False
     try:
         with urlopen(url+'/_stcore/health',timeout=.5) as response:return response.status==200
     except (URLError,OSError):return False
@@ -9101,9 +9102,9 @@ def run_launch_tests():
             self.assertEqual(p.returncode,0,p.stdout+p.stderr);self.assertIn('PANEL I SKANER GOTOWE',p.stdout)
             store=Store(self.db)
             with store.connection() as c:
-                runtime=json.loads(c.execute("SELECT payload FROM runtime WHERE key='launcher'").fetchone()[0])
+                runtime=load_payload(c.execute("SELECT payload FROM runtime WHERE key='launcher'").fetchone()[0])
                 self.assertEqual(runtime['status'],'STOPPED')
-                self.assertEqual(json.loads(c.execute("SELECT payload FROM runtime WHERE key='scanner'").fetchone()[0])['status'],'STOPPED')
+                self.assertEqual(load_payload(c.execute("SELECT payload FROM runtime WHERE key='scanner'").fetchone()[0])['status'],'STOPPED')
                 self.assertGreater(c.execute('SELECT COUNT(*) FROM cycles').fetchone()[0],0)
                 self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)
             with self.assertRaises(OSError):socket.create_connection(('127.0.0.1',self.port),timeout=.5)
@@ -9125,7 +9126,7 @@ def run_launch_tests():
                 while time.monotonic()<deadline:
                     if first.poll() is not None:self.fail('Pierwszy launcher zakończył start: '+''.join(first.communicate()))
                     with store.connection() as c:row=c.execute("SELECT payload FROM runtime WHERE key='launcher'").fetchone()
-                    if row and json.loads(row[0])['status']=='RUNNING':break
+                    if row and load_payload(row[0])['status']=='RUNNING':break
                     time.sleep(.1)
                 else:self.fail('Brak potwierdzenia startu pierwszego launchera.')
                 second=subprocess.run(self.command,capture_output=True,text=True,encoding='utf-8',timeout=10)
@@ -9195,7 +9196,7 @@ def main(argv=None):
             ranking_result = run_ranking_tests()
             opportunity_result = run_opportunity_tests()
             import unittest
-            repair_result=unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromName('test_repair_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_yahoo_retry_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_service_status_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_reference_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_us_session_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_readiness_20261025'),unittest.defaultTestLoader.loadTestsFromName('test_alert_quality_20261026'),unittest.defaultTestLoader.loadTestsFromName('test_ai_preflight_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_full_package_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_optimization_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_message_synthesis_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_c_tavily_contract'),unittest.defaultTestLoader.loadTestsFromName('test_e06_tavily_issuer'),unittest.defaultTestLoader.loadTestsFromName('test_e06_cli_dual_contract'),unittest.defaultTestLoader.loadTestsFromName('test_research_v3'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_search_contract'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_page_dates'),unittest.defaultTestLoader.loadTestsFromName('test_daily_readiness_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_tracking_levels_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_portfolio_cards_20261029')]))
+            repair_result=unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromName('test_repair_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_yahoo_retry_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_service_status_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_reference_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_us_session_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_readiness_20261025'),unittest.defaultTestLoader.loadTestsFromName('test_alert_quality_20261026'),unittest.defaultTestLoader.loadTestsFromName('test_ai_preflight_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_full_package_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_optimization_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_message_synthesis_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_c_tavily_contract'),unittest.defaultTestLoader.loadTestsFromName('test_e06_tavily_issuer'),unittest.defaultTestLoader.loadTestsFromName('test_e06_cli_dual_contract'),unittest.defaultTestLoader.loadTestsFromName('test_research_v3'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_search_contract'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_page_dates'),unittest.defaultTestLoader.loadTestsFromName('test_daily_readiness_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_tracking_levels_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_portfolio_cards_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_observation_storage_20261030')]))
             return 1 if foundation_result or market_result or service_result or ranking_result or opportunity_result or not repair_result.wasSuccessful() else 0
         if args.migration_report:
             plan = prepare_migration(args.migration_report)
