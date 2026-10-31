@@ -1,0 +1,33 @@
+[Unit]
+Description=KI 2 bounded technical supervision
+Wants=network-online.target
+# Do not order this oneshot after KI: it may synchronously restart KI itself.
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I /usr/local/lib/ki2-guardian/ki2_guardian.py --apply --notify --auto-restart
+TimeoutStartSec=150
+UMask=0077
+StateDirectory=ki2-guardian
+StateDirectoryMode=0700
+RuntimeDirectory=ki2-guardian
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+Nice=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# SQLite may create WAL/SHM as ubuntu; the monitor performs no SQL data writes.
+ReadWritePaths=/home/ubuntu/ki2
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check KI 2 health every two minutes
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=120
+AccuracySec=10
+Unit=ki2-guardian.service
+
+[Install]
+WantedBy=timers.target

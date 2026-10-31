@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import json
 from observation_storage import loads as load_payload, encode_observation, prune_observations
+from ki2_ops_guard import guard_operation
 import math
 import os
 import signal
@@ -1265,6 +1266,7 @@ class AnalysisRejected(ServiceError):
         self.payload=payload
 
 
+@guard_operation(error=ServiceError)
 def service_http(label,url,key=None,payload=None,uncertain=False):
     import requests
     headers={'Authorization':'Bearer '+key} if key else {}
@@ -1562,6 +1564,7 @@ def manual_provider(engine,keys,request=None):
     return 'OpenAI','https://api.openai.com/v1/chat/completions',keys['OPENAI_API_KEY']
 
 
+@guard_operation(error=ServiceError)
 def resume_manual_research(store,turn_id):
     """Explicit resume of one saved turn; no fresh Research, quote or Telegram."""
     with ScannerLock(str(store.path)+'.gpt_chat'):
@@ -1659,6 +1662,7 @@ def search_result_record(response,local_id):
             'request':copy.deepcopy(response.get('request'))}
 
 
+@guard_operation(error=ServiceError)
 def collect_manual_research(store,turn,context,snapshot,key):
     from tavily_cli_adapter import search_sync,CLITransportError
     r=context['research']
@@ -2157,6 +2161,7 @@ def event_analysis_request(evidence,context):
         'response_format':{'type':'json_schema','json_schema':{'name':'ki_event_analysis','strict':True,'schema':analysis_schema(snap,context)}}}
 
 
+@guard_operation(error=ServiceError)
 def analyze_event(evidence,context,keys,engine='openai'):
     import copy
     snap=evidence['snapshot']
@@ -3137,6 +3142,7 @@ def recover_service_jobs(store,kind):
 
 
 
+@guard_operation(error=ServiceError)
 def submit_event_research(store, event_id, query, cutoff, api_key):
     """Synchroniczne Tavily Search zamiast async Research. Wynik od razu COMPLETED."""
     from tavily_cli_adapter import search_sync, CLITransportError
@@ -3208,6 +3214,7 @@ def r1_research_sources(response, cutoff, snapshot):
         return result
     raise ServiceError("Research: nierozpoznany format odpowiedzi Tavily.", uncertain=True)
 
+@guard_operation(defer=True)
 def process_analysis_once(store,keys,event_id=None):
     job=claim_analysis(store,event_id)
     if not job:return False
@@ -3389,6 +3396,7 @@ def telegram_delivery_active(store):
     return cfg['pipeline_enabled'] and cfg['telegram_enabled']
 
 
+@guard_operation(defer=True)
 def process_delivery_once(store,keys,outbox_id=None):
     from datetime import timedelta
     # E03: the queue remains pending when either switch is off.
@@ -4782,6 +4790,7 @@ def gpt_chat_request(question,context,history):
             'response_format':{'type':'json_schema','json_schema':{'name':'ki_manual_research','strict':True,'schema':manual_research_schema(context)}}}
 
 
+@guard_operation(error=ServiceError)
 def perform_manual_question(store,ticker,question,with_search,history=(),purpose='chat',engine='openai',fetch_fresh_spread=False):
     engine=manual_engine(engine)
     keys=load_service_keys()
@@ -6301,6 +6310,7 @@ def deep_analysis_config(base,folder):
     return cfg
 
 
+@guard_operation(error=ServiceError)
 def start_deep_analysis(store,ticker,question="Co potwierdza ruch tej spółki, jakie dowody go wyjaśniają i co zaneguje ten scenariusz?"):
     import subprocess
     ticker=ticker.strip().upper()
@@ -9196,7 +9206,7 @@ def main(argv=None):
             ranking_result = run_ranking_tests()
             opportunity_result = run_opportunity_tests()
             import unittest
-            repair_result=unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromName('test_repair_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_yahoo_retry_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_service_status_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_reference_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_us_session_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_readiness_20261025'),unittest.defaultTestLoader.loadTestsFromName('test_alert_quality_20261026'),unittest.defaultTestLoader.loadTestsFromName('test_ai_preflight_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_full_package_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_optimization_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_message_synthesis_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_c_tavily_contract'),unittest.defaultTestLoader.loadTestsFromName('test_e06_tavily_issuer'),unittest.defaultTestLoader.loadTestsFromName('test_e06_cli_dual_contract'),unittest.defaultTestLoader.loadTestsFromName('test_research_v3'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_search_contract'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_page_dates'),unittest.defaultTestLoader.loadTestsFromName('test_daily_readiness_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_tracking_levels_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_portfolio_cards_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_observation_storage_20261030')]))
+            repair_result=unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromName('test_repair_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_yahoo_retry_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_service_status_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_reference_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_us_session_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_readiness_20261025'),unittest.defaultTestLoader.loadTestsFromName('test_alert_quality_20261026'),unittest.defaultTestLoader.loadTestsFromName('test_ai_preflight_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_full_package_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_optimization_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_message_synthesis_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_c_tavily_contract'),unittest.defaultTestLoader.loadTestsFromName('test_e06_tavily_issuer'),unittest.defaultTestLoader.loadTestsFromName('test_e06_cli_dual_contract'),unittest.defaultTestLoader.loadTestsFromName('test_research_v3'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_search_contract'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_page_dates'),unittest.defaultTestLoader.loadTestsFromName('test_daily_readiness_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_tracking_levels_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_portfolio_cards_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_observation_storage_20261030'),unittest.defaultTestLoader.loadTestsFromName('test_guardian_20261031')]))
             return 1 if foundation_result or market_result or service_result or ranking_result or opportunity_result or not repair_result.wasSuccessful() else 0
         if args.migration_report:
             plan = prepare_migration(args.migration_report)
