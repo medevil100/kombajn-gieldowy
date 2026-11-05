@@ -22,6 +22,7 @@ plotly>=5.18
 matplotlib
 
 # Daty i strefy czasowe
+exchange-calendars==4.13.2
 python-dateutil
 pytz
 

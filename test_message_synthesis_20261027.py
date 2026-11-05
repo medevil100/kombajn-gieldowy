@@ -27,7 +27,9 @@ class MessageSynthesisTests(unittest.TestCase):
         for ticker in ('GOSS','CLNN','AAA.WA'):
             ev,result=self.sample();ev['snapshot']['ticker']=ticker;ev['snapshot']['rvol']=.7
             text=KI.opportunity_message('e',ev,{'sources':[]},result)
-            self.assertIn('za wcześnie na ocenę aktywności całej godziny',text)
+            self.assertIn('bieżąca dotąd: 0,70×',text)
+            self.assertNotIn('za wcześnie',text)
+            self.assertNotIn('świeca trwa',text)
             self.assertNotIn('poniżej średniej',text)
             self.assertIn('nie można ocenić spreadu',text)
             self.assertNotIn('bez przekroczenia',text)

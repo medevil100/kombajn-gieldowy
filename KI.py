@@ -130,6 +130,9 @@ CREATE TABLE IF NOT EXISTS opportunities(
  candle_end TEXT NOT NULL, state TEXT NOT NULL, cycle_id TEXT NOT NULL,
  payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS opportunity_selection ON opportunities(state,cycle_id);
+CREATE TABLE IF NOT EXISTS signal_confirmations(
+ confirmed_at TEXT NOT NULL, ticker TEXT NOT NULL, price REAL NOT NULL,
+ change_pct REAL NOT NULL, currency TEXT NOT NULL, PRIMARY KEY(confirmed_at,ticker));
 CREATE TABLE IF NOT EXISTS analysis_budgets(slot TEXT PRIMARY KEY, used INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS deep_reports(
  id TEXT PRIMARY KEY, ticker TEXT NOT NULL, state TEXT NOT NULL, payload TEXT,
@@ -821,25 +824,94 @@ def wilder(values,n):
     return smooth(values,n,1/n)
 
 
+def market_rsi(close):
+    gains = [None]
+    losses = [None]
+    for previous, current in zip(close, close[1:]):
+        change = current - previous if current is not None and previous is not None else None
+        gains.append(max(change, 0) if change is not None else None)
+        losses.append(max(-change, 0) if change is not None else None)
+    return [
+        None if gain is None or loss is None else
+        50.0 if gain == loss == 0 else 100.0 if loss == 0 else 100 - 100 / (1 + gain / loss)
+        for gain, loss in zip(wilder(gains, 14), wilder(losses, 14))
+    ]
+
+
+def session_vwap(rows, ticker, interval):
+    from datetime import time, timedelta
+    if interval not in ('15m', '30m', '1h'):
+        return None
+    zone = exchange_zone(ticker)
+    day = parse_market_time(rows[-1]['time']).astimezone(zone).date()
+    opening = time(9) if ticker.upper().endswith('.WA') else time(9, 30)
+    expected = datetime.combine(day, opening, zone)
+    step = timedelta(seconds=MARKET_INTERVALS[interval])
+    total_volume = weighted_price = 0.0
+    for row in rows:
+        start = parse_market_time(row['time']).astimezone(zone)
+        if start.date() != day:
+            continue
+        if start != expected or not automatic_session_open(ticker, start):
+            return None
+        expected += step
+        volume = row.get('volume')
+        if volume is None:
+            return None
+        if volume == 0:
+            continue
+        prices = [row.get(field) for field in ('high', 'low', 'close')]
+        if any(price is None for price in prices):
+            return None
+        total_volume += volume
+        weighted_price += sum(prices) / 3 * volume
+    return weighted_price / total_volume if total_volume > 0 else None
+
+
+FIBONACCI_RATIOS = (0, 23.6, 38.2, 50, 61.8, 78.6, 100)
+
+
+def supplemental_market_indicators(rows, ticker, interval):
+    rsi = market_rsi([row.get('close') for row in rows])
+    stochastic = [None] * len(rsi)
+    for index in range(13, len(rsi)):
+        window = rsi[index - 13:index + 1]
+        if None in window:
+            continue
+        low, high = min(window), max(window)
+        if high > low:
+            stochastic[index] = (window[-1] - low) / (high - low) * 100
+    k = rolling_mean(stochastic, 3)
+    d = rolling_mean(k, 3)
+
+    closed = [row for row in rows if row.get('status') == 'CLOSED'
+              and finite_number(row.get('volume'), True)][-20:]
+    levels = []
+    if len(closed) == 20 and all(row.get('high') is not None and row.get('low') is not None for row in closed):
+        high = max(row['high'] for row in closed)
+        low = min(row['low'] for row in closed)
+        if high > low:
+            levels = [high - ratio / 100 * (high - low) for ratio in FIBONACCI_RATIOS]
+    return {'vwap': session_vwap(rows, ticker, interval), 'stoch_rsi_k': k[-1],
+            'stoch_rsi_d': d[-1], 'fibonacci': levels}
+
+
 def market_indicators(rows):
     validate_market_rows(rows)
     close=[r.get('close') for r in rows]; high=[r.get('high') for r in rows]
     low=[r.get('low') for r in rows]; volume=[r.get('volume') for r in rows]
-    n=len(rows); gains=[None];losses=[None];tr=[];plus=[None];minus=[None]
+    n=len(rows);tr=[];plus=[None];minus=[None]
     for i in range(n):
         if high[i] is None or low[i] is None or (i and close[i-1] is None):tr.append(None)
         else:tr.append(max(high[i]-low[i],abs(high[i]-close[i-1]),abs(low[i]-close[i-1])) if i else high[i]-low[i])
         if i:
-            d=close[i]-close[i-1] if close[i] is not None and close[i-1] is not None else None
-            gains.append(max(d,0) if d is not None else None);losses.append(max(-d,0) if d is not None else None)
             if any(v is None for v in (high[i],high[i-1],low[i],low[i-1])):
                 plus.append(None);minus.append(None)
             else:
                 up=high[i]-high[i-1];down=low[i-1]-low[i]
                 plus.append(up if up>down and up>0 else 0)
                 minus.append(down if down>up and down>0 else 0)
-    ag,al=wilder(gains,14),wilder(losses,14)
-    rsi=[None if g is None or l is None else (50.0 if g==l==0 else 100.0 if l==0 else 100-100/(1+g/l)) for g,l in zip(ag,al)]
+    rsi=market_rsi(close)
     atr=wilder(tr,14);dtr=wilder([None]+tr[1:],14)
     pdm,mdm=wilder(plus,14),wilder(minus,14)
     pdi=[None if t is None or p is None else (100*p/t if t else 0.0) for p,t in zip(pdm,dtr)]
@@ -1135,6 +1207,22 @@ def merge_daily_source_rows(recent,extended):
     return [by_time[key] for key in sorted(by_time)]
 
 
+def market_52_week_range(metadata, ticker, now):
+    if metadata.get('symbol') != ticker:
+        return None
+    currency = metadata.get('currency')
+    low = metadata.get('fiftyTwoWeekLow')
+    high = metadata.get('fiftyTwoWeekHigh')
+    quote_time = metadata.get('regularMarketTime')
+    if (currency not in ('PLN', 'USD') or not finite_number(low, True)
+            or not finite_number(high, True) or low > high
+            or not finite_number(quote_time, True)
+            or not 0 <= now.timestamp() - quote_time <= 7 * 86400):
+        return None
+    return {'low': low, 'high': high, 'currency': currency,
+            'as_of': datetime.fromtimestamp(quote_time, timezone.utc).isoformat()}
+
+
 def _orig_fetch_market(ticker,interval):
     import yfinance as yf
     import warnings
@@ -1207,6 +1295,7 @@ def _orig_fetch_market(ticker,interval):
           'previous_closed':previous_closed,'average_volume':avg_volume,'rvol':ind['rvol'],
           'rvol_incomplete':last['status']!='CLOSED' or last.get('partial_interval',False),
           'partial_interval':last.get('partial_interval',False),'indicators':ind,
+          'supplemental_indicators':supplemental_market_indicators(rows,ticker,interval),
           'ohlc':{k:last.get(k) for k in ('open','high','low','close')},
           'chart_history':build_chart_history(rows),
           'scoring':market_score(ind,last['close']),'direction':market_direction(ind,last['close']),
@@ -1222,6 +1311,10 @@ def _orig_fetch_market(ticker,interval):
           'metadata_warning':metadata_warning,'history_warning':history_warning,
           'candle_age_seconds':max(0,(now-parse_market_time(last['time'])).total_seconds())}
     if interval=='1d':snap['daily_history']=[dict(row) for row in rows if row.get('status')=='CLOSED']
+    elif interval=='1h':
+        range_52w = market_52_week_range(metadata, ticker, now)
+        if range_52w:
+            snap['market_52_week_range'] = range_52w
     return snap
 
 
@@ -1690,6 +1783,7 @@ def collect_manual_research(store,turn,context,snapshot,key):
 
 
 from ai_assessment import summary_text as analysis_assessment_text, validate_axes, unsupported_story, quote_candidates
+from analysis_verdict import review as review_analysis_material, material_issues, decision_errors, activity_summary, quote_status, narrative_errors
 
 
 def analysis_schema(snapshot,context):
@@ -1710,6 +1804,13 @@ def analysis_schema(snapshot,context):
             aliases=(context.get('issuer_identity') or issuer_search_identity(snapshot)).get('aliases',[])
             quotes=list(dict.fromkeys(q for source in context['sources'] for q in quote_candidates(source,aliases)))
             schema['properties']['context']['items']['properties']['fact']={'type':'string','enum':quotes or ['UNAVAILABLE']}
+    if context.get('analysis_manifest',{}).get('version',0)>=4:
+        local=review_analysis_material(snapshot,context['analysis_manifest'])
+        schema['properties']['decision']=obj({
+            'verdict':{'type':'string','enum':[local['verdict']]},
+            'reason_codes':{'type':'array','minItems':1,'maxItems':3,
+                            'items':{'type':'string','enum':list(local['evidence']) or ['UNAVAILABLE']}}})
+        schema['required'].append('decision')
     return schema
 
 
@@ -1740,6 +1841,8 @@ def analysis_publication_issues(result,require_assessment=False):
     issues=[]
     if require_assessment and not analysis_assessment_text(result):
         issues.append('Brak poprawnego wspólnego wniosku AI o ruchu, aktywności i ograniczeniach.')
+    if isinstance(result,ValidatedAnalysis) and any(x.startswith('decision:') for x in result.get('quality_issues',[])):
+        issues.append('Wniosek AI jest niezgodny z lokalną oceną lub nie wskazuje wymaganych dowodów.')
     if len(metrics)<2 or len(dimensions)<2:
         issues.append('Za mało niezależnych interpretacji technicznych: wymagane co najmniej dwa wskaźniki z różnych obszarów.')
     if not dimensions.intersection({'momentum','price','direction'}):
@@ -1755,6 +1858,7 @@ def validate_event_analysis(result,snapshot,context):
     trusted=isinstance(result,ValidatedAnalysis)
     if isinstance(result,dict) and 'assessment' in result:expected.add('assessment')
     if context.get('analysis_manifest',{}).get('version',0)>=3:expected.add('assessment')
+    if context.get('analysis_manifest',{}).get('version',0)>=4:expected.add('decision')
     if not isinstance(result,dict) or set(result)-{'quality_issues'}!=expected:
         raise ValueError('Niepoprawne sekcje analizy AI.')
     warnings=list(result.get('quality_issues',[])) if trusted else []
@@ -1769,7 +1873,7 @@ def validate_event_analysis(result,snapshot,context):
         return bool(re.search(r'\b(buy|sell|kup|kupuj|sprzedaj|sprzedawaj)\b',value,re.I))
     def issue(path,reason):warnings.append(path+': '+reason+' (usunięto).')
     removed_premise=False
-    for key in expected-{'assessment'}:
+    for key in expected-{'assessment','decision'}:
         if not isinstance(result[key],list):raise ValueError(key+': niepoprawna lista.')
         if len(result[key])>5:
             issue(key,'przekroczony limit elementów')
@@ -1866,6 +1970,12 @@ def validate_event_analysis(result,snapshot,context):
             issue('assessment','brak spójnego wniosku o ruchu, aktywności i ograniczeniach albo nieuprawniona pewność')
             result['assessment']=''
         else:result['assessment']=summary
+    if 'decision' in expected:
+        local=review_analysis_material(snapshot,context['analysis_manifest'])
+        for error in decision_errors(result['decision'],local,result['technical'],result.get('assessment'),snapshot):
+            warnings.append('decision: '+error)
+        for error in narrative_errors(result,snapshot,context['analysis_manifest']):
+            warnings.append('decision: '+error)
     if warnings:result['quality_issues']=list(dict.fromkeys(warnings))
     return result
 
@@ -1905,7 +2015,7 @@ def build_analysis_manifest(evidence,context):
     assessment='Wskazania mieszane' if support and against else 'Wskazania zgodne z ruchem' if support else 'Bieżące wskazania przeczą ruchowi od bazy' if against else 'Za mało danych do oceny zgodności'
     rsi=i.get('rsi');risk=opportunity_risk(snap)
     row=evidence.get('ranking') or {}
-    return {'version':3,'identity':{k:snap.get(k) for k in ('ticker','company_name','currency','interval','acquired_at','candle_time','candle_end','candle_status')},
+    manifest={'version':3,'identity':{k:snap.get(k) for k in ('ticker','company_name','currency','interval','acquired_at','candle_time','candle_end','candle_status')},
         'detection':{'state':matrix.get('state','TWO_CANDLES' if evidence.get('reasons')==['TWO_CANDLES'] else 'UNKNOWN'),
                      'direction':'WZROST' if direction>0 else 'SPADEK' if direction<0 else 'NIEUSTALONY',
                      'change_pct':change,'price':price,'base':matrix,'proofs':evidence.get('reasons',[])},
@@ -1927,6 +2037,10 @@ def build_analysis_manifest(evidence,context):
                    'count':len(context.get('sources',[])),'cutoff':context.get('cutoff'),
                    'excluded':context.get('excluded',0),'extract':context.get('extract_diagnostics',{})},
         'conclusion':'Potwierdzenie ruchu nie jest potwierdzeniem okazji ani wykonalności transakcji.'}
+    if evidence.get('autonomous_assessment_version')==1:
+        manifest['version']=4
+        manifest['local_review']=review_analysis_material(snap,manifest)
+    return manifest
 
 
 def automatic_ai_preflight(evidence,context):
@@ -2018,6 +2132,25 @@ def save_ai_preflight(store,event_id,context,decision):
                       (json_text(result),'Bez wywołania AI: '+' '.join(decision['skip_reasons']),utc_now(),event_id))
             c.execute("UPDATE outbox SET status='FILTERED',last_error='Ocena lokalna: brak podstaw do wywołania AI.',next_attempt_at=NULL WHERE event_id=? AND kind='ANALYSIS' AND status IN ('PENDING','PREVIEW')",(event_id,))
     return context
+
+
+def filter_incomplete_analysis_material(store,event_id,evidence):
+    """Only new events: stop before either paid provider, retain evidence/history."""
+    if evidence.get('autonomous_assessment_version')!=1:return False
+    issues=material_issues(evidence.get('snapshot') or {})
+    if not issues:return False
+    with store.transaction() as c:
+        prior=c.execute('SELECT context FROM analysis_jobs WHERE event_id=?',(event_id,)).fetchone()
+        context=load_payload(prior[0]) if prior and prior[0] else {'sources':[]}
+        context['analysis_manifest']=build_analysis_manifest(evidence,context)
+        research_exists=c.execute('SELECT 1 FROM research_requests WHERE event_id=?',(event_id,)).fetchone() is not None
+        result={'local_only':True,'provider':{'not_called':True,'research_not_called':not research_exists},
+                'local_review':context['analysis_manifest']['local_review']}
+        changed=c.execute("UPDATE analysis_jobs SET state='FILTERED',context=?,result=?,last_error=?,next_attempt_at=NULL,updated_at=? WHERE event_id=? AND state IN ('BUSY_CONTEXT','BUSY_AI')",
+            (json_text(context),json_text(result),'Materiał przed dostawcami: '+' '.join(issues),utc_now(),event_id)).rowcount
+        if changed!=1:raise ServiceError('Stan zadania zmienił się przed kontrolą materiału; dostawcy nie zostali wywołani.')
+        c.execute("UPDATE outbox SET status='FILTERED',last_error='Niepełny materiał przed dostawcami.',next_attempt_at=NULL WHERE event_id=? AND kind='ANALYSIS' AND status IN ('PENDING','PREVIEW')",(event_id,))
+    return True
 
 
 def legacy_event_instructions():
@@ -2116,7 +2249,11 @@ def event_analysis_request(evidence,context):
             'Brak podstaw do sekcji oznacza pustą listę. Bez źródeł context ma być pusty. '
             'Nie wydawaj poleceń transakcji ani BUY/SELL. Zwróć wyłącznie JSON zgodny ze schematem.')
 
-        if not check['quotes_available']:market['spread']={'available':False,'reason':'Brak poprawnych bid/ask.'}
+        if not check['quotes_available']:
+            status=quote_status(snap)
+            reason=('Niespójne bid/ask: bid powyżej ask.' if status=='INVERTED' else
+                    'Niepełne bid/ask.' if status=='INCOMPLETE' else 'Brak bid/ask.')
+            market['spread']={**(snap.get('spread') or {}),'available':False,'status':status,'reason':reason}
         evidence_data.update(snapshot=market,local_assessment={k:v for k,v in check.items() if k in ('direction','change_pct','quotes_available','scope','local_findings','supporting_signals','local_risk','limitations','questions','previous_relation')},
                              previous_snapshot=check.get('previous_snapshot'))
         if context.get('analysis_manifest'):
@@ -2143,6 +2280,15 @@ def event_analysis_request(evidence,context):
                 'Przy otwartej świecy wolumen poniżej średniej pełnych godzin nie dowodzi słabej aktywności całej godziny. '
                 'Brak bid/ask oznacza nieocenione ryzyko wykonania, nie bezpieczeństwo. '
                 'Nie pisz, że pojedynczy histogram potwierdza kontynuację trendu.')
+            if manifest.get('version',0)>=4:
+                instructions+=(' local_review jest lokalną kontrolą dowodów, nie rekomendacją transakcji. '
+                    'decision.verdict musi odpowiadać local_review.verdict. W reason_codes wskaż od jednej do trzech '
+                    'przesłanek z local_review.evidence, w tym przynajmniej jedną required_reason_codes. '
+                    'Uzasadnij je w assessment i technical. Przy TECH_MIXED zinterpretuj wskaźnik wspierający i przeciwny. '
+                    'risk musi uwzględniać dominujące ryzyko, activity musi odpowiadać wolumenowi i statusowi świecy. '
+                    'Nie oceniaj relacji potencjału do ryzyka, gdy trade_plan nie ma statusu INDICATIVE i wyliczonego rr1. '
+                    'Rozróżniaj brak, niepełne i niespójne bid/ask od niepotwierdzonej świeżości dostępnych ofert. '
+                    'Oceniaj zgodność danych, bez obietnic zarobku, prawdopodobieństw i zapewnień o wykonaniu transakcji.')
     # Operational diagnostics (failed sources, requests, attempts, credit usage) stay
     # in SQLite; do not pay to resend them to OpenAI or expose unverifiable text.
     _sources = context.get('sources') or []
@@ -2316,6 +2462,11 @@ def fetch_opportunity_spread(ticker):
         return {**spread_from_info({}),'error':'Yahoo: '+type(exc).__name__+'; spread niedostępny.'}
 
 
+def fetch_portfolio_analyst(ticker):
+    import yfinance as yf
+    return bounded_market_operation(lambda: yf.Ticker(ticker).get_info(), (ticker, 'quote'), 20)
+
+
 def attach_manual_quote(context,quote):
     # Freeze a separate quote in the report; never rewrite the stored OHLC observation.
     if context.get('snapshot'):
@@ -2341,7 +2492,14 @@ def quote_report_rows(snapshot):
 def opportunity_risk(snapshot):
     reasons=[];missing=[];quote=snapshot.get('spread') or {};spread=quote.get('spread_pct')
     high=(snapshot.get('ohlc') or {}).get('high');price=snapshot.get('price');pullback=None
-    if finite_number(high,True) and finite_number(price,True) and price<=high:
+    change=(snapshot.get('price_matrix') or {}).get('change_pct')
+    low=(snapshot.get('ohlc') or {}).get('low')
+    if finite_number(change) and change<0:
+        if finite_number(low,True) and finite_number(price,True) and price>=low:
+            pullback=(price/low-1)*100
+            if pullback>=2.-1e-10:reasons.append('Odbicie od minimum bieżącej świecy ≥ 2%')
+        else:missing.append('Poprawne minimum bieżącej świecy')
+    elif finite_number(high,True) and finite_number(price,True) and price<=high:
         pullback=(high-price)/high*100
         if pullback>=2.-1e-10:reasons.append('Cofnięcie od maksimum bieżącej świecy ≥ 2%')
     else:missing.append('Poprawne maksimum bieżącej świecy')
@@ -2721,7 +2879,7 @@ def queue_opportunity(store,sequence_id,spread,delivery_enabled,now=None):
         if not _ok:
             c.execute("UPDATE opportunities SET state='EXPIRED' WHERE sequence_id=?",(sequence_id,));return False
         row.update(snapshot=snap,risk=opportunity_risk(snap))
-        evidence={'kind':'CONFIRMED_OPPORTUNITY','sequence_id':sequence_id,'snapshot':snap,'ranking':row,
+        evidence={'kind':'CONFIRMED_OPPORTUNITY','autonomous_assessment_version':1,'sequence_id':sequence_id,'snapshot':snap,'ranking':row,
                   'reference':({'price':snap['price_matrix']['anchor_price'],'acquired_at':snap['price_matrix']['anchor_at']} if snap.get('price_matrix') else {'price':snap['previous_closed']['open'],'candle_time':snap['previous_closed']['time']}),
                   'price_change_pct':row['change_pct'],'rvol_change_pct':None,'reasons':['PRICE_MATRIX_3_READS' if snap.get('price_matrix') else 'TWO_CANDLES'],
                   'thresholds':{'price_threshold_pct':float(store.load_section('settings',{}).get('price_threshold_pct',2.0)),'confirmation_reads':3} if snap.get('price_matrix') else {'price_threshold_pct':2.,'rvol_min':1.5},'delivery_enabled':delivery_enabled,
@@ -2742,21 +2900,26 @@ def opportunity_message(event_id,evidence,context,result):
     heading='POTWIERDZONY WZROST' if finite_number(change) and change>0 else 'POTWIERDZONY SPADEK' if finite_number(change) and change<0 else 'POTWIERDZONY RUCH'
     lines=[heading+' · '+snap['ticker'],
            'Ruch: '+pl_number(change,2,'%')+' od bazy · cena '+pl_number(snap.get('price'),4,' '+str(snap.get('currency') or '')),
-           'Ocena: '+manifest['technical']['assessment']+'.']
-    rv=snap.get('rvol')
-    if not finite_number(rv):activity='brak danych do oceny wolumenu.'
-    elif snap.get('candle_status')=='OPEN':
-        activity=('zgromadzony wolumen już przekracza średnią pełnych godzin; świeca trwa.' if rv>=1 else
-                  'świeca trwa — za wcześnie na ocenę aktywności całej godziny.')
-    else:activity='wolumen zakończonej świecy '+('powyżej' if rv>=1 else 'poniżej')+' średniej.'
-    lines.append('Aktywność: '+activity)
+           'Ocena: '+(manifest.get('local_review') or {}).get('label',manifest['technical']['assessment'])+'.']
+    if manifest.get('local_review'):
+        local=manifest['local_review']
+        if local['required_reason_codes']:lines.append('Powód: '+local['evidence'][local['required_reason_codes'][0]]['text'])
+    previous=(manifest.get('comparison') or {}).get('previous_snapshot') or evidence.get('previous_snapshot')
+    lines.append('Aktywność: '+activity_summary(snap,previous))
     quotes=manifest['quotes'];has_quotes=all(finite_number(quotes.get(k),True) for k in ('bid','ask')) and quotes['ask']>=quotes['bid']
     quote_note='brak bid/ask' if not has_quotes else 'świeżość ofert niepotwierdzona' if not quotes.get('freshness_confirmed') else 'czas ofert potwierdzony'
     reasons='; '.join(risk.get('reasons',[]))
-    if not has_quotes:lines.append('Ryzyko: nie można ocenić spreadu i warunków wykonania — brak bid/ask.'+(' '+reasons[:140]+'.' if reasons else ''))
+    if not has_quotes:
+        status=quote_status({'spread':quotes})
+        why='niespójne bid/ask (bid powyżej ask)' if status=='INVERTED' else 'niepełne bid/ask' if status=='INCOMPLETE' else 'brak bid/ask'
+        lines.append('Ryzyko: nie można ocenić spreadu i warunków wykonania — '+why+'.'+(' '+reasons[:140]+'.' if reasons else ''))
     else:lines.append('Ryzyko: '+risk['label']+' · '+quote_note+('. '+reasons[:140] if reasons else '')+'.')
     lines.append(bid_ask_summary(snap,quotes))
-    if analysis_assessment_text(result):lines.append('Wniosek AI: '+analysis_assessment_text(result))
+    summary=analysis_assessment_text(result)
+    if manifest.get('version',0)>=4 and isinstance(result.get('assessment'),dict):
+        # Volume has its own measured line; keep all three AI axes in the full report.
+        summary=' '.join(result['assessment'][key].strip() for key in ('movement','risk'))
+    if summary:lines.append('Wniosek AI: '+summary)
     lines.extend(trade_plan_lines(manifest.get('trade_plan') or build_trade_plan(snap,change)))
     lines.append('Kontekst źródłowy w pełnym raporcie; związek z ruchem niepotwierdzony.' if result.get('context') else 'Przyczyna nieustalona.')
     if result.get('quality_issues'):lines.append('Analiza częściowa — szczegóły pominięć w panelu.')
@@ -2829,6 +2992,29 @@ def opportunity_indicator_rows(snapshot):
         elif key in ('stoch_k','stoch_d'):shown=pl_number(value,2,'%')
         else:shown=pl_number(value,2)
         rows.append({'Wskaźnik':label,'Wartość':shown})
+    return rows + supplemental_indicator_rows(snapshot)
+
+
+def supplemental_indicator_rows(snapshot):
+    values = snapshot.get('supplemental_indicators')
+    if not isinstance(values, dict):
+        return []
+    currency = snapshot.get('currency') or ''
+    unit = ' ' + currency if currency else ''
+    rows = []
+    for key, label, digits, suffix in (
+        ('vwap', 'VWAP sesji (ze świec)', 4, unit),
+        ('stoch_rsi_k', 'Stoch RSI %K', 2, '%'),
+        ('stoch_rsi_d', 'Stoch RSI %D', 2, '%'),
+    ):
+        rows.append({'Wskaźnik': label, 'Wartość': pl_number(values.get(key), digits, suffix)})
+    levels = values.get('fibonacci') or []
+    if len(levels) == len(FIBONACCI_RATIOS):
+        for ratio, level in zip(FIBONACCI_RATIOS, levels):
+            label = f'Fibonacci {ratio:g}%'.replace('.', ',')
+            rows.append({'Wskaźnik': label, 'Wartość': pl_number(level, 4, unit)})
+    else:
+        rows.append({'Wskaźnik': 'Fibonacci', 'Wartość': 'Brak danych'})
     return rows
 
 
@@ -3241,6 +3427,7 @@ def process_analysis_once(store,keys,event_id=None):
                     c.execute("UPDATE analysis_jobs SET state='FILTERED',last_error=?,next_attempt_at=NULL,updated_at=? WHERE event_id=? AND state IN ('BUSY_CONTEXT','BUSY_AI')",
                               ('Niepotwierdzona lub zmieniona baza poprzedniej sesji; bez wywołań dostawców.',utc_now(),job['event_id']))
                 return True
+        if evidence.get('kind')=='CONFIRMED_OPPORTUNITY' and filter_incomplete_analysis_material(store,job['event_id'],evidence):return True
         if job['state']=='BUSY_CONTEXT':
             stage='RESEARCH_CONTEXT'
             record=load_event_research(store,job['event_id'])
@@ -3321,6 +3508,11 @@ def process_analysis_once(store,keys,event_id=None):
                 stage='AI_PREFLIGHT'
                 context['analysis_manifest']=build_analysis_manifest(evidence,context)
                 decision=automatic_ai_preflight(evidence,context)
+                if context['analysis_manifest'].get('version',0)>=4:
+                    local=context['analysis_manifest']['local_review']
+                    if local['verdict']=='INSUFFICIENT':
+                        decision['allowed']=False
+                        decision['skip_reasons'].extend(local['material_issues'] or ['Za mało spójnych wskazań do oceny.'])
                 prepared=event_analysis_request(evidence,{**context,'ai_preflight':decision})
                 if len(json_text(prepared))>160000:
                     decision['allowed']=False
@@ -3741,6 +3933,13 @@ def detect_market(store,snapshot,config=None):
         encoded=encode_observation(stored_snapshot)
         c.execute('INSERT INTO observations(ticker,interval,candle_time,acquired_at,candle_status,payload) VALUES(?,?,?,?,?,?)',
                   (t,interval,snapshot['candle_time'],now,snapshot['candle_status'],encoded))
+        if matrix.get('newly_confirmed') and matrix.get('activity_verified') is True:
+            currency = snapshot.get('currency')
+            expected_currency = 'PLN' if t.endswith('.WA') else 'USD'
+            if currency == expected_currency and finite_number(matrix.get('change_pct')) and matrix['change_pct'] != 0:
+                confirmed = parse_market_time(now).astimezone(timezone.utc).isoformat()
+                c.execute('INSERT OR IGNORE INTO signal_confirmations VALUES(?,?,?,?,?)',
+                          (confirmed, t, snapshot['price'], matrix['change_pct'], currency))
         price=snapshot['price'];reasons=[];dprice=None;drvol=None;event_id=None
         if old is None:
             baseline={'price':price,'rvol':rv,'candle_time':snapshot['candle_time'],'acquired_at':now,'last_event_id':None}
@@ -4078,6 +4277,10 @@ def scanner_main(db,diagnostic=False,cycles=None):
                     except (OSError,sqlite3.Error) as exc:print('Heartbeat: '+str(exc),file=sys.stderr,flush=True)
             worker=threading.Thread(target=heartbeat,daemon=True);worker.start()
             service_threads=[threading.Thread(target=service_worker,args=(store,stop,kind),daemon=True) for kind in ('analysis','telegram')]
+            from portfolio_fundamentals import worker as fundamentals_worker
+            service_threads.append(threading.Thread(target=fundamentals_worker,
+                args=(store,stop,portfolio_tickers,fetch_portfolio_analyst),
+                daemon=True, name='KI-Fundamenty'))
             for service_thread in service_threads:service_thread.start()
             print('SKANER RYNKU: Yahoo → wskaźniki → detekcja → SQLite. Tavily, GPT i Telegram według przełączników panelu.',flush=True)
             try:
@@ -5121,6 +5324,15 @@ def company_snapshot_report(snapshot,previous=None):
         value=i.get(field);label=names.get(field,polish_indicator(field))
         technical.append({'Wskaźnik':label,'Wartość':pl_number(value,0 if field=='obv' else 4 if field in ('ma_fast','ma_slow','last_macd','last_macd_signal','last_macd_hist','last_upper_bb','last_lower_bb','bb_sma','atr','vwma') else 2,'%' if field=='roc' else ''),'Znaczenie':meanings[field] if finite_number(value) else 'Brak danych.'})
         if not finite_number(value):missing.append(label)
+    for row in supplemental_indicator_rows(s):
+        label = row['Wskaźnik']
+        if label.startswith('Fibonacci'):
+            meaning = 'Poziom od maksimum do minimum z 20 zamkniętych świec z obrotem.'
+        elif label.startswith('VWAP'):
+            meaning = 'Średnia ważona wolumenem, szacowana ze świec od otwarcia sesji.'
+        else:
+            meaning = 'Położenie RSI w jego zakresie, z wygładzeniem 3 / 3.'
+        technical.append({**row, 'Znaczenie': meaning})
     risk=opportunity_risk(s);missing.extend(risk['missing'])
     if (s.get('spread') or {}).get('acquired_at'):notes.append('Osobny czas pobrania bid/ask: '+s['spread']['acquired_at']+'. Czas ostatniej transakcji nie potwierdza świeżości spreadu.')
     weakens.extend(risk['reasons'])
@@ -5467,6 +5679,139 @@ def render_confirmed_tracking(store):
                 'Aktualność':row['levels'].get('label'),
                 'Ograniczenia':row['levels']['plan'].get('reason','')})
         st.dataframe(pd.DataFrame(table),width='stretch',hide_index=True)
+
+
+SIGNAL_HORIZONS = (1, 2, 3, 5)
+
+
+def signal_session_outcomes(store, now=None):
+    """Read recent confirmations and match the exact exchange sessions."""
+    from datetime import timedelta
+    from exchange_calendars import get_calendar
+
+    now = parse_market_time(now or utc_now()).astimezone(timezone.utc)
+    cutoff = (now - timedelta(days=30)).isoformat()
+    result = []
+    calendars = {}
+    with store.connection() as connection:
+        confirmations = {}
+        for row in connection.execute(
+            'SELECT * FROM signal_confirmations WHERE confirmed_at BETWEEN ? AND ?', (cutoff, now.isoformat())
+        ):
+            confirmations[row['ticker'], row['confirmed_at']] = tuple(row)[2:]
+
+        # Older versions kept the confirmation timestamp in the opportunity snapshot.
+        # Recover the price only from the original observation with that timestamp.
+        legacy = connection.execute("""
+            SELECT DISTINCT ticker,
+                json_extract(payload,'$.snapshot.price_matrix.confirmed_at') AS confirmed_at
+            FROM opportunities
+            WHERE updated_at>=? AND json_valid(payload)
+              AND state IN ('CONFIRMED','RESERVED','SELECTED','EXPIRED','SKIPPED_LIMIT','SKIPPED_RESTART')
+              AND confirmed_at BETWEEN ? AND ?
+        """, (cutoff, cutoff, now.isoformat())).fetchall()
+        for ticker, confirmed_at in legacy:
+            try:
+                normalized = parse_market_time(confirmed_at).astimezone(timezone.utc).isoformat()
+            except (TypeError, ValueError):
+                continue
+            if (ticker, normalized) in confirmations:
+                continue
+            original = connection.execute("""
+                SELECT json_extract(payload,'$.price'), json_extract(payload,'$.price_matrix.change_pct'),
+                       json_extract(payload,'$.currency')
+                FROM observations
+                WHERE ticker=? AND interval='1h' AND acquired_at=? AND json_valid(payload)
+                  AND json_extract(payload,'$.price_matrix.newly_confirmed')=1
+                  AND json_extract(payload,'$.price_matrix.activity_verified')=1
+                ORDER BY id LIMIT 1
+            """, (ticker, confirmed_at)).fetchone()
+            if original:
+                confirmations[ticker, normalized] = tuple(original)
+
+        for (ticker, confirmed_at), (price, direction_pct, currency) in sorted(
+            confirmations.items(), key=lambda item: item[0][1], reverse=True
+        ):
+            gpw = ticker.endswith('.WA')
+            if (currency != ('PLN' if gpw else 'USD') or not finite_number(price, True)
+                    or not finite_number(direction_pct) or direction_pct == 0):
+                continue
+            market = 'XWAR' if gpw else 'XNYS'
+            if market not in calendars:
+                calendars[market] = get_calendar(market)
+            calendar = calendars[market]
+            moment = parse_market_time(confirmed_at)
+            signal_day = moment.astimezone(exchange_zone(ticker)).date().isoformat()
+            if not calendar.is_session(signal_day):
+                continue
+            sessions = calendar.sessions_window(signal_day, max(SIGNAL_HORIZONS) + 1)
+            days = [session.date().isoformat() for session in sessions]
+            candles = {row['session_date']: row for row in connection.execute("""
+                SELECT session_date, close, high, low, volume, closed_at
+                FROM daily_candles WHERE ticker=? AND session_date BETWEEN ? AND ?
+            """, (ticker, days[1], days[-1]))}
+            for horizon in SIGNAL_HORIZONS:
+                target = days[horizon]
+                candle = candles.get(target)
+                status = 'Oczekuje na zamknięcie'
+                change = None
+                if calendar.session_close(sessions[horizon]) <= now:
+                    status = 'Brak danych z sesji'
+                    if candle and parse_market_time(candle['closed_at']) <= now and finite_number(candle['close'], True):
+                        status = 'Obliczono'
+                        change = (candle['close'] / price - 1) * 100
+                result.append({'ticker': ticker, 'confirmed_at': confirmed_at, 'price': price,
+                               'direction': 'Wzrost' if direction_pct > 0 else 'Spadek', 'currency': currency,
+                               'horizon': horizon, 'session': target, 'status': status, 'change': change,
+                               'candle': dict(candle) if change is not None else {}})
+    return result
+
+
+def render_signal_outcomes(store):
+    import streamlit as st
+    from tracking_view import time_text
+
+    st.subheader('Wyniki po 1, 2, 3 i 5 sesjach')
+    st.caption('Ostatnie 30 dni. Zmiana od ceny z chwili potwierdzenia do zamknięcia wskazanej sesji. '
+               'Wyniki obejmują sygnały z zachowanym odczytem potwierdzenia.')
+    try:
+        rows = signal_session_outcomes(store)
+    except ModuleNotFoundError:
+        st.warning('Pomiar wymaga zainstalowanego kalendarza sesji.')
+        return
+    if not rows:
+        st.info('Brak sygnałów z zachowaną ceną potwierdzenia.')
+        return
+    summary = []
+    for direction in ('Wzrost', 'Spadek'):
+        for horizon in SIGNAL_HORIZONS:
+            group = [row for row in rows if row['direction'] == direction and row['horizon'] == horizon]
+            if not group:
+                continue
+            measured = [row['change'] for row in group if row['change'] is not None]
+            continued = sum(change > 0 if direction == 'Wzrost' else change < 0 for change in measured)
+            summary.append({'Sygnał': direction, 'Po sesjach': horizon, 'Obliczono': len(measured),
+                            'W tym zgodne z kierunkiem': continued,
+                            'Udział zgodnych': pl_number(continued / len(measured) * 100, 1, '%') if measured else '—',
+                            'Brak danych': sum(row['status'] == 'Brak danych z sesji' for row in group),
+                            'Oczekuje': sum(row['status'] == 'Oczekuje na zamknięcie' for row in group)})
+    st.dataframe(summary, width='stretch', hide_index=True)
+    horizon = st.radio('Szczegóły po ilu sesjach', SIGNAL_HORIZONS, horizontal=True, key='signal_outcome_horizon')
+    details = []
+    for row in rows:
+        if row['horizon'] != horizon:
+            continue
+        unit = ' ' + row['currency']
+        candle = row['candle']
+        details.append({'Ticker': row['ticker'], 'Sygnał': row['direction'],
+                        'Potwierdzenie': time_text(row['confirmed_at']), 'Sesja': row['session'],
+                        'Cena potwierdzenia': pl_number(row['price'], 4, unit),
+                        'Zamknięcie': pl_number(candle.get('close'), 4, unit),
+                        'Zmiana': pl_number(row['change'], 2, '%'),
+                        'Maksimum': pl_number(candle.get('high'), 4, unit),
+                        'Minimum': pl_number(candle.get('low'), 4, unit),
+                        'Wolumen': pl_number(candle.get('volume'), 0), 'Stan': row['status']})
+    st.dataframe(details, width='stretch', hide_index=True)
 
 
 def portfolio_get(store):
@@ -5819,6 +6164,26 @@ def portfolio_snapshot(store, ticker, interval='1h'):
         return None
 
 
+def portfolio_daily_move(snapshot):
+    matrix = snapshot.get('price_matrix')
+    if (not isinstance(matrix, dict) or matrix.get('reference_status') != 'READY'
+            or snapshot.get('latest_price_origin') == 'carried_previous_close'
+            or not accepted_matrix_snapshot(snapshot)):
+        return None
+    try:
+        session = parse_market_time(snapshot['acquired_at']).astimezone(exchange_zone(snapshot['ticker'])).date()
+        if session.isoformat() != matrix.get('session_date'):
+            return None
+        anchor = matrix['anchor_price']
+        delta = snapshot['price'] - anchor
+        percent = 100 * (delta / anchor)
+        if finite_number(percent):
+            return {'value': delta, 'percent': percent}
+    except (KeyError, TypeError, ValueError, OverflowError):
+        pass
+    return None
+
+
 def portfolio_avg_volume_1m(snap):
     """Srednia wolumenu z dostepnych swiec 1H (chart_history, tylko volume>0).
     Zwraca (avg_vol, n_candles) lub (None, 0) gdy brak danych."""
@@ -5890,10 +6255,19 @@ def render_portfolio(store):
     if st.button('Odswiez portfel', key='portfolio_refresh'):
         st.rerun()
 
+    gpw_tickers = [t for t in tickers if t.upper().endswith('.WA')]
+    usa_tickers = [t for t in tickers if not t.upper().endswith('.WA')]
+    markets = {'Wszystkie': tickers, 'GPW': gpw_tickers, 'USA': usa_tickers}
+    market = st.radio('Rynek portfela', list(markets), horizontal=True, key='portfolio_market')
+    visible_tickers = markets[market]
+    if not visible_tickers:
+        st.info(f'Brak spółek z rynku {market} w portfelu.')
+        return
+
     # Tabela
     rows = []
     config_by_ticker={entry['ticker']:entry for entry in portfolio_get(store)}
-    for t in tickers:
+    for t in visible_tickers:
         snap = portfolio_snapshot(store, t, '1h')
         if not snap:
             entry=config_by_ticker.get(t,{})
@@ -5985,6 +6359,9 @@ def render_portfolio(store):
         rows.append({
             '_fresh':price_fresh,'_fresh_reason':price_reason,
             '_analysis_levels':analysis_levels,'_currency':cur,
+            '_daily_move':portfolio_daily_move(snap),
+            '_supplemental_indicators':supplemental_indicator_rows(snap),
+            '_market_52_week_range':snap.get('market_52_week_range'),
             '_acquired_at':snap.get('_acquired_at') or snap.get('acquired_at'),'_risk_at':risk_at,
             'Ticker':t,
             'Cena':(fmt(price,4)+' '+cur).strip() if finite_number(price) else '—',
@@ -6008,6 +6385,12 @@ def render_portfolio(store):
         })
 
     from portfolio_view import cards_html as portfolio_cards_html
+    from portfolio_fundamentals import analyst_views, views as fundamentals_views
+    fundamentals = fundamentals_views(store, visible_tickers)
+    analyst = analyst_views(store, visible_tickers)
+    for row in rows:
+        row['_fundamentals'] = fundamentals.get(row['Ticker'])
+        row['_analyst'] = analyst.get(row['Ticker'])
     st.html(portfolio_cards_html(rows))
 
     import pandas as pd
@@ -6186,6 +6569,12 @@ def render_growth_ranking(store,now=None):
                 st.write('**2. Jakość ruchu:** '+sections['quality']['summary'])
                 st.write('**3. Ryzyko:** '+sections['risk']['summary'])
                 st.caption(bid_ask_summary(snap))
+                st.write('**Aktywność:** '+activity_summary(snap))
+                local=review_analysis_material(snap,build_analysis_manifest({'snapshot':snap}, {'sources':[]}))
+                st.markdown('**Ocena danych:** '+local['summary'])
+                st.caption('Kompletność oceny: '+('częściowa' if local['coverage']=='PARTIAL' else 'pełna')+
+                           ' · '+('Czas bid/ask potwierdzony; wykonanie niegwarantowane.' if local['execution']=='TIMESTAMP_CONFIRMED' else
+                                  'Świeżość bid/ask niepotwierdzona.' if local['execution']=='UNVERIFIED' else 'Brak bid/ask.'))
                 plan=build_trade_plan(snap,matrix.get('change_pct',r.get('change_pct')))
                 st.markdown('---')
                 st.markdown('**4. Plan SL/TP**')
@@ -6622,7 +7011,7 @@ def run_streamlit(db,now=None):
         st.caption('Odczyt zapisanych wyników co 15 minut. Skaner pobiera Yahoo według ustawionego cyklu.')
         st.caption('Panel jest po polsku. Wyłącz automatyczne tłumaczenie tej strony w przeglądarce; może zmieniać tickery, liczby i powodować błędy widoku.')
         st.caption('GPT-4o mini analizuje wybrane, potwierdzone okazje. Tavily dostarcza datowane źródła. Automatyczna analiza wymaga świec 1h.')
-    section=st.radio('Widok panelu',['Automat','Moj portfel','Analiza GPT','Rozmowa z GPT','Analiza pogłębiona','Monitor Tavily + AI','Ręczny ticker','Dodaj / wyszukaj spółki'],horizontal=True,key='panel_view')
+    section=st.radio('Widok panelu',['Automat','Dalszy ruch spółek','Moj portfel','Analiza GPT','Rozmowa z GPT','Analiza pogłębiona','Monitor Tavily + AI','Ręczny ticker','Dodaj / wyszukaj spółki'],horizontal=True,key='panel_view')
     render_error_controls(store)
     with st.expander('Historia dzienna i zamknięcie odniesienia'):
         daily_ticker=st.selectbox('Instrument historii dziennej',['']+ticks,key='daily_history_ticker')
@@ -6758,6 +7147,15 @@ def run_streamlit(db,now=None):
             st.json(s)
     @st.fragment(run_every=900 if auto_refresh else None)
     def live_view():
+        if section=='Dalszy ruch spółek':
+            st.button('Odśwież dalszy ruch', help='Odczytuje zapisane wyniki skanera.')
+            tracking_mode = st.radio('Widok dalszego ruchu', ('Śledzenie bieżące', 'Wyniki po sesjach'),
+                                     horizontal=True, key='confirmed_tracking_mode')
+            if tracking_mode == 'Wyniki po sesjach':
+                render_signal_outcomes(store)
+            else:
+                render_confirmed_tracking(store)
+            return
         st.button('Odśwież diagnostykę',help='Odczytuje zapisane wyniki; nie pobiera Yahoo.')
         with store.connection() as c:
             runtime=c.execute("SELECT payload,updated_at FROM runtime WHERE key='scanner'").fetchone()
@@ -7029,7 +7427,10 @@ def render_service_panel(store,manual=False):
                     st.write(source['url'])
                     st.text(source['content'])
                 for rejected in context.get('rejected_sources',[]):st.caption('Odrzucono: '+rejected['title']+' · '+rejected['reason'])
-                st.caption('Przyjęto źródeł: '+str(len(context['sources']))+' · odrzucono: '+str(context['excluded'])+' · granica czasu: '+context['cutoff'])
+                excluded = context.get('excluded')
+                excluded_label = str(excluded) if excluded is not None else 'brak w zapisie'
+                cutoff_label = str(context.get('cutoff') or 'brak w zapisie')
+                st.caption('Przyjęto źródeł: '+str(len(context['sources']))+' · odrzucono: '+excluded_label+' · granica czasu: '+cutoff_label)
             if job['result']:
                 result=load_payload(job['result']);ev=load_payload(job['payload'])
                 if result.get('local_only'):
@@ -7067,6 +7468,7 @@ def historical_probe_pair(snapshot,threshold=1.):
             pair.append({**snapshot,'candle_time':row['time'],'candle_end':end,'candle_status':'CLOSED',
                          'price':row['close'],'volume':row['volume'],'rvol':ind['rvol'],'rvol_incomplete':False,
                          'indicators':ind,'ohlc':{k:row.get(k) for k in ('open','high','low','close')},
+                         'supplemental_indicators':supplemental_market_indicators(rows[:index+1],snapshot['ticker'],snapshot['interval']),
                          'chart_history':rows[:index+1],'scoring':market_score(ind,row['close']),
                          'latest_price_origin':row.get('price_origin') or 'Yahoo OHLC',
                          'session_summary':None,'session_summary_warning':None,
@@ -9206,7 +9608,7 @@ def main(argv=None):
             ranking_result = run_ranking_tests()
             opportunity_result = run_opportunity_tests()
             import unittest
-            repair_result=unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromName('test_repair_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_yahoo_retry_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_service_status_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_reference_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_us_session_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_readiness_20261025'),unittest.defaultTestLoader.loadTestsFromName('test_alert_quality_20261026'),unittest.defaultTestLoader.loadTestsFromName('test_ai_preflight_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_full_package_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_optimization_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_message_synthesis_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_c_tavily_contract'),unittest.defaultTestLoader.loadTestsFromName('test_e06_tavily_issuer'),unittest.defaultTestLoader.loadTestsFromName('test_e06_cli_dual_contract'),unittest.defaultTestLoader.loadTestsFromName('test_research_v3'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_search_contract'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_page_dates'),unittest.defaultTestLoader.loadTestsFromName('test_daily_readiness_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_tracking_levels_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_portfolio_cards_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_observation_storage_20261030'),unittest.defaultTestLoader.loadTestsFromName('test_guardian_20261031')]))
+            repair_result=unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromName('test_repair_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_yahoo_retry_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_service_status_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_reference_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_us_session_20261024'),unittest.defaultTestLoader.loadTestsFromName('test_readiness_20261025'),unittest.defaultTestLoader.loadTestsFromName('test_alert_quality_20261026'),unittest.defaultTestLoader.loadTestsFromName('test_ai_preflight_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_full_package_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_optimization_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_message_synthesis_20261027'),unittest.defaultTestLoader.loadTestsFromName('test_c_tavily_contract'),unittest.defaultTestLoader.loadTestsFromName('test_e06_tavily_issuer'),unittest.defaultTestLoader.loadTestsFromName('test_e06_cli_dual_contract'),unittest.defaultTestLoader.loadTestsFromName('test_research_v3'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_search_contract'),unittest.defaultTestLoader.loadTestsFromName('test_tavily_page_dates'),unittest.defaultTestLoader.loadTestsFromName('test_daily_readiness_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_tracking_levels_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_portfolio_cards_20261029'),unittest.defaultTestLoader.loadTestsFromName('test_observation_storage_20261030'),unittest.defaultTestLoader.loadTestsFromName('test_guardian_20261031'),unittest.defaultTestLoader.loadTestsFromName('test_analysis_verdict_20261031'),unittest.defaultTestLoader.loadTestsFromName('test_activity_reporting_20261102'),unittest.defaultTestLoader.loadTestsFromName('test_analysis_consistency_20261102')]))
             return 1 if foundation_result or market_result or service_result or ranking_result or opportunity_result or not repair_result.wasSuccessful() else 0
         if args.migration_report:
             plan = prepare_migration(args.migration_report)

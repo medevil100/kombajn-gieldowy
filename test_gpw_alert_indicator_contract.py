@@ -169,7 +169,8 @@ class GPWAlertIndicatorContractTests(unittest.TestCase):
                                       {"context": [], "risks": [], "hypotheses":[], "missing":[], "technical": [{"metric":"rsi","interpretation":"Wskaźnik poniżej poziomu neutralnego."},{"metric":"ma_fast","interpretation":"Cena powyżej szybkiej średniej."}]})
         self.assertIn("Ocena:", message)
         self.assertNotIn("MACD hist.", message)
-        self.assertIn("świeca trwa", message)
+        self.assertIn("wolumen dotąd: 1,20× średniej pełnej godziny po 45 min", message)
+        self.assertNotIn("świeca trwa", message)
 
 
 if __name__ == "__main__":

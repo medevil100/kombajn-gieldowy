@@ -55,6 +55,32 @@ class PortfolioCardsTests(unittest.TestCase):
         self.assertEqual(saved[0]['sl_fired_at'],self.config[0]['sl_fired_at'])
         self.assertIsNone(saved[0]['tp_fired_at'])
 
+    def test_market_filter_changes_cards_and_tables_only(self):
+        with self.store.connection() as c:
+            before = list(c.iterdump())
+        with patch.object(portfolio_view, 'cards_html', wraps=portfolio_view.cards_html) as render:
+            app = self.app()
+            self.assertEqual(app.radio(key='portfolio_market').value, 'Wszystkie')
+            for market, expected in (('GPW', ['BBB.WA']), ('USA', ['AAA']),
+                                     ('Wszystkie', ['AAA', 'BBB.WA'])):
+                app.radio(key='portfolio_market').set_value(market).run(timeout=30)
+                self.assertEqual(len(app.exception), 0)
+                self.assertEqual([row['Ticker'] for row in render.call_args.args[0]], expected)
+                self.assertEqual(app.dataframe[0].value['Ticker'].tolist(), expected)
+                self.assertEqual(app.number_input(key='sl_AAA').value, 1.2)
+        with self.store.connection() as c:
+            self.assertEqual(list(c.iterdump()), before)
+
+    def test_market_filter_handles_empty_group(self):
+        KI.portfolio_save(self.store, self.config[:1])
+        app = self.app()
+        app.radio(key='portfolio_market').set_value('GPW').run(timeout=30)
+        self.assertEqual(len(app.exception), 0)
+        self.assertIn('Brak spółek z rynku GPW w portfelu.', [item.value for item in app.info])
+        self.assertEqual(len(app.dataframe), 0)
+        app.radio(key='portfolio_market').set_value('USA').run(timeout=30)
+        self.assertEqual(app.dataframe[0].value['Ticker'].tolist(), ['AAA'])
+
     def test_existing_add_and_delete_actions_still_work(self):
         app=self.app()
         app.text_input(key='portfolio_add').set_value('CCC')

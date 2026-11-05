@@ -1,5 +1,6 @@
 """Portfolio cards separating manual alert thresholds from local analysis."""
 from html import escape
+import math
 
 from tracking_view import time_text, level_values, number_text
 
@@ -12,6 +13,69 @@ def text(value, default='—'):
 
 def threshold_status(value):
     return {'FIRED':'Wyzwolony', 'armed':'Ustawiony'}.get(value, 'Nie ustawiono')
+
+
+def fundamentals_html(view):
+    if not view:
+        return ''
+    html = '<section class="ki-pf-analysis"><div class="ki-pf-section">Fundamenty</div>'
+    summary = view.get('summary')
+    if summary:
+        html += '<div class="ki-pf-caption">Kwartał do ' + escape(summary['period_end']) + ' · Alpha Vantage</div>'
+        if summary.get('older'):
+            html += '<div class="ki-pf-caption">Dane historyczne · okres zakończył się ponad 180 dni temu.</div>'
+        for field, label in (
+            ('net_income', 'Wynik netto za kwartał'),
+            ('cash', 'Gotówka i jej ekwiwalenty'),
+            ('equity', 'Kapitał własny'),
+            ('operating_cashflow', 'Przepływy operacyjne · 4 kwartały'),
+        ):
+            value = number_text(summary[field] / 1_000_000, 'mln USD', digits=2)
+            html += '<div class="ki-pf-detail"><span>' + label + '</span><strong>' + escape(value) + '</strong></div>'
+        income = 'Strata netto' if summary['net_income'] < 0 else 'Zysk netto' if summary['net_income'] > 0 else 'Wynik netto bliski zeru'
+        flows = 'ujemne' if summary['operating_cashflow'] < 0 else 'dodatnie' if summary['operating_cashflow'] > 0 else 'zerowe'
+        html += '<p>' + income + ' w ostatnim kwartale. Łączne przepływy operacyjne z czterech kwartałów są ' + flows + '.</p>'
+        html += '<div class="ki-pf-caption">Wycena na akcję wymaga potwierdzenia liczby akcji.</div>'
+    if view.get('notice'):
+        html += '<div class="ki-pf-caption">' + escape(view['notice']) + '</div>'
+    return html + '</section>'
+
+
+def market_context_html(row):
+    currency = row.get('_currency') or ''
+    change = row.get('_daily_move')
+    daily = 'Brak potwierdzonego zamknięcia poprzedniej sesji'
+    if change:
+        delta, percent = change['value'], change['percent']
+        daily = (f'{delta:+.4f} {currency} ({percent:+.2f}%)').replace('.', ',')
+    result = ('<div class="ki-pf-detail"><span>Zmiana dzienna</span><strong>'
+              + escape(daily) + '</strong></div>')
+    window = row.get('_market_52_week_range')
+    range_text = 'Oczekuje na odczyt Yahoo Finance'
+    as_of = ''
+    if isinstance(window, dict) and window.get('currency') == currency:
+        low, high = window.get('low'), window.get('high')
+        if (all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                and math.isfinite(x) and x > 0 for x in (low, high)) and low <= high):
+            range_text = number_text(low, digits=4) + ' – ' + number_text(high, currency, digits=4)
+            as_of = '<div class="ki-pf-caption">Zakres z Yahoo Finance · ' + escape(time_text(window.get('as_of'))) + '</div>'
+    result += ('<div class="ki-pf-detail"><span>Zakres 52 tygodni</span><strong>'
+               + escape(range_text) + '</strong></div>' + as_of)
+    analyst = row.get('_analyst')
+    target_text = 'Oczekuje na odczyt Yahoo Finance'
+    source = ''
+    if analyst == {}:
+        target_text = 'Brak potwierdzonego celu'
+    elif analyst and analyst.get('unavailable'):
+        target_text = 'Źródło niedostępne · odczyt odłożony'
+    elif analyst and (not currency or analyst.get('currency') == currency):
+        target_text = number_text(analyst.get('price'), analyst.get('currency'), digits=2)
+        source = ('<div class="ki-pf-caption">Liczba opinii: ' + escape(str(analyst['count']))
+                  + ' · Yahoo Finance · odczyt ' + escape(time_text(analyst['acquired_at'])) + '</div>')
+    elif analyst:
+        target_text = 'Waluta celu różni się od waluty kursu'
+    return (result + '<div class="ki-pf-detail"><span>Średni cel analityków</span><strong>'
+            + escape(target_text) + '</strong></div>' + source)
 
 
 def cards_html(rows):
@@ -46,10 +110,19 @@ def cards_html(rows):
                             ('Cofnięcie od maksimum','Cofniecie %'),('Wolumen','Wolumen'),
                             ('Śr. wol. dostępnych świec','Sr. wol. 1M'),('Wolumen / średnia','Wol./Sr.'),
                             ('Spread z zapisu','Spread %')))
+        indicators = row.get('_supplemental_indicators') or []
+        technical = ''
+        if indicators:
+            technical = '<details><summary>VWAP, Stoch RSI i Fibonacci</summary>' + ''.join(
+                '<div class="ki-pf-detail"><span>' + escape(item['Wskaźnik']) + '</span><strong>'
+                + escape(item['Wartość']) + '</strong></div>'
+                for item in indicators
+            ) + '</details>'
         cards.append('<article class="ki-pf-card"><div class="ki-pf-heading"><strong>'+field('Ticker')
             +'</strong><span class="'+direction+'">'+field('Zmiana 1H')+'</span></div>'
             '<div class="ki-pf-price">'+field('Cena')+'</div>'
             '<div class="ki-pf-caption">Zmiana ceny od otwarcia świecy 1h</div>'
+            +market_context_html(row)+
             '<div class="ki-pf-badge '+('fresh' if fresh else 'old')+'">'+label+'</div>'
             '<div class="ki-pf-section">Moje progi alertów</div>'
             '<div class="ki-pf-levels">'+levels+'</div>'
@@ -59,6 +132,8 @@ def cards_html(rows):
             '<div class="ki-pf-levels">'+analysis_cells+'</div>'
             '<div class="ki-pf-caption">'+escape(analysis_note)+'</div>'
             '<div class="ki-pf-caption">Dane analizy: '+escape(time_text(analysis.get('as_of')))+'</div></section>'
+            +fundamentals_html(row.get('_fundamentals'))+
+            technical+
             '<details><summary>Ryzyko i dane</summary><p>'+escape(text(row.get('_fresh_reason')))+'</p>'
             +details+'<p>Ryzyko z zapisanej analizy: '+field('Ryzyko')+'</p>'
             '<p>Powody: '+field('Powody')+'</p><p>Braki: '+field('Braki')+'</p>'
