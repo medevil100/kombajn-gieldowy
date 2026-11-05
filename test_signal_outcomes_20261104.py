@@ -15,6 +15,9 @@ class SignalOutcomeTests(unittest.TestCase):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.store = KI.Store(Path(folder.name) / 'signals.sqlite3')
+        console = patch.object(KI, 'print', create=True)
+        console.start()
+        self.addCleanup(console.stop)
 
     def test_original_confirmation_survives_a_later_observation(self):
         at = '2026-11-10T10:00:00+00:00'
