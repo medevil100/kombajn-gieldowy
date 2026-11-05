@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+import threading
 from unittest.mock import patch
 
 import KI
@@ -65,6 +66,83 @@ class SignalOutcomeTests(unittest.TestCase):
         self.assertEqual(closed['direction'], 'Spadek')
         self.assertEqual(pending['status'], 'Oczekuje na zamknięcie')
         self.assertEqual(closed['status'], 'Brak danych z sesji')
+
+    def seed_missing(self, ticker='AAA.WA'):
+        with self.store.transaction() as connection:
+            connection.execute('INSERT INTO signal_confirmations VALUES(?,?,?,?,?)',
+                               ('2026-11-02T10:00:00+00:00', ticker, 10., 3., 'PLN'))
+
+    def test_missing_reason_and_repair_for_a_ticker_outside_watchlist(self):
+        self.seed_missing()
+        now = datetime.fromisoformat('2026-11-05T18:00:00+00:00')
+        rows = KI.signal_session_outcomes(self.store, now)
+        self.assertIn('poza listą', rows[0]['diagnostic'])
+        candle = {'session_date': '2026-11-03', 'status': 'CLOSED',
+                  'open': 10., 'high': 12., 'low': 9., 'close': 11., 'volume': 500.}
+        source = {'daily_history': [candle], 'acquired_at': now.isoformat(),
+                  'rejected_source_rows': [{'time': '2026-11-04T00:00:00+01:00',
+                                            'reason': 'Sprzeczne OHLC'}]}
+        with patch.object(KI, 'fetch_market', return_value=source) as fetch:
+            KI.maintain_signal_history(self.store, now=now.isoformat())
+            KI.maintain_signal_history(KI.Store(self.store.path), now=(now + timedelta(minutes=16)).isoformat())
+            fetch.assert_called_once_with('AAA.WA', '1d')
+        rows = KI.signal_session_outcomes(self.store, now)
+        self.assertEqual(rows[0]['status'], 'Obliczono')
+        self.assertAlmostEqual(rows[0]['change'], 10.)
+        self.assertIn('Sprzeczne OHLC', rows[1]['diagnostic'])
+        self.assertEqual(self.store.load_section('tickers', []), [])
+        with self.store.connection() as connection:
+            for table in ('events', 'analysis_jobs', 'outbox'):
+                self.assertEqual(connection.execute('SELECT COUNT(*) FROM ' + table).fetchone()[0], 0)
+
+    def test_history_repair_has_global_cooldown_and_one_ticker_per_cycle(self):
+        self.seed_missing('AAA.WA')
+        self.seed_missing('BBB.WA')
+        now = datetime.fromisoformat('2026-11-05T18:00:00+00:00')
+        with patch.object(KI, 'fetch_market', side_effect=KI.MarketDataUnavailable('NO_CLOSED_DAILY', 'Brak danych')) as fetch:
+            KI.maintain_signal_history(self.store, now=now.isoformat())
+            self.assertEqual(fetch.call_count, 1)
+            KI.maintain_signal_history(self.store, now=(now + timedelta(minutes=1)).isoformat())
+            self.assertEqual(fetch.call_count, 1)
+            KI.maintain_signal_history(self.store, now=(now + timedelta(minutes=16)).isoformat())
+            self.assertEqual(fetch.call_count, 2)
+            self.assertNotEqual(fetch.call_args_list[0], fetch.call_args_list[1])
+
+    def test_recent_normal_refresh_and_stopping_prevent_extra_requests(self):
+        self.seed_missing()
+        now = datetime.fromisoformat('2026-11-05T18:00:00+00:00')
+        KI._save_daily_history(self.store, 'AAA.WA', [], now)
+        with patch.object(KI, 'fetch_market', side_effect=AssertionError('extra fetch')):
+            KI.maintain_signal_history(self.store, now=(now + timedelta(minutes=16)).isoformat())
+            stop = threading.Event()
+            stop.set()
+            KI.maintain_signal_history(self.store, stop, (now + timedelta(hours=7)).isoformat())
+
+    def test_invalid_ohlc_is_not_saved_as_an_outcome(self):
+        self.seed_missing()
+        now = datetime.fromisoformat('2026-11-05T18:00:00+00:00')
+        bad = {'daily_history': [{'session_date': '2026-11-03', 'status': 'CLOSED',
+                'open': 8., 'high': 12., 'low': 9., 'close': 11., 'volume': 500.}],
+               'acquired_at': now.isoformat()}
+        with patch.object(KI, 'fetch_market', return_value=bad):
+            KI.maintain_signal_history(self.store, now=now.isoformat())
+        self.assertEqual(KI.signal_session_outcomes(self.store, now)[0]['status'], 'Brak danych z sesji')
+
+    def test_normal_scanner_cycle_repairs_history_without_readding_removed_ticker(self):
+        self.seed_missing()
+        now = '2026-11-05T18:00:00+00:00'
+        source = {'daily_history': [{'session_date': '2026-11-03', 'status': 'CLOSED',
+                  'open': 10., 'high': 12., 'low': 9., 'close': 11., 'volume': 500.}],
+                  'acquired_at': now}
+        with patch.object(KI, 'utc_now', return_value=now), \
+             patch.object(KI, 'fetch_market', return_value=source) as fetch, \
+             patch.object(KI, 'portfolio_check_alerts'), \
+             patch.object(KI, 'daily_report_send'), patch.object(KI, 'us_report_send'):
+            result = KI.run_market_cycle(self.store)
+        self.assertEqual(result['status'], 'EMPTY_WATCHLIST')
+        fetch.assert_called_once_with('AAA.WA', '1d')
+        self.assertEqual(self.store.load_section('tickers', []), [])
+        self.assertEqual(KI.signal_session_outcomes(self.store, now)[0]['status'], 'Obliczono')
 
 
 class SupplementalIndicatorTests(unittest.TestCase):

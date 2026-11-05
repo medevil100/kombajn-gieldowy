@@ -4211,6 +4211,11 @@ def run_market_cycle(store,stop=None):
                 try:
                     print('queue_opportunity FAILED for '+str(opportunity.get('ticker') or opportunity.get('sequence_id'))+': '+str(_qe)[:200],flush=True)
                 except Exception: pass
+    if not any(r['status'] in ('FETCH_CAPACITY', 'RATE_LIMITED') for r in results):
+        try:
+            maintain_signal_history(store, stop)
+        except Exception as exc:
+            print('signal_history: ' + type(exc).__name__ + ': ' + str(exc)[:200], flush=True)
     _processed = {r.get('ticker') for r in results if isinstance(r, dict) and r.get('ticker')}
     _unprocessed = [t for t in tickers if t not in _processed]
     status='CAPACITY_LIMITED' if any(r['status']=='FETCH_CAPACITY' for r in results) else 'RATE_LIMITED' if any(r['status']=='RATE_LIMITED' for r in results) else 'EMPTY_WATCHLIST' if not tickers else 'INTERRUPTED' if stop is not None and stop.is_set() else 'ERROR' if all(r['status']=='ERROR' for r in results) else 'PARTIAL' if any(r['status']=='ERROR' for r in results) else 'OK'
@@ -5695,6 +5700,8 @@ def signal_session_outcomes(store, now=None):
     calendars = {}
     with store.connection() as connection:
         confirmations = {}
+        active_tickers = {row[0] for row in connection.execute('SELECT ticker FROM watchlist')}
+        histories = {}
         for row in connection.execute(
             'SELECT * FROM signal_confirmations WHERE confirmed_at BETWEEN ? AND ?', (cutoff, now.isoformat())
         ):
@@ -5746,6 +5753,11 @@ def signal_session_outcomes(store, now=None):
                 continue
             sessions = calendar.sessions_window(signal_day, max(SIGNAL_HORIZONS) + 1)
             days = [session.date().isoformat() for session in sessions]
+            if ticker not in histories:
+                raw = connection.execute('SELECT payload FROM runtime WHERE key=?',
+                                         ('daily_history:' + ticker,)).fetchone()
+                histories[ticker] = load_payload(raw[0]) if raw else {}
+            history = histories[ticker]
             candles = {row['session_date']: row for row in connection.execute("""
                 SELECT session_date, close, high, low, volume, closed_at
                 FROM daily_candles WHERE ticker=? AND session_date BETWEEN ? AND ?
@@ -5755,16 +5767,83 @@ def signal_session_outcomes(store, now=None):
                 candle = candles.get(target)
                 status = 'Oczekuje na zamknięcie'
                 change = None
+                diagnostic = ''
                 if calendar.session_close(sessions[horizon]) <= now:
                     status = 'Brak danych z sesji'
                     if candle and parse_market_time(candle['closed_at']) <= now and finite_number(candle['close'], True):
                         status = 'Obliczono'
                         change = (candle['close'] / price - 1) * 100
+                    else:
+                        rejected = [item for item in history.get('rejected_source_rows', [])
+                                    if str(item.get('time', '')).startswith(target)]
+                        if rejected:
+                            diagnostic = 'Odrzucona świeca źródłowa — ' + str(rejected[0].get('reason', 'Niepoprawne OHLCV'))
+                        elif ticker not in active_tickers:
+                            diagnostic = 'Spółka poza listą skanera; historia do uzupełnienia.'
+                        else:
+                            diagnostic = 'Brak poprawnej świecy w zapisanej historii Yahoo.'
                 result.append({'ticker': ticker, 'confirmed_at': confirmed_at, 'price': price,
                                'direction': 'Wzrost' if direction_pct > 0 else 'Spadek', 'currency': currency,
                                'horizon': horizon, 'session': target, 'status': status, 'change': change,
-                               'candle': dict(candle) if change is not None else {}})
+                               'candle': dict(candle) if change is not None else {},
+                               'diagnostic': diagnostic, 'history_refreshed_at': history.get('refreshed_at')})
     return result
+
+
+def maintain_signal_history(store, stop=None, now=None):
+    """Fill one ticker's missing daily outcomes per scan, with durable cooldowns."""
+    from datetime import timedelta
+    current = parse_market_time(now or utc_now()).astimezone(timezone.utc)
+    if stop is not None and stop.is_set():
+        return
+    global_key = 'signal_history_maintenance'
+    with store.connection() as connection:
+        raw = connection.execute('SELECT payload FROM runtime WHERE key=?', (global_key,)).fetchone()
+        state = load_payload(raw[0]) if raw else {}
+    if state.get('next_attempt_at') and current < parse_market_time(state['next_attempt_at']):
+        return
+    missing = {row['ticker']: row for row in signal_session_outcomes(store, current.isoformat())
+               if row['status'] == 'Brak danych z sesji'}
+    ordered = sorted(missing.values(), key=lambda row: row['history_refreshed_at'] or '')
+    for row in ordered:
+        ticker = row['ticker']
+        key = 'signal_history_attempt:' + ticker
+        with store.connection() as connection:
+            raw = connection.execute('SELECT payload FROM runtime WHERE key=?', (key,)).fetchone()
+            previous = load_payload(raw[0]) if raw else {}
+        checked_times = [parse_market_time(value) for value in
+                         (previous.get('attempted_at'), row['history_refreshed_at']) if value]
+        if checked_times and current - max(checked_times) < timedelta(hours=6):
+            continue
+        if not market_fetch_due(store, ticker, '1d', current):
+            continue
+        if stop is not None and stop.is_set():
+            return
+        state = {'ticker': ticker, 'attempted_at': current.isoformat(), 'status': 'RUNNING',
+                 'next_attempt_at': (current + timedelta(minutes=15)).isoformat()}
+        with store.transaction() as connection:
+            connection.execute('INSERT OR REPLACE INTO runtime VALUES(?,?,?)',
+                               (key, json_text({'attempted_at': current.isoformat()}), current.isoformat()))
+            connection.execute('INSERT OR REPLACE INTO runtime VALUES(?,?,?)',
+                               (global_key, json_text(state), current.isoformat()))
+        try:
+            snapshot = fetch_market(ticker, '1d')
+            if not snapshot.get('daily_history'):
+                raise MarketDataUnavailable('NO_CLOSED_DAILY', 'Brak zakończonych sesji dziennych Yahoo.')
+            _save_daily_history(store, ticker, snapshot['daily_history'], snapshot['acquired_at'],
+                                snapshot.get('source', 'Yahoo Finance'), snapshot.get('rejected_source_rows'))
+            record_market_fetch(store, ticker, '1d', now=current)
+            state['status'] = 'UPDATED'
+        except Exception as exc:
+            record_market_fetch(store, ticker, '1d', exc, current)
+            state.update(status='DATA_UNAVAILABLE', error_type=type(exc).__name__)
+            if isinstance(exc, MarketRateLimitError):
+                state['next_attempt_at'] = (current + timedelta(hours=1)).isoformat()
+        with store.transaction() as connection:
+            connection.execute('INSERT OR REPLACE INTO runtime VALUES(?,?,?)',
+                               (global_key, json_text(state), utc_now()))
+        print('signal_history: ' + json_text(state), flush=True)
+        return
 
 
 def render_signal_outcomes(store):
@@ -5774,6 +5853,8 @@ def render_signal_outcomes(store):
     st.subheader('Wyniki po 1, 2, 3 i 5 sesjach')
     st.caption('Ostatnie 30 dni. Zmiana od ceny z chwili potwierdzenia do zamknięcia wskazanej sesji. '
                'Wyniki obejmują sygnały z zachowanym odczytem potwierdzenia.')
+    st.caption('Skaner uzupełnia brakującą historię dzienną także dla dawnych sygnałów spoza bieżącej listy. '
+               'Najwyżej jedna spółka na przebieg; ponowna kontrola tej samej spółki po co najmniej 6 godzinach.')
     try:
         rows = signal_session_outcomes(store)
     except ModuleNotFoundError:
@@ -5810,7 +5891,9 @@ def render_signal_outcomes(store):
                         'Zmiana': pl_number(row['change'], 2, '%'),
                         'Maksimum': pl_number(candle.get('high'), 4, unit),
                         'Minimum': pl_number(candle.get('low'), 4, unit),
-                        'Wolumen': pl_number(candle.get('volume'), 0), 'Stan': row['status']})
+                        'Wolumen': pl_number(candle.get('volume'), 0), 'Stan': row['status'],
+                        'Powód braku danych': row['diagnostic'],
+                        'Historia odświeżona': time_text(row['history_refreshed_at'])})
     st.dataframe(details, width='stretch', hide_index=True)
 
 
