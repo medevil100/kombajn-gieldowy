@@ -85,12 +85,14 @@ CREATE TABLE IF NOT EXISTS price_matrix(
 CREATE TABLE IF NOT EXISTS events(
  id TEXT PRIMARY KEY, ticker TEXT NOT NULL, interval TEXT NOT NULL,
  created_at TEXT NOT NULL, payload TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS company_events ON events(ticker,created_at);
 CREATE TABLE IF NOT EXISTS outbox(
  id TEXT PRIMARY KEY, event_id TEXT NOT NULL REFERENCES events(id),
  kind TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING',
  attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
  next_attempt_at TEXT, last_error TEXT, delivered_at TEXT, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(status,next_attempt_at);
+CREATE INDEX IF NOT EXISTS company_outbox ON outbox(event_id,created_at);
 CREATE TABLE IF NOT EXISTS analysis_jobs(
  event_id TEXT PRIMARY KEY REFERENCES events(id), state TEXT NOT NULL,
  context TEXT, result TEXT, attempts INTEGER NOT NULL DEFAULT 0,
@@ -130,9 +132,14 @@ CREATE TABLE IF NOT EXISTS opportunities(
  candle_end TEXT NOT NULL, state TEXT NOT NULL, cycle_id TEXT NOT NULL,
  payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS opportunity_selection ON opportunities(state,cycle_id);
+CREATE INDEX IF NOT EXISTS company_opportunities ON opportunities(ticker,updated_at);
 CREATE TABLE IF NOT EXISTS signal_confirmations(
  confirmed_at TEXT NOT NULL, ticker TEXT NOT NULL, price REAL NOT NULL,
  change_pct REAL NOT NULL, currency TEXT NOT NULL, PRIMARY KEY(confirmed_at,ticker));
+CREATE TABLE IF NOT EXISTS signal_technical_context(
+ confirmed_at TEXT NOT NULL, ticker TEXT NOT NULL, payload TEXT NOT NULL,
+ PRIMARY KEY(confirmed_at,ticker),
+ FOREIGN KEY(confirmed_at,ticker) REFERENCES signal_confirmations(confirmed_at,ticker));
 CREATE TABLE IF NOT EXISTS analysis_budgets(slot TEXT PRIMARY KEY, used INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS deep_reports(
  id TEXT PRIMARY KEY, ticker TEXT NOT NULL, state TEXT NOT NULL, payload TEXT,
@@ -2037,6 +2044,11 @@ def build_analysis_manifest(evidence,context):
                    'count':len(context.get('sources',[])),'cutoff':context.get('cutoff'),
                    'excluded':context.get('excluded',0),'extract':context.get('extract_diagnostics',{})},
         'conclusion':'Potwierdzenie ruchu nie jest potwierdzeniem okazji ani wykonalności transakcji.'}
+    from technical_events import analyze as analyze_events
+    technical_context=analyze_events(snap)
+    manifest['technical_events']={k:technical_context.get(k) for k in
+        ('method','config_version','config_id','interval','candle_time','known_at','events','missing')}
+    manifest['scenario_plan']=technical_context.get('scenario',{'status':'UNAVAILABLE','reason':'Brak pełnych zamkniętych danych.'})
     if evidence.get('autonomous_assessment_version')==1:
         manifest['version']=4
         manifest['local_review']=review_analysis_material(snap,manifest)
@@ -2270,6 +2282,13 @@ def event_analysis_request(evidence,context):
                 'oceń jego spójność i ograniczenia, uwzględnij brak planu i słabą relację zysku do ryzyka w assessment. '
                 'directional_score ocenia zgodność wskazań z score_direction, nie wykonalność transakcji. Braki ograniczają ocenę, a nie potwierdzają bezpieczeństwa. '
                 'RSI nie jest wyceną: nie używaj niedowartościowania/przewartościowania ani obietnicy odbicia.')
+            instructions+=(' technical_events opisuje zdarzenia z zamkniętych świec; dywergencja jest ostrzeżeniem, nie dowodem odwrócenia. '
+                'Wartości przy punktach zwrotnych dotyczą ich dat historycznych, a nie bieżącej świecy. '
+                'Zdarzenie złożone łączy grupy przesłanek z tego samego OHLCV i nie zwiększa punktacji ani prawdopodobieństwa. '
+                'scenario_plan to wyliczony lokalnie scenariusz bazowy, alternatywa i warunek zanegowania. '
+                'Nie zmieniaj jego poziomów ani warunków, nie przepisuj liczb do własnej interpretacji i nie traktuj go jako planu zlecenia. '
+                'HISTORICAL lub UNAVAILABLE nie opisuje aktualnego scenariusza; nie obiecuj jego realizacji. '
+                'Scenariusz nie zastępuje local_review ani oceny ryzyka i świeżości ofert.')
             instructions+=(' assessment: obiekt z trzema obowiązkowymi polami movement, activity, risk; każde to jedno zdanie do stu pięćdziesięciu znaków, bez cyfr. '
                 'movement: kierunek i zgodność lub sprzeczność wskazań. activity: osobno oceń wolumen i aktywność, nawet gdy dane są niepełne. '
                 'risk: ryzyko, ograniczenia ofert i planu; przy słabej relacji potencjału do ryzyka powiedz to jawnie. '
@@ -3940,6 +3959,12 @@ def detect_market(store,snapshot,config=None):
                 confirmed = parse_market_time(now).astimezone(timezone.utc).isoformat()
                 c.execute('INSERT OR IGNORE INTO signal_confirmations VALUES(?,?,?,?,?)',
                           (confirmed, t, snapshot['price'], matrix['change_pct'], currency))
+                from technical_events import analyze as analyze_events
+                from signal_comparison import features as comparison_features
+                event_context = analyze_events(snapshot)
+                event_context['comparison'] = comparison_features(snapshot, matrix['change_pct'], event_context)
+                c.execute('INSERT OR IGNORE INTO signal_technical_context VALUES(?,?,?)',
+                          (confirmed, t, json_text(event_context)))
         price=snapshot['price'];reasons=[];dprice=None;drvol=None;event_id=None
         if old is None:
             baseline={'price':price,'rvol':rv,'candle_time':snapshot['candle_time'],'acquired_at':now,'last_event_id':None}
@@ -4598,6 +4623,7 @@ def render_local_research_analysis(context):
     st.caption('Świeca: '+str(report['candle_time'] or 'Brak początku')+' → '+str(report['candle_end'] or 'Brak końca')+' · '+polish_status(report['candle_status'] or 'UNKNOWN'))
     st.markdown('**1. Detekcja ruchu względem stałej bazy**')
     st.write(report['conclusion'])
+    render_technical_events(context['snapshot'])
     render_company_report_table(report['prices'])
     st.markdown('**2. Jakość ruchu — aktywność i technika**')
     st.markdown('**Układ średnich i ocena wskaźników**')
@@ -5369,6 +5395,12 @@ def company_snapshot_report(snapshot,previous=None):
             'notes':notes,'conclusion':conclusion,'trend':trend,'risk':risk,'confirmed':confirmed}
 
 
+def render_technical_events(snapshot):
+    import streamlit as st
+    from technical_events import analyze, cards_html
+    st.html(cards_html(analyze(snapshot)))
+
+
 def render_company_report_table(rows):
     import html
     import streamlit as st
@@ -5588,6 +5620,7 @@ def tracking_confirmed_opportunities(store,days=7,now=None):
     current_time=now or datetime.now(timezone.utc)
     cutoff=(current_time-timedelta(days=days)).isoformat()
     from tracking_view import level_view
+    from technical_events import analyze as analyze_events
     result=[]
     with store.connection() as c:
         rows=c.execute("""SELECT sequence_id,ticker,state,updated_at,payload
@@ -5641,6 +5674,7 @@ def tracking_confirmed_opportunities(store,days=7,now=None):
                 'direction':direction,
                 'current_at':acquired,
                 'currency':source.get('currency') or snap.get('currency') or '',
+                'technical_events':analyze_events(source),
                 'levels':level_view(source,
                     (source.get('price_matrix') or {}).get('change_pct') if source.get('price_matrix') else change_pct,
                     now=current_time,reference_ready=daily_matrix_reference_ready(source)),
@@ -5702,6 +5736,13 @@ def signal_session_outcomes(store, now=None):
         confirmations = {}
         active_tickers = {row[0] for row in connection.execute('SELECT ticker FROM watchlist')}
         histories = {}
+        technical_context = {
+            (row['ticker'], row['confirmed_at']): load_payload(row['payload'])
+            for row in connection.execute(
+                'SELECT ticker,confirmed_at,payload FROM signal_technical_context WHERE confirmed_at BETWEEN ? AND ?',
+                (cutoff, now.isoformat())
+            )
+        }
         for row in connection.execute(
             'SELECT * FROM signal_confirmations WHERE confirmed_at BETWEEN ? AND ?', (cutoff, now.isoformat())
         ):
@@ -5747,6 +5788,7 @@ def signal_session_outcomes(store, now=None):
             if market not in calendars:
                 calendars[market] = get_calendar(market)
             calendar = calendars[market]
+            events = technical_context.get((ticker, confirmed_at))
             moment = parse_market_time(confirmed_at)
             signal_day = moment.astimezone(exchange_zone(ticker)).date().isoformat()
             if not calendar.is_session(signal_day):
@@ -5785,8 +5827,10 @@ def signal_session_outcomes(store, now=None):
                 result.append({'ticker': ticker, 'confirmed_at': confirmed_at, 'price': price,
                                'direction': 'Wzrost' if direction_pct > 0 else 'Spadek', 'currency': currency,
                                'horizon': horizon, 'session': target, 'status': status, 'change': change,
+                               'session_close': calendar.session_close(sessions[horizon]).isoformat(),
                                'candle': dict(candle) if change is not None else {},
-                               'diagnostic': diagnostic, 'history_refreshed_at': history.get('refreshed_at')})
+                               'diagnostic': diagnostic, 'history_refreshed_at': history.get('refreshed_at'),
+                               'technical_events': events})
     return result
 
 
@@ -5863,6 +5907,31 @@ def render_signal_outcomes(store):
     if not rows:
         st.info('Brak sygnałów z zachowaną ceną potwierdzenia.')
         return
+    types = {}
+    for row in rows:
+        for event in (row.get('technical_events') or {}).get('events', []):
+            types[event['code']] = event['label']
+    options = {'Wszystkie rodzaje': None, 'Bez zapisanego typu': 'LEGACY',
+               'Brak danych do oceny zdarzeń': 'NO_DATA', 'Bez zdarzeń w sprawdzonym zakresie': 'NO_EVENT'}
+    options.update({label: code for code, label in sorted(types.items(), key=lambda item: item[1])})
+    choice = st.selectbox('Rodzaj zdarzenia przy potwierdzeniu', list(options), key='outcome_event_type')
+    code = options[choice]
+    if code == 'LEGACY':
+        rows = [row for row in rows if row['technical_events'] is None]
+    elif code == 'NO_DATA':
+        rows = [row for row in rows if row['technical_events'] is not None
+                and not row['technical_events'].get('candle_time')]
+    elif code == 'NO_EVENT':
+        rows = [row for row in rows if row['technical_events'] is not None
+                and row['technical_events'].get('candle_time') and not row['technical_events']['events']]
+    elif code is not None:
+        rows = [row for row in rows if any(event['code'] == code for event in
+                (row['technical_events'] or {}).get('events', []))]
+    st.caption('Typ jest zapisywany przy nowych potwierdzeniach na podstawie zamkniętych świec. '
+               'Jeden sygnał może należeć do kilku rodzajów zdarzeń.')
+    if not rows:
+        st.info('Brak sygnałów tego rodzaju w wybranym okresie.')
+        return
     summary = []
     for direction in ('Wzrost', 'Spadek'):
         for horizon in SIGNAL_HORIZONS:
@@ -5884,6 +5953,13 @@ def render_signal_outcomes(store):
             continue
         unit = ' ' + row['currency']
         candle = row['candle']
+        context = row['technical_events']
+        if context is None:
+            type_label = 'Bez zapisanego typu'
+        elif not context.get('candle_time'):
+            type_label = 'Brak danych do oceny zdarzeń'
+        else:
+            type_label = ', '.join(event['label'] for event in context['events']) or 'Bez zdarzeń w sprawdzonym zakresie'
         details.append({'Ticker': row['ticker'], 'Sygnał': row['direction'],
                         'Potwierdzenie': time_text(row['confirmed_at']), 'Sesja': row['session'],
                         'Cena potwierdzenia': pl_number(row['price'], 4, unit),
@@ -5892,6 +5968,7 @@ def render_signal_outcomes(store):
                         'Maksimum': pl_number(candle.get('high'), 4, unit),
                         'Minimum': pl_number(candle.get('low'), 4, unit),
                         'Wolumen': pl_number(candle.get('volume'), 0), 'Stan': row['status'],
+                        'Rodzaj zdarzenia': type_label,
                         'Powód braku danych': row['diagnostic'],
                         'Historia odświeżona': time_text(row['history_refreshed_at'])})
     st.dataframe(details, width='stretch', hide_index=True)
@@ -6296,6 +6373,7 @@ def render_portfolio(store):
     import streamlit as st
     import re
     from tracking_view import level_view
+    from technical_events import analyze as analyze_events
     st.subheader('Mój portfel')
     st.caption('Do 10 spółek. Ostatnie zapisane dane skanera; podgląd nie pobiera danych ani nie uruchamia AI. Ręczne progi SL/TP służą istniejącym alertom Telegram, nie są zleceniami.')
     tickers = portfolio_tickers(store)
@@ -6444,6 +6522,7 @@ def render_portfolio(store):
             '_analysis_levels':analysis_levels,'_currency':cur,
             '_daily_move':portfolio_daily_move(snap),
             '_supplemental_indicators':supplemental_indicator_rows(snap),
+            '_technical_events':analyze_events(snap),
             '_market_52_week_range':snap.get('market_52_week_range'),
             '_acquired_at':snap.get('_acquired_at') or snap.get('acquired_at'),'_risk_at':risk_at,
             'Ticker':t,
@@ -6614,20 +6693,44 @@ def render_portfolio(store):
 def render_growth_ranking(store,now=None):
     import streamlit as st
     import html
+    st.html('''<style>
+    [data-testid="stMainBlockContainer"]{max-width:none;padding-left:16px;padding-right:16px}
+    </style>''')
     ranking=load_growth_ranking(store,now)
     matrix_rows=load_price_matrix_rows(store)
     st.subheader('Ruch od stałej ceny bazowej matrycy')
     st.caption('Cena bazowa pochodzi z zamknięcia poprzedniej zakończonej sesji i pozostaje stała w bieżącej sesji. Brak tego zamknięcia blokuje ocenę ruchu względem bazy. Kandydat wymaga trzech potwierdzeń ruchu z nowym dowodem aktywności (przyrost wolumenu w 1H lub dodatni wolumen nowej świecy) w oknie jednej godziny. Same ponowne pobrania bez aktywności nie zwiększają licznika. Cofnięcie nie przesuwa ceny bazowej.')
     if matrix_rows:
-        st.dataframe(matrix_rows,width='stretch',hide_index=True)
+        import pandas as pd
+        frame=pd.DataFrame(matrix_rows)
+        def movement_label(value):
+            if not finite_number(value):return 'Brak danych'
+            if math.isclose(value,0.,rel_tol=0.,abs_tol=1e-9):return '→ Bez zmiany'
+            return '↑ Wzrost' if value>0 else '↓ Spadek'
+        frame.insert(1,'Ruch od bazy',frame['Zmiana od bazy (%)'].map(movement_label))
+        def matrix_colors(row):
+            colors={'↑ Wzrost':('#143b2c','#dcfce7'),'↓ Spadek':('#4c1d24','#ffe4e6'),
+                    '→ Bez zmiany':('#4a2c16','#fed7aa'),'Brak danych':('#18212d','#c6d0dc')}
+            background,text=colors[row['Ruch od bazy']]
+            return ['background-color: '+background+'; color: '+text]*len(row)
+        st.caption('Kolory względem stałej ceny bazowej: zielony — wzrost, czerwony — spadek, pomarańczowy — bez zmiany.')
+        from matrix_view import cards_table
+        st.html(cards_table(matrix_rows))
+        with st.expander('Narzędzia tabeli i eksport CSV'):
+            st.dataframe(frame.style.apply(matrix_colors,axis=1),width='stretch',hide_index=True)
     else:st.info('Brak ruchów powyżej progu od ceny bazowej matrycy.')
     st.subheader('TOP 10 wzrostów i TOP 10 spadków')
     st.caption('Cena porównywana jest ze stałym zamknięciem poprzedniej zakończonej sesji. Kandydat może utrzymywać się mimo cofnięcia ceny ponad progiem; potwierdzenie wymaga trzech dowodów nowej aktywności w ciągu godziny, bez wymazywania historii obserwacji.')
     st.caption('Kwalifikujących się spółek: '+str(ranking['top_count'])+' · wzrosty: '+str(ranking['up_count'])+' · spadki: '+str(ranking['down_count'])+'. Ranking osobno według zgodności z kierunkiem, RVOL i tickera. Podział list nie uruchamia dodatkowych analiz AI.')
     def num(value,suffix='',digits=2):
         return format(value,',.'+str(digits)+'f').replace(',',' ').replace('.',',')+suffix if finite_number(value) else 'Brak danych'
-    def show(entries):
+    def show(entries,compact=False):
         if not entries:st.info('Brak spółek spełniających warunki w aktualnej świecy.');return
+        def metric(column,label,value):
+            if compact:
+                column.markdown('**'+label+'**')
+                column.markdown('<div style="font-size:clamp(1rem,2.5vw,1.5rem);overflow-wrap:anywhere">'+html.escape(value)+'</div>',unsafe_allow_html=True)
+            else:column.metric(label,value)
         for n,r in enumerate(entries,1):
             snap=r['snapshot'];p=r['previous_closed'];risk=r['risk']
             sections=opportunity_report_sections(r)
@@ -6637,22 +6740,28 @@ def render_growth_ranking(store,now=None):
                        ('Potwierdzony wzrost' if r.get('change_pct',0)>0 else 'Potwierdzony spadek') if r['group']=='TOP' else 'Kandydat — bez potwierdzenia')
                 color='green' if r.get('change_pct',0)>0 else 'red'
                 st.markdown(':'+color+'[**'+str(n)+'. '+r['ticker']+' · '+title+' · '+str(r['score'])+'/100**]')
-                a,b,d,e=st.columns(4)
-                a.markdown('**Cena**')
-                a.markdown('<div translate="no" lang="pl" style="font-size:1.8rem">'+html.escape(pl_number(r['price'],4,' '+r['currency']))+'</div>',unsafe_allow_html=True)
-                if matrix:
-                    b.metric('Cena bazowa',num(matrix['anchor_price'],digits=4)+' '+str(r['currency']))
-                    d.metric('Zmiana od bazy',num(matrix['change_pct'],'%',2))
-                    e.metric('Odczyty z aktywnością',str(matrix['consecutive_reads'])+' / 3')
+                if compact:
+                    a,b=st.columns(2)
+                    d,e=st.columns(2)
                 else:
-                    b.metric('Pierwsza 1h — zamknięta',num((p['close']/p['open']-1)*100,'%'))
-                    d.metric('Druga 1h — w trakcie',num(r['candle_change_pct'],'%'))
-                    e.metric('RVOL obu świec',num(p['rvol'])+'× / '+num(r['rvol'])+'×')
+                    a,b,d,e=st.columns(4)
+                a.markdown('**Cena**')
+                price_style='font-size:clamp(1rem,2.5vw,1.5rem);overflow-wrap:anywhere' if compact else 'font-size:1.8rem'
+                a.markdown('<div translate="no" lang="pl" style="'+price_style+'">'+html.escape(pl_number(r['price'],4,' '+r['currency']))+'</div>',unsafe_allow_html=True)
+                if matrix:
+                    metric(b,'Cena bazowa',num(matrix['anchor_price'],digits=4)+' '+str(r['currency']))
+                    metric(d,'Zmiana od bazy',num(matrix['change_pct'],'%',2))
+                    metric(e,'Odczyty z aktywnością',str(matrix['consecutive_reads'])+' / 3')
+                else:
+                    metric(b,'Pierwsza 1h — zamknięta',num((p['close']/p['open']-1)*100,'%'))
+                    metric(d,'Druga 1h — w trakcie',num(r['candle_change_pct'],'%'))
+                    metric(e,'RVOL obu świec',num(p['rvol'])+'× / '+num(r['rvol'])+'×')
                 st.write('**1. Detekcja ruchu:** '+sections['detection']['summary'])
                 st.write('**2. Jakość ruchu:** '+sections['quality']['summary'])
                 st.write('**3. Ryzyko:** '+sections['risk']['summary'])
                 st.caption(bid_ask_summary(snap))
                 st.write('**Aktywność:** '+activity_summary(snap))
+                render_technical_events(snap)
                 local=review_analysis_material(snap,build_analysis_manifest({'snapshot':snap}, {'sources':[]}))
                 st.markdown('**Ocena danych:** '+local['summary'])
                 st.caption('Kompletność oceny: '+('częściowa' if local['coverage']=='PARTIAL' else 'pełna')+
@@ -6708,10 +6817,13 @@ def render_growth_ranking(store,now=None):
                                ' · '+polish_status(snap.get('candle_status'))+' · odczyt '+snap['acquired_at'])
                     for source in r['source_facts']:
                         st.write(str(source.get('published_at') or source.get('date_state') or 'Brak daty') + ' · ' + str(source.get('fact') or ''));st.link_button('Otwórz źródło',source['url'])
-    st.markdown('### :green[TOP 10 wzrostów]')
-    show(ranking['up'])
-    st.markdown('### :red[TOP 10 spadków]')
-    show(ranking['down'])
+    down_column,up_column=st.columns(2,gap='medium')
+    with down_column:
+        st.markdown('### :red[TOP 10 spadków]')
+        show(ranking['down'],compact=True)
+    with up_column:
+        st.markdown('### :green[TOP 10 wzrostów]')
+        show(ranking['up'],compact=True)
     st.subheader('Wczesne obserwacje')
     st.caption('Kandydaci pozostają widoczni do potwierdzenia lub spadku poniżej progu matrycy. Bez potwierdzenia nie są kierowani do GPT ani Telegrama.')
     show(ranking['early'])
@@ -7024,6 +7136,8 @@ def run_streamlit(db,now=None):
     import html
     store=Store(db)
     st.set_page_config(page_title='KI — rynek i detekcja',page_icon='📈',layout='wide',initial_sidebar_state='collapsed')
+    from fullscreen_control import render as render_fullscreen_control
+    render_fullscreen_control()
     # Translatory zmieniają węzły zarządzane przez React (m.in. OBV -> „OCZYWIŚCIE”).
     # Oznaczenie polskiej aplikacji zapobiega takiej ingerencji przy kolejnych renderach.
     st.html('''<script>
@@ -7094,7 +7208,15 @@ def run_streamlit(db,now=None):
         st.caption('Odczyt zapisanych wyników co 15 minut. Skaner pobiera Yahoo według ustawionego cyklu.')
         st.caption('Panel jest po polsku. Wyłącz automatyczne tłumaczenie tej strony w przeglądarce; może zmieniać tickery, liczby i powodować błędy widoku.')
         st.caption('GPT-4o mini analizuje wybrane, potwierdzone okazje. Tavily dostarcza datowane źródła. Automatyczna analiza wymaga świec 1h.')
-    section=st.radio('Widok panelu',['Automat','Dalszy ruch spółek','Moj portfel','Analiza GPT','Rozmowa z GPT','Analiza pogłębiona','Monitor Tavily + AI','Ręczny ticker','Dodaj / wyszukaj spółki'],horizontal=True,key='panel_view')
+    section=st.radio('Widok panelu',['Automat','Dalszy ruch spółek','Moj portfel','Historia spółki','Porównanie sygnałów','Analiza GPT','Rozmowa z GPT','Analiza pogłębiona','Monitor Tavily + AI','Ręczny ticker','Dodaj / wyszukaj spółki'],horizontal=True,key='panel_view')
+    if section=='Porównanie sygnałów':
+        from signal_comparison import render
+        render(store)
+        return
+    if section=='Historia spółki':
+        from company_history import render
+        render(store)
+        return
     render_error_controls(store)
     with st.expander('Historia dzienna i zamknięcie odniesienia'):
         daily_ticker=st.selectbox('Instrument historii dziennej',['']+ticks,key='daily_history_ticker')
@@ -7153,6 +7275,7 @@ def run_streamlit(db,now=None):
         st.caption('Świeca: '+when(s['candle_time'])+' → '+when(s.get('candle_end'))+' · '+polish_status(s.get('candle_status','UNKNOWN')))
         st.markdown('**Wniosek z zapisanych danych**')
         st.write(report['conclusion'])
+        render_technical_events(report_snapshot)
         st.markdown('**Cena i trzy osobne odniesienia**')
         render_company_report_table(report['prices'])
         st.markdown('**Wolumen i aktywność**')

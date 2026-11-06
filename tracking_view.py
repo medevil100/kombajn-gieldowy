@@ -4,6 +4,7 @@ from html import escape
 import math
 
 from sl_tp import build_plan, stamp
+from technical_events import cards_html as event_cards_html
 
 
 def numeric(value):
@@ -81,6 +82,7 @@ def cards_html(rows):
             '<div class="ki-track-badge '+badge+'">'+escape(levels.get('label', 'Brak danych'))+'</div>'
             '<div class="ki-track-price">Ostatnia cena: <strong>'+escape(number_text(row.get('current_price'), currency))+'</strong></div>'
             '<div class="ki-track-note">Zmiana od bazy śledzenia: '+escape(number_text(row.get('change_pct'), '%', 2))+'</div>'
+            +(event_cards_html(row['technical_events']) if row.get('technical_events') is not None else '')+
             '<dl class="ki-track-levels">'+cells+'</dl>'
             '<div class="ki-track-note">'+escape(availability)+'</div>'
             '<div class="ki-track-note">'+escape(space)+'</div>'

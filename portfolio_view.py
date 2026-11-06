@@ -3,6 +3,7 @@ from html import escape
 import math
 
 from tracking_view import time_text, level_values, number_text
+from technical_events import cards_html as event_cards_html
 
 
 def text(value, default='—'):
@@ -123,6 +124,7 @@ def cards_html(rows):
             '<div class="ki-pf-price">'+field('Cena')+'</div>'
             '<div class="ki-pf-caption">Zmiana ceny od otwarcia świecy 1h</div>'
             +market_context_html(row)+
+            (event_cards_html(row['_technical_events']) if row.get('_technical_events') is not None else '')+
             '<div class="ki-pf-badge '+('fresh' if fresh else 'old')+'">'+label+'</div>'
             '<div class="ki-pf-section">Moje progi alertów</div>'
             '<div class="ki-pf-levels">'+levels+'</div>'
