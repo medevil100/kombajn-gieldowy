@@ -1,0 +1,11 @@
+# Wpisywanie tickera — poprawka widoku orkiestratora
+
+Status: wdrożono na VPS 10 listopada około 17:28 UTC (18:28 CET). Dwanaście testów instalatora i pełna regresja VPS PASS; graf offline, panel i trzy świeże heartbeaty potwierdzone. Jednostka `ki2-orchestrator-input-install-20261110.service`, success/0. Kopia kodu: `/home/ubuntu/ki2/backup-orchestrator-input-20261110T172856548552Z`. Raport: `/home/ubuntu/ki2-orkiestrator-ticker-vps-20261110/tests-20261110T172659612727Z`. Sprawdzenie rzeczywistego wpisywania na urządzeniu pozostaje do potwierdzenia. Wdrożony orkiestrator i zasady TOP 5 pozostają aktywne; ta poprawka dotyczy wyłącznie odczytu wpisanego symbolu.
+
+Pole listy zastąpiono pustym polem tekstowym. Symbol jest normalizowany: usuwane są spacje na końcach i zamieniane małe litery na duże. Odczytywany jest dokładny zapis `runtime` dla danego tickera. Brak zapisu daje komunikat po polsku, bez wyjątku i bez żądania do dostawcy. Gdy istnieje zapis spółki spoza aktywnej listy, jest pokazany z własną datą i wyjaśnieniem, że spółka nie jest obecnie obserwowana. Nie dodaje się jej automatycznie do skanera.
+
+Wpisanie tickera ani odświeżenie widoku nie wywołuje AI, Yahoo, Tavily ani Telegrama. Polityka orkiestratora, limity ocen i kwalifikacja TOP 5 nie są zmieniane. TOP 5 nadal oznacza wyłącznie wzrosty z kompletnym technicznym SL/TP; obserwacje bez planu i ostrzeżenia spadkowe są odrębne.
+
+Istniejący test widoku zmieniono z wyboru opcji na wpisanie symbolu małymi literami ze spacjami oraz wpisanie nieznanego symbolu. Kontroluje pustą wartość początkową, prawidłowy odczyt, komunikat braku danych i brak wywołań API. Instalator ma 12 testów na plikach tymczasowych. Przed podmianą wymagana jest pełna regresja paczki na VPS.
+
+Pełna regresja Windows i Ubuntu WSL przeszła: 769 testów modułów, wbudowane 522, panel 26 i uruchamianie 5; pominięcia zależne od platformy. JavaScript OK na Windows; Linux bez Node nie uruchamiał tej fazy. Dwanaście testów instalatora na obu systemach OK. Nie uruchamiano rzeczywistych dostawców ani wysyłki. Kod KI.py i polityka kwalifikacji pozostają bajtowo takie jak we wdrożonej wersji orkiestratora; zmieniono wyłącznie moduł widoku i istniejący test wpisywania.

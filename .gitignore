@@ -103,3 +103,22 @@ top10-*-20261027.log
 # Local backups made during VPS and daily-reference fixes
 /backup_20261029_*/
 *.bak.*
+
+# Lokalne archiwa, inne projekty i wyniki diagnostyki; bez usuwania danych.
+/Alchemik-*/
+/backup_*/
+/audyt-*/
+/weryfikacja-*/
+/tavily-proba-kontrolna-*/
+/*.tar.gz
+
+# Rzeczywiste sondy dostawców nie są częścią regresji ani wydania KI 2.
+/verify_openai_live_20261025.py
+/verify_tavily_live_20261025.py
+/verify_tavily_positive_control_20261025.py
+
+# Lokalne wskazanie danych poza OneDrive; nie jest konfiguracją produkcji VPS.
+/.ki2-local-paths.json
+
+# Osobne, wersjonowane środowiska analizy pogłębionej na Linuxie.
+/tradingagents-envs/

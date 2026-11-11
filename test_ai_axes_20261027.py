@@ -80,13 +80,16 @@ class AssessmentAxesTests(unittest.TestCase):
         clean=KI.validate_event_analysis(result,ev['snapshot'],ctx)
         self.assertTrue(KI.analysis_publication_issues(clean,True))
 
-    def test_source_quote_enum_contains_only_literal_source_fragments(self):
+    def test_source_quote_ids_point_to_literal_source_fragments(self):
         ev,result,ctx=self.sample()
         ev['snapshot']['company_name']='Emitent'
         source={'id':'S1','content':'Emitent opublikował dzisiaj raport o wynikach finansowych. Privacy policy and copyright reserved here.'}
         ctx['sources']=[source]
-        fact=KI.analysis_schema(ev['snapshot'],ctx)['properties']['context']['items']['properties']['fact']
-        self.assertEqual(fact['enum'],['Emitent opublikował dzisiaj raport o wynikach finansowych.'])
+        request=KI.event_analysis_request(ev,ctx)
+        fact=request['response_format']['json_schema']['schema']['properties']['context']['items']['properties']['fact']
+        self.assertEqual(fact['enum'],['Q1'])
+        catalog=json.loads(request['messages'][-1]['content'])['source_context']['quote_catalog']
+        self.assertEqual(catalog,[{'quote_id':'Q1','source_id':'S1','fact':'Emitent opublikował dzisiaj raport o wynikach finansowych.'}])
 
     def test_finish_persists_structured_result_and_does_not_queue_rejected_output(self):
         with tempfile.TemporaryDirectory() as folder:

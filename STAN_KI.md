@@ -1,6 +1,19 @@
 ﻿# KI — AKTUALNY STAN PROJEKTU
 
-## Wersja odniesienia
+## Aktualizacja 11 listopada 2026
+
+Bieżąca gałąź: `ki-stage1-test`. Główne zmiany od 6 listopada obejmują
+oceny AI oparte na dowodach i przebiegu sesji, aktualizacje w trakcie dnia,
+wstępne oceny, orkiestrator, TOP 5 wzrostów z kompletnym planem oraz osobne
+ostrzeżenia spadkowe, harmonogram raportów według kalendarzy i kolorowe
+wskaźniki. Źródła są objęte pełną regresją Windows i Linux.
+
+Aktualny opis testów: `TESTY_KI.md`. Potwierdzenia VPS i obserwacji:
+`PUNKT_WZNOWIENIA_20261111.md`. Dodatkowa poprawka zachowania kolorów
+historycznych jest lokalnie przetestowana; jej wdrożenia VPS nie potwierdzono.
+Poniższy E05 jest historycznym punktem odniesienia, a nie aktualną wersją.
+
+## Historyczna wersja odniesienia
 Repozytorium: medevil100/kombajn-gieldowy
 Galaz rozwojowa: ki-stage1-test
 Wersja: E05, uruchomiona z rzeczywistymi uslugami 9.10.2026.

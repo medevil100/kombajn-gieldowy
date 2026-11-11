@@ -113,7 +113,9 @@ def cards_html(rows):
                             ('Spread z zapisu','Spread %')))
         indicators = row.get('_supplemental_indicators') or []
         technical = ''
-        if indicators:
+        if row.get('_indicator_html'):
+            technical = '<details><summary>Wskaźniki · kolory, Bollinger i poziomy</summary>' + row['_indicator_html'] + '</details>'
+        elif indicators:
             technical = '<details><summary>VWAP, Stoch RSI i Fibonacci</summary>' + ''.join(
                 '<div class="ki-pf-detail"><span>' + escape(item['Wskaźnik']) + '</span><strong>'
                 + escape(item['Wartość']) + '</strong></div>'

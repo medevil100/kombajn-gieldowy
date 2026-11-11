@@ -875,7 +875,7 @@ class IdentityAndPartialRiskContracts(unittest.TestCase):
         self.assertEqual(context['sources'],[])
 
     def test_partial_risk_retains_quote_uncertainty(self):
-        risk=KI.opportunity_risk({'price':100.,'ohlc':{'high':101.},'spread':{'spread_pct':1.1}})
+        risk=KI.opportunity_risk({'price':100.,'ohlc':{'high':101.},'spread':{'bid':99.5,'ask':100.5}})
         self.assertEqual(risk['checked_criteria'],2)
         self.assertIn('Ocena częściowa',risk['label'])
         self.assertFalse(risk['complete'])
@@ -887,7 +887,9 @@ class IdentityAndPartialRiskContracts(unittest.TestCase):
         self.assertEqual(risk['label'],'Brak danych do oceny ryzyka')
 
     def test_elevated_risk_still_wins_over_missing_data(self):
-        for snap in ({'spread':{'spread_pct':2.}}, {'price':98.,'ohlc':{'high':100.}}):
+        for snap in ({'acquired_at':'2026-11-06T10:15:00Z',
+                      'spread':{'bid':99.,'ask':102.,'freshness_confirmed':True,'quote_time':'2026-11-06T10:15:00Z'}},
+                     {'price':98.,'ohlc':{'high':100.}}):
             risk=KI.opportunity_risk(snap)
             self.assertEqual(risk['label'],'Ryzyko podwyższone')
             self.assertTrue(risk['reasons'])

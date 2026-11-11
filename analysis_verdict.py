@@ -2,6 +2,7 @@
 import math
 import re
 from datetime import datetime
+from session_context import shortened_activity_ready
 
 VERSION = 1
 LABELS = {
@@ -46,7 +47,12 @@ def activity_summary(snapshot, previous=None):
     previous_hour = (not closed and start and full_start and full_end == start
                      and (full_end - full_start).total_seconds() == 3600
                      and full.get('status') == 'CLOSED' and number(full.get('rvol')) and full['rvol'] >= 0)
-    if closed and valid_rv:
+    if shortened_activity_ready(snapshot):
+        minutes=int((timestamp(snapshot['candle_end'])-start).total_seconds()/60)
+        text='skrócona świeca '+str(minutes)+' min: dotąd '+count(snapshot['volume'])+' szt.; bez godzinowego RVOL.'
+        if previous_hour:text+=' Ostatnia pełna zamknięta 1h: '+ratio(full['rvol'])+' średniej.'
+        text+=' Ocena obejmuje zapisane świece całej sesji.'
+    elif closed and valid_rv:
         text = 'wolumen zakończonej świecy ' + ('powyżej' if rv > 1 else 'równy' if rv == 1 else 'poniżej') + ' średniej (' + ratio(rv) + ').'
     elif valid_rv:
         text = ('ostatnia zamknięta 1h: ' + ratio(full['rvol']) + ' średniej; bieżąca dotąd: ' + ratio(rv)
@@ -89,7 +95,7 @@ def material_issues(snapshot):
         issues.append('Niepełne lub sprzeczne czasy świecy i odczytu.')
     elif status not in ('OPEN', 'CLOSED') or (status == 'OPEN' and acquired >= end) or (status == 'CLOSED' and acquired < end):
         issues.append('Status świecy jest sprzeczny z czasem odczytu.')
-    if not all(number(snapshot.get(k), True) for k in ('volume', 'average_volume', 'rvol')):
+    if not all(number(snapshot.get(k), True) for k in ('volume', 'average_volume', 'rvol')) and not shortened_activity_ready(snapshot):
         issues.append('Brak pełnego pomiaru wolumenu, jego średniej lub RVOL.')
     matrix = snapshot.get('price_matrix') or {}
     change, anchor = matrix.get('change_pct'), matrix.get('anchor_price')
@@ -156,7 +162,10 @@ def review(snapshot, manifest):
     if plan.get('status') == 'INDICATIVE' and number(plan.get('rr1')) and plan['rr1'] < 1:
         evidence['POOR_RR'] = {'text': 'Potencjał do pierwszego celu jest mniejszy niż odległość do SL.', 'metrics': []}
         dominant.append('POOR_RR')
-    if snapshot.get('candle_status') == 'OPEN':
+    if shortened_activity_ready(snapshot):
+        limitations.append('Końcowa świeca jest skrócona; godzinowy RVOL niewyznaczony. Aktywność oceniana z całej sesji i osobno ostatniej pełnej godziny.')
+        activity='SHORT_INTERVAL'
+    elif snapshot.get('candle_status') == 'OPEN':
         limitations.append('Świeca trwa; wolumen całej godziny pozostaje nieznany.')
         activity = 'PARTIAL_ABOVE' if number(snapshot.get('rvol')) and snapshot['rvol'] >= 1 else 'PARTIAL'
     else:
@@ -225,6 +234,7 @@ def narrative_errors(result, snapshot, manifest):
     texts = list(assessment.values()) if isinstance(assessment, dict) else [assessment]
     texts += [x.get('interpretation', '') for x in result.get('technical', [])]
     texts += [x for key in ('hypotheses', 'risks', 'missing') for x in result.get(key, [])]
+    if isinstance(result.get('final_review'),dict):texts.append(result['final_review'].get('explanation',''))
     plan = manifest.get('trade_plan') or {}
     rr = plan.get('rr1')
     measured_rr = plan.get('status') == 'INDICATIVE' and number(rr) and rr >= 0

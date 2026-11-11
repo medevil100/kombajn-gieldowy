@@ -25,12 +25,12 @@ class TradePlanTests(unittest.TestCase):
         self.assertEqual((p['tp1'],p['tp2']),(12,14));self.assertAlmostEqual(p['rr1'],2/2.25)
         self.assertFalse(p['execution_confirmed']);self.assertEqual(before,s)
 
-    def test_all_tickers_use_same_rules_and_spread_reduces_reward(self):
+    def test_all_tickers_use_same_technical_levels_without_quote_costs(self):
         s,now=self.sample();base=sl_tp.build_plan(s,3,now)
         for ticker in ('VCYT','ABC.WA','GNPX'):
             s.update(ticker=ticker,spread={'bid':9.8,'ask':10.2})
             p=sl_tp.build_plan(s,3,now)
-            self.assertLess(p['rr1'],base['rr1']);self.assertEqual(p['entry'],10)
+            self.assertEqual(p['rr1'],base['rr1']);self.assertEqual(p['entry'],10)
 
     def test_missing_stale_and_downward_data_cannot_form_plan(self):
         s,now=self.sample()
@@ -43,11 +43,12 @@ class TradePlanTests(unittest.TestCase):
         s['chart_history'][18]['status']='OPEN'
         self.assertEqual(sl_tp.build_plan(s,3,now)['status'],'UNAVAILABLE')
 
-    def test_quote_flag_without_timestamp_cannot_set_ask_entry(self):
+    def test_quotes_never_replace_technical_reference_with_ask(self):
         s,now=self.sample();s['spread']={'bid':9.9,'ask':10.1,'freshness_confirmed':True}
         self.assertEqual(sl_tp.build_plan(s,3,now)['entry'],10)
         s['spread']['acquired_at']=now.isoformat()
-        self.assertEqual(sl_tp.build_plan(s,3,now)['entry'],10.1)
+        s['spread']['quote_time']=now.isoformat()
+        self.assertEqual(sl_tp.build_plan(s,3,now)['entry'],10)
 
     def test_stored_plan_is_historical_after_validity(self):
         s,now=self.sample();p=sl_tp.build_plan(s,3,now)

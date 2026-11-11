@@ -17,7 +17,7 @@ def stamp(value):
 def build_plan(snapshot,change,now=None):
     now=now or datetime.now(timezone.utc)
     at=stamp(snapshot.get('acquired_at'))
-    plan={'version':1,'status':'UNAVAILABLE','side':'LONG','as_of':snapshot.get('acquired_at'),
+    plan={'version':2,'scope':'TECHNICAL_REFERENCE','status':'UNAVAILABLE','side':'LONG','as_of':snapshot.get('acquired_at'),
           'currency':snapshot.get('currency'),'reason':'','method':'60 zamkniętych świec 1h; pivots 2+2; SL poniżej wsparcia o 0,25 ATR, co najmniej 1 ATR od wejścia; TP: dwa najbliższe opory.',
           'execution_confirmed':False}
     def missing(reason):
@@ -41,12 +41,9 @@ def build_plan(snapshot,change,now=None):
         rows.append(row);seen.add(start)
     rows=sorted(rows,key=lambda r:stamp(r['time']))[-60:]
     if len(rows)<20:return missing('Za mało pełnych świec z obrotem: wymagane co najmniej 20.')
-    q=snapshot.get('spread') or {}
-    valid_quotes=number(q.get('bid')) and number(q.get('ask')) and q['ask']>=q['bid']
-    # Timestamp evidence, not a boolean alone, is needed to use an ask as entry.
-    qt=stamp(q.get('acquired_at') or q.get('updated_at') or q.get('timestamp'))
-    fresh=valid_quotes and q.get('freshness_confirmed') is True and qt and 0<=(at-qt).total_seconds()<=60
-    entry=q['ask'] if fresh else price
+    # This is a technical reference, not a broker execution plan. Quotes have a
+    # separate clock and never move the entry, levels or technical R/R.
+    entry=price
     supports=[];resistances=[]
     for idx in range(2,len(rows)-2):
         r=rows[idx];neighbours=rows[idx-2:idx]+rows[idx+1:idx+3]
@@ -69,19 +66,18 @@ def build_plan(snapshot,change,now=None):
     if len(targets)<2:return missing('Brak dwóch odrębnych potwierdzonych oporów powyżej ceny.')
     sl=min(support['low']-.25*atr,entry-atr)
     if sl<=0:return missing('SL wynikający ze wsparcia i ATR jest niepoprawny.')
-    spread=q['ask']-q['bid'] if valid_quotes and not fresh else 0.
-    risk=entry-sl+spread
-    rewards=[r['high']-entry-spread for r in targets]
-    if min(rewards)<=0:return missing('Spread pochłania potencjał do pierwszego oporu.')
+    risk=entry-sl
+    rewards=[r['high']-entry for r in targets]
+    if min(rewards)<=0:return missing('Opór nie leży powyżej ceny odniesienia.')
     ratios=[v/risk for v in rewards]
-    plan.update(status='INDICATIVE',entry=entry,entry_basis='ask z potwierdzonym czasem' if fresh else 'ostatnia cena; orientacyjnie',
+    plan.update(status='INDICATIVE',entry=entry,entry_basis='ostatnia cena; poziomy techniczne',
                 sl=sl,tp1=targets[0]['high'],tp2=targets[1]['high'],rr1=ratios[0],rr2=ratios[1],
                 reference_price=price,support_distance_pct=(price-support['low'])/price*100,
                 resistance_distance_pct=(targets[0]['high']-price)/price*100,
                 support={'price':support['low'],'time':support['time']},
                 resistances=[{'price':r['high'],'time':r['time']} for r in targets],atr=atr,
-                candle_count=len(rows),spread_cost=spread,quote_freshness_confirmed=bool(fresh),
-                spread_basis='wejście po ask; spread zawarty w odległościach' if fresh else 'doliczony ostatni spread; czas ofert niepotwierdzony' if valid_quotes else 'brak ofert: spread nieujęty w relacji zysku do ryzyka',
+                candle_count=len(rows),spread_cost=0.,quote_freshness_confirmed=False,
+                spread_basis='relacja techniczna bez spreadu; aktualne oferty i koszty sprawdź w XTB',
                 valid_until=(at+timedelta(minutes=15)).isoformat(),
                 reason='Poziomy orientacyjne; wykonalność niepotwierdzona. Prowizje i poślizg nieujęte. '+('Potencjał TP1 mniejszy od ryzyka.' if ratios[0]<1 else ''))
     return plan
