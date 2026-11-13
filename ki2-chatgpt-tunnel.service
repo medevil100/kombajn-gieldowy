@@ -1,0 +1,28 @@
+[Unit]
+Description=Private read-only KI tools for ChatGPT through OpenAI Tunnel
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+Environment=HOME=/home/ubuntu
+WorkingDirectory=/home/ubuntu/ki2-chatgpt-mcp
+ExecStart=/home/ubuntu/ki2/.venv/bin/python -I -B /home/ubuntu/ki2-chatgpt-mcp/ki_mcp_tunnel.py
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=20
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/ki2-chatgpt-mcp
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -145,7 +145,7 @@ def render_html(snapshot, rows, now=None):
         if not dated:tone='neutral'
         color,symbol=TONES[tone]
         meaning=str(row.get('Znaczenie') or '')
-        result+='<div class="ki-i-row" style="--ki-tone:'+color+'"><span>'+escape(label)+'</span><strong>'+escape(str(row.get('Wartość','Brak danych')))+'</strong><div class="ki-i-status">'+symbol+' '+escape(text)
+        result+='<div class="ki-i-row" style="--ki-tone:'+color+';border-left-color:'+color+'"><span>'+escape(label)+'</span><strong style="color:'+color+'">'+escape(str(row.get('Wartość','Brak danych')))+'</strong><div class="ki-i-status" style="color:'+color+'">'+symbol+' '+escape(text)
         if position is not None:result+=meter(position)
         if meaning:result+='<span class="ki-i-meaning">'+escape(meaning)+'</span>'
         result+='</div></div>'

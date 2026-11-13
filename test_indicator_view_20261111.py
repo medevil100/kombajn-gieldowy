@@ -7,6 +7,13 @@ import indicator_view as view
 
 
 class IndicatorViewTests(unittest.TestCase):
+    def test_historical_tone_is_inline_not_only_stylesheet(self):
+        self.setUp()
+        self.s['acquired_at']=(self.now-timedelta(days=2)).isoformat()
+        html=view.render_html(self.s,[{'Wskaźnik':'SMA 10','Wartość':'1,3996 USD'}],now=self.now)
+        self.assertIn('<strong style="color:#68dfaa">',html)
+        self.assertIn('Zapis historyczny',html)
+
     def setUp(self):
         self.now=datetime(2026,11,11,16,tzinfo=timezone.utc)
         self.s={'price':1.4,'currency':'USD','acquired_at':self.now.isoformat(),'candle_status':'OPEN',

@@ -10,6 +10,8 @@ FIELDS = ('Ticker', 'Ruch od bazy', 'Stan', 'Cena bazowa', 'Czas bazy UTC',
           'Ostatnia cena', 'Zmiana od bazy (%)', 'Odczyty pod rząd',
           'Ostatni odczyt UTC', 'Powiadomienia')
 WIDTHS = (8, 8, 9, 8, 12, 8, 10, 8, 12, 17)
+COLORS = {'up':('#143b2c','#dcfce7'), 'down':('#4c1d24','#ffe4e6'),
+          'flat':('#4a2c16','#fed7aa'), 'unknown':('#18212d','#c6d0dc')}
 
 
 def movement(value):
@@ -48,8 +50,9 @@ def cards_table(rows):
     body = []
     for row in rows:
         color, label = movement(row.get('Zmiana od bazy (%)'))
+        background, foreground = COLORS[color]
         values = {**row, 'Ruch od bazy': label}
-        cells = ''.join('<td data-label="' + escape(key, quote=True) + '" title="'
+        cells = ''.join('<td style="background-color:'+background+';color:'+foreground+'" data-label="' + escape(key, quote=True) + '" title="'
                         + escape(str(values.get(key) if values.get(key) is not None else 'Brak danych'), quote=True)
                         + '"><span class="ki-matrix-value">' + display(key, values.get(key)) + '</span></td>' for key in FIELDS)
         body.append('<tr class="ki-matrix-' + color + '">' + cells + '</tr>')

@@ -7577,7 +7577,11 @@ def run_streamlit(db,now=None):
         st.caption('Odczyt zapisanych wyników co 15 minut. Skaner pobiera Yahoo według ustawionego cyklu.')
         st.caption('Panel jest po polsku. Wyłącz automatyczne tłumaczenie tej strony w przeglądarce; może zmieniać tickery, liczby i powodować błędy widoku.')
         st.caption('GPT-4o mini analizuje wybrane, potwierdzone okazje. Tavily dostarcza datowane źródła. Automatyczna analiza wymaga świec 1h.')
-    section=st.radio('Widok panelu',['Automat','Wybrane okazje · TOP 5','Końcowe oceny AI','Dalszy ruch spółek','Moj portfel','Historia spółki','Porównanie sygnałów','Analiza GPT','Rozmowa z GPT','Analiza pogłębiona','Monitor Tavily + AI','Ręczny ticker','Dodaj / wyszukaj spółki'],horizontal=True,key='panel_view')
+    section=st.radio('Widok panelu',['Automat','Wybrane okazje · TOP 5','Końcowe oceny AI','Dalszy ruch spółek','Moj portfel','Historia spółki','Porównanie sygnałów','Asystent KI','Analiza GPT','Rozmowa z GPT','Analiza pogłębiona','Monitor Tavily + AI','Ręczny ticker','Dodaj / wyszukaj spółki'],horizontal=True,key='panel_view')
+    if section=='Asystent KI':
+        from ki_assistant import render
+        render(company_review.script_api(globals()),store)
+        return
     if section=='Wybrane okazje · TOP 5':
         from selected_opportunities import render
         render(company_review.script_api(globals()),store,auto_refresh)

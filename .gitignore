@@ -122,3 +122,7 @@ top10-*-20261027.log
 
 # Osobne, wersjonowane środowiska analizy pogłębionej na Linuxie.
 /tradingagents-envs/
+
+# Private runtime configuration for the ChatGPT tunnel; keep templates only.
+.runtime-key
+tunnel.json

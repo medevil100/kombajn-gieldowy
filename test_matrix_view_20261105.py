@@ -27,6 +27,11 @@ class Cells(HTMLParser):
 
 
 class MatrixViewTests(unittest.TestCase):
+    def test_direction_colors_are_attached_to_cells_after_style_rerender(self):
+        for change, color in ((2., '#143b2c'), (-2., '#4c1d24'), (0., '#4a2c16'), (None, '#18212d')):
+            html=cards_table([{'Ticker':'HUMA','Zmiana od bazy (%)':change}])
+            self.assertEqual(html.count('<td style="background-color:'+color), len(FIELDS))
+
     def test_every_field_remains_visible_and_input_is_unchanged(self):
         row = {'Ticker': 'STX.WA', 'Stan': 'Potwierdzony', 'Cena bazowa': 1.25,
                'Czas bazy UTC': '2026-11-04T17:00:00+01:00', 'Ostatnia cena': 1.3,
