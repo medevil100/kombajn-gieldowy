@@ -11,6 +11,7 @@ FIELDS={'price_evidence','momentum_evidence','supporting_evidence','limiting_evi
 
 def policy(book,snapshot):
     warnings=set(CONTEXT_ONLY)&set(book['limits'])
+    warnings.update(k for k in book['limits'] if k.startswith('L_TREND_') and k.endswith('_UNKNOWN'))
     # A partial hour below a full-hour mean is not proof of weak full-hour activity.
     if snapshot.get('candle_status')!='CLOSED':warnings.add('L_ACTIVITY_LOW')
     # A missing long execution plan does not suppress an observation in XTB.

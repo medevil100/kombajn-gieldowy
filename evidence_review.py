@@ -7,6 +7,7 @@ from ai_assessment import source_quote_catalog
 from sl_tp import stamp
 import prompt_policy
 import review_coordinator
+import company_narrative
 
 CONTRACT='EVIDENCE_SELECTION_V1'
 SCHEMA_NAME='ki_grounded_company_review'
@@ -150,6 +151,21 @@ def catalogue(api,snapshot,context):
             'conditions':conditions,'quotes':quotes,'axes':{'movement':movement,'activity':activity,'risk':risk},
             'local_verdict':local.get('verdict'),'identity':m.get('identity'),
             'missing':(['Nie ustalono przyczyny ruchu.']+([quote] if local.get('execution')!='TIMESTAMP_CONFIRMED' else []))}
+    intelligence=m.get('market_intelligence') or {}
+    horizons=(intelligence.get('trend_context') or {}).get('horizons') or {}
+    for key,horizon in horizons.items():
+        text=horizon.get('label','')+': '+{'UP':'wzrostowy','DOWN':'spadkowy','MIXED':'mieszany','UNKNOWN':'brak danych'}.get(horizon.get('direction'),'brak danych')+'.'
+        expected='UP' if change>0 else 'DOWN'
+        observed=horizon.get('direction')
+        if observed==expected:
+            supports['S_TREND_'+key.upper()]=text
+        else:
+            code='L_TREND_'+key.upper()+('_CONFLICT' if observed in ('UP','DOWN') else '_UNKNOWN')
+            limits[code]=text
+    if any(value is not None for value in intelligence.values()):
+        book['market_intelligence']=intelligence
+    if horizons:
+        book['axes']['movement']+=' '+intelligence['trend_context']['relationship']
     if book['contract']==CURRENT_CONTRACT:
         book['coordination']=review_coordinator.policy(book,snapshot)
     if preliminary:
@@ -176,9 +192,18 @@ def schema(book):
     if book.get('contract')==CURRENT_CONTRACT:
         props=result['properties']
         props.pop('verdict');props.pop('source_quote')
+        props['narrative']=company_narrative.schema()
         props['decision']=review_coordinator.decision_schema(book)
         result['required']=list(props)
     return result
+
+
+def narrative_material(snapshot,context,book):
+    manifest=context.get('analysis_manifest') or {}
+    background=manifest.get('company_background') or {}
+    return {'analysis_manifest':manifest,'company_background':background,
+            'daily_candles':background.get('daily_candles') or [],
+            'quote_catalog':list(book.get('quotes',{}).values()),'sources':context.get('sources') or []}
 
 
 def request(api,base,snapshot,context):
@@ -221,6 +246,15 @@ def request(api,base,snapshot,context):
     result['response_format']={'type':'json_schema','json_schema':{
         'name':CURRENT_SCHEMA_NAME if book['contract']==CURRENT_CONTRACT else SCHEMA_NAME,
         'strict':True,'schema':schema(book)}}
+    if book['contract']==CURRENT_CONTRACT:
+        payload['narrative_facts']=company_narrative.facts_for(snapshot,narrative_material(snapshot,context,book))
+        result['messages'][-1]['content']=api.json_text(company_narrative.compact_input(payload))
+        instruction=result['messages'][0]['content']
+        instruction=instruction.replace('Zwróć wyłącznie identyfikatory ze schematu, bez własnych opisów, liczb i nowych faktów.',
+            'W polach decyzyjnych wybieraj identyfikatory ze schematu; w narrative napisz własne uzasadnienie na podstawie danych.')
+        instruction=instruction.replace('KI składa pełny polski opis z wybranych dowodów oraz obowiązkowych ograniczeń pakietu.',
+            'Własne pełne uzasadnienie piszesz w narrative; KI zachowuje sprawdzone dane i warunki lokalne.')
+        result['messages'][0]['content']=instruction+company_narrative.instructions()
     return result
 
 
@@ -232,6 +266,14 @@ def decode(api,wire,snapshot,context):
     if frozen!=book:raise ValueError('Katalog dowodów nie odpowiada zapisanym danym tej spółki.')
     original_wire=copy.deepcopy(wire)
     coordinated=book['contract']==CURRENT_CONTRACT
+    narrative=None
+    if 'narrative_facts' in payload:
+        expected=company_narrative.facts_for(snapshot,narrative_material(snapshot,context,book))
+        if payload['narrative_facts']!=expected:raise ValueError('Katalog liczb uzasadnienia nie odpowiada zapisanym danym.')
+        if not isinstance(wire,dict) or 'narrative' not in wire:raise ValueError('Brak pełnego uzasadnienia AI wymaganego przez zapisany kontrakt.')
+        narrative=company_narrative.checked(wire['narrative'],expected)
+        if not all(key in narrative['sections'] for key in ('summary','risks')):raise ValueError('Brak poprawnego autorskiego uzasadnienia werdyktu i ryzyka.')
+        wire={k:v for k,v in wire.items() if k!='narrative'}
     if coordinated:wire=review_coordinator.normalize(wire,book)
     # The wire contract contains only scalar enums and bounded lists of enums.
     # Keep runtime validation dependency-free, including the separate deep env.
@@ -268,4 +310,7 @@ def decode(api,wire,snapshot,context):
         'catalogue_sha256':hashlib.sha256(api.json_text(book).encode('utf-8')).hexdigest(),
         'condition_text':book['conditions'][wire['watch_condition']],
         'description_origin':'KI composed verified statements; AI selected verdict and evidence.'}
+    if narrative:
+        provenance['narrative']=narrative
+        provenance['description_origin']='AI authored the Polish explanation; KI checked numeric references and kept canonical decision constraints.'
     return canonical,provenance

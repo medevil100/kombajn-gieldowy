@@ -316,7 +316,8 @@ def response_message(body, final=False):
 
 
 SNAP_FIELDS = ('ticker interval acquired_at candle_time candle_end candle_status partial_interval currency price '
-               'volume average_volume rvol indicators supplemental_indicators price_matrix ohlc previous_closed')
+               'volume average_volume rvol indicators supplemental_indicators price_matrix ohlc previous_closed '
+               'price_basis corporate_actions trend_context news_watch official_notices')
 
 
 class ReadStore:
@@ -391,7 +392,11 @@ class Reader:
             matrix = db.execute('SELECT payload,updated_at FROM price_matrix WHERE ticker=?', (ticker,)).fetchone()
             control = db.execute('SELECT payload,updated_at FROM runtime WHERE key=?', ('orchestrator:'+ticker,)).fetchone()
             fund = db.execute('SELECT payload,updated_at FROM runtime WHERE key=?', ('fundamentals_alpha:'+ticker,)).fetchone()
-            return {'ticker': ticker, 'snapshots_newest_first': snapshots,
+            large_case=None
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='large_movement_cases'").fetchone():
+                row=db.execute('SELECT status,opened_at,updated_at,market_at,price,currency,result FROM large_movement_cases WHERE ticker=?',(ticker,)).fetchone()
+                if row:large_case={k:row[k] for k in ('status','opened_at','updated_at','market_at','price','currency')} | {'assessment':obj(row['result'])}
+            return {'ticker': ticker, 'snapshots_newest_first': snapshots, 'large_movement_case':large_case,
                     'matrix': {'updated_at': matrix[1], 'data': obj(matrix[0])} if matrix else None,
                     'orchestrator': {'updated_at': control[1], 'data': obj(control[0])} if control else None,
                     'fundamentals': {'updated_at': fund[1], 'data': pick(obj(fund[0]), 'status summary')} if fund else None}
@@ -413,12 +418,16 @@ class Reader:
                 if name == 'reviews':
                     item.update(analysis=pick(res.get('analysis'), 'assessment technical context hypotheses risks missing final_review'),
                                 error=scrub(r['last_error']), manifest=pick(ctx.get('analysis_manifest'),
-                                'identity local_review trade_plan scenario_plan session_context technical_events'))
+                                'identity local_review trade_plan scenario_plan session_context technical_events market_intelligence'))
                     session = item['manifest'].get('session_context')
                     if isinstance(session, dict):
                         item['manifest']['session_context'] = pick(session, 'status as_of summary issues')
                 result.append(item)
-            return {'ticker': ticker, 'records_newest_first': result, 'scope': 'Zapisane analizy automatu; nie wykonano wyszukiwania. Raporty ręczne i pogłębione są w osobnych widokach KI.'}
+            watch=db.execute('SELECT payload FROM runtime WHERE key=?',('market_intelligence:news:'+ticker,)).fetchone()
+            official=db.execute('SELECT payload FROM runtime WHERE key=?',('market_intelligence:official:'+ticker,)).fetchone()
+            return {'ticker': ticker, 'records_newest_first': result, 'independent_issuer_news':obj(watch[0]) if watch else None,
+                    'official_notices':obj(official[0]) if official else None,
+                    'scope': 'Zapisane analizy i niezależne tropy informacyjne; nie wykonano nowego wyszukiwania. Trop nie potwierdza przyczyny ruchu.'}
         if name == 'daily_history':
             cutoff = (datetime.now(timezone.utc)-timedelta(days=args['days'])).date().isoformat()
             rows = db.execute('SELECT session_date,open,high,low,close,volume FROM daily_candles WHERE ticker=? AND session_date>=? ORDER BY session_date DESC LIMIT 260', (ticker,cutoff)).fetchall()

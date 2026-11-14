@@ -126,6 +126,7 @@ def cards_html(rows):
             '<div class="ki-pf-price">'+field('Cena')+'</div>'
             '<div class="ki-pf-caption">Zmiana ceny od otwarcia świecy 1h</div>'
             +market_context_html(row)+
+            row.get('_intelligence_html','')+
             (event_cards_html(row['_technical_events']) if row.get('_technical_events') is not None else '')+
             '<div class="ki-pf-badge '+('fresh' if fresh else 'old')+'">'+label+'</div>'
             '<div class="ki-pf-section">Moje progi alertów</div>'

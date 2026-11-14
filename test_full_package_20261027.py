@@ -11,7 +11,7 @@ class FullPackageTests(unittest.TestCase):
     def test_manifest_has_all_local_assessments_and_all_indicator_values(self):
         ev,result=self.sample();ctx={'sources':[]}
         manifest=KI.build_analysis_manifest(ev,ctx)
-        self.assertEqual(set(manifest),{'version','identity','detection','technical','activity','risk','quotes','trade_plan','comparison','sources','conclusion','technical_events','scenario_plan'})
+        self.assertEqual(set(manifest),{'version','identity','detection','technical','activity','risk','quotes','trade_plan','comparison','sources','conclusion','technical_events','scenario_plan','market_intelligence'})
         self.assertEqual(manifest['technical']['all_indicators'],ev['snapshot']['indicators'])
         self.assertEqual(manifest['comparison']['status'],'UNAVAILABLE')
         self.assertIn('okazji',manifest['conclusion'])

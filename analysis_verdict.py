@@ -80,6 +80,8 @@ def activity_summary(snapshot, previous=None):
 def material_issues(snapshot):
     """Minimum coherent material before either research or AI; quotes optional."""
     issues = []
+    if (snapshot.get('price_basis') or {}).get('blocked'):
+        issues.append(snapshot['price_basis'].get('reason','Jednostka ceny wymaga kontroli po operacji na akcjach.'))
     price = snapshot.get('price')
     ohlc = snapshot.get('ohlc') or {}
     if not snapshot.get('ticker') or snapshot.get('interval') != '1h':

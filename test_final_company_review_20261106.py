@@ -17,6 +17,7 @@ import KI
 import final_company_review as review
 import ki2_ops_guard
 import sl_tp
+from test_company_narrative_20261113 import fixture_narrative
 
 
 NOW=datetime(2026,11,6,15,30,tzinfo=timezone.utc)
@@ -41,6 +42,7 @@ def model_transport(response):
             if attention=='PANEL_ONLY':wire['limiting_evidence']=[primary]
             wire.pop('verdict');wire.pop('source_quote')
             wire['decision']={'verdict':attention,'primary_reason':primary,'source_quote':'NONE'}
+            if 'narrative' in request['response_format']['json_schema']['schema']['properties']:wire['narrative']=fixture_narrative()
         result=copy.deepcopy(response);result['choices'][0]['message']['content']=json.dumps(wire)
         return result
     return reply

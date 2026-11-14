@@ -10,6 +10,7 @@ import re
 import session_context
 import early_company_review as early_review
 import company_orchestrator as orchestrator
+import company_narrative
 
 LIMIT=6
 SETTING='final_company_review_enabled'
@@ -177,12 +178,15 @@ def background(api,store,snapshot):
             data['fundamentals']['cached_at']=row['updated_at']
         else:data['fundamentals']={'status':'UNAVAILABLE'}
         end=at.astimezone(api.exchange_zone(ticker)).date()
-        daily=c.execute('''SELECT session_date,open,high,low,close,volume FROM daily_candles
+        daily=c.execute('''SELECT session_date,open,high,low,close,volume,closed_at,metadata FROM daily_candles
                            WHERE ticker=? AND session_date>=? AND session_date<? ORDER BY session_date DESC LIMIT 260''',
                         (ticker,(end-timedelta(weeks=52)).isoformat(),end.isoformat())).fetchall()
-        ordered=list(reversed(daily))
-        history={'status':'AVAILABLE' if daily else 'UNAVAILABLE','sample_count':len(daily),
-             'raw_location':'daily_candles; wszystkie świece zachowane w KI, do AI trafia wyliczone podsumowanie.',
+        ordered=[r for r in reversed(daily) if api.parse_market_time(r['closed_at'])<=at
+                 and (not api.load_payload(r['metadata']).get('acquired_at') or api.parse_market_time(api.load_payload(r['metadata'])['acquired_at'])<=at)]
+        data['daily_candles']=[{'time':api.load_payload(r['metadata']).get('source_time') or r['session_date']+'T00:00:00+00:00',
+            'end':r['closed_at'],'status':'CLOSED',**{key:r[key] for key in ('open','high','low','close','volume')}} for r in ordered]
+        history={'status':'AVAILABLE' if ordered else 'UNAVAILABLE','sample_count':len(ordered),
+             'raw_location':'company_background.daily_candles; dostępne zamknięte świece 52 tygodni są przekazywane AI.',
              'note':'Zapisane zakończone sesje tej spółki; niekoniecznie komplet 52 tygodni.'}
         if ordered:
             last=ordered[-1]['close']
@@ -354,10 +358,19 @@ def digest_message(api,items,slot):
         analysis=api.load_payload(item['result'])['analysis'];change=snap['price_matrix']['change_pct']
         control=item.get('orchestration') or orchestrator.report_decision(api,ev,ctx,analysis,{},api.parse_market_time(snap['acquired_at']))
         cut=lambda text,n:str(text)[:n].rsplit(' ',1)[0]+'…' if len(str(text))>n else str(text)
+        narrative=((api.load_payload(item['result']).get('provider') or {}).get('evidence_review') or {}).get('narrative') or {}
+        sections=narrative.get('sections') or {}
+        explanation=(sections.get('summary') or {}).get('text') or analysis['final_review']['explanation']
+        risk=(sections.get('risks') or {}).get('text') or analysis['assessment']['risk']
         lines.extend(['',('OSTRZEŻENIE SPADKOWE · ' if control['role']==orchestrator.WARNING else 'WZROST Z PLANEM · ' if control['role']==orchestrator.TOP else 'WZROST DO OBSERWACJI · ')+snap['ticker']+' '+api.pl_number(change,2,'%')
                       +' · '+api.pl_number(snap['price'],4,' '+snap['currency']),
-                      'Ocena AI: '+cut(analysis['final_review']['explanation'],190),
-                      'Ryzyko: '+cut(analysis['assessment']['risk'],110)])
+                      'Ocena AI: '+cut(explanation,150),
+                      'Ryzyko: '+cut(risk,80)])
+        horizons=(snap.get('trend_context') or {}).get('horizons') or {}
+        if horizons:
+            marks={'UP':'↑','DOWN':'↓','MIXED':'↔','UNKNOWN':'brak'}
+            lines.append('Trend: '+' / '.join(label+' '+marks.get(horizons.get(key,{}).get('direction'),'brak')
+                for key,label in (('short','krótki'),('medium','średni'),('long','długi'))))
         if early_review.is_event(ev):
             lines.insert(len(lines)-2,'Status: WSTĘPNA OCENA · '+str(snap['price_matrix']['consecutive_reads'])+'/3 potwierdzeń aktywności.')
         plan=ctx['analysis_manifest'].get('trade_plan') or {}
@@ -498,19 +511,24 @@ def render(api,store):
                 for issue in analysis.get('quality_issues',[]):st.write('• '+sanitize_cli_diagnostic(issue))
                 continue
             ev=api.load_payload(row['payload']);s=ev['snapshot'];ctx=api.load_payload(row['context'])
+            import market_intelligence
+            st.markdown(market_intelligence.cards(s),unsafe_allow_html=True)
             if early_review.is_event(ev):st.warning(early_review.LABEL+' · '+str(s['price_matrix']['consecutive_reads'])+'/3. To zapis stanu w chwili oceny.')
             analysis=api.load_payload(row['result'])['analysis'];final=analysis.get('final_review') or {}
             control=next((d.get('orchestration') for d in payload.get('decisions',[]) if d.get('event_id')==row['id']),None)
             if control:st.info(control['role_label'])
             selection=(api.load_payload(row['result']).get('provider') or {}).get('evidence_review') or {}
-            if selection:
+            if selection.get('narrative'):
+                st.markdown(company_narrative.html(selection['narrative']),unsafe_allow_html=True)
+            elif selection:
                 st.caption('AI wybrało werdykt i dowody; pełny opis złożyło KI ze zweryfikowanych danych. To nie jest swobodny komentarz modelu.')
                 st.markdown('**Warunek obserwacji wybrany przez AI**');st.write(selection.get('condition_text','Brak zapisanego warunku.'))
             st.write('Ocena końcowa: '+('do powiadomienia' if final.get('attention')=='INFORM' else 'tylko panel'))
-            st.write(final.get('explanation','Brak poprawnego końcowego opisu.'))
+            if not selection.get('narrative'):st.write(final.get('explanation','Brak poprawnego końcowego opisu.'))
             st.caption('Dane ceny: '+s['acquired_at']+' · raport jest zapisem tej chwili.')
             for axis,title in (('movement','Ruch i technika'),('activity','Wolumen i aktywność'),('risk','Ryzyko i ograniczenia')):
-                st.markdown('**'+title+'**');st.write((analysis.get('assessment') or {}).get(axis,'Brak poprawnej oceny.'))
+                if not selection.get('narrative'):
+                    st.markdown('**'+title+'**');st.write((analysis.get('assessment') or {}).get(axis,'Brak poprawnej oceny.'))
             session=ctx['analysis_manifest'].get('session_context') or {}
             st.markdown('**Przebieg bieżącej sesji**')
             st.caption('Dane do '+str(session.get('as_of') or s['acquired_at'])+' · świece: '

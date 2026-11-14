@@ -126,3 +126,6 @@ top10-*-20261027.log
 # Private runtime configuration for the ChatGPT tunnel; keep templates only.
 .runtime-key
 tunnel.json
+
+# Lokalne kopie wdrożeń i prywatne artefakty archiwalne
+/kopie-wdrozen/

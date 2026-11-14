@@ -49,6 +49,13 @@ def read_audit(path, since, until=None):
                 'scope':'Ostatni zapis każdej spółki w badanym czasie; nie historia wszystkich przejść.'}
         if 'cycles' in tables:
             report['cycles'] = dict(db.execute('SELECT status,count(*) FROM cycles WHERE started_at>=? AND started_at<=? GROUP BY status', params))
+        if 'large_movement_jobs' in tables:
+            usage=db.execute('SELECT count(started_at),coalesce(sum(input_tokens),0),coalesce(sum(output_tokens),0) FROM large_movement_jobs WHERE created_at>=? AND created_at<=?',params).fetchone()
+            report['large_movement']={'jobs':dict(db.execute('SELECT state,count(*) FROM large_movement_jobs WHERE created_at>=? AND created_at<=? GROUP BY state',params)),
+                'reserved_model_calls':usage[0],'input_tokens':usage[1],'output_tokens':usage[2],
+                'scope':'Osobna gałąź orkiestratora dla dużego potencjału; zużycie także z zapisanych błędnych odpowiedzi.'}
+            if 'large_movement_cases' in tables:
+                report['large_movement']['current_cases']=dict(db.execute('SELECT status,count(*) FROM large_movement_cases GROUP BY status'))
         if {'events', 'analysis_jobs'} <= tables:
             jobs = Counter()
             coverage = Counter()

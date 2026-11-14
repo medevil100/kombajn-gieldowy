@@ -9,6 +9,7 @@ import evidence_review as grounded
 import review_coordinator as coordinator
 import test_evidence_review_20261109 as previous
 import test_final_company_review_20261106 as fixtures
+from test_company_narrative_20261113 import fixture_narrative
 
 
 class ReviewCoordinatorTests(unittest.TestCase):
@@ -31,7 +32,7 @@ class ReviewCoordinatorTests(unittest.TestCase):
                 'momentum_evidence':[next(iter(book['momentum']))],
                 'supporting_evidence':supports,'limiting_evidence':limits,
                 'watch_condition':next(iter(book['conditions'])),
-                'decision':{'verdict':attention,'primary_reason':reason,'source_quote':quote}}
+                'decision':{'verdict':attention,'primary_reason':reason,'source_quote':quote},'narrative':fixture_narrative()}
 
     def body(self,wire):
         return {'model':'offline-coordinator','usage':{'total_tokens':1},

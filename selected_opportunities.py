@@ -6,6 +6,8 @@ from html import escape
 import json
 import sqlite3
 import company_orchestrator as orchestrator
+import market_intelligence
+import company_narrative
 from urllib.parse import urlsplit
 
 from sl_tp import stamp
@@ -201,9 +203,13 @@ def cards_html(api,cards,now):
         html+=paragraph('Od stałej bazy: '+number_text(change,'%',2)+' · '+('GPW' if card['ticker'].endswith('.WA') else 'USA'))
         html+=paragraph('Cena i analiza dotyczą odczytu: '+time_text(s.get('acquired_at')),'ki-top5-note')
         html+=paragraph('AI zakończono: '+time_text(card.get('review_at'))+' · aktualność najpóźniej do '+time_text(card['valid_until']),'ki-top5-note')
-        html+='<h4>Werdykt AI · dlaczego obserwować</h4>'+paragraph(a['final_review']['explanation'])
-        if card.get('evidence_review'):html+=paragraph('AI wybrało werdykt i dowody; opis składa KI.','ki-top5-note')
-        html+='<h4>Co osłabia ocenę</h4>'+paragraph(a['assessment']['risk'])
+        narrative=(card.get('evidence_review') or {}).get('narrative')
+        if narrative:html+=company_narrative.html(narrative)
+        else:
+            html+='<h4>Werdykt AI · dlaczego obserwować</h4>'+paragraph(a['final_review']['explanation'])
+            if card.get('evidence_review'):html+=paragraph('Wcześniejsza ocena: AI wybrało werdykt i dowody; opis składa KI.','ki-top5-note')
+            html+='<h4>Co osłabia ocenę</h4>'+paragraph(a['assessment']['risk'])
+        html+=market_intelligence.cards(s)
         for title,text in scenario_text(m.get('scenario_plan') or {},now):html+='<h4>'+title+'</h4>'+paragraph(text)
         colors={'Wsparcie':'support','Opór':'resistance','SL':'sl','TP1':'tp','TP2':'tp'}
         html+='<dl class="ki-top5-levels">'+''.join('<div class="'+colors[label]+'"><dt>'+label+'</dt><dd>'+escape(number_text(value,currency))+'</dd></div>' for label,value in levels.items())+'</dl>'

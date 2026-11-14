@@ -36,6 +36,10 @@ import prompt_policy
 import evidence_review
 import early_company_review
 import company_orchestrator
+import market_intelligence
+import issuer_watch
+import corporate_feed
+import large_movement
 from datetime import datetime, timezone
 
 STAGE = 3
@@ -182,6 +186,8 @@ class Store:
                 if row and int(row[0]) not in (1, SCHEMA_VERSION):
                     raise ValueError('Nieobsługiwana wersja bazy; nie zmieniono schematu.')
             c.executescript(SCHEMA)
+            c.executescript(issuer_watch.SCHEMA)
+            c.executescript(large_movement.SCHEMA)
             c.execute("INSERT OR IGNORE INTO metadata VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
             c.execute("UPDATE metadata SET value=? WHERE key='schema_version' AND value<>?", (str(SCHEMA_VERSION), str(SCHEMA_VERSION)))
             alert_decisions_ensure(c)
@@ -799,6 +805,10 @@ def refresh_daily_history(store,ticker,now=None):
     snapshot=fetch_market(ticker,'1d')
     if not snapshot.get('daily_history'):raise MarketDataUnavailable('NO_CLOSED_DAILY','Brak zakończonych sesji dziennych Yahoo.')
     _save_daily_history(store,ticker,snapshot['daily_history'],snapshot['acquired_at'],snapshot.get('source','Yahoo Finance'),snapshot.get('rejected_source_rows'),attempt_started_at=current)
+    with store.transaction() as c:
+        c.execute('INSERT OR REPLACE INTO runtime VALUES(?,?,?)',('market_intelligence:daily:'+ticker,
+            json_text({'rows':snapshot['daily_history'],'corporate_actions':snapshot.get('corporate_actions',[]),
+                       'acquired_at':snapshot['acquired_at']}),snapshot['acquired_at']))
     return True
 
 
@@ -1258,14 +1268,16 @@ def _orig_fetch_market(ticker,interval):
     warnings.filterwarnings('ignore', category=DeprecationWarning, module='yfinance')
     if not valid_ticker(ticker) or interval not in MARKET_INTERVALS:raise ValueError('Błędny ticker lub interwał.')
     provider=yf.Ticker(ticker)
-    periods=('3mo','1y') if interval=='1d' else ('1mo','3mo') if interval=='1h' else ('1mo','59d')
+    periods=('1y',) if interval=='1d' else ('1mo','3mo') if interval=='1h' else ('1mo','59d')
     attempts=[];rows=None;metadata={};metadata_warning=None
     history_warning=None
+    corporate_actions=[]
     for period in periods:
         try:
             frame=provider.history(period=period,interval=interval,prepost=False,auto_adjust=False,
-                                   actions=False,repair=False,keepna=True,timeout=20)
+                                   actions=True,repair=False,keepna=True,timeout=20)
             now=datetime.now(timezone.utc)
+            corporate_actions=market_intelligence.yahoo_actions(frame,now.isoformat())
             try:metadata=provider.get_history_metadata()
             except Exception as exc:
                 if type(exc).__name__=='YFRateLimitError':raise
@@ -1302,7 +1314,7 @@ def _orig_fetch_market(ticker,interval):
         session_date=parse_market_time(accepted_empty_tail[-1]['time']).date().isoformat()
         try:
             daily_frame=provider.history(period='5d',interval='1d',prepost=False,auto_adjust=False,
-                                         actions=False,repair=False,keepna=True,timeout=20)
+                                         actions=True,repair=False,keepna=True,timeout=20)
             summary_at=datetime.now(timezone.utc)
             daily_rows=normalize_yahoo_frame(daily_frame,ticker,'1d',summary_at,metadata)
             session_summary=session_summary_from_rows(daily_rows,session_date)
@@ -1321,6 +1333,7 @@ def _orig_fetch_market(ticker,interval):
     snap={'ticker':ticker,'interval':interval,'source':'Yahoo Finance','acquired_at':now.isoformat(),
           'candle_time':last['time'],'candle_end':last['end'],'candle_status':last['status'],
           'status_basis':last['status_basis'],'price':last['close'],'volume':last['volume'],
+          'corporate_actions':corporate_actions,
           'previous_closed':previous_closed,'average_volume':avg_volume,'rvol':ind['rvol'],
           'rvol_incomplete':last['status']!='CLOSED' or last.get('partial_interval',False),
           'partial_interval':last.get('partial_interval',False),'indicators':ind,
@@ -1470,7 +1483,7 @@ def issuer_search_identity(snapshot):
     ticker=str(snapshot.get('ticker') or '').strip().upper()
     name=issuer_name(snapshot.get('company_name'),ticker)
     domains=(['gpw.pl','newconnect.pl','gpwinfostrefa.pl','infostrefa.com','pap.pl','bankier.pl','money.pl','stooq.pl','isbnews.pl']
-             if ticker.endswith('.WA') else ['sec.gov','nasdaq.com','businesswire.com','globenewswire.com','prnewswire.com'])
+             if ticker.endswith('.WA') else ['sec.gov','nasdaq.com','nasdaqtrader.com','businesswire.com','globenewswire.com','prnewswire.com'])
     issuer_domain=issuer_domain_from_website(snapshot.get('company_website'))
     if issuer_domain and issuer_domain not in domains:domains.append(issuer_domain)
     aliases=[name] if name else []
@@ -2107,6 +2120,15 @@ def build_analysis_manifest(evidence,context):
         manifest['session_context']=evidence.get('session_context') or {'status':'UNAVAILABLE','missing':['Brak zapisanego przebiegu sesji.']}
         manifest['activity']['structurally_shortened']=shortened_activity_ready(snap)
         manifest['activity']['measured_description']=activity_summary(snap,evidence.get('previous_snapshot'))
+    manifest['market_intelligence']={k:snap.get(k) for k in ('price_basis','corporate_actions','trend_context','news_watch','official_notices')}
+    if (snap.get('price_basis') or {}).get('blocked'):
+        manifest['trade_plan']={'status':'UNAVAILABLE','reason':snap['price_basis']['reason']}
+        manifest['scenario_plan']={'status':'UNAVAILABLE','reason':snap['price_basis']['reason']}
+    scenario=manifest.get('scenario_plan') or {}
+    until=market_intelligence.stamp(scenario.get('valid_until'))
+    at=market_intelligence.stamp(snap.get('acquired_at'))
+    if until and at and until<=at:
+        manifest['scenario_plan']={'status':'UNAVAILABLE','expired':True,'reason':'Scenariusz wygasł przed tym odczytem; bez aktualnego warunku.','valid_until':scenario['valid_until']}
     return manifest
 
 
@@ -3516,7 +3538,7 @@ def recover_service_jobs(store,kind):
                 "UPDATE outbox SET status='UNCERTAIN',"
                 "last_error='Proces przerwany; sprawdz czat przed ponowieniem.' "
                 "WHERE status='SENDING' "
-                "AND kind IN ('EVIDENCE','ANALYSIS','EARLY_MOVEMENT','FINAL_COMPANY_DIGEST')"
+                "AND kind IN ('EVIDENCE','ANALYSIS','EARLY_MOVEMENT','FINAL_COMPANY_DIGEST','ISSUER_NOTICE','LARGE_MOVEMENT_DIGEST')"
             )
 
 
@@ -3538,7 +3560,8 @@ def submit_event_research(store, event_id, query, cutoff, api_key):
         if not row:raise ValueError('Brak zapisanego zdarzenia do wyszukiwania.')
         snapshot=load_payload(row[0])['snapshot']
         arguments=event_search_arguments(snapshot,cutoff)
-        resp=search_sync(query,api_key,max_results=8,**arguments)
+        resp=issuer_watch.cached_search(company_review.script_api(globals()),store,snapshot,cutoff)
+        if resp is None:resp=search_sync(query,api_key,max_results=8,**arguments)
         from tavily_cli_adapter import enrich_search_response
         eligible=normalize_tavily_context(resp,snapshot,window_days=30,allow_external_domains=False)
         enrich_search_response(resp,api_key,{source['url'] for source in eligible['sources']})
@@ -3848,11 +3871,13 @@ def claim_delivery(store,outbox_id=None,now=None):
         if digest:return digest
         # Check all pending messages, including retries, before any network request.
         # Portfolio alerty: bez event/job
-        pr = c.execute("SELECT o.* FROM outbox o WHERE o.kind='PORTFOLIO_ALERT' AND o.status='PENDING' AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=?)"+
+        pr = c.execute("SELECT o.* FROM outbox o WHERE o.kind IN ('PORTFOLIO_ALERT','ISSUER_NOTICE','LARGE_MOVEMENT_DIGEST') AND o.status='PENDING' AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=?)"+
                        (' AND o.id=?' if outbox_id else '')+' ORDER BY o.created_at',
                        (current.isoformat(),outbox_id) if outbox_id else (current.isoformat(),)).fetchall()
-        if pr:
-            item = dict(pr[0]); item['attempts'] = (item.get('attempts') or 0) + 1
+        for candidate in pr:
+            if candidate['kind']=='LARGE_MOVEMENT_DIGEST' and not large_movement.delivery_valid(company_review.script_api(globals()),store,candidate['event_id'],current.isoformat()):
+                c.execute("UPDATE outbox SET status='FILTERED',last_error='Scenariusz zmienił status przed wysyłką.' WHERE id=?",(candidate['id'],));continue
+            item = dict(candidate); item['attempts'] = (item.get('attempts') or 0) + 1
             c.execute("UPDATE outbox SET status='SENDING',attempts=? WHERE id=?", (item['attempts'], item['id']))
             return item
         early=c.execute("SELECT o.*,e.payload AS evidence_payload FROM outbox o JOIN events e ON e.id=o.event_id WHERE o.kind='EARLY_MOVEMENT' AND o.status='PENDING'"+
@@ -3927,6 +3952,10 @@ def process_delivery_once(store,keys,outbox_id=None):
         if not telegram_delivery_active(store):
             with store.transaction() as c:
                 c.execute("UPDATE outbox SET status='PENDING',attempts=attempts-1 WHERE id=? AND status='SENDING' AND attempts>0",(item['id'],))
+            return False
+        if item['kind']=='LARGE_MOVEMENT_DIGEST' and not large_movement.delivery_valid(company_review.script_api(globals()),store,item['event_id']):
+            with store.transaction() as c:
+                c.execute("UPDATE outbox SET status='FILTERED',last_error='Scenariusz zmienił status przed HTTP.' WHERE id=?",(item['id'],))
             return False
         if item['kind']=='EARLY_MOVEMENT' and not early_delivery_valid(store,load_payload(item['evidence_payload']),datetime.now(timezone.utc)):
             with store.transaction() as c:
@@ -4016,12 +4045,26 @@ def service_work_due(store,kind,now=None):
         return c.execute("SELECT 1 FROM outbox WHERE status='PENDING' AND (next_attempt_at IS NULL OR next_attempt_at<=?) LIMIT 1",(stamp,)).fetchone() is not None
 
 
+@guard_operation(defer=True)
+def process_issuer_watch_once(store,keys):
+    api=company_review.script_api(globals())
+    corporate_feed.process_once(api,store)
+    record_service_worker_health(store,'analysis','READY')
+    researched=issuer_watch.process_once(api,store,keys)
+    record_service_worker_health(store,'analysis','READY')
+    assessed=large_movement.process_once(api,store,keys)
+    return large_movement.finalize(api,store) or researched or assessed
+
+
 def service_worker(store,stop,kind):
-    last_pulse=0.0
+    last_pulse=0.0;last_issuer_check=0.0
     while not stop.is_set():
         try:
             with ScannerLock(str(store.path)+'.'+kind):
                 recover_service_jobs(store,kind)
+                if kind=='analysis':
+                    issuer_watch.recover(company_review.script_api(globals()),store)
+                    large_movement.recover(company_review.script_api(globals()),store)
                 while not stop.is_set():
                     cfg=service_config(store.load_section('settings',{}))
                     enabled=(cfg['pipeline_enabled'] if kind=='analysis' else
@@ -4029,6 +4072,10 @@ def service_worker(store,stop,kind):
                     if time.monotonic()-last_pulse>=5:
                         record_service_worker_health(store,kind,'READY' if enabled else 'DISABLED')
                         last_pulse=time.monotonic()
+                    if kind=='analysis' and enabled and time.monotonic()-last_issuer_check>=30:
+                        last_issuer_check=time.monotonic()
+                        large_movement.maintenance(company_review.script_api(globals()),store)
+                        if issuer_watch.pending(store) or corporate_feed.pending(company_review.script_api(globals()),store) or large_movement.pending(store):process_issuer_watch_once(store,load_service_keys())
                     if enabled and service_work_due(store,kind):
                         keys=load_service_keys()
                         processed=process_analysis_once(store,keys) if kind=='analysis' else process_delivery_once(store,keys)
@@ -4095,6 +4142,17 @@ def _record_price_matrix_read(c,snapshot,threshold_pct,cadence_minutes):
         return {**(old or {}),'read_status':'MARKET_CLOSED','newly_confirmed':False}
     session=when.astimezone(exchange_zone(ticker)).date().isoformat()
     reference=_daily_reference(c,ticker,when)
+    basis=market_intelligence.price_basis(snapshot,reference,acquired)
+    snapshot['price_basis']=basis
+    if basis['blocked'] and reference:
+        row={**(old or {}),'ticker':ticker,'last_price':price,'last_acquired_at':acquired,
+             'last_candle_time':snapshot.get('candle_time'),'anchor_price':None,'change_pct':None,
+             'state':'PRICE_BASIS_BLOCKED','read_status':'PRICE_BASIS_BLOCKED',
+             'reference_status':'PRICE_BASIS_BLOCKED','consecutive_reads':0,
+             'candidate_started_at':None,'confirmed_at':None,'activity_verified':False,
+             'newly_confirmed':False,'price_basis':basis}
+        c.execute('INSERT OR REPLACE INTO price_matrix VALUES(?,?,?)',(ticker,json_text(row),acquired))
+        return row
     expected=required_daily_session(ticker,when)
     ready=bool(reference and reference['session_date']==expected)
     if not ready:
@@ -4252,10 +4310,10 @@ def detect_market(store,snapshot,config=None):
                           'anchor_at':old['acquired_at'] if old else now,'last_price':snapshot['price'],
                           'last_acquired_at':now,'change_pct':None,'state':'DISABLED',
                           'consecutive_reads':0,'newly_confirmed':False}
-        if matrix_enabled and matrix.get('read_status')=='MISSING_DAILY_REFERENCE':
+        if matrix_enabled and matrix.get('read_status') in ('MISSING_DAILY_REFERENCE','PRICE_BASIS_BLOCKED'):
             c.execute('INSERT INTO observations(ticker,interval,candle_time,acquired_at,candle_status,payload) VALUES(?,?,?,?,?,?)',
                       (t,interval,snapshot['candle_time'],now,snapshot['candle_status'],encode_observation({**snapshot,'price_matrix':matrix})))
-            return {'status':'MISSING_DAILY_REFERENCE','reasons':[],'price_matrix':matrix}
+            return {'status':matrix['read_status'],'reasons':[],'price_matrix':matrix}
         if matrix_enabled and matrix.get('read_status') in ('TOO_SOON','OUT_OF_ORDER','MARKET_CLOSED'):
             # Rejected reads cannot update the observation/baseline or enter qualification.
             rejected=matrix['read_status']
@@ -4468,11 +4526,13 @@ def run_market_cycle(store,stop=None):
     tickers=store.load_section('tickers',[])
     cid=uuid.uuid4().hex;started=utc_now();results=[]
     with store.transaction() as c:c.execute('INSERT INTO cycles VALUES(?,?,?,?,?)',(cid,started,None,'RUNNING',json_text({'mode':'MARKET'})))
+    corporate_feed.schedule(company_review.script_api(globals()),store,started)
     for t in tickers:
         if stop is not None and stop.is_set():break
         try:
             snap=fetch_automatic_snapshot(store,t)
             attach_historical_baseline(store,snap)
+            market_intelligence.attach(company_review.script_api(globals()),store,snap)
         except MarketFetchCapacityError as exc:
             results.append({'ticker':t,'status':'FETCH_CAPACITY','error':str(exc)})
             print(json_text(results[-1]),flush=True)
@@ -4500,6 +4560,10 @@ def run_market_cycle(store,stop=None):
             if t not in store.load_section('tickers',[]):continue
             result=detect_market(store,snap,{**cfg,**services,'price_matrix_enabled':True})
             snap={**snap,'price_matrix':result.get('price_matrix')}
+            large_control=company_orchestrator.coordinate_large_movement(company_review.script_api(globals()),store,snap,cid,utc_now()) if result['status'] not in ('OUT_OF_ORDER','TOO_SOON') else {'status':result['status']}
+            issuer_watch.enqueue(company_review.script_api(globals()),store,snap)
+            issuer_watch.action_notice(company_review.script_api(globals()),store,snap)
+            market_intelligence.refresh_blocked_reference(company_review.script_api(globals()),store,snap)
             if cfg['market_interval']=='1h' and result['status']=='PRICE_CANDIDATE':
                 result['early_alert_queued']=queue_early_movement(store,snap)
             opportunity=(record_opportunity(store,snap,cid)
@@ -4512,6 +4576,7 @@ def run_market_cycle(store,stop=None):
                 with store.connection() as c:previous_control=company_orchestrator.previous_assessment(company_review.script_api(globals()),c,snap,at)
                 control=company_orchestrator.assess(company_review.script_api(globals()),snap,material,
                     store.load_section('settings',{}),at,previous=previous_control)
+                control['connections']['large_movement']=large_control
                 with store.transaction() as c:company_orchestrator.save(company_review.script_api(globals()),c,control)
             results.append({'ticker':t,**result,'opportunity':opportunity})
             print(json_text({'ticker':t,'interval':cfg['market_interval'],'result':result['status'],'reasons':result['reasons']}),flush=True)
@@ -5764,7 +5829,7 @@ def render_technical_events(snapshot):
 
 def indicator_table_html(snapshot, rows=None):
     from indicator_view import render_html
-    return render_html(snapshot, opportunity_indicator_rows(snapshot) if rows is None else rows)
+    return market_intelligence.cards(snapshot)+render_html(snapshot, opportunity_indicator_rows(snapshot) if rows is None else rows)
 
 
 def render_indicator_table(snapshot, rows=None):
@@ -6369,6 +6434,11 @@ def portfolio_get(store):
 
 def portfolio_save(store, config):
     """Zapisuje pelny config portfela."""
+    previous={e['ticker']:e for e in portfolio_get(store)}
+    for entry in config:
+        old=previous.get(entry.get('ticker'),{})
+        if (entry.get('sl'),entry.get('tp'))!=(old.get('sl'),old.get('tp')):
+            entry['levels_checked_at']=utc_now()
     tickers = [e['ticker'] for e in config if isinstance(e, dict) and e.get('ticker')]
     store.update_settings({'portfolio_config': config, 'portfolio_tickers': tickers})
 
@@ -6557,6 +6627,8 @@ def daily_report_send(store):
 
 def portfolio_price_status(snapshot,now=None,max_age_seconds=900):
     current=parse_market_time(now or utc_now())
+    if (snapshot.get('price_basis') or {}).get('blocked'):
+        return False,snapshot['price_basis'].get('reason','Jednostka ceny wymaga kontroli.')
     try:
         acquired=parse_market_time(snapshot['acquired_at'])
         if not market_session_open(snapshot.get('ticker'),current):return False,'Poza regularną sesją.'
@@ -6592,6 +6664,11 @@ def portfolio_check_alerts(store,now=None):
             try: snap = load_payload(row[0])
             except Exception: continue
             valid,reason=portfolio_price_status(snap,now)
+            basis=snap.get('price_basis') or {}
+            ack=market_intelligence.stamp(entry.get('levels_checked_at'))
+            unreviewed=any(market_intelligence.stamp(a.get('effective_at')) and (not ack or ack<market_intelligence.stamp(a['effective_at'])) for a in basis.get('events',[]))
+            if basis.get('blocked') or unreviewed:
+                valid=False;reason='Operacja lub niespójna jednostka akcji: sprawdź i zapisz nowe ręczne SL/TP; progi nie zostały przeliczone.'
             c.execute('INSERT INTO runtime VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',
                       ('portfolio_price:'+ticker,json_text({'status':'READY' if valid else 'BLOCKED','reason':reason,'price_acquired_at':snap.get('acquired_at')}),now))
             if not valid:continue
@@ -6883,6 +6960,7 @@ def render_portfolio(store):
             '_daily_move':portfolio_daily_move(snap),
             '_supplemental_indicators':supplemental_indicator_rows(snap),
             '_indicator_html':indicator_table_html(snap),
+            '_intelligence_html':market_intelligence.cards(snap),
             '_technical_events':analyze_events(snap),
             '_market_52_week_range':snap.get('market_52_week_range'),
             '_acquired_at':snap.get('_acquired_at') or snap.get('acquired_at'),'_risk_at':risk_at,
@@ -7577,7 +7655,10 @@ def run_streamlit(db,now=None):
         st.caption('Odczyt zapisanych wyników co 15 minut. Skaner pobiera Yahoo według ustawionego cyklu.')
         st.caption('Panel jest po polsku. Wyłącz automatyczne tłumaczenie tej strony w przeglądarce; może zmieniać tickery, liczby i powodować błędy widoku.')
         st.caption('GPT-4o mini analizuje wybrane, potwierdzone okazje. Tavily dostarcza datowane źródła. Automatyczna analiza wymaga świec 1h.')
-    section=st.radio('Widok panelu',['Automat','Wybrane okazje · TOP 5','Końcowe oceny AI','Dalszy ruch spółek','Moj portfel','Historia spółki','Porównanie sygnałów','Asystent KI','Analiza GPT','Rozmowa z GPT','Analiza pogłębiona','Monitor Tavily + AI','Ręczny ticker','Dodaj / wyszukaj spółki'],horizontal=True,key='panel_view')
+    section=st.radio('Widok panelu',['Automat','Duży potencjał · AI','Wybrane okazje · TOP 5','Końcowe oceny AI','Dalszy ruch spółek','Moj portfel','Historia spółki','Porównanie sygnałów','Asystent KI','Analiza GPT','Rozmowa z GPT','Analiza pogłębiona','Monitor Tavily + AI','Ręczny ticker','Dodaj / wyszukaj spółki'],horizontal=True,key='panel_view')
+    if section=='Duży potencjał · AI':
+        large_movement.render(company_review.script_api(globals()),store)
+        return
     if section=='Asystent KI':
         from ki_assistant import render
         render(company_review.script_api(globals()),store)
@@ -7902,6 +7983,7 @@ def service_runtime_diagnostics(rows):
 
 
 def render_service_panel(store,manual=False):
+    issuer_watch.render(company_review.script_api(globals()),store)
     import streamlit as st
     st.caption('Silnik analizy: OpenAI (gpt-4o-mini).')
     labels={'PENDING_CONTEXT':'Oczekuje na Tavily','BUSY_CONTEXT':'Pobieranie kontekstu',

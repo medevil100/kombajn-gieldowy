@@ -1,0 +1,22 @@
+[Unit]
+Description=KI automatic 52-week history for all saved tickers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/ki2-historia52-automat-20261113
+ExecStart=/home/ubuntu/ki2/.venv/bin/python -I -B /home/ubuntu/ki2-historia52-automat-20261113/uzupelnij_52_tyg_20261113.py --apply --limit 3
+TimeoutStartSec=3min
+UMask=0077
+Nice=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/ki2
+ReadWritePaths=-/home/ubuntu/.cache
+Environment=HOME=/home/ubuntu
+Environment=PYTHONDONTWRITEBYTECODE=1

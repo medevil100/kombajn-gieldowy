@@ -23,6 +23,8 @@ def build_plan(snapshot,change,now=None):
     def missing(reason):
         plan['reason']=reason
         return plan
+    if (snapshot.get('price_basis') or {}).get('blocked'):
+        return missing(snapshot['price_basis'].get('reason','Niepotwierdzona jednostka ceny po operacji na akcjach.'))
     if not at or not -60<=(now-at).total_seconds()<=900:return missing('Brak świeżego odczytu ceny (limit 15 minut).')
     if snapshot.get('interval')!='1h':return missing('Plan wymaga świec 1h.')
     if snapshot.get('currency') not in ('PLN','USD'):return missing('Brak obsługiwanej waluty PLN/USD.')

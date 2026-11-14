@@ -1,0 +1,12 @@
+[Unit]
+Description=KI continuous history coverage check
+
+[Timer]
+OnBootSec=2min
+OnActiveSec=30s
+OnUnitInactiveSec=15min
+AccuracySec=10s
+Unit=ki2-history52.service
+
+[Install]
+WantedBy=timers.target

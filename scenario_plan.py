@@ -14,6 +14,9 @@ def build(snapshot, rows, events, config=DEFAULT_CONFIG):
             'interval': snapshot.get('interval'), 'config_id': config.identifier,
             'reason': 'Za mało pełnych zamkniętych świec z obrotem do scenariuszy.',
             'execution_confirmed': False, 'is_trade_plan': False}
+    if (snapshot.get('price_basis') or {}).get('blocked'):
+        plan['reason']=snapshot['price_basis'].get('reason','Niepotwierdzona jednostka ceny po operacji na akcjach.')
+        return plan
     acquired = stamp(snapshot.get('acquired_at'))
     if not acquired:
         return plan

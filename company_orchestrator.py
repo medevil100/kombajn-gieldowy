@@ -21,6 +21,19 @@ LABELS={TOP:'Wzrost · kompletny plan techniczny',WATCH:'Wzrost do obserwacji ·
         WARNING:'Ostrzeżenie spadkowe',PANEL:'Tylko panel'}
 
 
+def coordinate_large_movement(api,store,snapshot,cycle,now):
+    """Central orchestration branch; independent of the short intraday rank."""
+    import large_movement
+    try:status=large_movement.consider(api,store,snapshot,cycle,now)
+    except Exception as exc:
+        large_movement.save_diagnostic(api,store,snapshot['ticker'],snapshot['acquired_at'],'PREPARATION_FAILED',error_type=type(exc).__name__)
+        status='PREPARATION_FAILED'
+    if status=='QUEUED':
+        api.issuer_watch.enqueue(api,store,snapshot,now,reason_override='LARGE_POTENTIAL')
+    return {'status':status,'contract':large_movement.CONTRACT,
+            'scope':'Pełna ocena dużego potencjału; osobny czas, cel, ryzyko i trwała obserwacja.'}
+
+
 def plan_ready(api,snapshot,plan,now):
     at=stamp(snapshot.get('acquired_at'));until=stamp(plan.get('valid_until'))
     if (plan.get('status')!='INDICATIVE' or plan.get('side')!='LONG'
@@ -53,7 +66,9 @@ def assess(api,snapshot,manifest,settings,now,stage=None,previous=None,revalidat
     issues=api.material_issues(snapshot)
     reason=None;action='ANALYZE_PRELIMINARY' if stage==early.STAGE else 'ANALYZE_CONFIRMED'
     next_check='Nowy zaakceptowany odczyt; ponowna ocena tylko po istotnej zmianie dowodów.'
-    if not api.daily_matrix_reference_ready(snapshot):
+    if (snapshot.get('price_basis') or {}).get('blocked'):
+        reason='PRICE_BASIS_BLOCKED';action='WAIT_FOR_PRICE_BASIS';next_check=snapshot['price_basis']['reason']
+    elif not api.daily_matrix_reference_ready(snapshot):
         reason='MISSING_REFERENCE';action='WAIT_FOR_REFERENCE';next_check='Poprawne zamknięcie wymaganej poprzedniej sesji.'
     elif not api.market_session_open(snapshot.get('ticker'),now):
         reason='SESSION_CLOSED';action='WAIT_FOR_SESSION';next_check='Nowy odczyt podczas następnej regularnej sesji.'
@@ -91,6 +106,7 @@ def assess(api,snapshot,manifest,settings,now,stage=None,previous=None,revalidat
           'next_check':next_check,'issues':list(dict.fromkeys(issues)),
           'explanation':local.get('summary') if action=='KEEP_IN_PANEL' else issues[0] if issues else next_check,
           'connections':{
+              'market_intelligence':manifest.get('market_intelligence') or {},
               'price':{'change_from_base_pct':change,'reference_session':matrix.get('reference_session'),
                        'change_from_open_pct':summary.get('change_from_session_open_pct')},
               'activity':{'proof':matrix.get('activity_evidence'),'volume':snapshot.get('volume'),
@@ -183,6 +199,7 @@ def render_status(api,store):
     import streamlit as st
     ticks=set(store.load_section('tickers',[]))
     labels={'WAIT_FOR_REFERENCE':'Czeka na bazę','WAIT_FOR_SESSION':'Czeka na sesję',
+        'WAIT_FOR_PRICE_BASIS':'Operacja na akcjach · wymagana kontrola jednostki ceny',
         'WAIT_FOR_DATA':'Czeka na spójne dane','WAIT_FOR_SESSION_DATA':'Czeka na świece sesji',
         'WAIT_FOR_MOVEMENT':'Obserwuje cenę','WAIT_FOR_ACTIVITY':'Czeka na aktywność',
         'WAIT_FOR_CHANGE':'Czeka na istotną zmianę','WAIT_FOR_CAPACITY':'Czeka na kolejny cykl',
