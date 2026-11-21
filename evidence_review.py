@@ -272,7 +272,6 @@ def decode(api,wire,snapshot,context):
         if payload['narrative_facts']!=expected:raise ValueError('Katalog liczb uzasadnienia nie odpowiada zapisanym danym.')
         if not isinstance(wire,dict) or 'narrative' not in wire:raise ValueError('Brak pełnego uzasadnienia AI wymaganego przez zapisany kontrakt.')
         narrative=company_narrative.checked(wire['narrative'],expected)
-        if not all(key in narrative['sections'] for key in ('summary','risks')):raise ValueError('Brak poprawnego autorskiego uzasadnienia werdyktu i ryzyka.')
         wire={k:v for k,v in wire.items() if k!='narrative'}
     if coordinated:wire=review_coordinator.normalize(wire,book)
     # The wire contract contains only scalar enums and bounded lists of enums.

@@ -317,7 +317,6 @@ def decode(api,body,material,prepared):
     ev=material['evidence'];support=ev['support'];risk=ev['risk'];at=facts.stamp(material['as_of'])
     period=TIMES[wire['time_window']]
     narrative=company_narrative.checked(wire['narrative'],company_narrative.facts_for(material['snapshot'],material))
-    if not all(key in narrative['sections'] for key in ('summary','risks')):raise ValueError('Brak poprawnego autorskiego uzasadnienia werdyktu i ryzyka.')
     return {'contract':CONTRACT,'verdict':wire['verdict'],'as_of':material['as_of'],'reference_price':price,
         'narrative':narrative,
         'concrete':concrete,
@@ -378,10 +377,14 @@ def update_case(api,store,snapshot,rows,cycle):
 def consider(api,store,snapshot,cycle,now=None):
     """Called by the central orchestrator for every accepted/current snapshot."""
     current=facts.stamp(now or api.utc_now());at=facts.stamp(snapshot['acquired_at']);ticker=snapshot['ticker']
-    if not api.service_config(store.load_section('settings',{}))['pipeline_enabled']:return 'DISABLED'
     if not at or not timedelta(0)<=current-at<=timedelta(minutes=30):return 'STALE'
     rows=daily_rows(api,store,snapshot)
     update_case(api,store,snapshot,rows,cycle)
+    # An already saved thesis is a local, read-only lifecycle check.  It must
+    # not stop merely because the operator has temporarily disabled creation
+    # of new paid pipeline work.
+    if not api.service_config(store.load_section('settings',{}))['pipeline_enabled']:
+        return 'MONITORING_ONLY'
     local=setup(snapshot,rows)
     with store.connection() as c:
         existing=c.execute("SELECT status FROM large_movement_cases WHERE ticker=? AND status IN ('ACTIVE','WATCHING','WAIT','REVIEW_DUE','REVIEW_FAILED')",(ticker,)).fetchone()
@@ -470,8 +473,50 @@ def maintenance(api,store,now=None):
     return len(due)
 
 
+def recover_saved_response(api,store,now=None):
+    """Reuse one saved provider response after a prose-only validation change.
+
+    This is deliberately bounded and never makes an HTTP request. The decision
+    fields still go through the current strict decoder.
+    """
+    with store.connection() as c:
+        rows=c.execute("""SELECT * FROM large_movement_jobs
+            WHERE state='FAILED' AND error_type='ValueError' AND response IS NOT NULL AND request IS NOT NULL
+            ORDER BY created_at LIMIT 12""").fetchall()
+    row=result=None
+    for candidate in rows:
+        candidate=dict(candidate)
+        try:
+            decoded=decode(api,load(api,candidate['response']),load(api,candidate['packet']),load(api,candidate['request']))
+        except (ValueError,TypeError,KeyError,json.JSONDecodeError):
+            continue
+        row,result=candidate,decoded
+        break
+    if row is None:return False
+    material=load(api,row['packet'])
+    finished=now or api.utc_now()
+    with store.transaction() as c:
+        c.execute("UPDATE large_movement_jobs SET state='DONE',finished_at=?,result=?,error_type=NULL WHERE id=?",
+                  (finished,api.json_text(result),row['id']))
+        old=c.execute('SELECT * FROM large_movement_cases WHERE ticker=?',(row['ticker'],)).fetchone()
+        # A recovered response is historical.  It is shown in KI but is never
+        # delivered as a delayed Telegram notification.
+        notice=None
+        reopened=old and old['status'] in ('INVALIDATED','TARGET_REACHED','REJECT') and result['verdict'] in ('ACTIVE','WATCHING')
+        c.execute('''INSERT INTO large_movement_cases VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(ticker) DO UPDATE SET status=excluded.status,opened_at=excluded.opened_at,updated_at=excluded.updated_at,
+            market_at=excluded.market_at,price=excluded.price,currency=excluded.currency,result=excluded.result,
+            job_id=excluded.job_id,notice_cycle=excluded.notice_cycle''',
+            (row['ticker'],result['verdict'],old['opened_at'] if old and not reopened else material['as_of'],finished,
+             material['as_of'],material['snapshot']['price'],material['snapshot'].get('currency') or '',
+             api.json_text(result),row['id'],notice,old['notified_version'] if old else None))
+    save_diagnostic(api,store,row['ticker'],finished,'RECOVERED_SAVED_RESPONSE',job_id=row['id'],verdict=result['verdict'])
+    return True
+
+
 def process_once(api,store,keys,now=None,transport=None):
     current=facts.stamp(now or api.utc_now());iso=current.isoformat()
+    if recover_saved_response(api,store,now):return True
     if not api.service_config(store.load_section('settings',{}))['pipeline_enabled']:return False
     with store.transaction() as c:
         row=c.execute("SELECT * FROM large_movement_jobs WHERE state='QUEUED' ORDER BY created_at LIMIT 1").fetchone()

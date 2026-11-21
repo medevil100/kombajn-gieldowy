@@ -501,7 +501,11 @@ def render(api,store):
     if preparation_failed:st.warning('Przygotowanie części ocen zakończyło się błędem. Sprawdź powody poniżej; sam wybór spółki nie oznacza uruchomienia AI.')
     if newest_state=='EMPTY' and showing_previous:st.caption('W ostatnim cyklu nie było nowego zestawienia. Poniżej pozostaje poprzedni zapis z własną datą.')
     for row in members:
-        with st.expander(row['ticker']+' · '+('pełna ocena AI' if row['state']=='DONE' else 'Błąd — zadanie zatrzymane' if row['state']=='FAILED' else api.polish_status(row['state'])),expanded=False):
+        result=api.load_payload(row['result']) if row['state']=='DONE' else {}
+        narrative=((result.get('provider') or {}).get('evidence_review') or {}).get('narrative') or {}
+        prose_status=narrative.get('status')
+        title=('pełna ocena AI' if prose_status=='COMPLETE' else 'ocena AI · opis częściowy' if row['state']=='DONE' else 'Błąd — zadanie zatrzymane' if row['state']=='FAILED' else api.polish_status(row['state']))
+        with st.expander(row['ticker']+' · '+title,expanded=False):
             if row['state']!='DONE':
                 from tavily_cli_adapter import sanitize_cli_diagnostic
                 st.caption('Zdarzenie: '+row['created_at']+' · ostatnia aktualizacja: '+row['updated_at'])
@@ -514,12 +518,14 @@ def render(api,store):
             import market_intelligence
             st.markdown(market_intelligence.cards(s),unsafe_allow_html=True)
             if early_review.is_event(ev):st.warning(early_review.LABEL+' · '+str(s['price_matrix']['consecutive_reads'])+'/3. To zapis stanu w chwili oceny.')
-            analysis=api.load_payload(row['result'])['analysis'];final=analysis.get('final_review') or {}
+            analysis=result['analysis'];final=analysis.get('final_review') or {}
             control=next((d.get('orchestration') for d in payload.get('decisions',[]) if d.get('event_id')==row['id']),None)
             if control:st.info(control['role_label'])
-            selection=(api.load_payload(row['result']).get('provider') or {}).get('evidence_review') or {}
+            selection=(result.get('provider') or {}).get('evidence_review') or {}
             if selection.get('narrative'):
                 st.markdown(company_narrative.html(selection['narrative']),unsafe_allow_html=True)
+                if selection['narrative'].get('status')!='COMPLETE':
+                    st.caption('Werdykt i dowody zostały poprawnie zweryfikowane. Część swobodnego opisu AI odrzucono, ponieważ nie spełniała zasad odwołań do danych.')
             elif selection:
                 st.caption('AI wybrało werdykt i dowody; pełny opis złożyło KI ze zweryfikowanych danych. To nie jest swobodny komentarz modelu.')
                 st.markdown('**Warunek obserwacji wybrany przez AI**');st.write(selection.get('condition_text','Brak zapisanego warunku.'))

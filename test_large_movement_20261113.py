@@ -207,6 +207,16 @@ class LargeMovementTests(unittest.TestCase):
         s=sample(at=NOW+timedelta(minutes=45),price=1.21)
         self.assertEqual(large.consider(KI,self.store,s,'again',s['acquired_at']),'NO_MATERIAL_CHANGE')
 
+    def test_active_case_is_monitored_when_new_pipeline_work_is_disabled(self):
+        self.queue();self.process()
+        later=sample(at=NOW+timedelta(minutes=45),price=2.0)
+        self.store.save_section('settings',{'pipeline_enabled':False,'telegram_enabled':True,
+                                            'price_threshold_pct':2.,'final_company_review_enabled':True})
+        self.assertEqual(large.consider(KI,self.store,later,'monitor',later['acquired_at']),'MONITORING_ONLY')
+        row=self.case()
+        self.assertEqual(row['status'],'TARGET_REACHED')
+        self.assertEqual(json.loads(row['result'])['monitoring']['price'],2.0)
+
     def test_significant_new_price_can_trigger_intraday_update_after_thirty_minutes(self):
         self.queue();self.process()
         s=sample(at=NOW+timedelta(minutes=45),price=1.4)
@@ -334,6 +344,20 @@ class LargeMovementTests(unittest.TestCase):
         large.process_once(KI,self.store,{'OPENAI_API_KEY':'fixture'},NOW.isoformat(),lambda *a,**k:body({}))
         row=self.case();self.assertEqual(row['status'],'REVIEW_FAILED')
         self.assertIsNone(json.loads(row['result'])['potential_pct'])
+
+    def test_saved_response_with_partial_prose_is_recovered_without_provider(self):
+        self.queue()
+        with self.store.connection() as c:row=dict(c.execute('SELECT * FROM large_movement_jobs').fetchone())
+        material=json.loads(row['packet']);prepared=large.request(KI,material);value=wire(material)
+        value['narrative']['summary']={'text':'Cena 1,20 PLN wymaga dalszej obserwacji.','references':[]}
+        response=body(value)
+        with self.store.transaction() as c:
+            c.execute("UPDATE large_movement_jobs SET state='FAILED',request=?,response=?,error_type='ValueError' WHERE id=?",
+                      (json.dumps(prepared),json.dumps(response),row['id']))
+        self.assertTrue(large.recover_saved_response(KI,self.store,NOW.isoformat()))
+        with self.store.connection() as c:job=c.execute('SELECT state,result FROM large_movement_jobs').fetchone()
+        self.assertEqual(job['state'],'DONE')
+        self.assertEqual(json.loads(job['result'])['narrative']['status'],'PARTIAL')
 
     def test_non_string_evidence_is_a_validation_error(self):
         material=self.packet();value=wire(material);value['supporting_evidence']=[{}]

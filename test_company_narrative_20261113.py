@@ -79,14 +79,18 @@ class NarrativeTests(unittest.TestCase):
         self.assertEqual(request['model'],'gpt-4o-mini')
         self.assertIn('narrative',request['response_format']['json_schema']['schema']['required'])
 
-    def test_new_contract_requires_valid_verdict_and_risk_without_repair(self):
+    def test_new_contract_keeps_canonical_verdict_when_authored_section_is_invalid(self):
         import KI
         import test_review_coordinator_20261110 as helpers
         test=helpers.ReviewCoordinatorTests();self.addCleanup(test.doCleanups)
         _,ev,ctx,request,book=test.sample();wire=test.wire(book)
         wire['narrative']['summary']['text']='Cena [invented] będzie rosła.'
         wire['narrative']['summary']['references']=['invented']
-        with self.assertRaises(KI.AnalysisRejected):KI.parse_event_analysis_response(test.body(wire),ev['snapshot'],ctx)
+        analysis,proof=KI.parse_event_analysis_response(test.body(wire),ev['snapshot'],ctx)
+        report=proof['evidence_review']['narrative']
+        self.assertEqual(analysis['final_review']['attention'],'INFORM')
+        self.assertEqual(report['status'],'PARTIAL')
+        self.assertNotIn('summary',report['sections'])
 
     def test_old_frozen_coordinated_job_is_still_decoded_without_rewriting(self):
         import json
