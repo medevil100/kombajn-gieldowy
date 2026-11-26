@@ -58,9 +58,16 @@ def price_basis(snapshot, reference, now=None):
     comparable = [r for r in snapshot.get('chart_history', [])
                   if str(r.get('time', ''))[:10] == day and r.get('status') == 'CLOSED'
                   and stamp(r.get('end')) and stamp(r['end']) <= at and positive(r.get('close'))]
-    provider_close = comparable[-1]['close'] if comparable else None
+    provider_row = comparable[-1] if comparable else None
+    provider_close = provider_row['close'] if provider_row else None
     result['cached_reference'] = anchor
     result['same_fetch_previous_close'] = provider_close
+    result['same_fetch_previous_close_at'] = provider_row.get('end') if provider_row else None
+    if (positive(provider_close) and not math.isclose(provider_close,anchor,rel_tol=.005,abs_tol=1e-10)):
+        result.update(status='REFERENCE_SOURCE_CONFLICT',reference_override=provider_close,
+                      reason='Zapisana świeca dzienna różni się od zamknięcia poprzedniej sesji '
+                             'w tym samym świeżym pobraniu. Zmiana dzienna używa świeżego '
+                             'zamknięcia; sprzeczna historia dzienna nie zasila trendów.')
     for action in recent:
         # A cache collected before the action may be in the OLD share unit.
         if day and day < action['effective_at'][:10]:
@@ -178,7 +185,12 @@ def select_daily_history(api, stored, fresh, snapshot, reference=None):
     if cache_at and cache_at <= at and cached_reference and positive(anchor) and (
             not positive(cached_reference[-1].get('close')) or
             not math.isclose(cached_reference[-1]['close'],anchor,rel_tol=.02)):
-        return []
+        # Quarantine only the conflicting session.  Older, internally coherent
+        # daily bars remain useful for detecting a multi-session surge and old
+        # highs; one bad close must not erase the complete opportunity history.
+        snapshot['daily_history_conflict']={'session':day,'cached_close':cached_reference[-1].get('close'),
+            'accepted_reference':anchor,'status':'SESSION_QUARANTINED'}
+        rows=[r for r in rows if r['time'][:10]!=day]
     match = [r for r in rows if r['time'][:10] == day]
     if ((snapshot.get('price_basis') or {}).get('blocked') or
             match and positive(anchor) and not math.isclose(match[-1]['close'],anchor,rel_tol=.02) or

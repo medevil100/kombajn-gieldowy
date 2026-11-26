@@ -138,6 +138,20 @@ class CompanyOrchestratorTests(unittest.TestCase):
             self.assertEqual(len(f.rows('outbox')),1)
             self.assertIn('WZROST Z PLANEM' if with_plan else 'WZROST DO OBSERWACJI',f.rows('outbox')[0]['message'])
 
+    def test_final_top5_starts_one_large_review_but_watch_does_not(self):
+        for with_plan,expected in ((True,1),(False,0)):
+            f,rows,s,m=self.sample(with_plan)
+            with patch.object(KI,'fetch_opportunity_spread',return_value={}):
+                KI.company_review.prepare(KI,f.store,'cycle',rows,NOW)
+            f.finish_members()
+            with patch('large_movement.consider',return_value='QUEUED') as consider:
+                self.assertTrue(KI.company_review.finalize(KI,f.store,NOW))
+            self.assertEqual(consider.call_count,expected)
+            if expected:
+                args,kwargs=consider.call_args
+                self.assertEqual(args[2]['ticker'],s['ticker'])
+                self.assertEqual(kwargs['admission'],'TOP5_FINAL')
+
     def test_ai_prompt_receives_joined_evidence_but_frozen_contract_is_not_rewritten(self):
         f,rows,s,m=self.sample(True)
         with patch.object(KI,'fetch_opportunity_spread',return_value={}):KI.company_review.prepare(KI,f.store,'cycle',rows,NOW)

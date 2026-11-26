@@ -1,4 +1,4 @@
-﻿"""
+"""
 _ai_review.py - offline analiza decyzji should_alert.
 Czyta alert_decisions (lub opportunities jako fallback), grupuje po reason,
 pyta GPT o kalibracje progów, zapisuje raport MD.
@@ -19,7 +19,7 @@ OUT_DEFAULT = "AI_REVIEW_{date}.md"
 
 
 def load_alert_decisions(db, days):
-    """Zwraca liste dict z alert_decisions z ostatnich N dni."""
+    """Zwraca liste dict z alert_decisions z ostatnich N dni, uzupelniona o rvol/score z opportunities."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     c = sqlite3.connect(db)
     try:
@@ -30,11 +30,37 @@ def load_alert_decisions(db, days):
         ).fetchall()
     except sqlite3.OperationalError:
         return []
-    return [
-        {'seq': r[0], 'ts': r[1], 'stage': r[2], 'should_alert': bool(r[3]),
-         'reason': r[4], 'payload': json.loads(r[5]) if r[5] else None}
-        for r in rows
-    ]
+
+    decisions = []
+    for r in rows:
+        decisions.append({
+            'seq': r[0], 'ts': r[1], 'stage': r[2], 'should_alert': bool(r[3]),
+            'reason': r[4], 'payload': json.loads(r[5]) if r[5] else {}
+        })
+
+    # Uzupelnij rvol/score z tabeli opportunities (na podstawie seq)
+    seqs = list(set(d['seq'] for d in decisions))
+    if seqs:
+        placeholders = ','.join('?' for _ in seqs)
+        try:
+            opp_rows = c.execute(f"SELECT sequence_id, payload FROM opportunities WHERE sequence_id IN ({placeholders})", seqs).fetchall()
+            opp_data = {}
+            for seq_id, payload in opp_rows:
+                try:
+                    op = json.loads(payload) if payload else {}
+                    opp_data[seq_id] = {
+                        'rvol': op.get('rvol'),
+                        'score': op.get('score')
+                    }
+                except Exception:
+                    pass
+            for d in decisions:
+                if d['seq'] in opp_data:
+                    d['payload'].update(opp_data[d['seq']])
+        except Exception:
+            pass
+
+    return decisions
 
 
 def load_opportunities(db, days):

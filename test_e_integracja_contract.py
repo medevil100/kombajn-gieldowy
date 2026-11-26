@@ -115,12 +115,14 @@ class EContractTests(unittest.TestCase):
 
     def test_e03_disabling_pipeline_pauses_existing_pending_queue(self):
         item=self.insert_pending_delivery()
-        self.store.save_section('settings',{'pipeline_enabled':False,'telegram_enabled':True})
+        self.store.save_section('settings',{'pipeline_enabled':False,'telegram_enabled':True,
+                                            'telegram_signal_only':False})
         original=self.delivery_state(item)
         self.assertFalse(KI.telegram_delivery_active(self.store))
         self.assertFalse(KI.process_delivery_once(self.store,{'TELEGRAM_BOT_TOKEN':'not-a-token','TELEGRAM_CHAT_ID':'1'},item))
         self.assertEqual(original,self.delivery_state(item))
-        self.store.save_section('settings',{'pipeline_enabled':True,'telegram_enabled':True})
+        self.store.save_section('settings',{'pipeline_enabled':True,'telegram_enabled':True,
+                                            'telegram_signal_only':False})
         self.assertTrue(KI.telegram_delivery_active(self.store))
         self.assertEqual(original,self.delivery_state(item))
         # No network: database can claim a valid message only after reactivation.

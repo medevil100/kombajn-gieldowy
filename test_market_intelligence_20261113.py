@@ -68,7 +68,8 @@ class PriceBasisTests(unittest.TestCase):
     def test_future_action_and_later_observation_are_not_used(self):
         s=snap();s['corporate_actions'][0]['observed_at']=(NOW+timedelta(minutes=1)).isoformat()
         result=facts.price_basis(s,reference(4))
-        self.assertEqual(result['status'],'NO_ACTION_REPORTED')
+        self.assertEqual(result['status'],'REFERENCE_SOURCE_CONFLICT')
+        self.assertFalse(result['events'])
         s['corporate_actions'][0].update(observed_at=NOW.isoformat(),effective_at=(NOW+timedelta(days=1)).isoformat())
         self.assertFalse(facts.price_basis(s,reference(4))['events'])
 
@@ -218,7 +219,8 @@ class IntegrationTests(unittest.TestCase):
 
     def test_action_notice_is_deduplicated_and_uses_existing_sender_even_with_final_mode(self):
         s=snap();facts.attach(KI,self.store,s)
-        self.store.update_settings({'final_company_review_enabled':True})
+        self.store.update_settings({'final_company_review_enabled':True,
+                                    'telegram_signal_only':False})
         watch.action_notice(KI,self.store,s);watch.action_notice(KI,self.store,s)
         with self.store.connection() as c:
             self.assertEqual(c.execute('SELECT count(*) FROM outbox').fetchone()[0],1)

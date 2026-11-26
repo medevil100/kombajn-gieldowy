@@ -101,8 +101,8 @@ def validate_axes(value,snapshot,manifest):
                 phrases=[' '.join(words[i:i+4]) for i in range(len(words)-3)]
                 if repeated or any(phrases.count(phrase)>=3 for phrase in set(phrases)):
                     errors.append(key+': zapętlony lub powtarzany tekst zamiast uzasadnienia');continue
-                if not 2<=len(sentences)<=4 or not re.search(r'[.!?]$',text):
-                    errors.append(key+': wymagane od dwóch do czterech pełnych zdań');continue
+                if len(words)<8:
+                    errors.append(key+': wymagane konkretne uzasadnienie, nie samo hasło');continue
                 if len(set(s.casefold() for s in sentences))!=len(sentences):
                     errors.append(key+': powtórzone zdanie zamiast osobnego uzasadnienia');continue
             elif len(text)<100 or len(sentences)<2:

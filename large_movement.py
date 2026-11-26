@@ -13,10 +13,27 @@ from html import escape
 
 import market_intelligence as facts
 import company_narrative
+import ai_model_policy
+import session_context
 
 CONTRACT='KI-LARGE-MOVEMENT-20261113-v3'
-MAX_CALLS_DAY=12
+MAX_CALLS_DAY=ai_model_policy.MAX_AUTOMATIC_CALLS_DAY
+MAX_CALLS_TICKER_DAY=4
 MAX_NEW_CYCLE=4
+RECOVERY_PREFIX='large_recovery:time_contract_v1:'
+
+
+def automatic_ai_usage(c,start,ticker=None):
+    """Count one shared automatic budget across both production AI queues."""
+    suffix=' AND ticker=?' if ticker else ''
+    args=(start,ticker) if ticker else (start,)
+    used=c.execute('SELECT count(*) FROM large_movement_jobs WHERE started_at>=?'+suffix,args).fetchone()[0]
+    radar_exists=c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='radar_ai_jobs'").fetchone()
+    if radar_exists:
+        used+=c.execute("SELECT count(*) FROM radar_ai_jobs WHERE started_at>=? AND COALESCE(json_extract(packet,'$.manual_requested'),0)<>1"+suffix,args).fetchone()[0]
+    return used
+
+
 SCHEMA='''CREATE TABLE IF NOT EXISTS large_movement_cases(
  ticker TEXT PRIMARY KEY,status TEXT NOT NULL,opened_at TEXT NOT NULL,updated_at TEXT NOT NULL,
  market_at TEXT NOT NULL,price REAL NOT NULL,currency TEXT NOT NULL,
@@ -32,15 +49,128 @@ SCHEMA='''CREATE TABLE IF NOT EXISTS large_movement_cases(
 TIMES={'UNESTIMATED':('Brak podstaw do oszacowania czasu',None,None),
        'S1_4':('1–4 sesje',1,4),'W1_3':('1–3 tygodnie',7,21),
        'W4_8':('4–8 tygodni',28,56),'M2_6':('2–6 miesięcy',60,180)}
-STATES={'ACTIVE':'Aktywny scenariusz dużego potencjału','WATCHING':'Wczesna teza · wymaga potwierdzenia',
+STATES={'ACTIVE':'Aktywny scenariusz dużego potencjału',
+        'TECHNICAL_WATCH':'Wykryte wybicie · trwała obserwacja techniczna',
+        'WATCHING':'Wczesna teza · wymaga potwierdzenia',
         'WAIT':'Warunki jeszcze niespełnione','REJECT':'AI nie widzi podstaw do tej tezy',
         'INVALIDATED':'Warunek zanegowania spełniony','TARGET_REACHED':'Cena dotarła do wskazanego poziomu',
         'REVIEW_DUE':'Wymaga aktualizacji oceny','BASIS_REVIEW':'Operacja na akcjach · ponowna ocena jednostki',
         'REVIEW_FAILED':'Nowa ocena nie została zakończona poprawnie'}
 
+# This is deliberately independent from the model verdict.  A model may describe a
+# setup, but the panel must always be able to tell the owner what the latest saved
+# market data has or has not confirmed.
+CONFIRMATION_STATES={
+    'WAITING_FOR_BREAKOUT':'Oczekuje na wybicie pierwszego oporu',
+    'BREAKOUT_DETECTED':'Wybicie wykryte · oczekuje na zamknięcie potwierdzające',
+    'CONFIRMED':'Wybicie potwierdzone zamknięciem sesji',
+    'NO_SEPARATE_LEVEL':'Brak odrębnego poziomu potwierdzenia',
+    'INVALIDATED':'Scenariusz zanegowany',
+    'TARGET_REACHED':'Cel techniczny osiągnięty',
+    'BASIS_REVIEW':'Porównanie cen wymaga ponownej kontroli',
+}
+
 
 def load(api,raw):
     return api.load_payload(raw) if raw else {}
+
+
+def breakout_reference(snapshot,rows):
+    """Retain a known resistance crossed after it became observable."""
+    price=snapshot.get('price');at=facts.stamp(snapshot.get('acquired_at'))
+    if not facts.positive(price) or not at or (snapshot.get('price_basis') or {}).get('blocked'):return {}
+    history=[r for r in rows if facts.stamp(r.get('end')) and facts.stamp(r['end'])<=at]
+    candidates=[]
+    for i in range(2,len(history)-2):
+        r=history[i];level=r['high']
+        if not facts.positive(level) or not all(level>x['high'] for x in history[i-2:i]+history[i+1:i+3]):continue
+        candidates.append((level,r['time'],i+2,'DAILY_PIVOT'))
+    if len(history)>=20:
+        prior=history[-20:];peak=max(prior,key=lambda r:r['high'])
+        candidates.append((peak['high'],peak['time'],len(history)-1,'RANGE_20_SESSIONS'))
+    crossed=[]
+    for level,origin,known,kind in candidates:
+        points=[(r['end'],r['close']) for r in history[known:]]+[(snapshot['acquired_at'],price)]
+        crossings=[t for (pt,p),(t,v) in zip(points,points[1:]) if p<=level<v]
+        if not crossings:continue
+        crossing=max(crossings,key=facts.stamp)
+        later=[r for r in history if facts.stamp(r['end'])>=facts.stamp(crossing)]
+        crossed.append({'price':level,'time':origin,'known_at':history[known]['end'],'kind':kind,
+                        'crossed_at':crossing,'distance_pct':(price/level-1)*100,
+                        'distance_price':price-level,'current_above':price>level,
+                        'last_closed_at':later[-1]['end'] if later else None,
+                        'last_closed_price':later[-1]['close'] if later else None,
+                        'closed_above':bool(later and later[-1]['close']>level),
+                        'basis':'Historyczny opór przekroczony po jego potwierdzeniu; kandydat na wsparcie.'})
+    return max(crossed,key=lambda r:(facts.stamp(r['crossed_at']),r['price'])) if crossed else {}
+
+
+def confirmation_status(result, snapshot, rows, case_status=None):
+    """Return a deterministic next gate from saved levels and closed daily bars.
+
+    This is local bookkeeping, not a new AI conclusion and never uses a provider.
+    A live price above resistance is useful, but does not become a confirmed
+    breakout until a later full daily session has closed above that level.
+    """
+    status=case_status or ''
+    if status in ('INVALIDATED','TARGET_REACHED','BASIS_REVIEW'):
+        return {'code':status,'label':CONFIRMATION_STATES[status],
+                'next_condition':'Brak — scenariusz ma już stan końcowy albo wymaga kontroli podstawy ceny.',
+                'met':[], 'missing':[]}
+    concrete=result.get('concrete') or {}
+    first=result.get('breakout_reference') or concrete.get('first_level') or {}
+    resistance=first.get('price')
+    currency=snapshot.get('currency') or ''
+    if not facts.positive(resistance):
+        return {'code':'NO_SEPARATE_LEVEL','label':CONFIRMATION_STATES['NO_SEPARATE_LEVEL'],
+                'next_condition':str(result.get('confirmation') or 'Sprawdź zapisane warunki scenariusza.'),
+                'met':[], 'missing':['Brak zapisanego poziomu wybicia. Brak wyższego oporu sam w sobie nie odrzuca scenariusza.']}
+    price=snapshot.get('price')
+    distance=(price/resistance-1)*100 if facts.positive(price) else None
+    distance_text=f'Odległość ceny od poziomu: {distance:+.2f}%.' if distance is not None else ''
+    reference=facts.stamp(result.get('as_of'))
+    later=[r for r in rows if facts.stamp(r.get('end')) and reference and facts.stamp(r['end'])>reference]
+    close_above=bool(later and facts.positive(later[-1].get('close')) and later[-1]['close']>resistance)
+    price_above=facts.positive(price) and price>resistance
+    level_text=f'{resistance:.4f} {currency}'.strip()
+    if result.get('breakout_reference') and facts.positive(price) and not price_above:
+        return {'code':'RETURN_BELOW','label':'Powrót do przebitego oporu lub poniżej',
+                'next_condition':f'Sprawdź odzyskanie {level_text} i zamknięcie sesji względem tego poziomu.',
+                'met':[distance_text],'missing':['Cena nie utrzymuje się ponad zapisanym poziomem wybicia.'],
+                'level':resistance}
+    if close_above:
+        return {'code':'CONFIRMED','label':CONFIRMATION_STATES['CONFIRMED'],
+                'next_condition':'Warunek potwierdzenia został spełniony.',
+                'met':[f'Pełna sesja zamknęła się powyżej {level_text}.', distance_text],
+                'missing':[], 'level':resistance}
+    if price_above:
+        return {'code':'BREAKOUT_DETECTED','label':CONFIRMATION_STATES['BREAKOUT_DETECTED'],
+                'next_condition':f'Potrzebne zamknięcie pełnej sesji powyżej {level_text}.',
+                'met':[f'Cena przekroczyła {level_text}: {price:.4f} {currency}'.strip(),distance_text],
+                'missing':[f'Brak późniejszego pełnego zamknięcia sesji powyżej {level_text}.'], 'level':resistance}
+    return {'code':'WAITING_FOR_BREAKOUT','label':CONFIRMATION_STATES['WAITING_FOR_BREAKOUT'],
+            'next_condition':f'Cena i późniejsze pełne zamknięcie sesji muszą znaleźć się powyżej {level_text}.',
+            'met':[], 'missing':[f'Cena {price:.4f} {currency} nie przekroczyła jeszcze {level_text}.'] if facts.positive(price) else ['Brak poprawnej bieżącej ceny.'],
+            'level':resistance}
+
+
+def confirmed_activation_ready(result, confirmation):
+    """Whether a saved waiting thesis has now met every deterministic gate.
+
+    The original AI verdict remains part of the saved result.  This function
+    only advances the lifecycle after a later CLOSED daily session supplies
+    the confirmation that was missing when the assessment was written.
+    """
+    return bool(
+        confirmation.get('code')=='CONFIRMED'
+        and isinstance(result.get('potential_pct'),(int,float))
+        and math.isfinite(result['potential_pct'])
+        and result['potential_pct']>=50
+        and facts.positive((result.get('target') or {}).get('price'))
+        and facts.positive((result.get('invalidation') or {}).get('price'))
+        and result.get('time_code') in TIMES
+        and result.get('time_code')!='UNESTIMATED'
+    )
 
 
 def daily_rows(api,store,snapshot):
@@ -56,17 +186,23 @@ def daily_rows(api,store,snapshot):
 
 def setup(snapshot,rows):
     """Cheap local evidence before AI; no 50% promise in candidate admission."""
+    base={'eligible':False,'reason':'INSUFFICIENT_DAILY_DATA','breakout_20d':False,
+          'range_high':None,'range_low':None,'change_5_sessions_pct':0.0,
+          'closed_hour_activity':False,'daily_activity':False,'hourly_up':False,
+          'daily_sample':len(rows)}
     price=snapshot.get('price');at=facts.stamp(snapshot.get('acquired_at'))
     if not at or not facts.positive(price) or (snapshot.get('price_basis') or {}).get('blocked'):
-        return {'eligible':False,'reason':'PRICE_BASIS_OR_DATA'}
+        return {**base,'reason':'PRICE_BASIS_OR_DATA'}
     if snapshot.get('latest_price_origin')=='carried_previous_close' or len(rows)<20:
-        return {'eligible':False,'reason':'INSUFFICIENT_DAILY_DATA'}
+        return base
     past=[r for r in rows if r['time'][:10]<str(snapshot.get('candle_time',''))[:10]]
-    if len(past)<20:return {'eligible':False,'reason':'INSUFFICIENT_DAILY_DATA'}
+    if len(past)<20:return base
     history=past[-20:];high=max(r['high'] for r in history);low=min(r['low'] for r in history)
     week=(price/past[-5]['close']-1)*100
     closed=snapshot.get('previous_closed') or {};rv=closed.get('rvol')
-    prior_activity=facts.positive(rv) and rv>=1.5 and closed.get('status')=='CLOSED' and facts.stamp(closed.get('end')) and facts.stamp(closed['end'])<=at
+    prior_activity=bool(session_context.strong_closed_hour_activity(snapshot,1.5,1000,2.)) or (
+        facts.positive(rv) and rv>=1.5 and closed.get('status')=='CLOSED'
+        and facts.stamp(closed.get('end')) and facts.stamp(closed['end'])<=at)
     volumes=[r['volume'] for r in rows[-20:] if facts.positive(r.get('volume'))]
     daily_activity=bool(len(volumes)>=15 and rows[-1].get('volume',0)>=1.5*sum(volumes[:-1])/max(1,len(volumes)-1))
     breakout=price>high*1.005
@@ -76,7 +212,7 @@ def setup(snapshot,rows):
     hourly_up=(facts.positive(ind.get('ma_fast')) and price>ind['ma_fast'] and
                isinstance(ind.get('last_macd_hist'),(int,float)) and ind['last_macd_hist']>0)
     eligible=bool((breakout or week>=8 or daily_up) and (prior_activity or daily_activity) and (hourly_up or daily_up or breakout))
-    return {'eligible':eligible,'reason':'MATERIAL_LARGE_MOVE_SETUP' if eligible else 'NO_MATERIAL_SETUP',
+    return {**base,'eligible':eligible,'reason':'MATERIAL_LARGE_MOVE_SETUP' if eligible else 'NO_MATERIAL_SETUP',
             'breakout_20d':breakout,'range_high':high,'range_low':low,'change_5_sessions_pct':week,
             'closed_hour_activity':bool(prior_activity),'daily_activity':daily_activity,'hourly_up':hourly_up,
             'daily_sample':len(rows)}
@@ -208,9 +344,59 @@ def packet(api,store,snapshot,rows,local):
             'session_context':api.company_review.session_context.build(snapshot),'company_background':background,
             'analysis_manifest':manifest,'sources':sources,'setup':local,'targets':targets,'invalidation_levels':supports}
     result['snapshot'].pop('chart_history',None)
+    result['breakout_reference']=breakout_reference(snapshot,rows)
     attach_sources(api,result,sources)
     result['time_windows']=['UNESTIMATED','S1_4','W1_3']+(['W4_8'] if len(rows)>=60 else [])+(['M2_6'] if len(rows)>=210 else [])
     return result
+
+
+def technical_watch_result(snapshot,rows,setup_data):
+    """Durable local watch created before AI and independent of target availability."""
+    breakout=breakout_reference(snapshot,rows)
+    above_available_high=bool(setup_data.get('breakout_20d') and facts.positive(setup_data.get('range_high')))
+    reason=('Cena przekroczyła maksimum dostępnego zakresu odniesienia. Brak wyższego '
+            'potwierdzonego oporu oznacza wybicie ponad zapisane szczyty, a nie brak okazji.'
+            if above_available_high else
+            'Wielosesyjny wzrost i aktywność spełniły techniczne warunki trwałej obserwacji.')
+    confirmation=('Monitoruj utrzymanie ceny ponad '+str(round(breakout['price'],6))
+                  +' oraz późniejsze zamknięcie pełnej sesji ponad tym poziomem.'
+                  if facts.positive(breakout.get('price')) else
+                  'Monitoruj utrzymanie wybicia, wolumen oraz pierwsze pełne zamknięcie sesji po wykryciu.')
+    return {'contract':CONTRACT,'verdict':'TECHNICAL_WATCH','as_of':snapshot['acquired_at'],
+        'reference_price':snapshot['price'],'target':None,'potential_pct':None,'invalidation':None,
+        'time_code':'UNESTIMATED','time_label':TIMES['UNESTIMATED'][0],
+        'time_basis':'Stan techniczny jest aktualizowany kolejnymi odczytami; bez prognozy terminu.',
+        'time_confidence':'nieoceniona','why':[reason],
+        'risks':['Brak wyższego oporu uniemożliwia rzetelne wyznaczenie celu, ale nie unieważnia wykrytego ruchu.',
+                 'Wybicie może zostać zanegowane przez powrót i zamknięcie poniżej zapisanego poziomu.'],
+        'confirmation':confirmation,'realized_move_5_sessions_pct':setup_data.get('change_5_sessions_pct',0.),
+        'scope':'Lokalna trwała obserwacja techniczna; AI uzupełnia ocenę, lecz nie decyduje o istnieniu obserwacji.',
+        'breakout_reference':breakout or None,'setup':setup_data,
+        'data_gaps':['Brak wiarygodnego wyższego oporu lub celu nie usuwa obserwacji.'],
+        'monitoring':{'as_of':snapshot['acquired_at'],'price':snapshot['price'],'reason':reason,
+                      'trend_context':snapshot.get('trend_context'),'price_basis':snapshot.get('price_basis')}}
+
+
+def save_technical_watch(api,store,snapshot,rows,setup_data,cycle):
+    """Persist detection immediately; provider errors and budgets cannot erase it."""
+    result=technical_watch_result(snapshot,rows,setup_data)
+    watch_id='technical:'+hashlib.sha256((snapshot['ticker']+snapshot['acquired_at']).encode()).hexdigest()[:24]
+    now=api.utc_now()
+    with store.transaction() as c:
+        old=c.execute('SELECT * FROM large_movement_cases WHERE ticker=?',(snapshot['ticker'],)).fetchone()
+        protected=old and old['status'] in ('ACTIVE','WATCHING','WAIT','REVIEW_DUE','BASIS_REVIEW')
+        if protected:return False
+        changed=not old or old['status']!='TECHNICAL_WATCH' or not facts.positive(old['price']) or abs(snapshot['price']/old['price']-1)>=.1
+        notice=cycle if changed else old['notice_cycle'] if old else None
+        opened=old['opened_at'] if old and old['status']=='TECHNICAL_WATCH' else snapshot['acquired_at']
+        c.execute('''INSERT INTO large_movement_cases VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(ticker) DO UPDATE SET status=excluded.status,updated_at=excluded.updated_at,
+            market_at=excluded.market_at,price=excluded.price,currency=excluded.currency,
+            result=excluded.result,job_id=excluded.job_id,notice_cycle=excluded.notice_cycle''',
+            (snapshot['ticker'],'TECHNICAL_WATCH',opened,now,snapshot['acquired_at'],snapshot['price'],
+             snapshot.get('currency') or '',api.json_text(result),watch_id,notice,
+             old['notified_version'] if old else None))
+    return True
 
 
 def concrete_context(material,target,level):
@@ -246,7 +432,7 @@ def request(api,material):
            'time_reason':enum(('DAILY_TREND_AND_STRUCTURE','BREAKOUT_AND_ACTIVITY','INSUFFICIENT_TIME_EVIDENCE')),
            'confirmation':enum(('BREAKOUT_AND_ACTIVITY','WAIT_CLOSED_DAY','WAIT_RETEST','NO_SETUP')),
            'estimate_confidence':enum(('LOW','MODERATE'))}
-    props['narrative']=company_narrative.schema()
+    props['narrative']=company_narrative.schema(sections=company_narrative.FULL_SECTIONS)
     instructions=(
         'Jesteś krytycznym analitykiem jednej spółki w KI. Oceń pełny pakiet: zapis sesji, dzienne świece, '
         'różne horyzonty, wolumen, strukturę, poziomy, informacje źródłowe, dostępne fundamenty i wcześniejsze wyniki tej samej spółki. '
@@ -269,14 +455,19 @@ def request(api,material):
         'MODERATE oznacza umiarkowaną pewność oszacowania czasu, nigdy procentową pewność zysku. '
         'Uzasadnij wybór celu przez target_reason: HISTORICAL_STRUCTURE dla historycznego pivotu, RANGE_PROJECTION dla projekcji, NO_TARGET przy NONE. '
         'time_reason musi odpowiadać osobnym time_evidence: DAILY_TREND_AND_STRUCTURE wymaga wybranego trendu dziennego; BREAKOUT_AND_ACTIVITY wymaga wybicia i zamkniętego wolumenu. '
-        'Przy niewystarczających podstawach czasu wybierz UNESTIMATED i INSUFFICIENT_TIME_EVIDENCE. '
+        'Przy time_window=UNESTIMATED wymagane są time_basis=TB_UNKNOWN i time_reason=INSUFFICIENT_TIME_EVIDENCE. '
+        'Dotyczy to także WAIT, WATCHING i REJECT. Dostępność danych technicznych nie uzasadnia TB_TECHNICAL, jeżeli nie oszacowano czasu. '
         'Bliższy opór z relacją odległości do zanegowania poniżej jedności wymaga WAIT lub WATCHING; nie wybieraj ACTIVE tylko z powodu odległego szczytu. '
         'Nie wydawaj zleceń. Aktualne wykonanie pozostaje do kontroli w XTB. KI złoży polski opis z wybranych dowodów.')
+    instructions+=(' Oceniaj breakout_reference: historyczny opór, crossed_at, odległość ceny i późniejsze zamknięcia. '
+        'Brak oporu powyżej ceny nie jest powodem odrzucenia spółki. Przebity opór jest kandydatem na wsparcie; '
+        'rozróżnij wykrycie, utrzymanie i powrót poniżej. Bez udokumentowanego celu nie wymyślaj potencjału; '
+        'możesz zachować WATCHING lub WAIT z konkretnym warunkiem. Nie nazywaj wybicia maksimum 52 tygodni bez potwierdzonego zakresu historii.')
     payload=copy.deepcopy(material)
     payload['narrative_facts']=company_narrative.facts_for(material['snapshot'],material)
     instructions=instructions.replace('Wybieraj wyłącznie identyfikatory i kody ze schematu.','W polach decyzyjnych wybieraj identyfikatory i kody ze schematu.').replace('KI złoży polski opis z wybranych dowodów.','Sam napisz pełne uzasadnienie w narrative.')
-    instructions+=company_narrative.instructions()
-    return {'model':'gpt-4o-mini','temperature':.2,'max_completion_tokens':2600,'store':False,
+    instructions+=company_narrative.instructions(full=True)
+    return {**ai_model_policy.chat_parameters(),'temperature':.2,'max_completion_tokens':company_narrative.FULL_MAX_TOKENS,'store':False,
             'messages':[{'role':'system','content':instructions},{'role':'user','content':api.json_text(company_narrative.compact_input(payload))}],
             'response_format':{'type':'json_schema','json_schema':{'name':'ki_large_movement_v3','strict':True,
                 'schema':{'type':'object','properties':props,'required':list(props),'additionalProperties':False}}}}
@@ -302,6 +493,12 @@ def decode(api,body,material,prepared):
     if wire['time_reason']=='DAILY_TREND_AND_STRUCTURE' and not any(k.startswith('B_TREND_') for k in wire['time_evidence']):raise ValueError('Czas bez wybranego dowodu trendu dziennego.')
     if wire['time_reason']=='BREAKOUT_AND_ACTIVITY' and not ('B_BREAKOUT' in wire['time_evidence'] and any(k in wire['time_evidence'] for k in ('B_VOLUME','B_DAILY_VOLUME'))):raise ValueError('Czas bez wybranego wybicia i aktywności.')
     if (wire['time_window']=='UNESTIMATED')!=(wire['time_reason']=='INSUFFICIENT_TIME_EVIDENCE'):raise ValueError('Niespójne uzasadnienie horyzontu.')
+    corrections=[]
+    if (wire['verdict'] in ('WAIT','WATCHING','REJECT')
+            and wire['time_window']=='UNESTIMATED' and wire['time_basis']=='TB_TECHNICAL'):
+        corrections.append({'field':'time_basis','original':'TB_TECHNICAL','normalized':'TB_UNKNOWN',
+                            'reason':'Nie oszacowano czasu; techniczna podstawa oszacowania nie ma zastosowania.'})
+        wire['time_basis']='TB_UNKNOWN'
     if wire['time_window']=='UNESTIMATED' and wire['time_basis']!='TB_UNKNOWN':raise ValueError('Niespójna podstawa oszacowania czasu.')
     if wire['time_window']!='UNESTIMATED' and wire['time_basis']=='TB_UNKNOWN':raise ValueError('Czas bez podstawy.')
     if wire['verdict']=='ACTIVE':
@@ -316,8 +513,10 @@ def decode(api,body,material,prepared):
     intermediate=[v for v in material['targets'].values() if target and price<v['price']<target['price']*.98]
     ev=material['evidence'];support=ev['support'];risk=ev['risk'];at=facts.stamp(material['as_of'])
     period=TIMES[wire['time_window']]
-    narrative=company_narrative.checked(wire['narrative'],company_narrative.facts_for(material['snapshot'],material))
+    narrative=company_narrative.checked(wire['narrative'],company_narrative.facts_for(material['snapshot'],material),company_narrative.FULL_SECTIONS)
     return {'contract':CONTRACT,'verdict':wire['verdict'],'as_of':material['as_of'],'reference_price':price,
+        'validation_corrections':corrections,
+        'breakout_reference':material.get('breakout_reference') or breakout_reference(material['snapshot'],material['daily_candles']),
         'narrative':narrative,
         'concrete':concrete,
         'target':target,'potential_pct':potential,'invalidation':level,'time_code':wire['time_window'],
@@ -352,7 +551,7 @@ def update_case(api,store,snapshot,rows,cycle):
         row=c.execute('SELECT * FROM large_movement_cases WHERE ticker=?',(ticker,)).fetchone()
         if not row or facts.stamp(row['market_at'])>=at:return
         result=load(api,row['result']);status=row['status'];new=status;reason=None
-        if status in ('ACTIVE','WATCHING','WAIT','REVIEW_DUE','REVIEW_FAILED','BASIS_REVIEW'):
+        if status in ('ACTIVE','TECHNICAL_WATCH','WATCHING','WAIT','REVIEW_DUE','REVIEW_FAILED','BASIS_REVIEW'):
             changed_basis=any(facts.stamp(a.get('effective_at')) and facts.stamp(result.get('as_of'))<facts.stamp(a['effective_at'])<=at
                               for a in snapshot.get('corporate_actions',[]))
             if (snapshot.get('price_basis') or {}).get('blocked') or changed_basis:
@@ -367,15 +566,26 @@ def update_case(api,store,snapshot,rows,cycle):
                     new='TARGET_REACHED';reason='Zapisana cena dotarła do celu; nie jest to potwierdzenie realizacji transakcji.'
                 elif facts.stamp(result.get('review_after')) and at>=facts.stamp(result['review_after']):
                     new='REVIEW_DUE';reason='Minął szacowany przedział czasu; potrzebna ponowna ocena, wpis pozostaje w historii.'
+        confirmation=confirmation_status(result,snapshot,rows,new)
+        if new in ('WAIT','WATCHING') and confirmed_activation_ready(result,confirmation):
+            previous_status=new
+            new='REVIEW_DUE'
+            reason=('Pełna późniejsza sesja potwierdziła zapisane wybicie; scenariusz spełnia '
+                    'warunki techniczne i oczekuje na świeżą ocenę AI przed awansem do aktywnego dużego potencjału.')
+            result['lifecycle_promotion']={
+                'from':previous_status,'to':'REVIEW_DUE','at':snapshot['acquired_at'],
+                'basis':'CLOSED_DAILY_CONFIRMATION','original_ai_verdict':result.get('verdict')
+            }
         result['monitoring']={'as_of':snapshot['acquired_at'],'price':snapshot['price'],'reason':reason,
-            'trend_context':snapshot.get('trend_context'),'price_basis':snapshot.get('price_basis')}
+            'trend_context':snapshot.get('trend_context'),'price_basis':snapshot.get('price_basis'),
+            'confirmation_status':confirmation}
         c.execute('UPDATE large_movement_cases SET status=?,market_at=?,price=?,updated_at=?,result=?,notice_cycle=? WHERE ticker=?',
             (new,snapshot['acquired_at'],snapshot['price'],api.utc_now(),api.json_text(result),
-             cycle if new!=status and new in ('INVALIDATED','TARGET_REACHED','BASIS_REVIEW') else row['notice_cycle'],ticker))
+             cycle if new!=status and new in ('ACTIVE','INVALIDATED','TARGET_REACHED','BASIS_REVIEW') else row['notice_cycle'],ticker))
 
 
-def consider(api,store,snapshot,cycle,now=None):
-    """Called by the central orchestrator for every accepted/current snapshot."""
+def consider(api,store,snapshot,cycle,now=None,admission=None):
+    """Evaluate a current snapshot; confirmed TOP 5 may request one wider review."""
     current=facts.stamp(now or api.utc_now());at=facts.stamp(snapshot['acquired_at']);ticker=snapshot['ticker']
     if not at or not timedelta(0)<=current-at<=timedelta(minutes=30):return 'STALE'
     rows=daily_rows(api,store,snapshot)
@@ -386,15 +596,39 @@ def consider(api,store,snapshot,cycle,now=None):
     if not api.service_config(store.load_section('settings',{}))['pipeline_enabled']:
         return 'MONITORING_ONLY'
     local=setup(snapshot,rows)
+    if admission=='TOP5_FINAL':
+        local={**local,'admission':'TOP5_FINAL',
+               'admission_reason':'Końcowa wzrostowa kwalifikacja TOP 5 wymaga osobnej oceny szerszego potencjału.'}
     with store.connection() as c:
         existing=c.execute("SELECT status FROM large_movement_cases WHERE ticker=? AND status IN ('ACTIVE','WATCHING','WAIT','REVIEW_DUE','REVIEW_FAILED')",(ticker,)).fetchone()
-    if not local['eligible'] and not (existing and local['reason']=='NO_MATERIAL_SETUP'):
+    admitted_top5=admission=='TOP5_FINAL' and local['reason']=='NO_MATERIAL_SETUP'
+    if not local['eligible'] and not admitted_top5 and not (existing and local['reason']=='NO_MATERIAL_SETUP'):
         save_diagnostic(api,store,ticker,snapshot['acquired_at'],local['reason']);return local['reason']
+    if local['eligible']:
+        save_technical_watch(api,store,snapshot,rows,local,cycle)
     with store.connection() as c:
         pending=c.execute("SELECT 1 FROM large_movement_jobs WHERE ticker=? AND state IN ('QUEUED','RUNNING') LIMIT 1",(ticker,)).fetchone()
-        previous=c.execute('SELECT created_at,packet FROM large_movement_jobs WHERE ticker=? ORDER BY created_at DESC LIMIT 1',(ticker,)).fetchone()
+        deferred=c.execute("SELECT * FROM large_movement_jobs WHERE ticker=? AND state='DEFERRED_BUDGET' ORDER BY created_at DESC LIMIT 1",(ticker,)).fetchone()
+        previous=c.execute('SELECT * FROM large_movement_jobs WHERE ticker=? ORDER BY created_at DESC LIMIT 1',(ticker,)).fetchone()
         count=c.execute('SELECT count(*) FROM large_movement_jobs WHERE cycle_id=?',(cycle,)).fetchone()[0]
     if pending:return 'IN_PROGRESS'
+    if deferred:
+        material=packet(api,store,snapshot,rows,local)
+        deferred_day=facts.stamp(deferred['created_at']).astimezone(timezone.utc).date()
+        current_day=current.astimezone(timezone.utc).date()
+        with store.transaction() as c:
+            if current_day>deferred_day:
+                c.execute("""UPDATE large_movement_jobs SET cycle_id=?,state='QUEUED',created_at=?,started_at=NULL,
+                          finished_at=NULL,packet=?,request=NULL,response=NULL,result=NULL,error_type=NULL,
+                          input_tokens=NULL,output_tokens=NULL WHERE id=?""",
+                          (cycle,current.isoformat(),api.json_text(material),deferred['id']))
+                state='QUEUED'
+            else:
+                c.execute('UPDATE large_movement_jobs SET cycle_id=?,packet=? WHERE id=?',
+                          (cycle,api.json_text(material),deferred['id']))
+                state='DEFERRED_BUDGET'
+        save_diagnostic(api,store,ticker,snapshot['acquired_at'],state,job_id=deferred['id'],setup=local)
+        return state
     if previous:
         elapsed=current-facts.stamp(previous['created_at'])
         previous_packet=load(api,previous['packet']);old=previous_packet.get('snapshot') or {}
@@ -409,19 +643,19 @@ def consider(api,store,snapshot,cycle,now=None):
         save_diagnostic(api,store,ticker,snapshot['acquired_at'],'CYCLE_LIMIT');return 'CYCLE_LIMIT'
     with store.connection() as c:
         start=current.astimezone(timezone.utc).replace(hour=0,minute=0,second=0,microsecond=0).isoformat()
-        used=c.execute('SELECT count(*) FROM large_movement_jobs WHERE started_at>=?',(start,)).fetchone()[0]
-    if used>=MAX_CALLS_DAY:
-        save_diagnostic(api,store,ticker,snapshot['acquired_at'],'DAILY_LIMIT');return 'DAILY_LIMIT'
+        used=automatic_ai_usage(c,start)
+        ticker_used=automatic_ai_usage(c,start,ticker)
     material=packet(api,store,snapshot,rows,local)
     identifier=hashlib.sha256((ticker+cycle+snapshot['acquired_at']).encode()).hexdigest()[:32]
     with store.transaction() as c:
-        c.execute("DELETE FROM large_movement_jobs WHERE created_at<? AND state NOT IN ('QUEUED','RUNNING') AND id NOT IN (SELECT job_id FROM large_movement_cases WHERE job_id IS NOT NULL)",
+        c.execute("DELETE FROM large_movement_jobs WHERE created_at<? AND state NOT IN ('QUEUED','RUNNING','DEFERRED_BUDGET') AND id NOT IN (SELECT job_id FROM large_movement_cases WHERE job_id IS NOT NULL)",
                   ((current-timedelta(days=90)).isoformat(),))
-        if c.execute("SELECT 1 FROM large_movement_jobs WHERE ticker=? AND state IN ('QUEUED','RUNNING')",(ticker,)).fetchone():return 'IN_PROGRESS'
+        if c.execute("SELECT 1 FROM large_movement_jobs WHERE ticker=? AND state IN ('QUEUED','RUNNING','DEFERRED_BUDGET')",(ticker,)).fetchone():return 'IN_PROGRESS'
         c.execute('INSERT INTO large_movement_jobs(id,ticker,cycle_id,state,created_at,packet) VALUES(?,?,?,?,?,?)',
-            (identifier,ticker,cycle,'QUEUED',current.isoformat(),api.json_text(material)))
-    save_diagnostic(api,store,ticker,snapshot['acquired_at'],'QUEUED',job_id=identifier,setup=local)
-    return 'QUEUED'
+            (identifier,ticker,cycle,'DEFERRED_BUDGET' if used>=MAX_CALLS_DAY or ticker_used>=MAX_CALLS_TICKER_DAY else 'QUEUED',current.isoformat(),api.json_text(material)))
+    state='DEFERRED_BUDGET' if used>=MAX_CALLS_DAY or ticker_used>=MAX_CALLS_TICKER_DAY else 'QUEUED'
+    save_diagnostic(api,store,ticker,snapshot['acquired_at'],state,job_id=identifier,setup=local)
+    return state
 
 
 def pending(store):
@@ -467,28 +701,63 @@ def maintenance(api,store,now=None):
     current=now or api.utc_now()
     with store.connection() as c:
         due=c.execute("SELECT ticker FROM large_movement_cases WHERE status IN ('ACTIVE','WATCHING','WAIT') AND json_extract(result,'$.review_after') IS NOT NULL AND julianday(json_extract(result,'$.review_after'))<=julianday(?)",(current,)).fetchall()
-    if due:
+        unreviewed=c.execute("""SELECT ticker FROM large_movement_cases
+            WHERE status='ACTIVE'
+              AND json_extract(result,'$.lifecycle_promotion.basis')='CLOSED_DAILY_CONFIRMATION'
+              AND json_extract(result,'$.post_confirmation_ai.finished_at') IS NULL""").fetchall()
+    if due or unreviewed:
         with store.transaction() as c:
             for row in due:c.execute("UPDATE large_movement_cases SET status='REVIEW_DUE',updated_at=? WHERE ticker=? AND status IN ('ACTIVE','WATCHING','WAIT')",(current,row['ticker']))
-    return len(due)
+            for row in unreviewed:c.execute("UPDATE large_movement_cases SET status='REVIEW_DUE',updated_at=?,notice_cycle=NULL WHERE ticker=? AND status='ACTIVE'",(current,row['ticker']))
+    return len(due)+len(unreviewed)
+
+
+def attach_recovered_review(api,store,now=None):
+    """Attach historical review only to its own failed case; keep live market fields."""
+    with store.transaction() as c:
+        row=c.execute('''SELECT c.ticker,c.result AS case_result,j.result AS job_result
+            FROM large_movement_cases c JOIN large_movement_jobs j ON j.id=c.job_id
+            JOIN runtime r ON r.key=? || j.id
+            WHERE c.status='REVIEW_FAILED' AND j.state='DONE'
+              AND json_extract(r.payload,'$.status')='RECOVERED'
+            ORDER BY j.created_at LIMIT 1''',(RECOVERY_PREFIX,)).fetchone()
+        if not row:return False
+        result=load(api,row['job_result']);previous=load(api,row['case_result'])
+        if not result.get('narrative'):return False
+        if previous.get('monitoring'):
+            result['monitoring']=dict(previous['monitoring'])
+            result['monitoring'].pop('confirmation_status',None)
+        result['historical_recovery']=True
+        c.execute("UPDATE large_movement_cases SET result=?,status='REVIEW_DUE',updated_at=?,notice_cycle=NULL WHERE ticker=?",
+                  (api.json_text(result),now or api.utc_now(),row['ticker']))
+    return True
 
 
 def recover_saved_response(api,store,now=None):
-    """Reuse one saved provider response after a prose-only validation change.
+    """Reuse one saved provider response after a validation change.
 
     This is deliberately bounded and never makes an HTTP request. The decision
     fields still go through the current strict decoder.
     """
+    if attach_recovered_review(api,store,now):return True
     with store.connection() as c:
-        rows=c.execute("""SELECT * FROM large_movement_jobs
+        rows=c.execute("""SELECT * FROM large_movement_jobs j
             WHERE state='FAILED' AND error_type='ValueError' AND response IS NOT NULL AND request IS NOT NULL
-            ORDER BY created_at LIMIT 12""").fetchall()
+            AND NOT EXISTS (SELECT 1 FROM runtime r WHERE r.key=? || j.id)
+            ORDER BY created_at LIMIT 12""",(RECOVERY_PREFIX,)).fetchall()
     row=result=None
     for candidate in rows:
         candidate=dict(candidate)
         try:
             decoded=decode(api,load(api,candidate['response']),load(api,candidate['packet']),load(api,candidate['request']))
-        except (ValueError,TypeError,KeyError,json.JSONDecodeError):
+        except (ValueError,TypeError,KeyError,json.JSONDecodeError) as exc:
+            # One attempt per decoder revision; bad records cannot starve later jobs.
+            with store.transaction() as c:
+                c.execute('INSERT OR REPLACE INTO runtime(key,payload,updated_at) VALUES(?,?,?)',
+                          (RECOVERY_PREFIX+candidate['id'],api.json_text({
+                              'status':'RECOVERY_REJECTED','job_id':candidate['id'],
+                              'error_type':type(exc).__name__,'validation_reason':str(exc)[:240]}),
+                           now or api.utc_now()))
             continue
         row,result=candidate,decoded
         break
@@ -496,9 +765,17 @@ def recover_saved_response(api,store,now=None):
     material=load(api,row['packet'])
     finished=now or api.utc_now()
     with store.transaction() as c:
-        c.execute("UPDATE large_movement_jobs SET state='DONE',finished_at=?,result=?,error_type=NULL WHERE id=?",
-                  (finished,api.json_text(result),row['id']))
+        changed=c.execute("UPDATE large_movement_jobs SET state='DONE',finished_at=?,result=?,error_type=NULL WHERE id=? AND state='FAILED'",
+                          (finished,api.json_text(result),row['id'])).rowcount
+        if not changed:return False
+        c.execute('INSERT OR REPLACE INTO runtime(key,payload,updated_at) VALUES(?,?,?)',
+                  (RECOVERY_PREFIX+row['id'],api.json_text({'status':'RECOVERED','job_id':row['id'],
+                   'verdict':result['verdict'],'analysis_at':result['as_of']}),finished))
         old=c.execute('SELECT * FROM large_movement_cases WHERE ticker=?',(row['ticker'],)).fetchone()
+        # Preserve later market data, other assessments and resolved scenarios.
+        if old and old['status']!='TECHNICAL_WATCH' and (old['job_id']!=row['id'] or old['status']!='REVIEW_FAILED'
+                    or facts.stamp(old['market_at'])>facts.stamp(material['as_of'])):
+            return True
         # A recovered response is historical.  It is shown in KI but is never
         # delivered as a delayed Telegram notification.
         notice=None
@@ -526,10 +803,12 @@ def process_once(api,store,keys,now=None,transport=None):
         news_status=load(api,news[0]).get('status') if news else None
         if news_status in ('QUEUED','RUNNING') and current-facts.stamp(row['created_at'])<timedelta(minutes=3):return False
         start=current.astimezone(timezone.utc).replace(hour=0,minute=0,second=0,microsecond=0).isoformat()
-        used=c.execute('SELECT count(*) FROM large_movement_jobs WHERE started_at>=?',(start,)).fetchone()[0]
-        reason='EXPIRED' if current-at>timedelta(minutes=45) else 'DAILY_LIMIT' if used>=MAX_CALLS_DAY else 'KEY_MISSING' if not keys.get('OPENAI_API_KEY') else None
+        used=automatic_ai_usage(c,start)
+        ticker_used=automatic_ai_usage(c,start,row['ticker'])
+        reason='EXPIRED' if current-at>timedelta(minutes=45) else 'DEFERRED_BUDGET' if used>=MAX_CALLS_DAY or ticker_used>=MAX_CALLS_TICKER_DAY else 'KEY_MISSING' if not keys.get('OPENAI_API_KEY') else None
         if reason:
-            c.execute('UPDATE large_movement_jobs SET state=?,finished_at=? WHERE id=?',(reason,iso,row['id']))
+            c.execute('UPDATE large_movement_jobs SET state=?,finished_at=? WHERE id=?',
+                      (reason,None if reason=='DEFERRED_BUDGET' else iso,row['id']))
             c.execute("UPDATE large_movement_cases SET status='REVIEW_DUE' WHERE ticker=? AND status IN ('ACTIVE','WATCHING','WAIT')",(row['ticker'],))
             return True
         # Refresh dated sources only. Frozen prices, candles and setup stay unchanged.
@@ -564,7 +843,7 @@ def process_once(api,store,keys,now=None,transport=None):
                 (finished,api.json_text(body),api.json_text(result),(body.get('usage') or {}).get('prompt_tokens'),(body.get('usage') or {}).get('completion_tokens'),row['id']))
             old=c.execute('SELECT * FROM large_movement_cases WHERE ticker=?',(row['ticker'],)).fetchone()
             # Failed/negative reviews remain visible, never resurrect an older positive result.
-            notice=row['cycle_id'] if result['verdict']=='ACTIVE' or (result['verdict']=='WATCHING' and result.get('potential_pct') is not None and result['potential_pct']>=50) or old and old['status']=='ACTIVE' else None
+            notice=row['cycle_id'] if result['verdict']=='ACTIVE' or old and old['status']=='ACTIVE' else None
             reopened=old and old['status'] in ('INVALIDATED','TARGET_REACHED','REJECT') and result['verdict'] in ('ACTIVE','WATCHING')
             c.execute('''INSERT INTO large_movement_cases VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(ticker) DO UPDATE SET status=excluded.status,opened_at=excluded.opened_at,updated_at=excluded.updated_at,
@@ -608,6 +887,14 @@ def delivery_valid(api,store,event_id,now=None):
     return True
 
 
+def telegram_case_update_allowed(row):
+    """Only a confirmed case, or an update of one already announced, may leave KI."""
+    if row['status']=='ACTIVE':
+        return True
+    previous=str(row['notified_version'] or '')
+    return previous.endswith(':ACTIVE')
+
+
 def finalize(api,store,now=None):
     """One standard Telegram digest per completed scanner cycle, with durable dedup."""
     current=now or api.utc_now();changed=False
@@ -622,6 +909,9 @@ def finalize(api,store,now=None):
             included=[]
             for row in rows:
                 result=load(api,row['result']);version=str(row['job_id'])+':'+row['status']
+                if not telegram_case_update_allowed(row):
+                    c.execute('UPDATE large_movement_cases SET notice_cycle=NULL WHERE ticker=?',(row['ticker'],))
+                    continue
                 if version==row['notified_version']:
                     c.execute('UPDATE large_movement_cases SET notice_cycle=NULL WHERE ticker=?',(row['ticker'],));continue
                 if len(included)>=5:continue
@@ -654,7 +944,7 @@ def rows_for_view(api,store,market='Wszystkie',ticker=None):
     if market=='GPW':conditions.append("ticker LIKE '%.WA'")
     elif market=='USA':conditions.append("ticker NOT LIKE '%.WA'")
     if conditions:sql+=' WHERE '+' AND '.join(conditions)
-    sql+=" ORDER BY CASE status WHEN 'ACTIVE' THEN 0 WHEN 'WATCHING' THEN 1 WHEN 'REVIEW_DUE' THEN 2 ELSE 3 END,updated_at DESC LIMIT 200"
+    sql+=" ORDER BY CASE status WHEN 'ACTIVE' THEN 0 WHEN 'TECHNICAL_WATCH' THEN 1 WHEN 'WATCHING' THEN 2 WHEN 'REVIEW_DUE' THEN 3 ELSE 4 END,updated_at DESC LIMIT 200"
     with store.connection() as c:
         return [dict(r) for r in c.execute(sql,args)]
 
@@ -674,17 +964,30 @@ def case_page(store,statuses,market='Wszystkie',ticker=None,page=1):
 
 
 def cards_html(api,rows):
-    output='''<style>.ki-large{width:100%;box-sizing:border-box;color:#edf2f7}.ki-large article{border:1px solid #566676;border-radius:10px;padding:14px;margin:12px 0;overflow-wrap:anywhere}.ki-large .grid{display:flex;gap:10px;flex-wrap:wrap}.ki-large .cell{flex:1 1 170px;padding:10px;background:#182632;border-radius:7px}.ki-large p{line-height:1.5}.ki-large summary{cursor:pointer;min-height:44px;padding:8px 0}.ki-large .good{color:#86efac}.ki-large .risk{color:#fcd34d}.ki-large h3{margin:0 0 10px}.ki-large small{color:#c3cfdb}</style><div class="ki-large" lang="pl">'''
+    output='''<style>.ki-large{width:100%;box-sizing:border-box;color:#edf2f7}.ki-large article{background:#14202d;border:2px solid rgba(45,212,191,.95);border-top:6px solid #2dd4bf;border-radius:10px;padding:14px;margin:12px 0;overflow-wrap:anywhere;box-shadow:0 0 0 1px rgba(45,212,191,.18),0 0 20px rgba(20,184,166,.27),inset 0 0 18px rgba(20,184,166,.07)}.ki-large .grid{display:flex;gap:10px;flex-wrap:wrap}.ki-large .cell{flex:1 1 170px;padding:10px;background:#182632;border:2px solid #334d60;border-radius:7px}.ki-large .ki-confirm{margin:12px 0;padding:10px;border:2px solid #315e8c;border-left:5px solid #60a5fa;border-radius:7px;background:#142b45;line-height:1.55}.ki-large p{line-height:1.5}.ki-large summary{cursor:pointer;min-height:44px;padding:8px 0}.ki-large .good{color:#86efac}.ki-large .risk{color:#fcd34d}.ki-large h3{margin:0 0 10px;color:#99f6e4}.ki-large small{color:#c3cfdb}</style><div class="ki-large" lang="pl">'''
     for row in rows:
         result=load(api,row['result']);monitor=result.get('monitoring') or {};target=result.get('target') or {};level=result.get('invalidation') or {}
+        technical_watch=row['status']=='TECHNICAL_WATCH'
         num=lambda value:escape(api.pl_number(value,4,' '+row['currency'])) if isinstance(value,(int,float)) and math.isfinite(value) else 'brak'
         potential=api.pl_number(result['potential_pct'],1,'%') if result.get('potential_pct') is not None else 'nieoszacowany'
         remaining=(target['price']/row['price']-1)*100 if facts.positive(target.get('price')) and facts.positive(row['price']) and row['status']!='BASIS_REVIEW' else None
+        confirmation=monitor.get('confirmation_status') or confirmation_status(result,{'price':row['price'],'currency':row['currency']},[],row['status'])
         output+='<article><h3>'+escape(row['ticker'])+' · '+escape(STATES.get(row['status'],row['status']))+'</h3>'
-        output+='<small>Ocena AI: '+escape(result['as_of'])+' · początek obserwacji: '+escape(row['opened_at'])+'</small>'
-        if not result.get('narrative'):
+        output+='<small>'+('Odczyt techniczny: ' if technical_watch else 'Ocena AI: ')+escape(result['as_of'])+' · początek obserwacji: '+escape(row['opened_at'])+'</small>'
+        if result.get('historical_recovery'):
+            output+='<p>Odzyskano historyczne uzasadnienie AI z daty oceny powyżej. Bieżąca cena pozostaje aktualizowana; obecny scenariusz wymaga nowej oceny.</p>'
+        br=result.get('breakout_reference') or {}
+        if facts.positive(br.get('price')):
+            output+='<p><b>Przebity opór:</b> '+num(br['price'])+' · wykrycie: '+escape(br['crossed_at'])+' · bieżąca cena względem poziomu: '+escape(api.pl_number((row['price']/br['price']-1)*100,2,'%'))+'.</p>'
+        if result.get('validation_corrections'):
+            output+='<p>Uporządkowano podstawę czasu: termin pozostaje nieoszacowany. Oryginalna odpowiedź AI jest zachowana.</p>'
+        if not result.get('narrative') and not technical_watch:
             output+='<p class="risk"><b>Wcześniejsza ocena szablonowa.</b> Aktualizacja ceny poniżej nie jest nową analizą AI. Ten zapis nie zawiera pełnego autorskiego uzasadnienia.</p>'
         output+='<div class="grid"><div class="cell">Cena z oceny<br><b>'+num(result['reference_price'])+'</b></div><div class="cell">Potencjał od tej ceny<br><b class="good">'+escape(potential)+'</b></div><div class="cell">Szacowany horyzont AI<br><b>'+escape(result['time_label'])+'</b><br>pewność: '+escape(result['time_confidence'])+'</div></div>'
+        output+='<section class="ki-confirm"><b>Stan scenariusza teraz: '+escape(confirmation.get('label','Brak zapisanego stanu'))+'</b><br><span>Następny warunek: '+escape(confirmation.get('next_condition','Brak danych.'))+'</span>'
+        if confirmation.get('met'):output+='<br><span>Spełnione: '+escape(' · '.join(confirmation['met']))+'</span>'
+        if confirmation.get('missing'):output+='<br><span class="risk">Brakuje: '+escape(' · '.join(confirmation['missing']))+'</span>'
+        output+='</section>'
         if result.get('narrative'):output+=company_narrative.html(result['narrative'])
         concrete=result.get('concrete') or {}
         if concrete:
@@ -696,7 +999,7 @@ def cards_html(api,rows):
                 if concrete.get('first_rr') is not None:output+=' Relacja odległości do pierwszej przeszkody / zanegowania: '+escape(api.pl_number(concrete['first_rr'],2,'×'))+'.'
                 output+=' To odległości techniczne, bez potwierdzenia wykonalności.</p>'
             output+='<p><b>Podstawa celu:</b> '+escape(concrete['target_basis'])+'</p><p><b>Wartości z odczytu:</b> '+escape(concrete['metrics'])+'</p>'
-        if not result.get('narrative'):output+='<details><summary>Wcześniejsze uzasadnienie szablonowe</summary><p>'+escape(' '.join(result['why']))+'</p><p>'+escape(' '.join(result['risks']))+'</p></details>'
+        if not result.get('narrative'):output+='<details><summary>'+('Podstawa obserwacji technicznej' if technical_watch else 'Wcześniejsze uzasadnienie szablonowe')+'</summary><p>'+escape(' '.join(result['why']))+'</p><p>'+escape(' '.join(result['risks']))+'</p></details>'
         output+='<details><summary>Sprawdzone poziomy i zapis techniczny decyzji</summary>'
         output+='<p><b>Potwierdzenie:</b> '+escape(result['confirmation'])+'</p><p><b>Warunek zanegowania:</b> '+(
             'zamknięcie pełnej sesji poniżej '+num(level['price']) if level else 'brak wyznaczonego poziomu — teza nie jest pełnym scenariuszem')+'</p>'
@@ -715,8 +1018,8 @@ def cards_html(api,rows):
 
 def render(api,store):
     import streamlit as st
-    st.subheader('Duży potencjał · pełna ocena AI')
-    st.caption('Scenariusze dużego dalszego wzrostu, prowadzone przez centralny orkiestrator. Osobno potencjał i przewidywany czas; krótkie ruchy pozostają w dotychczasowych widokach. Otwarcie nie wywołuje API.')
+    st.subheader('Potwierdzone duże okazje · pełna ocena AI')
+    st.caption('Na właściwej liście znajdują się wyłącznie aktywne scenariusze z wymaganym potencjałem, celem, zanegowaniem, czasem i potwierdzeniem późniejszą zamkniętą sesją. Otwarcie widoku nie wywołuje API.')
     market=st.radio('Rynek scenariuszy',('Wszystkie','GPW','USA'),horizontal=True,key='large_market')
     ticker=st.text_input('Szukaj w ocenionych spółkach',value='',placeholder='Np. SZR.WA; wpisanie nie uruchamia nowej analizy',key='large_ticker').strip().upper()
     if ticker and not api.valid_ticker(ticker):st.info('Wpisz poprawny ticker.');return
@@ -731,9 +1034,20 @@ def render(api,store):
         data=case_page(store,statuses,market,ticker or None,page)
         st.caption('Strona '+str(page)+'/'+str(data['pages'])+' · po 10 spółek. Starsze tezy pozostają dostępne.')
         st.markdown(cards_html(api,data['rows']),unsafe_allow_html=True)
-    group('Aktywne scenariusze dużego potencjału',('ACTIVE',),'large_active_page')
-    with st.expander('Wczesne tezy i oceny do aktualizacji',expanded=True):
-        group('Wczesne i do aktualizacji',('WATCHING','WAIT','REVIEW_DUE','BASIS_REVIEW','REVIEW_FAILED'),'large_early_page')
+        import radar_ai
+        for item in data['rows']:
+            if item['status'] in ('ACTIVE','REVIEW_DUE'):
+                if st.button('Sprawdź teraz przez AI · 1 dodatkowe wywołanie',key='manual_large_ai_'+item['ticker']):
+                    state=radar_ai.schedule_manual(api,store,item['ticker'])
+                    if state=='QUEUED':st.success('Ręczna ocena AI została dodana do kolejki z pierwszeństwem.')
+                    elif state=='IN_PROGRESS':st.info('Ocena tej spółki już oczekuje albo jest wykonywana.')
+                    else:st.warning('Brak świeżego, poprawnego pakietu aktywnej dużej okazji — nie wykonano wywołania AI.')
+            with st.expander('Aktualizowana ocena AI · '+item['ticker']):
+                radar_ai.render_latest(store,item['ticker'])
+    group('Potwierdzone aktywne scenariusze dużego potencjału',('ACTIVE',),'large_active_page')
+    with st.expander('Kandydaci i oceny do aktualizacji — poza listą dużych okazji',expanded=False):
+        st.caption('Te wpisy są nadal monitorowane, ale nie są potwierdzonymi dużymi okazjami i nie uruchamiają nowego powiadomienia o kwalifikacji.')
+        group('Niepotwierdzone lub wymagające aktualizacji',('WATCHING','WAIT','REVIEW_DUE','BASIS_REVIEW','REVIEW_FAILED'),'large_early_page')
     with st.expander('Zakończone lub odrzucone tezy'):
         group('Zakończone lub odrzucone',('INVALIDATED','TARGET_REACHED','REJECT'),'large_archive_page')
     with st.expander('Dane, źródła i diagnostyka kwalifikacji'):

@@ -18,6 +18,7 @@ class OptimizationTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.store=KI.Store(Path(self.temp.name)/'test.sqlite3')
+        self.store.save_section('settings',{'telegram_signal_only':False})
 
     def test_portfolio_retry_is_not_claimed_before_due_and_attempts_unchanged(self):
         due=NOW+timedelta(minutes=5)

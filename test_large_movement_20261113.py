@@ -64,7 +64,7 @@ def wire(material,verdict='ACTIVE'):
             'time_basis':'TB_TECHNICAL','time_evidence':selected,
             'target_reason':'NO_TARGET' if target=='NONE' else 'RANGE_PROJECTION' if material['targets'][target]['kind']=='MEASURED_RANGE' else 'HISTORICAL_STRUCTURE',
             'time_reason':'BREAKOUT_AND_ACTIVITY',
-            'confirmation':'BREAKOUT_AND_ACTIVITY','estimate_confidence':'LOW','narrative':fixture_narrative()}
+            'confirmation':'BREAKOUT_AND_ACTIVITY','estimate_confidence':'LOW','narrative':fixture_narrative(full=True)}
 
 
 def body(choice):
@@ -104,12 +104,50 @@ class LargeMovementTests(unittest.TestCase):
         self.assertTrue(self.local['eligible'])
         self.assertEqual(KI.build_trade_plan(self.s,20.,now=NOW)['status'],'UNAVAILABLE')
         self.queue()
+        case=self.case()
+        self.assertEqual(case['status'],'TECHNICAL_WATCH')
+        result=KI.load_payload(case['result'])
+        self.assertIn('nie decyduje o istnieniu obserwacji',result['scope'])
+
+    def test_breakout_above_available_high_is_watched_without_higher_resistance(self):
+        snap=sample(price=3.0)
+        local=large.setup(snap,self.daily)
+        self.assertTrue(local['breakout_20d']);self.assertTrue(local['eligible'])
+        self.assertEqual(large.consider(KI,self.store,snap,'breakout',NOW.isoformat()),'QUEUED')
+        case=self.case();result=KI.load_payload(case['result'])
+        self.assertEqual(case['status'],'TECHNICAL_WATCH')
+        self.assertIsNone(result['target'])
+        self.assertIn('nie brak okazji',result['why'][0])
+
+    def test_final_top5_admission_starts_one_wider_review_without_auto_promotion(self):
+        local={**self.local,'eligible':False,'reason':'NO_MATERIAL_SETUP'}
+        with patch.object(large,'setup',return_value=local):
+            self.assertEqual(large.consider(KI,self.store,self.s,'ordinary',NOW.isoformat()),'NO_MATERIAL_SETUP')
+            self.assertEqual(large.consider(KI,self.store,self.s,'top5',NOW.isoformat(),admission='TOP5_FINAL'),'QUEUED')
+            self.assertEqual(large.consider(KI,self.store,self.s,'top5-again',NOW.isoformat(),admission='TOP5_FINAL'),'IN_PROGRESS')
+        with self.store.connection() as c:
+            jobs=c.execute('SELECT * FROM large_movement_jobs').fetchall()
+            cases=c.execute('SELECT * FROM large_movement_cases').fetchall()
+        self.assertEqual(len(jobs),1)
+        packet=KI.load_payload(jobs[0]['packet'])
+        self.assertEqual(packet['setup']['admission'],'TOP5_FINAL')
+        self.assertEqual(cases,[])
 
     def test_ai_receives_all_available_daily_bars_not_only_sixty(self):
         material=self.packet()
         self.assertEqual(len(material['daily_candles']),80)
         self.assertEqual(material['daily_coverage']['requested_weeks'],52)
         self.assertEqual(material['daily_coverage']['first_session'],self.daily[0]['time'])
+
+    def test_incomplete_setup_keeps_full_contract_for_manual_ai_packet(self):
+        short=self.daily[-5:]
+        local=large.setup(self.s,short)
+        self.assertFalse(local['eligible'])
+        self.assertFalse(local['breakout_20d'])
+        self.assertEqual(local['change_5_sessions_pct'],0.0)
+        material=large.packet(KI,self.store,self.s,short,local)
+        self.assertEqual(material['setup'],local)
+        self.assertIn('evidence',material)
 
     def test_near_resistance_has_priority_over_distant_hundred_percent_target(self):
         material=self.packet();material['snapshot']['price']=4.64
@@ -235,14 +273,27 @@ class LargeMovementTests(unittest.TestCase):
             large.process_once(KI,self.store,{},NOW.isoformat())
         with self.store.connection() as c:self.assertEqual(c.execute('SELECT state FROM large_movement_jobs').fetchone()[0],'KEY_MISSING')
 
-    def test_budget_rejects_before_network(self):
+    def test_budget_defers_before_network_and_requeues_with_fresh_packet(self):
         self.queue()
         with self.store.transaction() as c:
             for n in range(large.MAX_CALLS_DAY):
                 c.execute('INSERT INTO large_movement_jobs(id,ticker,cycle_id,state,created_at,started_at,packet) VALUES(?,?,?,?,?,?,?)',
                     ('used'+str(n),'ZZZ','prior','FAILED',NOW.isoformat(),NOW.isoformat(),'{}'))
         with patch.object(KI,'service_http',side_effect=AssertionError('provider')):large.process_once(KI,self.store,{'OPENAI_API_KEY':'fixture'},NOW.isoformat())
-        with self.store.connection() as c:self.assertEqual(c.execute("SELECT state FROM large_movement_jobs WHERE ticker='AAA'").fetchone()[0],'DAILY_LIMIT')
+        with self.store.connection() as c:
+            deferred=c.execute("SELECT * FROM large_movement_jobs WHERE ticker='AAA'").fetchone()
+        self.assertEqual(deferred['state'],'DEFERRED_BUDGET');self.assertIsNone(deferred['finished_at'])
+        same_day=sample(at=NOW+timedelta(minutes=45),price=1.4)
+        self.assertEqual(large.consider(KI,self.store,same_day,'same-day',same_day['acquired_at']),'DEFERRED_BUDGET')
+        with self.store.connection() as c:
+            refreshed=c.execute("SELECT * FROM large_movement_jobs WHERE ticker='AAA'").fetchone()
+        self.assertEqual(json.loads(refreshed['packet'])['snapshot']['price'],1.4)
+        next_session=sample(at=NOW+timedelta(days=3),price=1.5)
+        self.assertEqual(large.consider(KI,self.store,next_session,'next-session',next_session['acquired_at']),'QUEUED')
+        with self.store.connection() as c:
+            queued=c.execute("SELECT * FROM large_movement_jobs WHERE ticker='AAA'").fetchone()
+        self.assertEqual(queued['state'],'QUEUED')
+        self.assertEqual(json.loads(queued['packet'])['snapshot']['price'],1.5)
 
     def test_case_remains_after_seven_days_and_when_removed_from_intraday_rank(self):
         self.queue();self.process();self.store.save_section('tickers',[])
@@ -267,6 +318,51 @@ class LargeMovementTests(unittest.TestCase):
         large.update_case(KI,self.store,s,self.daily,'later')
         self.assertEqual(self.case()['status'],'ACTIVE')
 
+    def test_confirmation_status_distinguishes_live_breakout_from_closed_confirmation(self):
+        self.queue();self.process();case=self.case();result=KI.load_payload(case['result'])
+        first=result['concrete']['first_level']['price']
+        live=sample(at=NOW+timedelta(minutes=15),price=first*1.02)
+        live_state=large.confirmation_status(result,live,self.daily,'ACTIVE')
+        self.assertEqual(live_state['code'],'BREAKOUT_DETECTED')
+        closed={**self.daily[-1],'close':first*1.02,'end':(NOW+timedelta(days=1)).isoformat()}
+        confirmed=large.confirmation_status(result,live,self.daily+[closed],'ACTIVE')
+        self.assertEqual(confirmed['code'],'CONFIRMED')
+
+    def test_waiting_complete_thesis_advances_only_after_closed_daily_confirmation(self):
+        self.queue();self.process();case=self.case();result=KI.load_payload(case['result'])
+        first=result['concrete']['first_level']['price']
+        result['verdict']='WAIT';result['potential_pct']=52.1
+        result['target']={**(result.get('target') or {}),'price':first*2}
+        with self.store.transaction() as c:
+            c.execute("UPDATE large_movement_cases SET status='WAIT',result=?,notice_cycle=NULL WHERE ticker='AAA'",
+                      (KI.json_text(result),))
+        live=sample(at=NOW+timedelta(minutes=15),price=first*1.02)
+        large.update_case(KI,self.store,live,self.daily,'live-cycle')
+        self.assertEqual(self.case()['status'],'WAIT')
+        self.assertIsNone(self.case()['notice_cycle'])
+        closed={**self.daily[-1],'close':first*1.02,'end':(NOW+timedelta(days=1)).isoformat()}
+        later=sample(at=NOW+timedelta(days=1,minutes=5),price=first*1.03)
+        large.update_case(KI,self.store,later,self.daily+[closed],'closed-cycle')
+        promoted=self.case();saved=KI.load_payload(promoted['result'])
+        self.assertEqual(promoted['status'],'REVIEW_DUE')
+        self.assertIsNone(promoted['notice_cycle'])
+        self.assertEqual(saved['lifecycle_promotion']['original_ai_verdict'],'WAIT')
+        self.assertEqual(saved['lifecycle_promotion']['to'],'REVIEW_DUE')
+        self.assertEqual(saved['monitoring']['confirmation_status']['code'],'CONFIRMED')
+
+    def test_confirmation_alone_does_not_promote_incomplete_waiting_thesis(self):
+        self.queue();self.process();case=self.case();result=KI.load_payload(case['result'])
+        first=result['concrete']['first_level']['price']
+        result.update(verdict='WAIT',potential_pct=52.1,target=None)
+        with self.store.transaction() as c:
+            c.execute("UPDATE large_movement_cases SET status='WAIT',result=?,notice_cycle=NULL WHERE ticker='AAA'",
+                      (KI.json_text(result),))
+        closed={**self.daily[-1],'close':first*1.02,'end':(NOW+timedelta(days=1)).isoformat()}
+        later=sample(at=NOW+timedelta(days=1,minutes=5),price=first*1.03)
+        large.update_case(KI,self.store,later,self.daily+[closed],'closed-cycle')
+        self.assertEqual(self.case()['status'],'WAIT')
+        self.assertIsNone(self.case()['notice_cycle'])
+
     def test_target_reached_is_not_reported_as_realized_profit(self):
         self.queue();self.process();s=sample(at=NOW+timedelta(minutes=15),price=2.1)
         large.update_case(KI,self.store,s,self.daily,'later')
@@ -287,6 +383,39 @@ class LargeMovementTests(unittest.TestCase):
         self.assertIn('4–8 tygodni',rows[0]['message'])
         claimed=KI.claim_delivery(self.store,now=NOW)
         self.assertEqual(claimed['kind'],'LARGE_MOVEMENT_DIGEST')
+
+    def test_unconfirmed_legacy_notice_is_cleared_without_telegram(self):
+        self.queue();self.process()
+        with self.store.transaction() as c:
+            c.execute("UPDATE large_movement_cases SET status='WAIT',notice_cycle='legacy',notified_version=NULL")
+        self.assertFalse(large.finalize(KI,self.store,NOW.isoformat()))
+        with self.store.connection() as c:
+            case=c.execute('SELECT notice_cycle FROM large_movement_cases').fetchone()
+            outbox=c.execute('SELECT count(*) FROM outbox').fetchone()[0]
+        self.assertIsNone(case['notice_cycle'])
+        self.assertEqual(outbox,0)
+
+    def test_non_active_update_is_allowed_only_after_active_was_announced(self):
+        row={'status':'WAIT','notified_version':None}
+        self.assertFalse(large.telegram_case_update_allowed(row))
+        row['notified_version']='job:ACTIVE'
+        self.assertTrue(large.telegram_case_update_allowed(row))
+
+    def test_technical_watch_is_observation_not_large_potential(self):
+        self.queue()
+        row=self.case()
+        self.assertEqual(row['status'],'TECHNICAL_WATCH')
+        self.assertFalse(large.telegram_case_update_allowed(row))
+        html=large.cards_html(KI,[row])
+        self.assertIn('Odczyt techniczny:',html)
+        self.assertIn('Podstawa obserwacji technicznej',html)
+        self.assertNotIn('Wcześniejsza ocena szablonowa',html)
+        with self.store.transaction() as c:
+            c.execute("UPDATE large_movement_jobs SET state='FAILED'")
+        self.assertFalse(large.finalize(KI,self.store,NOW.isoformat()))
+        with self.store.connection() as c:
+            self.assertEqual(c.execute('SELECT count(*) FROM outbox').fetchone()[0],0)
+            self.assertIsNone(c.execute("SELECT notice_cycle FROM large_movement_cases WHERE ticker='AAA'").fetchone()[0])
 
     def test_invalidated_case_blocks_old_pending_positive_digest(self):
         self.queue();self.process();large.finalize(KI,self.store,NOW.isoformat())
@@ -342,7 +471,7 @@ class LargeMovementTests(unittest.TestCase):
     def test_first_invalid_response_is_visible_without_positive_forecast(self):
         self.queue()
         large.process_once(KI,self.store,{'OPENAI_API_KEY':'fixture'},NOW.isoformat(),lambda *a,**k:body({}))
-        row=self.case();self.assertEqual(row['status'],'REVIEW_FAILED')
+        row=self.case();self.assertEqual(row['status'],'TECHNICAL_WATCH')
         self.assertIsNone(json.loads(row['result'])['potential_pct'])
 
     def test_saved_response_with_partial_prose_is_recovered_without_provider(self):
@@ -358,6 +487,97 @@ class LargeMovementTests(unittest.TestCase):
         with self.store.connection() as c:job=c.execute('SELECT state,result FROM large_movement_jobs').fetchone()
         self.assertEqual(job['state'],'DONE')
         self.assertEqual(json.loads(job['result'])['narrative']['status'],'PARTIAL')
+
+    def test_unestimated_time_normalization_preserves_response_and_other_checks(self):
+        material=self.packet();prepared=large.request(KI,material)
+        for verdict in ('WAIT','WATCHING','REJECT'):
+            with self.subTest(verdict=verdict):
+                value=wire(material,verdict)
+                value.update(time_window='UNESTIMATED',time_reason='INSUFFICIENT_TIME_EVIDENCE')
+                response=body(value);original=copy.deepcopy(response)
+                result=large.decode(KI,response,material,prepared)
+                self.assertEqual(response,original)
+                self.assertEqual(result['verdict'],verdict)
+                self.assertEqual(result['validation_corrections'][0]['normalized'],'TB_UNKNOWN')
+                self.assertIn('narrative',result)
+                value['verdict']='ACTIVE'
+                with self.assertRaises(ValueError):large.decode(KI,body(value),material,prepared)
+                value['verdict']=verdict;value['target_reason']='NO_TARGET'
+                with self.assertRaises(ValueError):large.decode(KI,body(value),material,prepared)
+
+    def test_recovery_preserves_cost_date_raw_response_and_sends_no_notice(self):
+        job=self.queue();material=json.loads(job['packet']);value=wire(material,'WAIT')
+        value.update(time_window='UNESTIMATED',time_reason='INSUFFICIENT_TIME_EVIDENCE')
+        raw=json.dumps(body(value));started=NOW.isoformat()
+        with self.store.transaction() as c:
+            c.execute("UPDATE large_movement_jobs SET state='FAILED',request=?,response=?,error_type='ValueError',started_at=? WHERE id=?",
+                      (json.dumps(large.request(KI,material)),raw,started,job['id']))
+        with patch.object(KI,'service_http',side_effect=AssertionError('network')):
+            self.assertTrue(large.recover_saved_response(KI,self.store,(NOW+timedelta(days=1)).isoformat()))
+        row=self.case();self.assertEqual(row['status'],'WAIT')
+        self.assertEqual(row['market_at'],material['as_of']);self.assertIsNone(row['notice_cycle'])
+        self.assertIn('Uporządkowano podstawę czasu',large.cards_html(KI,[row]))
+        with self.store.connection() as c:
+            saved=c.execute('SELECT * FROM large_movement_jobs WHERE id=?',(job['id'],)).fetchone()
+        self.assertEqual(saved['response'],raw);self.assertEqual(saved['started_at'],started)
+        self.assertEqual(saved['state'],'DONE')
+        # Even replaying a decodable older job cannot overwrite newer market state.
+        with self.store.transaction() as c:
+            c.execute('DELETE FROM runtime WHERE key=?',(large.RECOVERY_PREFIX+job['id'],))
+            c.execute("UPDATE large_movement_jobs SET state='FAILED',error_type='ValueError' WHERE id=?",(job['id'],))
+            c.execute("UPDATE large_movement_cases SET status='REVIEW_FAILED',market_at=?,price=9 WHERE ticker='AAA'",
+                      ((NOW+timedelta(hours=1)).isoformat(),))
+        before=self.case()
+        self.assertTrue(large.recover_saved_response(KI,self.store,NOW.isoformat()))
+        self.assertEqual(self.case(),before)
+        with patch.object(KI,'service_http',side_effect=AssertionError('network')):
+            self.assertTrue(large.attach_recovered_review(KI,self.store,NOW.isoformat()))
+        attached=self.case()
+        self.assertEqual(attached['market_at'],before['market_at'])
+        self.assertEqual(attached['price'],before['price'])
+        self.assertEqual(attached['opened_at'],before['opened_at'])
+        self.assertEqual(attached['status'],'REVIEW_DUE')
+        self.assertIsNone(attached['notice_cycle'])
+        result=json.loads(attached['result'])
+        self.assertEqual(result['as_of'],material['as_of'])
+        self.assertTrue(result['historical_recovery'])
+        self.assertIn('Odzyskano historyczne uzasadnienie',large.cards_html(KI,[attached]))
+        self.assertFalse(large.attach_recovered_review(KI,self.store,NOW.isoformat()))
+
+    def test_recovery_advances_past_twelve_invalid_responses_without_http(self):
+        job=self.queue();material=json.loads(job['packet']);prepared=json.dumps(large.request(KI,material))
+        value=wire(material,'WAIT')
+        value.update(time_window='UNESTIMATED',time_reason='INSUFFICIENT_TIME_EVIDENCE')
+        with self.store.transaction() as c:
+            c.execute("UPDATE large_movement_jobs SET state='FAILED',error_type='ValueError',request=?,response=? WHERE id=?",
+                      (prepared,json.dumps(body(value)),job['id']))
+            for i in range(13):
+                c.execute("INSERT INTO large_movement_jobs(id,ticker,cycle_id,state,created_at,packet,request,response,error_type) VALUES(?,?,?,'FAILED',?,?,?,?,'ValueError')",
+                          ('bad'+str(i),'AAA','old', (NOW-timedelta(days=1)).isoformat(),job['packet'],prepared,json.dumps(body({}))))
+        with patch.object(KI,'service_http',side_effect=AssertionError('network')):
+            self.assertFalse(large.recover_saved_response(KI,self.store,NOW.isoformat()))
+            self.assertTrue(large.recover_saved_response(KI,self.store,NOW.isoformat()))
+            self.assertFalse(large.recover_saved_response(KI,self.store,NOW.isoformat()))
+        self.assertEqual(self.case()['status'],'WAIT')
+        with self.store.connection() as c:
+            diagnostics=[json.loads(r[0]) for r in c.execute('SELECT payload FROM runtime WHERE key LIKE ?', (large.RECOVERY_PREFIX+'%',))]
+        self.assertEqual(sum(d['status']=='RECOVERY_REJECTED' for d in diagnostics),13)
+        self.assertTrue(all(d.get('validation_reason') for d in diagnostics if d['status']=='RECOVERY_REJECTED'))
+
+    def test_crossed_resistance_survives_when_no_higher_target_exists(self):
+        snap=sample(price=2.5);context=large.breakout_reference(snap,self.daily)
+        self.assertAlmostEqual(context['price'],2.3)
+        self.assertAlmostEqual(context['distance_pct'],(2.5/2.3-1)*100)
+        self.assertFalse(context['closed_above'])
+        result={'as_of':snap['acquired_at'],'breakout_reference':context,'concrete':{}}
+        state=large.confirmation_status(result,snap,[],'WATCHING')
+        self.assertEqual(state['code'],'BREAKOUT_DETECTED')
+        state=large.confirmation_status(result,{**snap,'price':2.2},[],'WATCHING')
+        self.assertEqual(state['code'],'RETURN_BELOW')
+        material=large.packet(KI,self.store,snap,self.daily,large.setup(snap,self.daily))
+        request=large.request(KI,material)
+        self.assertIn('breakout_reference',request['messages'][1]['content'])
+        self.assertIn('breakout.distance_pct',request['messages'][1]['content'])
 
     def test_non_string_evidence_is_a_validation_error(self):
         material=self.packet();value=wire(material);value['supporting_evidence']=[{}]

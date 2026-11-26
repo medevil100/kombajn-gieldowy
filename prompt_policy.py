@@ -46,7 +46,7 @@ def evidence_policy(scope, compact=False):
 
 def assessment_rules(final=False):
     form = (
-        'Każde pole ma mieć od dwóch do czterech pełnych zdań, łącznie do sześciuset znaków. '
+        'Każde pole ma zawierać konkretne uzasadnienie do sześciuset znaków; liczba zdań jest dowolna. '
         'Nie ma minimum znaków do wypełnienia. Każde zdanie ma wnosić osobny fakt, ocenę albo ograniczenie. '
         'Nie wydłużaj opisu przez powtarzanie słów lub zdań. '
         if final else
@@ -72,14 +72,13 @@ def assessment_schema(final=False, decimal_chars='0-9'):
     """Static supported string constraints, also checked locally after receipt."""
     # Real punctuation is required, not an arbitrary character quota. The local
     # validator independently checks substance, repetitions and factual limits.
-    pattern=(r'^[^'+decimal_chars+r'.!?]+[.!?](?:\s+[^'+decimal_chars+r'.!?]+[.!?]){1,3}\s*$'
-             if final else '^[^'+decimal_chars+']*$')
+    pattern='^[^'+decimal_chars+']*$'
     common={'type':'string','pattern':pattern,'maxLength':600 if final else 150}
     descriptions={
         'movement':'Po polsku, bez cyfr: kierunek i zgodność wskazań. '+(
-            'Opisz dostępny przebieg bieżącej sesji od otwarcia i osobno ruch od stałej bazy. Od dwóch do czterech zdań zakończonych kropką, bez powtórzeń.' if final else 'Jedno krótkie zdanie.'),
+            'Opisz dostępny przebieg bieżącej sesji od otwarcia i osobno ruch od stałej bazy. Konkretne uzasadnienie bez powtórzeń; liczba zdań jest dowolna.' if final else 'Jedno krótkie zdanie.'),
         'activity':'Po polsku, bez cyfr: zmierzona aktywność i ograniczenia porównania. Nie porównuj sumy sesji ze średnią godziny. '+(
-            'Od dwóch do czterech zdań zakończonych kropką, bez powtórzeń.' if final else 'Jedno krótkie zdanie.'),
+            'Konkretne uzasadnienie bez powtórzeń; liczba zdań jest dowolna.' if final else 'Jedno krótkie zdanie.'),
         'risk':'Po polsku, bez cyfr: ryzyko, dostępność planu i dokładny status ofert; nie zamieniaj niespójnych ofert ani niepotwierdzonej świeżości w brak ofert. '+(
-            'Od dwóch do czterech zdań zakończonych kropką, bez powtórzeń.' if final else 'Jedno krótkie zdanie.')}
+            'Konkretne uzasadnienie bez powtórzeń; liczba zdań jest dowolna.' if final else 'Jedno krótkie zdanie.')}
     return {name:{**common,'description':description} for name,description in descriptions.items()}

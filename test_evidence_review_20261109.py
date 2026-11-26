@@ -41,7 +41,7 @@ class EvidenceReviewTests(unittest.TestCase):
     def test_request_has_only_code_enums_preserves_full_data_and_keeps_budget(self):
         f,ev,ctx,request=self.sample();before=copy.deepcopy((ev,ctx))
         self.assertEqual(request['response_format']['json_schema']['name'],grounded.SCHEMA_NAME)
-        self.assertEqual((request['model'],request['max_completion_tokens']),('gpt-4o-mini',3000))
+        self.assertEqual((request['model'],request['reasoning_effort'],request['max_completion_tokens']),('gpt-6-luna','none',6600))
         payload=json.loads(request['messages'][-1]['content'])
         self.assertEqual(payload['proved_event']['analysis_manifest']['session_context'],ev['session_context'])
         self.assertIn('evidence_review',payload)

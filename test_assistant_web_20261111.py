@@ -37,6 +37,8 @@ class WebTests(unittest.TestCase):
         args=network.call_args.args
         self.assertEqual(args[1],'https://api.openai.com/v1/responses')
         self.assertEqual(args[2],'fixture-not-real')
+        self.assertEqual(args[3]['model'],'gpt-6-luna')
+        self.assertEqual(args[3]['reasoning'],{'effort':'none'})
         self.assertEqual(args[3]['max_tool_calls'],1)
         self.assertEqual(args[3]['tools'],[{'type':'web_search','search_context_size':'low'}])
         self.assertFalse(args[3]['store'])

@@ -54,7 +54,8 @@ class ResearchV3Tests(unittest.TestCase):
         request=KI.gpt_chat_request('Co pokazują dane?',context,[])
         self.assertIn('{{metric:price}}',request['messages'][0]['content'])
         self.assertIn('nie potwierdza słabej aktywności',request['messages'][0]['content'])
-        self.assertEqual(request['max_completion_tokens'],5000)
-        self.assertEqual(request['model'],'gpt-4o-mini')
+        self.assertEqual(request['max_completion_tokens'],6600)
+        self.assertEqual(request['model'],'gpt-6-luna')
+        self.assertEqual(request['reasoning_effort'],'none')
 
 if __name__=='__main__':unittest.main()

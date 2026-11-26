@@ -122,9 +122,21 @@ def cards_html(rows):
                 for item in indicators
             ) + '</details>'
         cards.append('<article class="ki-pf-card"><div class="ki-pf-heading"><strong>'+field('Ticker')
-            +'</strong><span class="'+direction+'">'+field('Zmiana 1H')+'</span></div>'
+            +'</strong><span class="'+direction+'">'+field('Zmiana 1H')+'</span>'
+            '<button class="ki-pf-ai" type="button" data-ai-ticker="'+field('Ticker')+'" '
+            'title="Oceń teraz przez AI">AI</button></div>'
             '<div class="ki-pf-price">'+field('Cena')+'</div>'
             '<div class="ki-pf-caption">Zmiana ceny od otwarcia świecy 1h</div>'
+            '<section class="ki-pf-analysis"><div class="ki-pf-section">Moja pozycja</div>'
+            '<div class="ki-pf-detail"><span>Liczba akcji</span><strong>'+field('Akcje')+'</strong></div>'
+            '<div class="ki-pf-detail"><span>Cena zakupu</span><strong>'+field('Cena zakupu')+'</strong></div>'
+            '<div class="ki-pf-detail"><span>Koszt zakupu w PLN</span><strong>'+field('Koszt PLN')+'</strong></div>'
+            '<div class="ki-pf-detail"><span>Wartość pozycji</span><strong>'+field('Wartość pozycji')+'</strong></div>'
+            '<div class="ki-pf-detail"><span>Aktualna wartość w PLN</span><strong>'+field('Wartość PLN')+'</strong></div>'
+            '<div class="ki-pf-detail"><span>Wynik od zakupu</span><strong>'+field('Wynik')+'</strong></div>'
+            '<div class="ki-pf-detail"><span>Wynik po przeliczeniu PLN</span><strong>'+field('Wynik PLN')+'</strong></div>'
+            '<div class="ki-pf-caption">Kurs bieżącej wyceny: '+field('Kurs wyceny')+'</div>'
+            '<div class="ki-pf-caption">'+escape(text((row.get('_position') or {}).get('reason')))+'</div></section>'
             +market_context_html(row)+
             row.get('_intelligence_html','')+
             (event_cards_html(row['_technical_events']) if row.get('_technical_events') is not None else '')+
@@ -147,20 +159,60 @@ def cards_html(rows):
             'nie są wyliczonym planem technicznym ani zleceniami giełdowymi.</p></details></article>')
     return '''<style>
     .ki-pf-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:10px;width:100%}
-    .ki-pf-card{background:#182330;color:#edf2f7;border:1px solid #61758b;border-radius:10px;padding:12px;box-sizing:border-box;min-width:0;overflow-wrap:anywhere}
+    .ki-pf-card{background:#182330;color:#edf2f7;border:2px solid rgba(96,165,250,.94);border-radius:10px;padding:12px;box-sizing:border-box;min-width:0;overflow-wrap:anywhere;box-shadow:0 0 0 1px rgba(96,165,250,.18),0 0 18px rgba(56,189,248,.24),inset 0 0 16px rgba(37,99,235,.08)}
     .ki-pf-heading{display:flex;justify-content:space-between;align-items:center;gap:8px}.ki-pf-heading strong{font-size:1.1rem}
     .ki-pf-heading .up{color:#86efac}.ki-pf-heading .down{color:#fda4af}.ki-pf-heading .neutral{color:#cbd5e1}
+    .ki-pf-ai{border:1px solid #60a5fa;border-radius:6px;color:#bfdbfe;font-size:.78rem;font-weight:700;line-height:1;padding:7px 9px;text-decoration:none;white-space:nowrap}
+    .ki-pf-ai:hover{background:#142b45;color:#fff}.ki-pf-ai:focus-visible{outline:2px solid #60a5fa;outline-offset:2px}
     .ki-pf-price{font-size:1.3rem;font-weight:700;margin-top:8px;font-variant-numeric:tabular-nums}
     .ki-pf-caption{font-size:.85rem;color:#c6d0dc;margin:5px 0}
     .ki-pf-badge{font-size:.85rem;padding:5px 7px;margin-top:8px;border-radius:5px}
     .ki-pf-badge.fresh{background:#143b2c;color:#dcfce7}.ki-pf-badge.old{background:#443713;color:#fef9c3}
     .ki-pf-levels{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin:10px 0}
-    .ki-pf-section{font-size:.9rem;font-weight:700;margin-top:12px}.ki-pf-analysis{border-top:1px solid #43566c;margin-top:10px}
+    .ki-pf-section{font-size:.9rem;font-weight:700;margin-top:12px}.ki-pf-analysis{border-top:2px solid #536b86;margin-top:10px}
     .ki-pf-level{padding:8px;border-radius:6px;min-width:0;border-left:3px solid;font-size:.85rem}
     .ki-pf-level strong,.ki-pf-level small{display:block;margin-top:4px}.ki-pf-level strong{font-size:1.05rem}
     .ki-pf-level.sl{background:#4c1d24;color:#ffe4e6;border-color:#fb7185}.ki-pf-level.tp{background:#143b2c;color:#dcfce7;border-color:#4ade80}
     .ki-pf-level.support{background:#142b45;color:#bfdbfe;border-color:#60a5fa}.ki-pf-level.resistance{background:#322047;color:#e9d5ff;border-color:#c084fc}
     .ki-pf-card summary{cursor:pointer;min-height:44px;padding-top:10px;color:#c6d0dc}
     .ki-pf-card details p{font-size:.85rem;color:#c6d0dc}.ki-pf-detail{display:flex;justify-content:space-between;gap:12px;font-size:.85rem;margin:7px 0}.ki-pf-detail strong{text-align:right}
-    @media(max-width:600px){.ki-pf-grid{grid-template-columns:minmax(0,1fr)}}
+    @media(max-width:600px){.ki-pf-grid{grid-template-columns:minmax(0,1fr)}.ki-pf-ai{min-height:26px;padding:8px 11px}}
     </style><div class="ki-pf-grid">'''+''.join(cards)+'</div>'
+
+
+def interactive_cards(rows, *, key='ki_portfolio_cards'):
+    """Render the compact grid and return a same-session AI click trigger."""
+    import streamlit as st
+    # Registration belongs to Streamlit's current runtime/component manager.
+    # App sessions and AppTest instances can use different managers, so a
+    # process-global renderer would be stale outside the session that made it.
+    cards_component = st.components.v2.component(
+        'ki_portfolio_cards_v2',
+        html='''
+<div id="ki-portfolio-root"></div>
+''',
+        js='''
+export default function (component) {
+  const { data, parentElement, setTriggerValue } = component
+  const root = parentElement.querySelector("#ki-portfolio-root")
+  if (!root) return
+  const markup = (data && data.markup) || ""
+  if (root.__kiMarkup !== markup) {
+    root.innerHTML = markup
+    root.__kiMarkup = markup
+  }
+  root.onclick = event => {
+    const button = event.target.closest("button[data-ai-ticker]")
+    if (!button || !root.contains(button)) return
+    button.disabled = true
+    button.textContent = "AI…"
+    setTriggerValue("ai", button.dataset.aiTicker)
+  }
+}
+''',
+    )
+    return cards_component(
+        key=key,
+        data={'markup': cards_html(rows)},
+        on_ai_change=lambda: None,
+    )

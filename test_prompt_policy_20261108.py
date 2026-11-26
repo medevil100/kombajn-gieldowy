@@ -19,6 +19,23 @@ class PromptPolicyTests(unittest.TestCase):
         ctx['ai_preflight'] = KI.automatic_ai_preflight(ev, ctx)
         return ev, ctx, answer
 
+    def test_final_prose_survives_single_sentence_format(self):
+        fixture,ev,ctx=self.company()
+        answer=fixture.answer()
+        for key,value in answer['assessment'].items():
+            answer['assessment'][key]=value.replace('. ', '; ').rstrip('.')
+        clean=KI.validate_event_analysis(answer,ev['snapshot'],ctx)
+        self.assertTrue(all(clean['assessment'].values()))
+        self.assertFalse(KI.analysis_publication_issues(clean,True))
+
+    def test_early_stage_does_not_require_magic_words_but_rejects_completed_series(self):
+        result={'final_review':{'attention':'PANEL_ONLY','explanation':'Dostępne wskazania wymagają dalszej obserwacji kierunku.'},
+                'assessment':{'movement':'Wskazania wspierają kierunek wzrostowy przy ograniczonej aktywności.'}}
+        manifest={'review_stage':review.early_review.STAGE}
+        self.assertEqual(review.validate_final(result,manifest,lambda text:False),[])
+        result['assessment']['movement']='Seria potwierdzeń jest zakończona.'
+        self.assertTrue(review.validate_final(result,manifest,lambda text:False))
+
     def company(self):
         fixture = final.FinalCompanyReviewTests()
         fixture.setUp()
@@ -35,11 +52,11 @@ class PromptPolicyTests(unittest.TestCase):
         request = KI.event_analysis_request(ev, ctx)
         text = request['messages'][0]['content']
         self.assertEqual(text.count('assessment: obiekt'), 1)
-        self.assertIn('od dwóch do czterech pełnych zdań', text)
+        self.assertIn('liczba zdań jest dowolna', text)
         self.assertIn('Nie ma minimum znaków do wypełnienia', text)
         self.assertNotIn('stu pięćdziesięciu', text)
         self.assertNotIn('zastępuje wcześniejszy limit', text)
-        self.assertEqual(request['max_completion_tokens'], 3000)
+        self.assertEqual(request['max_completion_tokens'], 6600)
         self.assertEqual(request['response_format']['json_schema']['schema'], KI.analysis_schema(ev['snapshot'], ctx))
         clean = KI.validate_event_analysis(fixture.answer(), ev['snapshot'], ctx)
         self.assertFalse(KI.analysis_publication_issues(clean, True))
@@ -51,7 +68,7 @@ class PromptPolicyTests(unittest.TestCase):
         self.assertEqual(text.count('assessment: obiekt'), 1)
         self.assertIn('jedno zdanie do stu pięćdziesięciu znaków', text)
         self.assertNotIn('od stu do sześciuset znaków', text)
-        self.assertEqual((request['model'], request['max_completion_tokens']), ('gpt-4o-mini', 1800))
+        self.assertEqual((request['model'], request['reasoning_effort'], request['max_completion_tokens']), ('gpt-6-luna', 'none', 1800))
         self.assertFalse(KI.analysis_publication_issues(KI.validate_event_analysis(answer, ev['snapshot'], ctx), True))
 
     def test_source_instructions_remain_data_and_request_does_not_mutate_evidence(self):
@@ -123,7 +140,7 @@ class PromptPolicyTests(unittest.TestCase):
         self.assertIn(prompt_policy.VERSION, request['messages'][0]['content'])
         self.assertNotIn('QUESTION_MARKER_20261108', request['messages'][0]['content'])
         self.assertEqual(json.loads(request['messages'][-1]['content'])['question'], question)
-        self.assertEqual(request['max_completion_tokens'], 5000)
+        self.assertEqual(request['max_completion_tokens'], 6600)
 
     def test_deep_contract_reaches_agent_config_without_changing_its_limits(self):
         config = KI.deep_analysis_config({}, Path('offline-not-created'))

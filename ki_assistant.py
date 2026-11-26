@@ -17,8 +17,9 @@ import time
 import uuid
 
 from ki2_ops_guard import provider_lease
+import ai_model_policy
 
-MODEL = 'gpt-4o-mini'
+MODEL = ai_model_policy.MODEL
 VERSION = 'KI-ASSISTANT-20261111-v3-web'
 MAX_CALLS = 4
 MAX_TOOLS = 6
@@ -28,8 +29,8 @@ DAILY_CALLS = 100
 DAILY_MICRO_USD = 1_000_000
 # Standard rates checked against official model documentation, 2026-11-11.
 # Conservative reservations ignore cached-input discounts. Not an invoice.
-INPUT_MICRO = .15
-OUTPUT_MICRO = .60
+INPUT_MICRO = ai_model_policy.INPUT_USD_PER_MILLION
+OUTPUT_MICRO = ai_model_policy.OUTPUT_USD_PER_MILLION
 _workers = {}
 _worker_lock = threading.Lock()
 
@@ -239,7 +240,7 @@ def reserve(path, turn, payload, web_query=None):
     upper = math.ceil((size+8192)*INPUT_MICRO + MAX_OUTPUT*OUTPUT_MICRO)
     if web_query is not None:
         # One standard web call ($.01), plus the documented 8000 search-input
-        # token block for gpt-4o-mini. These are conservative local estimates.
+        # Conservative token block for the configured production model.
         upper += 10000 + math.ceil(8000*INPUT_MICRO)
     ident, day = uuid.uuid4().hex, now()[:10]
     with database(path, True) as db:
@@ -504,7 +505,7 @@ def tools():
 def request(messages, final=False):
     """Final synthesis is a normal structured answer, not a forced tool call."""
     definitions=tools()
-    payload={'model':MODEL,'messages':list(messages),'max_completion_tokens':MAX_OUTPUT,
+    payload={**ai_model_policy.chat_parameters(),'messages':list(messages),'max_completion_tokens':MAX_OUTPUT,
              'temperature':.2,'store':False}
     if final:
         payload['response_format']={'type':'json_schema','json_schema':{

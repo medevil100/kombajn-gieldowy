@@ -36,10 +36,14 @@ def gate(api,snapshot,current,settings,allow_confirmed=False,require_new_activit
         minimum_rvol=max(1.5,float(settings.get('min_rvol_for_opportunity',.5)),float(settings.get('min_rvol_absolute',.3)))
         minimum_volume=max(1000,float(settings.get('min_volume_for_opportunity',1000)))
     except (ValueError,TypeError):return no('Niepoprawne progi aktywności.')
-    if (not api.finite_number(minimum_rvol,True) or not api.finite_number(minimum_volume,True)
-        or not api.finite_number(snapshot.get('rvol'),True) or snapshot['rvol']<minimum_rvol
-        or not api.finite_number(snapshot.get('volume'),True) or snapshot['volume']<minimum_volume):
-        return no('Wstępna ocena wymaga RVOL co najmniej półtora i dodatniego obrotu ponad minimum.')
+    earlier=api.company_review.session_context.strong_closed_hour_activity(
+        snapshot,minimum_rvol,minimum_volume,threshold)
+    current_activity=(api.finite_number(snapshot.get('rvol'),True)
+        and snapshot['rvol']>=minimum_rvol
+        and api.finite_number(snapshot.get('volume'),True)
+        and snapshot['volume']>=minimum_volume)
+    if not current_activity and not earlier:
+        return no('Brak godziny bieżącej sesji z RVOL i wolumenem powyżej progów.')
     if require_new_activity and (matrix.get('activity_evidence') not in ('VOLUME_INCREASE','NEW_CANDLE_VOLUME')
         or matrix.get('last_activity_at')!=snapshot.get('acquired_at')):
         return no('Ten odczyt nie zawiera nowego dowodu aktywności.')
@@ -47,7 +51,8 @@ def gate(api,snapshot,current,settings,allow_confirmed=False,require_new_activit
     if session.get('status')!='COMPLETE_TO_ASOF':return no('Niepełny zapis świec bieżącej sesji.')
     return {'allowed':True,'reason':'Istotny ruch z nową aktywnością; status nadal wstępny.',
             'confirmation_reads':matrix['consecutive_reads'],'required_confirmation_reads':3,
-            'minimum_rvol':minimum_rvol,'minimum_volume':minimum_volume}
+            'minimum_rvol':minimum_rvol,'minimum_volume':minimum_volume,
+            'activity_hour':earlier}
 
 
 def movement_valid(api,evidence,current,settings,latest=False):

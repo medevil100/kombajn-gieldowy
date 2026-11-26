@@ -37,9 +37,12 @@ import evidence_review
 import early_company_review
 import company_orchestrator
 import market_intelligence
+import ai_model_policy
 import issuer_watch
 import corporate_feed
 import large_movement
+import technical_radar
+import radar_ai
 from datetime import datetime, timezone
 
 STAGE = 3
@@ -709,12 +712,34 @@ def required_daily_session(ticker,when,include_completed_today=False):
 def daily_matrix_reference_ready(snapshot):
     matrix=snapshot.get('price_matrix') or {}
     if matrix.get('reference_status')=='MISSING_PREVIOUS_SESSION':return False
-    # Pre-matrix legacy/manual records have no daily-reference contract.
-    if 'reference_session' not in matrix:return True
+    # A legacy technical anchor is not proof of the previous session close.
+    # It must be rebased by the next accepted scan before it can drive a daily
+    # direction, qualification, AI narrative or notification.
+    if not matrix.get('reference_session'):return False
     try:
         return (matrix.get('reference_session')==required_daily_session(snapshot['ticker'],snapshot['acquired_at'])
                 and finite_number(matrix.get('anchor_price'),True))
     except (KeyError,ValueError,TypeError):return False
+
+
+def price_change_contract(snapshot,matrix=None):
+    """Keep daily return distinct from any technical/tracking anchor."""
+    matrix=matrix if isinstance(matrix,dict) else snapshot.get('price_matrix') or {}
+    result={'version':'PRICE-REFERENCE-20261126-v1','as_of':snapshot.get('acquired_at'),
+            'current_price':snapshot.get('price'),'currency':snapshot.get('currency'),
+            'tracking':{'reference_price':matrix.get('anchor_price'),'reference_at':matrix.get('anchor_at'),
+                        'change_pct':matrix.get('change_pct'),'purpose':'TECHNICAL_QUALIFICATION'}}
+    daily={'status':'UNAVAILABLE','reference_type':'PREVIOUS_SESSION_CLOSE',
+           'reference_price':None,'reference_session':None,'change_pct':None}
+    candidate={**snapshot,'price_matrix':matrix}
+    if daily_matrix_reference_ready(candidate):
+        reference=matrix.get('anchor_price');price=snapshot.get('price')
+        if finite_number(reference,True) and finite_number(price,True):
+            daily.update(status='READY',reference_price=reference,
+                         reference_session=matrix.get('reference_session'),
+                         change_pct=(price/reference-1)*100)
+    result['daily']=daily
+    return result
 
 
 def load_daily_candles(store,ticker):
@@ -2041,7 +2066,7 @@ def validate_event_analysis(result,snapshot,context):
 
 def parse_event_analysis_response(body,snapshot,context):
     import copy
-    metadata={'raw_response':copy.deepcopy(body),'model':body.get('model','gpt-4o-mini'),'response_id':body.get('id'),'usage':body.get('usage',{})}
+    metadata={'raw_response':copy.deepcopy(body),'model':body.get('model',ai_model_policy.MODEL),'response_id':body.get('id'),'usage':body.get('usage',{})}
     draft={**metadata,'content':None,'finish_reason':None}
     try:
         choice=body['choices'][0];message=choice['message']
@@ -2430,7 +2455,7 @@ def event_analysis_request(evidence,context):
         instructions+=prompt_policy.assessment_rules(bool(evidence.get('company_review_batch')))
     instructions=prompt_policy.evidence_policy('event',compact=context.get('analysis_manifest',{}).get('version',0)<3)+instructions
     request={
-        'model':'gpt-4o-mini','temperature':0.2,'max_completion_tokens':3000 if evidence.get('company_review_batch') else 1800,'store':False,
+        **ai_model_policy.chat_parameters(),'temperature':0.2,'max_completion_tokens':ai_model_policy.FULL_MAX_TOKENS if evidence.get('company_review_batch') else 1800,'store':False,
         'messages':[{'role':'system','content':instructions},
                     {'role':'user','content':json_text({'proved_event':evidence_data,'source_context':safe_context})}],
         'response_format':{'type':'json_schema','json_schema':{'name':'ki_event_analysis','strict':True,'schema':analysis_schema(snap,context)}}}
@@ -3620,8 +3645,12 @@ def r1_research_sources(response, cutoff, snapshot):
 
 @guard_operation(defer=True)
 def process_analysis_once(store,keys,event_id=None):
+    if event_id is None and radar_ai.manual_pending(store):
+        return radar_ai.process_once(company_review.script_api(globals()),store,keys)
+    if technical_radar.enabled(store.load_section('settings',{})):
+        return radar_ai.process_once(company_review.script_api(globals()),store,keys)
     job=claim_analysis(store,event_id)
-    if not job:return False
+    if not job:return radar_ai.process_once(company_review.script_api(globals()),store,keys) if radar_ai.pending(store) else False
     stage='READ_EVENT'
     try:
         with store.connection() as c:
@@ -3865,13 +3894,59 @@ def early_delivery_valid(store,evidence,now):
 def claim_delivery(store,outbox_id=None,now=None):
     current=now or datetime.now(timezone.utc)
     with store.transaction() as c:
-        if company_review.enabled(store.load_section('settings',{})):
+        settings=store.load_section('settings',{})
+        if technical_radar.enabled(settings):
+            candidates=c.execute("SELECT * FROM outbox WHERE status='PENDING' AND kind IN ('TECHNICAL_DIGEST','PORTFOLIO_ALERT','LARGE_MOVEMENT_DIGEST') AND (next_attempt_at IS NULL OR next_attempt_at<=?)"+(' AND id=?' if outbox_id else '')+' ORDER BY created_at',(current.isoformat(),outbox_id) if outbox_id else (current.isoformat(),)).fetchall()
+            for row in candidates:
+                if row['kind']=='PORTFOLIO_ALERT':
+                    event=c.execute('SELECT ticker FROM events WHERE id=?',(row['event_id'],)).fetchone()
+                    saved=c.execute("SELECT payload FROM settings WHERE key='portfolio_config'").fetchone()
+                    config=load_payload(saved['payload']) if saved else []
+                    held={e.get('ticker') for e in config if isinstance(e,dict) and e.get('ticker')}
+                    identity=str(row['event_id'] or row['id'] or '')
+                    report=identity.startswith(('daily_report:','us_report:')) and bool(held)
+                    if not event or (event[0] not in held and not report):
+                        c.execute("UPDATE outbox SET status='FILTERED',last_error='Poza alarmami zapisanych pozycji' WHERE id=?",(row['id'],));continue
+                if row['kind']=='TECHNICAL_DIGEST' and (current-parse_market_time(row['created_at'])).total_seconds()>1800:
+                    c.execute("UPDATE outbox SET status='FILTERED',last_error='Wygasło zestawienie techniczne' WHERE id=?",(row['id'],));continue
+                if row['kind']=='TECHNICAL_DIGEST':
+                    event=c.execute('SELECT payload FROM events WHERE id=?',(row['event_id'],)).fetchone()
+                    members=load_payload(event[0]).get('members',[]) if event else []
+                    allowed=bool(members) and all(isinstance(m,(list,tuple)) and len(m)>=2 and (str(m[1]).startswith('TOP 5') or m[1]==technical_radar.LABELS['LARGE']) for m in members)
+                    if not allowed or not technical_radar.delivery_valid(c,event[0]):
+                        c.execute("UPDATE outbox SET status='FILTERED',last_error='Nowszy odczyt zastąpił zestawienie techniczne' WHERE id=?",(row['id'],));continue
+                if row['kind']=='LARGE_MOVEMENT_DIGEST' and not large_movement.delivery_valid(company_review.script_api(globals()),store,row['event_id'],current.isoformat()):
+                    c.execute("UPDATE outbox SET status='FILTERED',last_error='Scenariusz zmienił status przed wysyłką.' WHERE id=?",(row['id'],));continue
+                item=dict(row);item['attempts']+=1
+                c.execute("UPDATE outbox SET status='SENDING',attempts=? WHERE id=?",(item['attempts'],item['id']))
+                return item
+            return None
+        if company_review.enabled(settings):
             c.execute("UPDATE outbox SET status='FILTERED',last_error='Powiadomienia ruchu zastąpione zbiorczymi ocenami spółek.',next_attempt_at=NULL WHERE kind IN ('EARLY_MOVEMENT','ANALYSIS','EVIDENCE') AND status='PENDING'")
         digest=company_review.claim(company_review.script_api(globals()),store,c,outbox_id,current)
         if digest:return digest
+        # Signal-only mode is intentionally conservative: raw candidates stay in
+        # the panel.  Telegram is reserved for the final TOP 5 digest, durable
+        # large-movement state changes and owner-held-position SL/TP alerts.
+        if settings.get('telegram_signal_only',True):
+            # We are already inside the outbox write transaction.  Read the
+            # portfolio through this same connection instead of opening a
+            # second SQLite connection while a write transaction is active.
+            saved=c.execute("SELECT payload FROM settings WHERE key='portfolio_config'").fetchone()
+            config=load_payload(saved['payload']) if saved else []
+            held={entry.get('ticker') for entry in config if isinstance(entry,dict) and entry.get('ticker')}
+            candidates=c.execute("SELECT o.id,o.event_id,o.kind,e.ticker FROM outbox o JOIN events e ON e.id=o.event_id WHERE o.status='PENDING' AND o.kind IN ('EARLY_MOVEMENT','ANALYSIS','EVIDENCE','ISSUER_NOTICE','PORTFOLIO_ALERT')").fetchall()
+            for candidate in candidates:
+                identity=str(candidate['event_id'] or candidate['id'] or '')
+                keep=(candidate['kind']=='PORTFOLIO_ALERT' and
+                      (candidate['ticker'] in held or
+                       (identity.startswith(('daily_report:','us_report:')) and bool(held))))
+                if not keep:
+                    c.execute("UPDATE outbox SET status='FILTERED',last_error='Telegram tylko dla TOP 5, dużego potencjału lub istotnego alertu posiadanej pozycji.',next_attempt_at=NULL WHERE id=?",(candidate['id'],))
         # Check all pending messages, including retries, before any network request.
-        # Portfolio alerty: bez event/job
-        pr = c.execute("SELECT o.* FROM outbox o WHERE o.kind IN ('PORTFOLIO_ALERT','ISSUER_NOTICE','LARGE_MOVEMENT_DIGEST') AND o.status='PENDING' AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=?)"+
+        # Portfolio alerts are allowed only for a currently held ticker. Daily
+        # reports are portfolio-only summaries; issuer notices remain in KI.
+        pr = c.execute("SELECT o.* FROM outbox o JOIN events e ON e.id=o.event_id WHERE o.kind IN ('PORTFOLIO_ALERT','ISSUER_NOTICE','LARGE_MOVEMENT_DIGEST') AND o.status='PENDING' AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=?)"+
                        (' AND o.id=?' if outbox_id else '')+' ORDER BY o.created_at',
                        (current.isoformat(),outbox_id) if outbox_id else (current.isoformat(),)).fetchall()
         for candidate in pr:
@@ -3922,8 +3997,34 @@ def telegram_receipt(body,destination):
 
 
 def telegram_delivery_active(store):
+    if technical_radar.enabled(store.load_section('settings',{})):
+        return service_config(store.load_section('settings',{}))['telegram_enabled']
     cfg=service_config(store.load_section('settings',{}))
     return cfg['pipeline_enabled'] and cfg['telegram_enabled']
+
+
+def telegram_scope_allowed(store,item,now=None):
+    """Final outbound allow-list: growth TOP 5, confirmed large cases, and held portfolio."""
+    kind=item.get('kind');current=now or datetime.now(timezone.utc)
+    if kind=='LARGE_MOVEMENT_DIGEST':
+        return large_movement.delivery_valid(company_review.script_api(globals()),store,item['event_id'],current.isoformat())
+    if kind=='FINAL_COMPANY_DIGEST':
+        with store.connection() as c:row=c.execute('SELECT payload FROM events WHERE id=?',(item['event_id'],)).fetchone()
+        return bool(row and company_review.delivery_valid(company_review.script_api(globals()),store,load_payload(row[0]),current))
+    if kind=='TECHNICAL_DIGEST':
+        with store.connection() as c:row=c.execute('SELECT payload FROM events WHERE id=?',(item['event_id'],)).fetchone()
+        if not row:return False
+        evidence=load_payload(row[0]);members=evidence.get('members') or []
+        allowed=bool(members) and all(isinstance(m,(list,tuple)) and len(m)>=2
+            and (str(m[1]).startswith('TOP 5') or m[1]==technical_radar.LABELS['LARGE']) for m in members)
+        with store.connection() as c:return allowed and technical_radar.delivery_valid(c,row[0])
+    if kind!='PORTFOLIO_ALERT':return False
+    held=set(portfolio_tickers(store));identity=str(item.get('event_id') or item.get('id') or '')
+    if identity.startswith(('daily_report:','us_report:')):return bool(held)
+    if identity.startswith('portfolio:'):
+        parts=identity.split(':',2)
+        return len(parts)>=2 and parts[1] in held
+    return False
 
 
 @guard_operation(defer=True)
@@ -3968,6 +4069,10 @@ def process_delivery_once(store,keys,outbox_id=None):
         if item['kind'] in ('EARLY_MOVEMENT','ANALYSIS','EVIDENCE') and company_review.enabled(store.load_section('settings',{})):
             with store.transaction() as c:
                 c.execute("UPDATE outbox SET status='FILTERED',last_error='Włączono końcowe oceny spółek; osobny alert wstrzymany.',next_attempt_at=NULL WHERE id=?",(item['id'],))
+            return False
+        if not telegram_scope_allowed(store,item,datetime.now(timezone.utc)):
+            with store.transaction() as c:
+                c.execute("UPDATE outbox SET status='FILTERED',last_error='Telegram wyłącznie: wzrostowe TOP 5, potwierdzony duży potencjał lub posiadany portfel.',next_attempt_at=NULL WHERE id=?",(item['id'],))
             return False
         body=service_http('Telegram','https://api.telegram.org/bot'+token+'/sendMessage',payload={
             'chat_id':destination,'text':item['message'],'disable_web_page_preview':True},uncertain=True)
@@ -4040,6 +4145,8 @@ def service_work_due(store,kind,now=None):
     stamp=parse_market_time(now or utc_now()).isoformat()
     with store.connection() as c:
         if kind=='analysis':
+            if radar_ai.pending(store):return True
+            if technical_radar.enabled(store.load_section('settings',{})):return radar_ai.pending(store)
             if company_review.enabled(store.load_section('settings',{})) and company_review.due(store):return True
             return c.execute("SELECT 1 FROM analysis_jobs WHERE state IN ('PENDING_CONTEXT','PENDING_AI') AND (next_attempt_at IS NULL OR next_attempt_at<=?) LIMIT 1",(stamp,)).fetchone() is not None
         return c.execute("SELECT 1 FROM outbox WHERE status='PENDING' AND (next_attempt_at IS NULL OR next_attempt_at<=?) LIMIT 1",(stamp,)).fetchone() is not None
@@ -4047,6 +4154,8 @@ def service_work_due(store,kind,now=None):
 
 @guard_operation(defer=True)
 def process_issuer_watch_once(store,keys):
+    if technical_radar.enabled(store.load_section('settings',{})):
+        return issuer_watch.process_once(company_review.script_api(globals()),store,keys)
     api=company_review.script_api(globals())
     corporate_feed.process_once(api,store)
     record_service_worker_health(store,'analysis','READY')
@@ -4065,21 +4174,29 @@ def service_worker(store,stop,kind):
                 if kind=='analysis':
                     issuer_watch.recover(company_review.script_api(globals()),store)
                     large_movement.recover(company_review.script_api(globals()),store)
+                    radar_ai.recover(company_review.script_api(globals()),store)
                 while not stop.is_set():
                     cfg=service_config(store.load_section('settings',{}))
                     enabled=(cfg['pipeline_enabled'] if kind=='analysis' else
                              cfg['pipeline_enabled'] and cfg['telegram_enabled'])
+                    if technical_radar.enabled(store.load_section('settings',{})):
+                        enabled=cfg['pipeline_enabled'] if kind=='analysis' else cfg['telegram_enabled']
                     if time.monotonic()-last_pulse>=5:
-                        record_service_worker_health(store,kind,'READY' if enabled else 'DISABLED')
+                        record_service_worker_health(store,kind,'READY' if enabled or technical_radar.enabled(store.load_section('settings',{})) else 'DISABLED')
                         last_pulse=time.monotonic()
                     if kind=='analysis' and enabled and time.monotonic()-last_issuer_check>=30:
                         last_issuer_check=time.monotonic()
-                        large_movement.maintenance(company_review.script_api(globals()),store)
-                        if issuer_watch.pending(store) or corporate_feed.pending(company_review.script_api(globals()),store) or large_movement.pending(store):process_issuer_watch_once(store,load_service_keys())
+                        if technical_radar.enabled(store.load_section('settings',{})):
+                            if issuer_watch.pending(store):process_issuer_watch_once(store,load_service_keys())
+                        else:
+                            large_movement.maintenance(company_review.script_api(globals()),store)
+                            large_movement.recover_saved_response(company_review.script_api(globals()),store)
+                            radar_ai.schedule(company_review.script_api(globals()),store,utc_now())
+                            if issuer_watch.pending(store) or corporate_feed.pending(company_review.script_api(globals()),store) or large_movement.pending(store):process_issuer_watch_once(store,load_service_keys())
                     if enabled and service_work_due(store,kind):
                         keys=load_service_keys()
                         processed=process_analysis_once(store,keys) if kind=='analysis' else process_delivery_once(store,keys)
-                        if kind=='analysis' and company_review.enabled(store.load_section('settings',{})):
+                        if kind=='analysis' and not technical_radar.enabled(store.load_section('settings',{})) and company_review.enabled(store.load_section('settings',{})):
                             processed=company_review.finalize(company_review.script_api(globals()),store) or processed
                         if processed:continue
                     stop.wait(1)
@@ -4144,6 +4261,12 @@ def _record_price_matrix_read(c,snapshot,threshold_pct,cadence_minutes):
     reference=_daily_reference(c,ticker,when)
     basis=market_intelligence.price_basis(snapshot,reference,acquired)
     snapshot['price_basis']=basis
+    reference_price=(basis.get('reference_override') if basis.get('status')=='REFERENCE_SOURCE_CONFLICT'
+                     else reference['close'] if reference else None)
+    reference_at=(basis.get('same_fetch_previous_close_at') if basis.get('status')=='REFERENCE_SOURCE_CONFLICT'
+                  else reference['closed_at'] if reference else None)
+    reference_kind=('SAME_FETCH_PREVIOUS_SESSION_CLOSE' if basis.get('status')=='REFERENCE_SOURCE_CONFLICT'
+                    else 'PREVIOUS_SESSION_CLOSE')
     if basis['blocked'] and reference:
         row={**(old or {}),'ticker':ticker,'last_price':price,'last_acquired_at':acquired,
              'last_candle_time':snapshot.get('candle_time'),'anchor_price':None,'change_pct':None,
@@ -4157,26 +4280,28 @@ def _record_price_matrix_read(c,snapshot,threshold_pct,cadence_minutes):
     ready=bool(reference and reference['session_date']==expected)
     if not ready:
         row={**(old or {}),'ticker':ticker,'session_date':session,
-             'anchor_price':reference['close'] if reference else None,
-             'anchor_at':reference['closed_at'] if reference else None,
+             'anchor_price':reference_price,
+             'anchor_at':reference_at,
              'reference_session':reference['session_date'] if reference else None,
              'expected_reference_session':expected,'reference_status':'MISSING_PREVIOUS_SESSION',
              'last_price':price,'last_acquired_at':acquired,'last_candle_time':snapshot.get('candle_time'),
              'last_volume':volume if finite_number(volume) and volume>=0 else None,
-             'change_pct':None,'state':'MISSING_DAILY_REFERENCE','read_status':'MISSING_DAILY_REFERENCE',
+             'change_pct':None,'reference_kind':reference_kind,
+             'state':'MISSING_DAILY_REFERENCE','read_status':'MISSING_DAILY_REFERENCE',
              'consecutive_reads':0,'candidate_started_at':None,'confirmed_at':None,
              'activity_tracking_version':'E05','activity_verified':False,'activity_evidence':'REFERENCE_UNVERIFIED',
              'last_activity_at':None,'newly_confirmed':False}
         c.execute('INSERT OR REPLACE INTO price_matrix VALUES(?,?,?)',(ticker,json_text(row),acquired))
         return row
     changed=bool(old and (old.get('reference_session')!=reference['session_date']
-                         or old.get('anchor_price')!=reference['close'] or old.get('anchor_at')!=reference['closed_at']))
+                         or not math.isclose(old.get('anchor_price') or 0,reference_price or 0,rel_tol=1e-12,abs_tol=1e-12)
+                         or old.get('anchor_at')!=reference_at or old.get('reference_kind')!=reference_kind))
     if (old is None or old.get('session_date')!=session or not finite_number(old.get('anchor_price'),True)
             or old.get('reference_status')=='MISSING_PREVIOUS_SESSION' or changed):
-        anchor=reference['close'] if reference else None
-        row={'ticker':ticker,'anchor_price':anchor,'anchor_at':reference['closed_at'] if reference else None,
+        anchor=reference_price
+        row={'ticker':ticker,'anchor_price':anchor,'anchor_at':reference_at,
              'reference_session':reference['session_date'] if reference else None,'session_date':session,
-             'expected_reference_session':expected,'reference_status':'READY',
+             'expected_reference_session':expected,'reference_status':'READY','reference_kind':reference_kind,
              'reference_rebased':bool(old and old.get('session_date')==session and (changed or old.get('reference_status')=='MISSING_PREVIOUS_SESSION' or old.get('reference_rebased'))),
              'last_price':price,'last_acquired_at':acquired,'last_candle_time':snapshot.get('candle_time'),
              'last_volume':volume if finite_number(volume) and volume>=0 else None,
@@ -4185,12 +4310,16 @@ def _record_price_matrix_read(c,snapshot,threshold_pct,cadence_minutes):
              'consecutive_reads':0,'candidate_started_at':None,'confirmed_at':None,
              'activity_tracking_version':'E05','activity_verified':False,
              'activity_evidence':'BASELINE_ONLY','last_activity_at':None,'newly_confirmed':False,
-             'read_status':'RECORDED' if reference else 'MISSING_DAILY_REFERENCE'}
+             'read_status':'RECORDED' if reference else 'MISSING_DAILY_REFERENCE','price_basis':basis}
         c.execute('INSERT OR REPLACE INTO price_matrix VALUES(?,?,?)',(ticker,json_text(row),acquired))
         return row
     previous=parse_market_time(old['last_acquired_at'])
     elapsed=(when-previous).total_seconds()
-    min_gap=max(60,cadence_minutes*60-180);max_gap=cadence_minutes*60+300
+    min_gap=max(60,cadence_minutes*60-180)
+    # A scan of the full ticker list can take several minutes.  Keep a valid
+    # activity series across that processing drift, but never across a missed
+    # whole cycle or the existing two-hour candidate expiry.
+    max_gap=cadence_minutes*60+900
     if old.get('consecutive_reads',0) and elapsed<min_gap:
         return {**old,'read_status':'TOO_SOON','newly_confirmed':False}
     anchor=old['anchor_price'];delta=(price-anchor)/anchor*100
@@ -4311,14 +4440,17 @@ def detect_market(store,snapshot,config=None):
                           'last_acquired_at':now,'change_pct':None,'state':'DISABLED',
                           'consecutive_reads':0,'newly_confirmed':False}
         if matrix_enabled and matrix.get('read_status') in ('MISSING_DAILY_REFERENCE','PRICE_BASIS_BLOCKED'):
+            rejected_snapshot={**snapshot,'price_matrix':matrix}
+            rejected_snapshot['price_changes']=price_change_contract(rejected_snapshot,matrix)
             c.execute('INSERT INTO observations(ticker,interval,candle_time,acquired_at,candle_status,payload) VALUES(?,?,?,?,?,?)',
-                      (t,interval,snapshot['candle_time'],now,snapshot['candle_status'],encode_observation({**snapshot,'price_matrix':matrix})))
+                      (t,interval,snapshot['candle_time'],now,snapshot['candle_status'],encode_observation(rejected_snapshot)))
             return {'status':matrix['read_status'],'reasons':[],'price_matrix':matrix}
         if matrix_enabled and matrix.get('read_status') in ('TOO_SOON','OUT_OF_ORDER','MARKET_CLOSED'):
             # Rejected reads cannot update the observation/baseline or enter qualification.
             rejected=matrix['read_status']
             return {'status':rejected,'reasons':[],'price_matrix':matrix}
         stored_snapshot={**snapshot,'price_matrix':matrix} if matrix_enabled else snapshot
+        if matrix_enabled:stored_snapshot['price_changes']=price_change_contract(stored_snapshot,matrix)
         encoded=encode_observation(stored_snapshot)
         c.execute('INSERT INTO observations(ticker,interval,candle_time,acquired_at,candle_status,payload) VALUES(?,?,?,?,?,?)',
                   (t,interval,snapshot['candle_time'],now,snapshot['candle_status'],encoded))
@@ -4331,8 +4463,8 @@ def detect_market(store,snapshot,config=None):
                           (confirmed, t, snapshot['price'], matrix['change_pct'], currency))
                 from technical_events import analyze as analyze_events
                 from signal_comparison import features as comparison_features
-                event_context = analyze_events(snapshot)
-                event_context['comparison'] = comparison_features(snapshot, matrix['change_pct'], event_context)
+                event_context = analyze_events(stored_snapshot)
+                event_context['comparison'] = comparison_features(stored_snapshot, matrix['change_pct'], event_context)
                 c.execute('INSERT OR IGNORE INTO signal_technical_context VALUES(?,?,?)',
                           (confirmed, t, json_text(event_context)))
         price=snapshot['price'];reasons=[];dprice=None;drvol=None;event_id=None
@@ -4358,6 +4490,8 @@ def detect_market(store,snapshot,config=None):
             if reasons:
                 event_id=uuid.uuid4().hex
                 evidence={'snapshot':stored_snapshot,'reference':{**old,'price':matrix['anchor_price'],'acquired_at':matrix['anchor_at'],'rvol':reference},'reasons':reasons,'price_change_pct':dprice,
+                          'price_change_basis':'PREVIOUS_SESSION_CLOSE' if matrix_enabled else 'TECHNICAL_BASELINE',
+                          'price_change_reference_session':matrix.get('reference_session') if matrix_enabled else None,
                           'rvol_change_pct':drvol,'thresholds':{k:cfg[k] for k in ('price_threshold_pct','rvol_threshold_pct')},
                           'ai_status_at_detection':'LOCAL_ONLY',
                           'telegram_status_at_detection':'LOCAL_ONLY',
@@ -4523,10 +4657,16 @@ def attach_historical_baseline(store,snapshot):
 def run_market_cycle(store,stop=None):
     from datetime import timedelta
     settings=store.load_section('settings',{});cfg=automatic_market_config(settings);services=service_config(settings)
+    technical_mode=technical_radar.enabled(settings)
     tickers=store.load_section('tickers',[])
+    # Saved TOP 5 and large-movement cases remain in the fetch set even when
+    # the optional radar presentation is disabled or their rank later falls.
+    tickers=list(dict.fromkeys(tickers+technical_radar.monitored_tickers(store)))
     cid=uuid.uuid4().hex;started=utc_now();results=[]
     with store.transaction() as c:c.execute('INSERT INTO cycles VALUES(?,?,?,?,?)',(cid,started,None,'RUNNING',json_text({'mode':'MARKET'})))
-    corporate_feed.schedule(company_review.script_api(globals()),store,started)
+    if any(str(e.get('entry_currency') or '').upper()=='USD' and finite_number(e.get('shares'),True) for e in portfolio_get(store)):
+        refresh_portfolio_usd_pln(store)
+    if not technical_mode:corporate_feed.schedule(company_review.script_api(globals()),store,started)
     for t in tickers:
         if stop is not None and stop.is_set():break
         try:
@@ -4557,9 +4697,14 @@ def run_market_cycle(store,stop=None):
             continue
         try:
             # Re-read the active list: a ticker removed mid-cycle stops being processed.
-            if t not in store.load_section('tickers',[]):continue
+            if t not in store.load_section('tickers',[]) and t not in technical_radar.monitored_tickers(store):continue
             result=detect_market(store,snap,{**cfg,**services,'price_matrix_enabled':True})
             snap={**snap,'price_matrix':result.get('price_matrix')}
+            if technical_mode:
+                if result['status'] not in ('OUT_OF_ORDER','TOO_SOON'):
+                    technical_radar.record(company_review.script_api(globals()),store,snap)
+                results.append({'ticker':t,**result,'opportunity':{'state':'TECHNICAL_RADAR'}})
+                continue
             large_control=company_orchestrator.coordinate_large_movement(company_review.script_api(globals()),store,snap,cid,utc_now()) if result['status'] not in ('OUT_OF_ORDER','TOO_SOON') else {'status':result['status']}
             issuer_watch.enqueue(company_review.script_api(globals()),store,snap)
             issuer_watch.action_notice(company_review.script_api(globals()),store,snap)
@@ -4606,7 +4751,10 @@ def run_market_cycle(store,stop=None):
         try: print('us_report_send: '+str(_ue)[:200], flush=True)
         except Exception: pass
     selected=[]
-    if services['pipeline_enabled'] and not any(r['status']=='FETCH_CAPACITY' for r in results) and not (stop is not None and stop.is_set()):
+    if technical_mode:
+        technical_radar.finish_cycle(company_review.script_api(globals()),store,utc_now())
+        radar_ai.schedule(company_review.script_api(globals()),store,utc_now())
+    if not technical_mode and services['pipeline_enabled'] and not any(r['status']=='FETCH_CAPACITY' for r in results) and not (stop is not None and stop.is_set()):
         try:
             _rec=recover_orphaned_reserved(store)
             if _rec: print('recover_orphaned_reserved: '+str(_rec)+' wpisow wrocilo do CONFIRMED',flush=True)
@@ -4653,6 +4801,20 @@ def run_market_cycle(store,stop=None):
     return {'id':cid,'status':status,'results':results}
 
 
+def close_unfinished_market_cycles(store,reason,now=None):
+    """Close scanner cycles left RUNNING by an exception or service restart."""
+    finished=now or utc_now();closed=0
+    with store.transaction() as c:
+        rows=c.execute("SELECT id,payload FROM cycles WHERE status='RUNNING' AND finished_at IS NULL").fetchall()
+        for row in rows:
+            payload=load_payload(row['payload'])
+            payload['interrupted']={'reason':str(reason)[:300],'closed_at':finished}
+            c.execute("UPDATE cycles SET finished_at=?,status='ERROR',payload=? WHERE id=? AND status='RUNNING' AND finished_at IS NULL",
+                      (finished,json_text(payload),row['id']))
+            closed+=c.execute('SELECT changes()').fetchone()[0]
+    return closed
+
+
 def scanner_main(db,diagnostic=False,cycles=None):
     if diagnostic:return scanner_diagnostic_main(db,True,cycles)
     # Diagnostyka crashy: faulthandler na stderr (launcher przekierowuje stderr do .scanner.log).
@@ -4692,6 +4854,8 @@ def scanner_main(db,diagnostic=False,cycles=None):
     try:
         with ScannerLock(db):
             store=Store(db);status={'pid':os.getpid(),'mode':'MARKET','stage':STAGE,'status':'RUNNING','cycles_this_run':0,'skipped_slots':0}
+            recovered_cycles=close_unfinished_market_cycles(store,'SCANNER_RESTARTED')
+            if recovered_cycles:print('Zamknięto przerwane cykle: '+str(recovered_cycles),flush=True)
             store.runtime_status(status)
             def heartbeat():
                 while not stop.wait(5):
@@ -4719,6 +4883,7 @@ def scanner_main(db,diagnostic=False,cycles=None):
                         result=run_market_cycle(store,stop)
                     except Exception as _ce:
                         result={'status':'ERROR','results':[],'error':type(_ce).__name__+': '+str(_ce)[:200]}
+                        close_unfinished_market_cycles(store,result['error'])
                         try: print('CYCLE ERROR (skaner kontynuuje): '+type(_ce).__name__+': '+str(_ce)[:300], flush=True)
                         except Exception: pass
                     _log_ram('after-cycle')
@@ -5446,7 +5611,7 @@ def gpt_chat_request(question,context,history):
         messages[0]['content']+=(' Zwróć zwięzły raport: answer do czterech krótkich akapitów, '
             'metrics najwyżej sześć kluczy, facts najwyżej trzy krótkie cytaty, '
             'risks i missing najwyżej po trzy krótkie pozycje. Nie powtarzaj całego katalogu danych.')
-    return {'model':'gpt-4o-mini','temperature':.2,'max_completion_tokens':5000 if context.get('report_version')==3 else 1800,'store':False,'messages':messages,
+    return {**ai_model_policy.chat_parameters(),'temperature':.2,'max_completion_tokens':ai_model_policy.FULL_MAX_TOKENS if context.get('report_version')==3 else 1800,'store':False,'messages':messages,
             'response_format':{'type':'json_schema','json_schema':{'name':'ki_manual_research','strict':True,'schema':manual_research_schema(context)}}}
 
 
@@ -5625,7 +5790,7 @@ def render_gpt_chat(store):
         question=st.text_area('Pytanie do GPT',max_chars=4000)
         with_search=st.checkbox('Pytanie z wyszukiwaniem Tavily',value=True,key='chat_with_search')
         fetch_fresh_spread=st.checkbox('Pobierz świeże bid/ask (Yahoo)',value=False,key='chat_fetch_spread')
-        st.caption('Silnik AI: OpenAI (gpt-4o-mini).')
+        st.caption('Silnik AI: OpenAI ('+ai_model_policy.MODEL+').')
         st.caption('Po wysłaniu: jedno wyszukiwanie Tavily i jedno zapytanie do wybranego silnika. Odświeżenie nie wykonuje wywołań API.')
         send=st.form_submit_button('Wyślij pytanie')
     _col_clear, _ = st.columns([1, 5])
@@ -6443,6 +6608,77 @@ def portfolio_save(store, config):
     store.update_settings({'portfolio_config': config, 'portfolio_tickers': tickers})
 
 
+def refresh_portfolio_usd_pln(store, now=None):
+    """Fetch NBP's latest published USD rate at most once per Warsaw day.
+
+    Failures are retried after an hour; the last valid rate is retained.
+    """
+    from zoneinfo import ZoneInfo
+    from datetime import timedelta
+    from urllib.request import Request, urlopen
+    now=now or datetime.now(timezone.utc)
+    day=now.astimezone(ZoneInfo('Europe/Warsaw')).date().isoformat()
+    with store.connection() as c:
+        row=c.execute("SELECT payload FROM runtime WHERE key='portfolio_usd_pln'").fetchone()
+    previous=load_payload(row[0]) if row else {}
+    if previous.get('checked_day')==day:return previous
+    try:
+        retry=previous.get('last_attempt_at')
+        if retry and now-datetime.fromisoformat(retry)<timedelta(hours=1):return previous
+    except (TypeError,ValueError):pass
+    result={**previous,'last_attempt_at':now.isoformat()}
+    try:
+        request=Request('https://api.nbp.pl/api/exchangerates/rates/a/usd/?format=json',headers={'Accept':'application/json'})
+        with urlopen(request,timeout=8) as response:data=json.load(response)
+        rate=data['rates'][0];value=rate['mid'];effective=rate['effectiveDate']
+        if not finite_number(value,True) or datetime.fromisoformat(effective).date()>now.astimezone(ZoneInfo('Europe/Warsaw')).date():
+            raise ValueError('Nieprawidłowy kurs NBP')
+        result.update(rate=float(value),effective_date=effective,checked_day=day,source='NBP tabela A',error=None)
+    except Exception as exc:
+        result['error']=type(exc).__name__
+    with store.transaction() as c:
+        c.execute("INSERT INTO runtime(key,payload,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at",('portfolio_usd_pln',json_text(result),now.isoformat()))
+    return result
+
+
+def portfolio_position_metrics(entry, price=None, quote_currency=None):
+    """Calculate a transparent, manually configured position view.
+
+    No FX provider is called here.  USD/PLN is calculated only when the owner
+    supplied both the entry and valuation FX rates, so stock performance is never
+    silently mixed with a guessed currency result.
+    """
+    shares=entry.get('shares');entry_price=entry.get('entry_price')
+    currency=str(entry.get('entry_currency') or quote_currency or '').upper()
+    result={'ready':False,'currency':currency,'shares':shares,'entry_price':entry_price,
+            'cost_native':None,'value_native':None,'pnl_native':None,'pnl_pct':None,
+            'cost_pln':None,'value_pln':None,'pnl_pln':None,'reason':'Brak liczby akcji lub ceny zakupu.'}
+    if not finite_number(shares,True) or not finite_number(entry_price,True):
+        return result
+    result['cost_native']=shares*entry_price
+    if finite_number(price,True) and (not quote_currency or not currency or currency==str(quote_currency).upper()):
+        result['value_native']=shares*price
+        result['pnl_native']=result['value_native']-result['cost_native']
+        result['pnl_pct']=result['pnl_native']/result['cost_native']*100
+        result['ready']=True
+        result['reason']='Wynik oparty na ostatniej zapisanej cenie; nie obejmuje prowizji ani wykonania zlecenia.'
+    elif price is None:
+        result['reason']='Brak zapisanej bieżącej ceny.'
+    else:
+        result['reason']='Waluta zapisanej ceny różni się od waluty ceny zakupu.'
+    if currency=='PLN':
+        result['cost_pln']=result['cost_native']
+        result['value_pln']=result['value_native']
+        result['pnl_pln']=result['pnl_native']
+    elif currency=='USD':
+        entry_fx=entry.get('entry_fx_pln');valuation_fx=entry.get('valuation_fx_pln')
+        if finite_number(entry_fx,True):result['cost_pln']=result['cost_native']*entry_fx
+        if result['value_native'] is not None and finite_number(valuation_fx,True):
+            result['value_pln']=result['value_native']*valuation_fx
+            if result['cost_pln'] is not None:result['pnl_pln']=result['value_pln']-result['cost_pln']
+    return result
+
+
 def _ensure_report_event(c, event_id, now_iso):
     """Wstawia sztuczny event dla raportu, zeby FK outbox.event_id->events.id nie pekal.
     INSERT OR IGNORE nie ignoruje bledow FK — dlatego potrzebujemy tego rekordu."""
@@ -6453,7 +6689,7 @@ def _ensure_report_event(c, event_id, now_iso):
 
 
 def us_report_send(store):
-    """Raport USA po zamknięciu sesji według kalendarza XNYS; raz na sesję."""
+    """Raport posiadanych pozycji USA po zamknięciu XNYS; raz na sesję."""
     from datetime import timezone as _tz, timedelta as _td
     from report_schedule import report_window
     try:
@@ -6476,12 +6712,17 @@ def us_report_send(store):
             rows = list(c.execute("""SELECT ticker, payload FROM observations
                                      WHERE acquired_at >= ?
                                      ORDER BY id DESC LIMIT 4000""", (cutoff,)))
-        # Tylko USA (bez .WA)
+        # Wyłącznie faktycznie zapisane pozycje USA. Pozostałe tickery są
+        # analizowane w KI, ale nie są powodem wiadomości Telegram.
+        held={str(entry.get('ticker') or '').upper() for entry in portfolio_get(store)
+              if isinstance(entry,dict) and entry.get('ticker') and
+              not str(entry.get('ticker')).upper().endswith('.WA')}
+        if not held:return False
         by_t = {}
         for r in rows:
-            t = r[0]
+            t = str(r[0] or '').upper()
             if not t: continue
-            if str(t).upper().endswith('.WA'): continue
+            if t not in held: continue
             if t in by_t: continue
             try: snap = load_payload(r[1])
             except Exception: continue
@@ -6503,20 +6744,20 @@ def us_report_send(store):
                           (json_text(today_key),))
             return False
         data.sort(key=lambda x: x[2], reverse=True)
-        up = data[:5]
-        down = sorted(data, key=lambda x: x[2])[:5]
+        up = [row for row in data if row[2]>=0]
+        down = sorted((row for row in data if row[2]<0), key=lambda x: x[2])
         def _fmt(v, d=4):
             return format(v, ',.'+str(d)+'f').replace(',',' ').replace('.',',')
         def _fmt_vol(v):
             return format(v, ',.0f').replace(',',' ') if finite_number(v) else '-'
-        lines = ['RAPORT USA · '+now_utc.strftime('%Y-%m-%d')]
-        lines.append('(zamkniecie sesji USA)')
+        lines = ['PORTFEL USA · '+now_utc.strftime('%Y-%m-%d')]
+        lines.append('(zamknięcie sesji USA · tylko posiadane pozycje)')
         lines.append('')
-        lines.append('TOP 5 WZROSTOW:')
+        lines.append('WZROSTY PORTFELA:')
         for t, p, c, cur, v in up:
             lines.append('  '+t+': '+_fmt(p)+' '+cur+' ('+('+' if c>=0 else '')+format(c,',.2f').replace('.',',')+'%) vol '+_fmt_vol(v))
         lines.append('')
-        lines.append('TOP 5 SPADKOW:')
+        lines.append('SPADKI PORTFELA:')
         for t, p, c, cur, v in down:
             lines.append('  '+t+': '+_fmt(p)+' '+cur+' ('+format(c,',.2f').replace('.',',')+'%) vol '+_fmt_vol(v))
         lines.append('')
@@ -6539,7 +6780,7 @@ def us_report_send(store):
 
 
 def daily_report_send(store):
-    """Raport GPW po zamknięciu sesji według kalendarza XWAR; raz na sesję."""
+    """Raport posiadanych pozycji GPW po zamknięciu XWAR; raz na sesję."""
     from datetime import timezone as _tz, timedelta as _td
     from report_schedule import report_window
     try:
@@ -6564,10 +6805,16 @@ def daily_report_send(store):
             rows = list(c.execute("""SELECT ticker, payload FROM observations
                                      WHERE acquired_at >= ?
                                      ORDER BY id DESC LIMIT 2000""", (cutoff,)))
-        # Zbierz po tickerze najnowszy snapshot
+        # Wyłącznie faktycznie zapisane pozycje GPW. Spółki z samej listy
+        # pozostają w panelu i nie trafiają do Telegrama.
+        held={str(entry.get('ticker') or '').upper() for entry in portfolio_get(store)
+              if isinstance(entry,dict) and entry.get('ticker') and
+              str(entry.get('ticker')).upper().endswith('.WA')}
+        if not held:return False
         by_t = {}
         for r in rows:
-            t = r[0]
+            t = str(r[0] or '').upper()
+            if t not in held:continue
             if t in by_t: continue
             try: snap = load_payload(r[1])
             except Exception: continue
@@ -6583,8 +6830,8 @@ def daily_report_send(store):
             cur = str(snap.get('currency') or '')
             data.append((t, price, ch, cur))
         data.sort(key=lambda x: x[2], reverse=True)
-        up = data[:5]
-        down = sorted(data, key=lambda x: x[2])[:5]
+        up = [row for row in data if row[2]>=0]
+        down = sorted((row for row in data if row[2]<0), key=lambda x: x[2])
         # SL/TP alerts dzisiaj
         with store.connection() as c:
             alerts = list(c.execute("""SELECT message FROM outbox
@@ -6592,13 +6839,13 @@ def daily_report_send(store):
                                     (cutoff,)))
         def _fmt(v, d=4):
             return format(v, ',.'+str(d)+'f').replace(',',' ').replace('.',',')
-        lines = ['RAPORT DZIENNY · '+now_utc.strftime('%Y-%m-%d')]
+        lines = ['PORTFEL GPW · '+now_utc.strftime('%Y-%m-%d')]
         lines.append('')
-        lines.append('TOP 5 WZROSTOW:')
+        lines.append('WZROSTY PORTFELA:')
         for t, p, c, cur in up:
             lines.append('  '+t+': '+_fmt(p)+' '+cur+' ('+('+' if c>=0 else '')+format(c,',.2f').replace('.',',')+'%)')
         lines.append('')
-        lines.append('TOP 5 SPADKOW:')
+        lines.append('SPADKI PORTFELA:')
         for t, p, c, cur in down:
             lines.append('  '+t+': '+_fmt(p)+' '+cur+' ('+format(c,',.2f').replace('.',',')+'%)')
         if alerts:
@@ -6768,14 +7015,12 @@ def portfolio_daily_move(snapshot):
             or not accepted_matrix_snapshot(snapshot)):
         return None
     try:
-        session = parse_market_time(snapshot['acquired_at']).astimezone(exchange_zone(snapshot['ticker'])).date()
-        if session.isoformat() != matrix.get('session_date'):
-            return None
-        anchor = matrix['anchor_price']
-        delta = snapshot['price'] - anchor
-        percent = 100 * (delta / anchor)
+        contract=price_change_contract(snapshot,matrix);daily=contract['daily']
+        if daily['status']!='READY':return None
+        delta=snapshot['price']-daily['reference_price'];percent=daily['change_pct']
         if finite_number(percent):
-            return {'value': delta, 'percent': percent}
+            return {'value':delta,'percent':percent,'reference_price':daily['reference_price'],
+                    'reference_session':daily['reference_session']}
     except (KeyError, TypeError, ValueError, OverflowError):
         pass
     return None
@@ -6811,9 +7056,20 @@ def render_portfolio(store):
     import re
     from tracking_view import level_view
     from technical_events import analyze as analyze_events
+    def fmt(v, d=4):
+        return (format(v, ',.'+str(d)+'f').replace(',',' ').replace('.',',') if finite_number(v) else '—')
     st.subheader('Mój portfel')
     st.caption('Do 10 spółek. Ostatnie zapisane dane skanera; podgląd nie pobiera danych ani nie uruchamia AI. Ręczne progi SL/TP służą istniejącym alertom Telegram, nie są zleceniami.')
+    with store.connection() as c:
+        fxrow=c.execute("SELECT payload FROM runtime WHERE key='portfolio_usd_pln'").fetchone()
+    fx=load_payload(fxrow[0]) if fxrow else {}
+    if finite_number(fx.get('rate'),True):
+        st.caption('USD/PLN: '+fmt(fx['rate'],4)+' · NBP, tabela A · data kursu: '+str(fx.get('effective_date') or 'nieznana')+(' · ostatnia próba pobrania nieudana' if fx.get('error') else ''))
+    else:st.caption('Kurs USD/PLN: oczekuje na automatyczne pobranie z NBP.')
     tickers = portfolio_tickers(store)
+    if technical_radar.enabled(store.load_section('settings',{})):
+        with st.expander('Wspólna ocena techniczna moich spółek'):
+            technical_radar.render(store,tickers=set(tickers))
 
     # Dodawanie / usuwanie
     col1, col2 = st.columns([3, 1])
@@ -6891,8 +7147,6 @@ def render_portfolio(store):
         change = None
         if finite_number(price) and finite_number(op) and op:
             change = (price - op) / op * 100
-        def fmt(v, d=4):
-            return (format(v, ',.'+str(d)+'f').replace(',',' ').replace('.',',') if finite_number(v) else '—')
         avg_v, n_candles = portfolio_avg_volume_1m(snap)
         vol_vs_avg = None
         if finite_number(vol) and finite_number(avg_v) and avg_v > 0:
@@ -6954,6 +7208,9 @@ def render_portfolio(store):
         price_fresh,price_reason=portfolio_price_status(snap)
         analysis_levels=level_view(snap,(snap.get('price_matrix') or {}).get('change_pct'),
                                    reference_ready=bool(snap.get('price_matrix')) and daily_matrix_reference_ready(snap))
+        position=portfolio_position_metrics({**config_by_ticker.get(t,{}),'valuation_fx_pln':fx.get('rate')},price,cur)
+        def money(value,currency):
+            return (fmt(value,2)+' '+currency).strip() if finite_number(value) else '—'
         rows.append({
             '_fresh':price_fresh,'_fresh_reason':price_reason,
             '_analysis_levels':analysis_levels,'_currency':cur,
@@ -6965,6 +7222,15 @@ def render_portfolio(store):
             '_market_52_week_range':snap.get('market_52_week_range'),
             '_acquired_at':snap.get('_acquired_at') or snap.get('acquired_at'),'_risk_at':risk_at,
             'Ticker':t,
+            'Akcje':(fmt(position.get('shares'),4) if finite_number(position.get('shares'),True) else '—'),
+            'Cena zakupu':money(position.get('entry_price'),position.get('currency') or cur),
+            'Koszt PLN':(money(position.get('cost_pln'),'PLN') if finite_number(position.get('cost_pln')) else '—'),
+            'Wartość pozycji':money(position.get('value_native'),position.get('currency') or cur),
+            'Wartość PLN':(money(position.get('value_pln'),'PLN') if finite_number(position.get('value_pln')) else '—'),
+            'Wynik':((('+' if position.get('pnl_native',0)>=0 else '')+fmt(position['pnl_native'],2)+' '+(position.get('currency') or cur)+' ('+('+' if position.get('pnl_pct',0)>=0 else '')+fmt(position['pnl_pct'],2)+'%)') if finite_number(position.get('pnl_native')) and finite_number(position.get('pnl_pct')) else '—'),
+            'Wynik PLN':(money(position.get('pnl_pln'),'PLN') if finite_number(position.get('pnl_pln')) else '—'),
+            'Kurs wyceny':((fmt(fx.get('rate'),4)+' PLN · '+str(fx.get('effective_date') or '')) if cur=='USD' and finite_number(fx.get('rate'),True) else '—'),
+            '_position':position,
             'Cena':(fmt(price,4)+' '+cur).strip() if finite_number(price) else '—',
             'Zmiana 1H':(('+' if change>=0 else '')+format(change,',.2f').replace(',',' ').replace('.',',')+'%') if finite_number(change) else '—',
             'Ryzyko':risk_label,
@@ -6985,14 +7251,27 @@ def render_portfolio(store):
             'Odczyt':str(snap.get('_acquired_at') or '')[:19],
         })
 
-    from portfolio_view import cards_html as portfolio_cards_html
+    from portfolio_view import interactive_cards as portfolio_interactive_cards
     from portfolio_fundamentals import analyst_views, views as fundamentals_views
     fundamentals = fundamentals_views(store, visible_tickers)
     analyst = analyst_views(store, visible_tickers)
     for row in rows:
         row['_fundamentals'] = fundamentals.get(row['Ticker'])
         row['_analyst'] = analyst.get(row['Ticker'])
-    st.html(portfolio_cards_html(rows))
+    card_result=portfolio_interactive_cards(rows)
+    selected_ai_ticker=str(getattr(card_result,'ai',None) or '').strip().upper()
+    if selected_ai_ticker and selected_ai_ticker in visible_tickers:
+        with st.spinner('AI analizuje pełny aktualny pakiet KI dla '+selected_ai_ticker+'…'):
+            state=radar_ai.run_manual_portfolio(
+                company_review.script_api(globals()),store,load_service_keys(),selected_ai_ticker)
+        @st.dialog('Ocena AI · '+selected_ai_ticker,width='large')
+        def portfolio_ai_dialog():
+            if state in ('DONE','PARTIAL','MANUAL_RAW'):
+                radar_ai.render_latest(store,selected_ai_ticker)
+            elif state=='IN_PROGRESS':st.info('Ocena tej pozycji jest już wykonywana.')
+            elif state=='NOT_IN_PORTFOLIO':st.warning('Pozycja nie jest już zapisana w portfelu.')
+            else:st.error('Ocena AI nie została zakończona: '+str(state)+'.')
+        portfolio_ai_dialog()
 
     import pandas as pd
     df_all = pd.DataFrame(rows)
@@ -7117,6 +7396,31 @@ def render_portfolio(store):
         st.markdown('---')
 
     with st.expander('Zarządzaj pozycjami portfela'):
+        st.markdown('**Dane zakupu i waluta**')
+        st.caption('KI pobiera wspólny kurs USD/PLN z NBP do bieżącej wyceny. Kurs z chwili zakupu jest potrzebny osobno do wyliczenia historycznego kosztu i wyniku w PLN.')
+        position_config=portfolio_get(store)
+        updated_positions=[]
+        for entry in position_config:
+            ticker=entry['ticker'];default_currency=str(entry.get('entry_currency') or ('PLN' if ticker.endswith('.WA') else 'USD')).upper()
+            c1,c2,c3,c4=st.columns([2,2,2,2])
+            c1.markdown('**'+ticker+'**')
+            shares=c2.number_input('Akcje '+ticker,min_value=0.0,value=float(entry.get('shares') or 0.0),step=1.0,format='%.4f',key='portfolio_shares_'+ticker)
+            purchase=c3.number_input('Cena zakupu '+ticker,min_value=0.0,value=float(entry.get('entry_price') or 0.0),step=0.01,format='%.4f',key='portfolio_entry_'+ticker)
+            currency=c4.selectbox('Waluta '+ticker,('PLN','USD'),index=0 if default_currency=='PLN' else 1,key='portfolio_currency_'+ticker)
+            if currency=='USD':
+                entry_fx=st.number_input('USD/PLN przy zakupie '+ticker,min_value=0.0,value=float(entry.get('entry_fx_pln') or 0.0),step=0.0001,format='%.4f',key='portfolio_entry_fx_'+ticker)
+            else:
+                entry_fx=None
+            updated={**entry,'entry_currency':currency,
+                     'shares':shares if shares>0 else None,
+                     'entry_price':purchase if purchase>0 else None,
+                     'entry_fx_pln':entry_fx if entry_fx and entry_fx>0 else None}
+            updated_positions.append(updated)
+        if st.button('Zapisz dane zakupu i waluty',key='portfolio_save_positions'):
+            portfolio_save(store,updated_positions)
+            st.success('Zapisano dane portfela. Wynik jest wyłącznie odczytem ostatniej zapisanej ceny, bez zlecenia i bez prowizji.')
+            st.rerun()
+        st.markdown('---')
         # Usuwanie
         st.markdown('**Zarzadzanie**')
         for t in tickers:
@@ -7329,7 +7633,7 @@ def polish_deep_report(text):
 def deep_analysis_config(base,folder):
     """Explicit overrides isolate this manual tool from scanner state and external defaults."""
     cfg=dict(base);cfg.update(llm_provider='openai',quick_think_provider='openai',deep_think_provider='openai',
-        quick_think_llm='gpt-4o-mini',deep_think_llm='gpt-4o-mini',backend_url='https://api.openai.com/v1',
+        quick_think_llm=ai_model_policy.MODEL,deep_think_llm=ai_model_policy.MODEL,reasoning_effort=ai_model_policy.REASONING_EFFORT,backend_url='https://api.openai.com/v1',
         quick_think_backend_url='https://api.openai.com/v1',deep_think_backend_url='https://api.openai.com/v1',
         output_language='Polish',ki_report_contract=DEEP_REPORT_CONTRACT,max_debate_rounds=1,max_risk_discuss_rounds=1,max_tool_rounds=2,
         max_recur_limit=60,max_tokens=1800,llm_max_retries=0,temperature=.2,checkpoint_enabled=False,
@@ -7468,7 +7772,7 @@ def deep_analysis_worker(store,report_id):
         quality_issues=deep_report_quality(reports)
         rating={'Buy':'Kupno','Overweight':'Przewaga argumentów za','Hold':'Obserwacja / utrzymanie',
                 'Underweight':'Przewaga argumentów przeciw','Sell':'Sprzedaż','REVIEW':'Wymaga sprawdzenia'}.get(str(decision),'Wymaga sprawdzenia')
-        payload={'ticker':ticker,'date':day,'model':'gpt-4o-mini','version':'0.6.0','rating':rating,'reports':reports,
+        payload={'ticker':ticker,'date':day,'model':ai_model_policy.MODEL,'version':'0.6.0','rating':rating,'reports':reports,
                  'scope':'Osobna analiza dzienna TradingAgents; nie potwierdza automatycznie naszego sygnału dwóch świec 1h.',
                  'finished_at':utc_now(),'question':initial.get('question'),'ki_context':initial.get('ki_context',{}),'tool_evidence':audit,'quality_issues':quality_issues}
         if quality_issues:payload['rating']='Wymaga weryfikacji — raport zawiera nieuzasadnione zalecenie'
@@ -7603,7 +7907,7 @@ def run_streamlit(db,now=None):
     [data-baseweb="select"]>div{background:#182330!important;color:#fff!important}
     [data-testid="stSidebarCollapseButton"],[data-testid="stSidebarCollapsedControl"]{visibility:visible!important;opacity:1!important;pointer-events:auto!important}
     [data-testid="stSidebarCollapseButton"] button,[data-testid="stSidebarCollapsedControl"] button{min-width:48px;min-height:48px;touch-action:manipulation}
-    .ki-card{background:#182330;border:1px solid #61758b;border-radius:10px;padding:18px;margin:12px 0}
+    .ki-card{background:#182330;border:2px solid rgba(96,165,250,.94);border-radius:10px;padding:18px;margin:12px 0;box-shadow:0 0 0 1px rgba(96,165,250,.18),0 0 18px rgba(56,189,248,.24),inset 0 0 16px rgba(37,99,235,.08)}
     .ki-green{color:#6ee7a0}.ki-yellow{color:#ffe082}.ki-red{color:#ff9292}.ki-gray{color:#c6d0dc}
     .ki-score{font-size:26px;font-weight:700}.ki-label{font-size:14px;color:#c6d0dc}
     .ki-table{width:100%;border-collapse:collapse;background:#182330;color:#edf2f7}
@@ -7634,16 +7938,18 @@ def run_streamlit(db,now=None):
             st.caption('Do sześciu nowych spółek po cyklu. AI opisuje każdą osobno, bez porównań między emitentami. Wczesne ruchy pozostają w panelu; pełne raporty zachowane.')
             pipeline_enabled=st.checkbox('Tavily + AI po potwierdzeniu okazji',value=services['pipeline_enabled'])
             _engine_val='openai'
-            st.caption('Silnik AI: OpenAI (gpt-4o-mini).')
+            st.caption('Silnik AI: OpenAI ('+ai_model_policy.MODEL+').')
             st.caption('Tavily Search — jedno wyszukiwanie na zdarzenie lub ręczne żądanie. Wybrany silnik analizuje wyłącznie zweryfikowane materiały; brak źródeł nie potwierdza przyczyny ruchu.')
             telegram_enabled=st.checkbox('Automatycznie wysyłaj nowe zdarzenia na Telegram',value=services['telegram_enabled'])
             st.caption('Potwierdzony ruch automatyczny: wzrost lub spadek od zamknięcia poprzedniej sesji i trzy odczyty z nową aktywnością rynku; automat: świeca 1h co 15 minut. Regularna sesja: GPW 09:00–17:00 czasu Warszawy, USA 09:30–16:00 czasu Nowego Jorku. Skrócona świeca końcowa nie dostaje RVOL porównywanego z pełnymi świecami. Jedna wiadomość na potwierdzoną sekwencję.')
+            telegram_signal_only=st.checkbox('Telegram tylko: TOP 5, Duży potencjał i alarmy moich pozycji',value=settings.get('telegram_signal_only',True))
+            st.caption('Pozostałe kandydaty, raporty dzienne i informacje emitentów zostają w panelu KI. Alarm SL/TP dla faktycznie zapisanej pozycji pozostaje wyjątkiem bezpieczeństwa.')
             st.caption('Przy wyłączonej wysyłce wiadomości pozostają w podglądzie. Włączenie dotyczy nowych zdarzeń.')
             saved=st.form_submit_button('Zapisz ustawienia')
         if saved:
             import re
             new_ticks=list(dict.fromkeys(t.upper() for t in re.split(r'[,\s]+',text.strip()) if t))
-            proposed={'market_interval':iv,'auto_scan_interval':cadence,'price_threshold_pct':pt,'rvol_threshold_pct':rt,'observation_retention_days':int(retention),'sl_atr_multiplier':slm,'tp_atr_multiplier':tpm,'pipeline_enabled':pipeline_enabled,'telegram_enabled':telegram_enabled,'analysis_engine':_engine_val,'final_company_review_enabled':final_reviews}
+            proposed={'market_interval':iv,'auto_scan_interval':cadence,'price_threshold_pct':pt,'rvol_threshold_pct':rt,'observation_retention_days':int(retention),'sl_atr_multiplier':slm,'tp_atr_multiplier':tpm,'pipeline_enabled':pipeline_enabled,'telegram_enabled':telegram_enabled,'telegram_signal_only':telegram_signal_only,'analysis_engine':_engine_val,'final_company_review_enabled':final_reviews,'technical_radar_enabled':False}
             market_config(proposed);atr_risk_levels(1.,None,slm,tpm)
             if any(not valid_ticker(t) for t in new_ticks):st.error('Błędny ticker.')
             else:
@@ -7985,7 +8291,7 @@ def service_runtime_diagnostics(rows):
 def render_service_panel(store,manual=False):
     issuer_watch.render(company_review.script_api(globals()),store)
     import streamlit as st
-    st.caption('Silnik analizy: OpenAI (gpt-4o-mini).')
+    st.caption('Silnik analizy: OpenAI ('+ai_model_policy.MODEL+').')
     labels={'PENDING_CONTEXT':'Oczekuje na Tavily','BUSY_CONTEXT':'Pobieranie kontekstu',
             'PENDING_AI':'Oczekuje na GPT','BUSY_AI':'Analiza GPT','DONE':'Analiza gotowa',
             'FAILED':'Błąd — zadanie zatrzymane','REVIEW_REQUIRED':'Wymaga sprawdzenia',
@@ -8887,6 +9193,7 @@ def run_opportunity_tests():
 
      def setUp(self):
       self.tmp=tempfile.TemporaryDirectory();self.s=Store(Path(self.tmp.name)/'test.db');self.s.save_section('tickers',['AAA'])
+      self.s.save_section('settings',{'telegram_signal_only':False})
       self.now=datetime(2026,10,5,14,30,tzinfo=timezone.utc)
      def tearDown(self):self.tmp.cleanup()
      def snap(self,ticker='AAA',rv=2.,price=105.):
@@ -8933,7 +9240,8 @@ def run_opportunity_tests():
       detect_market(self.s,s);record_opportunity(self.s,s,'cycle',self.now)
       self.s.save_section('tickers',[]);self.assertEqual(reserve_opportunities(self.s,'cycle',self.now),[])
      def test_model_choice(self):
-      self.assertEqual(gpt_chat_request('test',{},[])['model'],'gpt-4o-mini')
+      self.assertEqual(gpt_chat_request('test',{},[])['model'],'gpt-6-luna')
+      self.assertEqual(gpt_chat_request('test',{},[])['reasoning_effort'],'none')
      def test_candidate_confirms_in_next_cycle_not_lost(self):
       s=self.snap(price=104.);detect_market(self.s,s);detect_market(self.s,s)
       a=record_opportunity(self.s,s,'old',self.now);self.assertEqual(a['state'],'CANDIDATE')
@@ -8987,7 +9295,7 @@ def run_opportunity_tests():
 
      def test_manual_tradingagents_config_is_explicit_and_separate(self):
       cfg=deep_analysis_config({'quick_think_llm':'expensive','tool_vendors':{'get_news':'alpha_vantage'}},Path(self.tmp.name)/'reports')
-      self.assertEqual(cfg['quick_think_llm'],'gpt-4o-mini');self.assertEqual(cfg['deep_think_llm'],'gpt-4o-mini')
+      self.assertEqual(cfg['quick_think_llm'],'gpt-6-luna');self.assertEqual(cfg['deep_think_llm'],'gpt-6-luna');self.assertEqual(cfg['reasoning_effort'],'none')
       self.assertEqual(cfg['data_vendors']['fundamental_data'],'yfinance');self.assertEqual(cfg['tool_vendors'],{})
       self.assertEqual(cfg['llm_max_retries'],0);self.assertEqual(cfg['output_language'],'Polish')
       with self.s.connection() as c:self.assertEqual(c.execute('SELECT COUNT(*) FROM deep_reports').fetchone()[0],0)
@@ -9781,7 +10089,8 @@ def run_service_tests():
 
         def setUp(self):
             self.temp=tempfile.TemporaryDirectory();self.store=Store(Path(self.temp.name)/'services.db')
-            self.cfg={'pipeline_enabled':True,'telegram_enabled':False}
+            self.cfg={'pipeline_enabled':True,'telegram_enabled':False,'telegram_signal_only':False}
+            self.store.save_section('settings',self.cfg)
         def tearDown(self):self.temp.cleanup()
         def snap(self,price=100,live=False):
             from datetime import timedelta

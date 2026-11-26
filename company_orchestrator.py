@@ -57,7 +57,8 @@ def plan_ready(api,snapshot,plan,now):
 
 def assess(api,snapshot,manifest,settings,now,stage=None,previous=None,revalidation=False):
     """Use one coherent, as-of evidence package. Do not mutate a frozen report."""
-    matrix=snapshot.get('price_matrix') or {};change=matrix.get('change_pct')
+    matrix=snapshot.get('price_matrix') or {};movement=api.price_change_contract(snapshot,matrix)
+    daily=movement['daily'];tracking=movement['tracking'];change=daily.get('change_pct')
     direction='UP' if api.finite_number(change) and change>0 else 'DOWN' if api.finite_number(change) and change<0 else 'UNKNOWN'
     stage=stage or (early.STAGE if matrix.get('state')=='CANDIDATE' else 'CONFIRMED')
     session=manifest.get('session_context') or session_context.build(snapshot)
@@ -88,8 +89,11 @@ def assess(api,snapshot,manifest,settings,now,stage=None,previous=None,revalidat
             try:
                 rv=max(float(settings.get('min_rvol_for_opportunity',.5)),float(settings.get('min_rvol_absolute',.3)))
                 volume=float(settings.get('min_volume_for_opportunity',1000))
-                qualified=qualified and (api.shortened_activity_ready(snapshot) or
-                    api.finite_number(snapshot.get('rvol')) and snapshot['rvol']>=rv) and snapshot.get('volume',0)>=volume
+                earlier=api.company_review.session_context.strong_closed_hour_activity(
+                    snapshot,rv,volume,settings.get('price_threshold_pct',2.))
+                qualified=qualified and bool(earlier or api.shortened_activity_ready(snapshot) or
+                    api.finite_number(snapshot.get('rvol')) and snapshot['rvol']>=rv
+                    and snapshot.get('volume',0)>=volume)
             except (TypeError,ValueError):qualified=False
         if not qualified:
             reason='MOVEMENT_NOT_READY';action='WAIT_FOR_ACTIVITY';next_check='Nowy dowód aktywności przy zachowanym ruchu od poprawnej bazy.'
@@ -107,7 +111,10 @@ def assess(api,snapshot,manifest,settings,now,stage=None,previous=None,revalidat
           'explanation':local.get('summary') if action=='KEEP_IN_PANEL' else issues[0] if issues else next_check,
           'connections':{
               'market_intelligence':manifest.get('market_intelligence') or {},
-              'price':{'change_from_base_pct':change,'reference_session':matrix.get('reference_session'),
+              'price':{'daily_change_pct':change,'previous_session_close':daily.get('reference_price'),
+                       'reference_session':daily.get('reference_session'),'daily_status':daily.get('status'),
+                       'tracking_change_pct':tracking.get('change_pct'),
+                       'tracking_reference_price':tracking.get('reference_price'),
                        'change_from_open_pct':summary.get('change_from_session_open_pct')},
               'activity':{'proof':matrix.get('activity_evidence'),'volume':snapshot.get('volume'),
                           'rvol':snapshot.get('rvol'),'partial_hour':snapshot.get('candle_status')=='OPEN'},
@@ -228,7 +235,12 @@ def render_status(api,store):
             for item in state.get('issues',[]):st.write('• '+item)
             links=state['connections']
             value=lambda x:api.pl_number(x,2,'%') if api.finite_number(x) else 'brak danych'
-            st.write('Cena od bazy: '+value(links['price'].get('change_from_base_pct'))+' · od otwarcia: '+value(links['price'].get('change_from_open_pct')))
+            st.write('Zmiana dzienna: '+value(links['price'].get('daily_change_pct'))
+                     +' · poprzednie zamknięcie: '+str(links['price'].get('previous_session_close') or 'brak danych')
+                     +' · sesja odniesienia: '+str(links['price'].get('reference_session') or 'brak danych'))
+            st.caption('Ruch od bazy technicznej: '+value(links['price'].get('tracking_change_pct'))
+                       +' · nie jest zmianą dzienną. Od otwarcia sesji: '
+                       +value(links['price'].get('change_from_open_pct')))
             st.write('Wspiera: '+('; '.join(links['technical']['supports']) or 'brak'))
             st.write('Przeczy: '+('; '.join(links['technical']['contradicts']) or 'brak'))
             st.write('Plan SL/TP: '+('kompletny' if links['plan']['complete'] else str(links['plan'].get('reason') or 'brak kompletu danych')))

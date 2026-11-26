@@ -40,8 +40,9 @@ class ReadinessTests(unittest.TestCase):
     def test_full_report_has_bounded_larger_budget_same_model_and_schema(self):
         context={'ticker':'HUMA','report_version':3,'snapshot':{'ticker':'HUMA','price':.4153,'currency':'USD'},'research':{'sources':[]}}
         request=KI.gpt_chat_request('Co pokazują dane?',context,[])
-        self.assertEqual(request['model'],'gpt-4o-mini')
-        self.assertEqual(request['max_completion_tokens'],5000)
+        self.assertEqual(request['model'],'gpt-6-luna')
+        self.assertEqual(request['reasoning_effort'],'none')
+        self.assertEqual(request['max_completion_tokens'],6600)
         self.assertTrue(request['response_format']['json_schema']['strict'])
         self.assertIn('Nie powtarzaj całego katalogu',request['messages'][0]['content'])
 

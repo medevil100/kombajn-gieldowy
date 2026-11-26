@@ -32,7 +32,7 @@ class ReviewCoordinatorTests(unittest.TestCase):
                 'momentum_evidence':[next(iter(book['momentum']))],
                 'supporting_evidence':supports,'limiting_evidence':limits,
                 'watch_condition':next(iter(book['conditions'])),
-                'decision':{'verdict':attention,'primary_reason':reason,'source_quote':quote},'narrative':fixture_narrative()}
+                'decision':{'verdict':attention,'primary_reason':reason,'source_quote':quote},'narrative':fixture_narrative(full=True)}
 
     def body(self,wire):
         return {'model':'offline-coordinator','usage':{'total_tokens':1},
@@ -81,7 +81,7 @@ class ReviewCoordinatorTests(unittest.TestCase):
         self.assertEqual(set(schema['required']),set(schema['properties']))
         self.assertNotIn('Pierwszy limiting_evidence',request['messages'][0]['content'])
         self.assertIn('obserwacji w XTB',request['messages'][0]['content'])
-        self.assertEqual((request['model'],request['max_completion_tokens']),('gpt-4o-mini',3000))
+        self.assertEqual((request['model'],request['reasoning_effort'],request['max_completion_tokens']),('gpt-6-luna','none',6600))
 
     def test_primary_reason_must_be_in_the_selected_evidence(self):
         f,ev,ctx,request,book=self.panel_sample();wire=self.wire(book,'PANEL_ONLY','L_SESSION')

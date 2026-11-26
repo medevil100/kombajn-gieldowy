@@ -156,7 +156,8 @@ class AutonomousReviewTests(unittest.TestCase):
         data = json.loads(request['messages'][-1]['content'])
         self.assertEqual(data['proved_event']['analysis_manifest']['local_review']['verdict'], 'ALIGNED')
         self.assertIn('required_reason_codes', request['messages'][0]['content'])
-        self.assertEqual(request['model'], 'gpt-4o-mini')
+        self.assertEqual(request['model'], 'gpt-6-luna')
+        self.assertEqual(request['reasoning_effort'], 'none')
 
     def test_good_typed_decision_survives_validation_and_revalidation(self):
         ev, ctx, result = self.sample()

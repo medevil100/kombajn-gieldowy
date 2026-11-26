@@ -77,7 +77,7 @@ class AssistantTests(unittest.TestCase):
         row=self.row(turn);self.assertEqual(row['state'],'DONE',row)
         evidence=json.loads(row['evidence']);self.assertEqual(evidence[0]['data']['orchestrator']['data']['action'],'WAIT_FOR_ACTIVITY')
         self.assertEqual(fake.call_count,2);self.assertEqual(a.usage(self.path)['calls'],2)
-        self.assertEqual(a.usage(self.path)['micro_usd'],420)
+        self.assertEqual(a.usage(self.path)['micro_usd'],300)
         self.assertEqual(before,self.market_dump())
         self.assertTrue(fake.call_args.kwargs['uncertain'])
 

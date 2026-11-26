@@ -5,6 +5,8 @@ import math
 import re
 from urllib.parse import urlsplit, quote
 
+import ai_model_policy
+
 
 def public_url(value):
     if not isinstance(value,str) or len(value)>2000 or any(ord(c)<33 for c in value):
@@ -96,7 +98,7 @@ def search(path,turn,api,args):
         raise ValueError('Wyszukiwanie wymaga pytania zapisanego w rozmowie.')
     key=api.load_service_keys().get('OPENAI_API_KEY')
     if not key:return {'status':'UNAVAILABLE','reason':'Brak klucza OpenAI.'}
-    payload={'model':a.MODEL,'store':False,'max_output_tokens':a.MAX_OUTPUT,
+    payload={'model':a.MODEL,'reasoning':{'effort':ai_model_policy.REASONING_EFFORT},'store':False,'max_output_tokens':a.MAX_OUTPUT,
              'max_tool_calls':1,'tools':[{'type':'web_search','search_context_size':'low'}],
              'tool_choice':'required','include':['web_search_call.action.sources'],
              'instructions':

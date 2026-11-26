@@ -21,7 +21,11 @@ class EarlyMovementTests(unittest.TestCase):
         self.store=KI.Store(Path(self.temp.name)/'early.sqlite3')
         self.base=datetime(2026,11,6,10,0,tzinfo=timezone.utc)
         self.cfg={'price_matrix_enabled':True,'auto_scan_interval':15,'price_threshold_pct':2.,
-                  'pipeline_enabled':True,'telegram_enabled':True}
+                  'pipeline_enabled':True,'telegram_enabled':True,
+                  # These tests exercise the legacy raw-alert delivery path.
+                  # Production defaults to the deliberately narrower TOP 5
+                  # signal mode, which is tested separately.
+                  'telegram_signal_only':False}
         self.store.save_section('settings',self.cfg)
         self.store.save_section('tickers',['AAA.WA'])
         KI._save_daily_history(self.store,'AAA.WA',[{'session_date':'2026-11-05','status':'CLOSED',

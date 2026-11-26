@@ -42,7 +42,9 @@ def model_transport(response):
             if attention=='PANEL_ONLY':wire['limiting_evidence']=[primary]
             wire.pop('verdict');wire.pop('source_quote')
             wire['decision']={'verdict':attention,'primary_reason':primary,'source_quote':'NONE'}
-            if 'narrative' in request['response_format']['json_schema']['schema']['properties']:wire['narrative']=fixture_narrative()
+            if 'narrative' in request['response_format']['json_schema']['schema']['properties']:
+                required=request['response_format']['json_schema']['schema']['properties']['narrative']['required']
+                wire['narrative']=fixture_narrative(full='data_quality' in required)
         result=copy.deepcopy(response);result['choices'][0]['message']['content']=json.dumps(wire)
         return result
     return reply
@@ -137,18 +139,30 @@ class FinalCompanyReviewTests(unittest.TestCase):
         for job in self.rows('analysis_jobs'):
             KI.finish_analysis(self.store,job['event_id'],self.answer(attention),{'model':'mock','usage':{'total_tokens':1}},NOW)
 
-    def test_cap_six_without_losing_remaining_local_candidates(self):
+    def test_cap_five_without_losing_remaining_local_candidates(self):
         batch,calls=self.prepare(9)
-        self.assertIsNotNone(batch);self.assertEqual(calls,6)
-        self.assertEqual(len(self.rows('analysis_jobs')),6)
+        self.assertIsNotNone(batch);self.assertEqual(calls,5)
+        self.assertEqual(len(self.rows('analysis_jobs')),5)
         self.assertEqual(len(self.rows('opportunities')),9)
         pool=KI.load_payload(self.rows('company_review_batches')[0]['payload'])['pool']
         self.assertEqual(len(pool),9)
-        self.assertEqual(sum(r['state']=='CYCLE_LIMIT' for r in pool),3)
+        self.assertEqual(sum(r['state']=='CYCLE_LIMIT' for r in pool),4)
         self.assertTrue(all(KI.load_payload(r['payload'])['company_review_batch']==batch for r in self.rows('events')))
 
+    def test_reserved_reference_and_future_reason_do_not_abort_scanner_cycle(self):
+        self.assertIn('REFERENCE_RESEARCH_RESERVED',review.UPDATE_REASONS)
+        selected=self.candidates(1)
+        previous={'allowed':False,'reason':'FUTURE_REASON','message':'Zapisany stan bez ponownego dostawcy.'}
+        with patch.object(review.orchestrator,'previous_assessment',return_value=previous), \
+             patch.object(KI,'fetch_opportunity_spread',side_effect=AssertionError('provider must not run')):
+            batch=review.prepare(KI,self.store,'cycle',selected,NOW)
+        self.assertIsNotNone(batch)
+        payload=KI.load_payload(self.rows('company_review_batches')[0]['payload'])
+        self.assertEqual(payload['pool'][0]['state'],'FUTURE_REASON')
+        self.assertIn(previous['message'],payload['pool'][0]['details'])
+
     def test_full_reports_stay_independent_and_only_one_digest_is_queued(self):
-        self.prepare();self.finish_members()
+        self.prepare(with_plan=True);self.finish_members()
         self.assertEqual(self.rows('outbox'),[])
         self.assertTrue(review.finalize(KI,self.store,NOW))
         messages=self.rows('outbox');self.assertEqual(len(messages),1)
@@ -198,7 +212,7 @@ class FinalCompanyReviewTests(unittest.TestCase):
         self.assertFalse(KI.queue_early_movement(self.store,snap,NOW))
 
     def test_digest_revalidates_prices_direction_session_and_membership(self):
-        self.prepare(1);self.finish_members();review.finalize(KI,self.store,NOW)
+        self.prepare(1,with_plan=True);self.finish_members();review.finalize(KI,self.store,NOW)
         ev=KI.load_payload(self.rows('events')[-1]['payload'])
         self.assertTrue(review.delivery_valid(KI,self.store,ev,NOW))
         self.assertFalse(review.delivery_valid(KI,self.store,ev,NOW+timedelta(minutes=16)))
@@ -206,6 +220,22 @@ class FinalCompanyReviewTests(unittest.TestCase):
         self.assertFalse(review.delivery_valid(KI,self.store,ev,NOW))
         self.assertIsNone(KI.claim_delivery(self.store,now=NOW))
         self.assertEqual(self.rows('outbox')[0]['status'],'FILTERED')
+
+    def test_watch_rows_stay_in_panel_but_do_not_enter_telegram(self):
+        self.prepare(1);self.finish_members();self.assertTrue(review.finalize(KI,self.store,NOW))
+        batch=KI.load_payload(self.rows('company_review_batches')[0]['payload'])
+        self.assertEqual(len(batch['included']),1)
+        self.assertEqual(batch['telegram_included'],[])
+        self.assertEqual(self.rows('outbox'),[])
+
+    def test_decline_never_enters_top5_telegram(self):
+        selected=self.candidates(1,with_plan=True,direction=-1)
+        with patch.object(KI,'fetch_opportunity_spread',return_value={}):
+            review.prepare(KI,self.store,'cycle',selected,NOW)
+        self.finish_members();self.assertTrue(review.finalize(KI,self.store,NOW))
+        batch=KI.load_payload(self.rows('company_review_batches')[0]['payload'])
+        self.assertEqual(batch['telegram_included'],[])
+        self.assertEqual(self.rows('outbox'),[])
 
     def test_invalid_attention_cannot_pass_publication_and_raw_result_is_kept(self):
         self.prepare(1);job=self.rows('analysis_jobs')[0];ev=KI.load_payload(self.rows('events')[0]['payload'])
@@ -311,7 +341,7 @@ class FinalCompanyReviewTests(unittest.TestCase):
         payload=KI.load_payload(self.rows('company_review_batches')[0]['payload'])
         self.assertEqual(payload['pool'][0]['state'],'MIXED')
 
-    def test_real_scanner_cycle_uses_final_route_and_respects_six_company_cap(self):
+    def test_real_scanner_cycle_uses_final_route_and_respects_five_company_cap(self):
         self.candidates(9);at=NOW+timedelta(minutes=15)
         with self.store.transaction() as c:c.execute("UPDATE opportunities SET state='CONFIRMED' WHERE state='RESERVED'")
         class Clock(datetime):
@@ -333,8 +363,8 @@ class FinalCompanyReviewTests(unittest.TestCase):
                 stack.enter_context(patch.object(KI,name))
             with redirect_stdout(io.StringIO()):cycle=KI.run_market_cycle(self.store)
         self.assertEqual(cycle['status'],'OK')
-        self.assertEqual(quote.call_count,6)
-        self.assertEqual(len(self.rows('analysis_jobs')),6)
+        self.assertEqual(quote.call_count,5)
+        self.assertEqual(len(self.rows('analysis_jobs')),5)
         self.assertEqual(self.rows('outbox'),[])
 
     def test_digest_uses_existing_telegram_receipt_path_with_mock_transport(self):

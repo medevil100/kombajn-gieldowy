@@ -3,7 +3,7 @@
 No cross-company model prompt. Existing issuer-isolated research/AI jobs retain
 their complete evidence. This module only qualifies, schedules and groups them.
 """
-from datetime import timedelta,timezone
+from datetime import datetime,timedelta,timezone
 import hashlib
 import json
 import re
@@ -12,7 +12,7 @@ import early_company_review as early_review
 import company_orchestrator as orchestrator
 import company_narrative
 
-LIMIT=6
+LIMIT=5
 SETTING='final_company_review_enabled'
 MIN_REVIEW_MINUTES=15
 MIN_PRICE_CHANGE_PCT=1.0
@@ -27,6 +27,7 @@ UPDATE_REASONS={
     'NO_NEW_MARKET_DATA':'Brak nowszego odczytu rynku.',
     'NO_NEW_MARKET_ACTIVITY':'Nowszy odczyt nie zawiera nowego wolumenu.',
     'NO_MATERIAL_CHANGE':'Nie zmieniły się istotnie cena, technika ani aktywność; brak nowej pełnej świecy.',
+    'REFERENCE_RESEARCH_RESERVED':'Po zmianie bazy research tej spółki jest już zarezerwowany w tej sesji; bez ponawiania dostawcy.',
     'PREVIOUS_ASSESSMENT_UNAVAILABLE':'Nie można potwierdzić poprzedniej oceny; wymagana kontrola.',
     'INCOMPARABLE_ASSESSMENT':'Odczyty nie są porównywalne z poprzednią oceną.'}
 
@@ -239,8 +240,12 @@ def validate_final(result,manifest,unsupported_story):
         return ['Powiadomienie wymaga zgodnych wskazań tej spółki; sprzeczności pozostają w panelu.']
     if manifest.get('review_stage')==early_review.STAGE:
         movement=(result.get('assessment') or {}).get('movement','')
-        if not re.search('wstępn',movement,re.I) or not re.search('nie.{0,30}zakończ|nie.{0,30}potwierdz|przed.{0,20}potwierdz',movement,re.I):
-            return ['Wstępna ocena musi jawnie opisywać niezakończoną serię potwierdzeń.']
+        # Stage is a fact from the manifest, displayed by the report and digest.
+        # Reject a contradictory claim, not omission of a prescribed phrase.
+        for sentence in re.split(r'[.!?]+',movement):
+            if re.search(r'nie\b|brak|oczek|wstępn|przed',sentence,re.I):continue
+            if re.search(r'(?:pełn\w*|zakończon\w*)\s+seri\w*\s+potwierdz|seri\w*\s+potwierdz\w*.{0,20}zakończon',sentence,re.I):
+                return ['Opis sprzecznie przedstawia serię potwierdzeń jako zakończoną.']
     return []
 
 
@@ -266,7 +271,12 @@ def prepare(api,store,cycle_id,selected,now=None,early_pool=None):
             preliminary=row.get('review_stage')==early_review.STAGE
             day=api.parse_market_time(snap['acquired_at']).astimezone(api.exchange_zone(ticker)).date().isoformat()
             direction='UP' if api.finite_number(change) and change>0 else 'DOWN'
-            evidence={'snapshot':snap,'autonomous_assessment_version':1,'price_change_pct':change}
+            movement=api.price_change_contract(snap,snap.get('price_matrix') or {})
+            daily=movement['daily']
+            evidence={'snapshot':snap,'autonomous_assessment_version':1,
+                      'price_change_pct':daily.get('change_pct'),'price_change_basis':'PREVIOUS_SESSION_CLOSE',
+                      'price_change_reference_price':daily.get('reference_price'),
+                      'price_change_reference_session':daily.get('reference_session')}
             manifest=api.build_analysis_manifest(evidence,{'sources':[]})
             local=manifest['local_review'];reason='SCHEDULED';details=api.material_issues(snap);update=None
             session=session_context.build(snap)
@@ -278,7 +288,8 @@ def prepare(api,store,cycle_id,selected,now=None,early_pool=None):
                 update=orchestrator.previous_assessment(api,c,snap,current)
                 if update:
                     if not update['allowed']:reason=update['reason']
-                    details.append(UPDATE_REASONS[update['reason']])
+                    details.append(UPDATE_REASONS.get(update['reason']) or update.get('message') or
+                                   'Zapisano stan poprzedniej oceny: '+str(update['reason']))
                     control=orchestrator.assess(api,snap,manifest,store.load_section('settings',{}),current,
                         early_review.STAGE if preliminary else 'CONFIRMED',previous=update)
                 if reason=='SCHEDULED' and len(planned)>=LIMIT:reason='CYCLE_LIMIT'
@@ -362,7 +373,7 @@ def digest_message(api,items,slot):
         sections=narrative.get('sections') or {}
         explanation=(sections.get('summary') or {}).get('text') or analysis['final_review']['explanation']
         risk=(sections.get('risks') or {}).get('text') or analysis['assessment']['risk']
-        lines.extend(['',('OSTRZEŻENIE SPADKOWE · ' if control['role']==orchestrator.WARNING else 'WZROST Z PLANEM · ' if control['role']==orchestrator.TOP else 'WZROST DO OBSERWACJI · ')+snap['ticker']+' '+api.pl_number(change,2,'%')
+        lines.extend(['',('OSTRZEŻENIE SPADKOWE · ' if control['role']==orchestrator.WARNING else 'WZROST Z PLANEM · ' if control['role']==orchestrator.TOP else 'WZROST DO OBSERWACJI · ')+snap['ticker']+' zmiana dzienna '+api.pl_number(change,2,'%')
                       +' · '+api.pl_number(snap['price'],4,' '+snap['currency']),
                       'Ocena AI: '+cut(explanation,150),
                       'Ryzyko: '+cut(risk,80)])
@@ -422,21 +433,46 @@ def finalize(api,store,now=None):
                 if before:row['orchestration']=orchestrator.stopped(before,status,current)
             decisions.append({'event_id':row['id'],'ticker':row['ticker'],'status':status,
                               'orchestration':row.get('orchestration')})
-        payload.update(included=[r['id'] for r in included],decisions=decisions)
+        telegram_included=[];top_large_reviews=[]
+        for item in included:
+            try:
+                event=api.load_payload(item['payload']);change=(event.get('snapshot',{}).get('price_matrix') or {}).get('change_pct')
+                if ((item.get('orchestration') or {}).get('role')==orchestrator.TOP
+                        and api.finite_number(change) and change>0):
+                    telegram_included.append(item)
+                    top_large_reviews.append(event['snapshot'])
+            except (TypeError,KeyError,ValueError):pass
+        payload.update(included=[r['id'] for r in included],
+                       telegram_included=[r['id'] for r in telegram_included],decisions=decisions)
         with store.transaction() as c:
             latest=c.execute('SELECT state FROM company_review_batches WHERE id=?',(batch['id'],)).fetchone()
             if not latest or latest['state']!='OPEN':continue
+            c.execute('''CREATE TABLE IF NOT EXISTS ki_top5_follow(
+                ticker TEXT PRIMARY KEY, status TEXT NOT NULL,
+                first_at TEXT NOT NULL, last_at TEXT NOT NULL)''')
+            for item in included:
+                if (item.get('orchestration') or {}).get('role')==orchestrator.TOP:
+                    c.execute('''INSERT INTO ki_top5_follow(ticker,status,first_at,last_at)
+                        VALUES(?,'FOLLOWING',?,?) ON CONFLICT(ticker) DO UPDATE SET
+                        status='FOLLOWING',last_at=excluded.last_at''',
+                        (item['ticker'],current.isoformat(),current.isoformat()))
             state='READY' if included else 'EMPTY'
-            if included:
-                evidence={'kind':'FINAL_COMPANY_DIGEST','batch_id':batch['id'],'members':payload['included']}
+            if telegram_included:
+                evidence={'kind':'FINAL_COMPANY_DIGEST','batch_id':batch['id'],'members':payload['telegram_included']}
                 c.execute('INSERT INTO events VALUES(?,?,?,?,?)',(batch['id'],'KI','1h',current.isoformat(),api.json_text(evidence)))
                 c.execute('INSERT INTO outbox(id,event_id,kind,message,status,created_at) VALUES(?,?,?,?,?,?)',
-                          (batch['id'],batch['id'],'FINAL_COMPANY_DIGEST',digest_message(api,included,batch['slot']),
+                          (batch['id'],batch['id'],'FINAL_COMPANY_DIGEST',digest_message(api,telegram_included,batch['slot']),
                            'PENDING' if api.telegram_delivery_active(store) else 'FILTERED',current.isoformat()))
             c.execute('UPDATE company_review_batches SET state=?,payload=?,updated_at=? WHERE id=?',
                       (state,api.json_text(payload),current.isoformat(),batch['id']))
             for item in members:
                 if item.get('orchestration'):orchestrator.save(api,c,item['orchestration'])
+        # TOP 5 admission starts exactly one independent large-potential review.
+        # Existing queued/running/deferred work and cooldowns are enforced by
+        # large_movement.consider; TOP 5 never grants an ACTIVE verdict itself.
+        import large_movement
+        for snapshot in top_large_reviews:
+            large_movement.consider(api,store,snapshot,batch['id'],current,admission='TOP5_FINAL')
         changed=True
     return changed
 
@@ -447,7 +483,7 @@ def delivery_valid(api,store,evidence,now):
         if not exists(c):return False
         row=c.execute('SELECT payload,state FROM company_review_batches WHERE id=?',(evidence.get('batch_id'),)).fetchone()
         if not row or row['state']!='READY':return False
-        members=api.load_payload(row['payload']).get('included') or []
+        members=api.load_payload(row['payload']).get('telegram_included') or []
         if not 1<=len(members)<=LIMIT or members!=evidence.get('members'):return False
         items=records(api,c,members)
     return len(items)==len(members) and all(item['state']=='DONE' and api.opportunity_delivery_valid(store,api.load_payload(item['payload']),now) for item in items)
@@ -484,14 +520,21 @@ def render(api,store):
         if not batch:
             st.info(waiting)
             return
-        newest_state=batch['state']
-        newest_payload=api.load_payload(batch['payload']);showing_previous=False
-        if not api.load_payload(batch['payload']).get('members'):
-            previous=c.execute("SELECT * FROM company_review_batches WHERE json_array_length(json_extract(payload,'$.members'))>0 ORDER BY created_at DESC LIMIT 1").fetchone()
-            if previous:
-                showing_previous=previous['id']!=batch['id'];batch=previous
+        newest_payload=api.load_payload(batch['payload'])
         payload=api.load_payload(batch['payload']);members=records(api,c,payload['members'])
-    st.caption('Każda spółka oceniana niezależnie. Pełne opisy pozostają w KI; Telegram otrzymuje jedno zestawienie do sześciu spółek po cyklu z nowym istotnym materiałem. Zapis zestawienia: '+batch['created_at'])
+    if not members:
+        st.info('Najnowszy cykl nie utworzył zestawienia spółek. Starsze zapisy pozostają w bazie; ten widok nie przedstawia ich jako bieżących.')
+        return
+    markets={('GPW' if row['ticker'].endswith('.WA') else 'USA') for row in members}
+    market_label=', '.join(sorted(markets))
+    now=datetime.now(timezone.utc)
+    gpw_zone=api.exchange_zone('4MS.WA')
+    current_gpw_day=now.astimezone(gpw_zone).date()
+    batch_gpw_day=api.parse_market_time(batch['created_at']).astimezone(gpw_zone).date()
+    if api.market_session_open('4MS.WA',now) and ('GPW' not in markets or batch_gpw_day!=current_gpw_day):
+        st.info('Brak nowego zestawienia GPW w bieżącej sesji. Ostatni zapis dotyczy '+market_label+' z '+batch['created_at']+'; nie jest bieżącą oceną GPW.')
+        return
+    st.caption('Każda spółka oceniana niezależnie. Pełne opisy pozostają w KI; Telegram otrzymuje jedno zestawienie TOP 5 po cyklu z nowym istotnym materiałem. Rynek: '+market_label+' · zapis: '+batch['created_at'])
     st.caption('Ta sama spółka może otrzymać nową ocenę w trakcie sesji po zmianie ceny, wskazań lub aktywności albo po kolejnej pełnej świecy z obrotem. Niezmieniony odczyt nie uruchamia ponownie AI.')
     st.caption('Nowe powiadomienia dotyczą obserwacji w XTB. Nieznana przyszłość, częściowa godzina i brak kompletnego planu SL/TP pozostają zastrzeżeniami; odmowa wymaga konkretnej przesłanki tej spółki.')
     st.caption('Istotne wczesne ruchy mogą otrzymać ocenę przed trzema potwierdzeniami. Mają jawny status „wstępna ocena” i wspólny limit zestawienia.')
@@ -499,13 +542,14 @@ def render(api,store):
     st.write(labels.get(batch['state'],batch['state']))
     preparation_failed=any(item.get('status')=='PREPARATION_FAILED' for item in newest_payload.get('diagnostics',[]))
     if preparation_failed:st.warning('Przygotowanie części ocen zakończyło się błędem. Sprawdź powody poniżej; sam wybór spółki nie oznacza uruchomienia AI.')
-    if newest_state=='EMPTY' and showing_previous:st.caption('W ostatnim cyklu nie było nowego zestawienia. Poniżej pozostaje poprzedni zapis z własną datą.')
     for row in members:
         result=api.load_payload(row['result']) if row['state']=='DONE' else {}
         narrative=((result.get('provider') or {}).get('evidence_review') or {}).get('narrative') or {}
         prose_status=narrative.get('status')
         title=('pełna ocena AI' if prose_status=='COMPLETE' else 'ocena AI · opis częściowy' if row['state']=='DONE' else 'Błąd — zadanie zatrzymane' if row['state']=='FAILED' else api.polish_status(row['state']))
         with st.expander(row['ticker']+' · '+title,expanded=False):
+            import radar_ai
+            radar_ai.render_latest(store,row['ticker'])
             if row['state']!='DONE':
                 from tavily_cli_adapter import sanitize_cli_diagnostic
                 st.caption('Zdarzenie: '+row['created_at']+' · ostatnia aktualizacja: '+row['updated_at'])
@@ -585,7 +629,7 @@ def render(api,store):
             st.markdown('**Wszystkie wskaźniki**')
             api.render_indicator_table(s)
     with st.expander('Dlaczego pozostałe spółki nie weszły do zestawienia'):
-        reasons={'SCHEDULED':'Wybrano do przygotowania oceny; zapis zadania jeszcze niepotwierdzony','CYCLE_LIMIT':'Poza limitem sześciu nowych ocen tego cyklu',
+        reasons={'SCHEDULED':'Wybrano do przygotowania oceny; zapis zadania jeszcze niepotwierdzony','CYCLE_LIMIT':'Poza limitem TOP 5 nowych ocen tego cyklu',
             'EARLY_DATA_GATE':'Wstępny kandydat nie spełnia bramki danych lub aktywności',
             'MISSING_REFERENCE':'Czeka na poprawną bazę poprzedniej sesji','SESSION_CLOSED':'Czeka na regularną sesję',
             'INVALID_OR_STALE_DATA':'Czeka na świeże i spójne dane','INCOMPLETE_SESSION':'Czeka na komplet świec sesji',

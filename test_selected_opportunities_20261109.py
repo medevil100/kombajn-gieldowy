@@ -38,6 +38,20 @@ class SelectedOpportunitiesTests(unittest.TestCase):
                 db.execute('INSERT INTO '+name+' ('+','.join(row)+') VALUES ('+','.join('?' for _ in row)+')',list(row.values()))
         return ticker
 
+    def test_top5_view_does_not_render_decline_warnings(self):
+        from streamlit.testing.v1 import AppTest
+        script="""import KI
+import selected_opportunities as top
+from unittest.mock import patch
+view={'cards':[],'rising_watch':[],'warnings':[{'ticker':'DECLINE_SENTINEL'}],'excluded':{}}
+with patch.object(top,'collect',return_value=view):
+    top.render(KI,None,False)
+"""
+        app=AppTest.from_string(script).run(timeout=30)
+        self.assertFalse(app.exception,list(app.exception))
+        self.assertNotIn('Ostrzeżenia spadkowe',[x.value for x in app.subheader])
+        self.assertFalse(any('DECLINE_SENTINEL' in x.value for x in app.markdown))
+
     def test_cap_five_is_read_only_deterministic_and_does_not_create_new_work(self):
         f=self.sample(6);before=self.dump(f.store)
         view=self.read(f)
@@ -68,6 +82,23 @@ class SelectedOpportunitiesTests(unittest.TestCase):
             f=self.sample(1);ticker=self.clone_job(f,state)
             view=self.read(f)
             self.assertEqual(view['cards'],[],(state,ticker,view))
+
+    def test_failed_ai_does_not_hide_current_orchestrated_technical_watch(self):
+        f=self.sample(1);ticker=self.clone_job(f,'FAILED')
+        with f.store.transaction() as db:
+            row=db.execute("SELECT payload FROM observations WHERE ticker=? AND interval='1h' ORDER BY id DESC LIMIT 1",(ticker,)).fetchone()
+            snapshot=KI.load_payload(row['payload'])
+            control={'ticker':ticker,'as_of':snapshot['acquired_at'],'evaluated_at':snapshot['acquired_at'],
+                'direction':'UP','role':KI.company_orchestrator.WATCH,
+                'role_label':KI.company_orchestrator.LABELS[KI.company_orchestrator.WATCH],
+                'review_allowed':True,'action':'ANALYZE_CONFIRMED','reason':'READY_FOR_AI',
+                'next_check':'Nowy zaakceptowany odczyt.','connections':{},'limitations':[]}
+            db.execute('INSERT OR REPLACE INTO runtime VALUES(?,?,?)',
+                ('orchestrator:'+ticker,KI.json_text(control),snapshot['acquired_at']))
+        view=self.read(f)
+        self.assertEqual(view['cards'],[])
+        self.assertEqual([x['ticker'] for x in view['rising_watch']],[ticker])
+        self.assertTrue(view['rising_watch'][0]['technical_only'])
 
     def test_current_reading_with_adverse_retrace_removes_old_positive(self):
         f=self.sample(1)
@@ -108,6 +139,7 @@ class SelectedOpportunitiesTests(unittest.TestCase):
         self.assertIn('Bid/ask',html)
         self.assertIn('Źródła i fakty',html)
         self.assertIn('Zapisane fundamenty',html)
+        self.assertNotIn('.ki-indicators{',html)
 
     def test_mobile_cards_escape_content_and_have_native_accessible_details(self):
         f=self.sample(1);card=self.read(f)['cards'][0]

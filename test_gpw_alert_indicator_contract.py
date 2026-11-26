@@ -47,6 +47,7 @@ class GPWAlertIndicatorContractTests(unittest.TestCase):
         now = datetime(2026, 10, 8, 15, 10, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
             store = Store(Path(directory) / "matrix.sqlite3")
+            store.save_section('settings',{'telegram_signal_only':False})
             KI._save_daily_history(store,'TOS.WA',[{'session_date':'2026-10-07','status':'CLOSED',
                 'open':2.96,'high':2.96,'low':2.96,'close':2.96,'volume':1000}],datetime(2026,10,8,12,tzinfo=timezone.utc))
             store.save_section("tickers", ["TOS.WA"])

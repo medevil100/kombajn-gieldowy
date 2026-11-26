@@ -192,7 +192,7 @@ def schema(book):
     if book.get('contract')==CURRENT_CONTRACT:
         props=result['properties']
         props.pop('verdict');props.pop('source_quote')
-        props['narrative']=company_narrative.schema()
+        props['narrative']=company_narrative.schema(sections=company_narrative.FULL_SECTIONS)
         props['decision']=review_coordinator.decision_schema(book)
         result['required']=list(props)
     return result
@@ -254,7 +254,8 @@ def request(api,base,snapshot,context):
             'W polach decyzyjnych wybieraj identyfikatory ze schematu; w narrative napisz własne uzasadnienie na podstawie danych.')
         instruction=instruction.replace('KI składa pełny polski opis z wybranych dowodów oraz obowiązkowych ograniczeń pakietu.',
             'Własne pełne uzasadnienie piszesz w narrative; KI zachowuje sprawdzone dane i warunki lokalne.')
-        result['messages'][0]['content']=instruction+company_narrative.instructions()
+        result['messages'][0]['content']=instruction+company_narrative.instructions(full=True)
+        result['max_completion_tokens']=company_narrative.FULL_MAX_TOKENS
     return result
 
 
@@ -271,7 +272,7 @@ def decode(api,wire,snapshot,context):
         expected=company_narrative.facts_for(snapshot,narrative_material(snapshot,context,book))
         if payload['narrative_facts']!=expected:raise ValueError('Katalog liczb uzasadnienia nie odpowiada zapisanym danym.')
         if not isinstance(wire,dict) or 'narrative' not in wire:raise ValueError('Brak pełnego uzasadnienia AI wymaganego przez zapisany kontrakt.')
-        narrative=company_narrative.checked(wire['narrative'],expected)
+        narrative=company_narrative.checked(wire['narrative'],expected,company_narrative.FULL_SECTIONS)
         wire={k:v for k,v in wire.items() if k!='narrative'}
     if coordinated:wire=review_coordinator.normalize(wire,book)
     # The wire contract contains only scalar enums and bounded lists of enums.

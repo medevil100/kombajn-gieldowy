@@ -4,6 +4,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from html import escape
 import json
+import math
 import sqlite3
 import company_orchestrator as orchestrator
 import market_intelligence
@@ -38,6 +39,7 @@ def collect(api, store, now=None, market='Wszystkie'):
               AND json_extract(e.payload,'$.company_review_batch') IS NOT NULL
         ) SELECT * FROM latest WHERE position=1''',
             ((current-timedelta(days=1)).isoformat(),current.isoformat())).fetchall()
+        represented=set()
         for row in rows:
             ticker=row['ticker']
             if market!='Wszystkie' and (ticker.endswith('.WA'))!=(market=='GPW'):continue
@@ -78,7 +80,10 @@ def collect(api, store, now=None, market='Wszystkie'):
                     excluded['Najnowszy odczyt nie podtrzymuje kwalifikacji']+=1;continue
                 score=(event.get('ranking') or {}).get('score')
                 if not api.finite_number(score):score=(manifest.get('technical') or {}).get('directional_score')
-                bucket='cards' if control['role']==orchestrator.TOP else 'warnings' if control['role']==orchestrator.WARNING else 'rising_watch'
+                change=(latest.get('price_matrix') or {}).get('change_pct')
+                positive=api.finite_number(change) and change>0
+                bucket=('warnings' if not positive or control['role']==orchestrator.WARNING
+                        else 'cards' if control['role']==orchestrator.TOP else 'rising_watch')
                 result[bucket].append({'event_id':row['id'],'ticker':ticker,'snapshot':snapshot,
                     'analysis':clean,'context':context,'manifest':manifest,'score':score,
                     'orchestration':control,
@@ -86,8 +91,39 @@ def collect(api, store, now=None, market='Wszystkie'):
                     'review_at':row['updated_at'],'latest_at':latest.get('acquired_at'),
                     'valid_until':min(at+timedelta(minutes=15),stamp(snapshot['candle_end'])).isoformat(),
                     'batch_at':batch['created_at']})
+                represented.add(ticker)
             except (ValueError,TypeError,KeyError,OverflowError):
                 excluded['Niepoprawny zapis raportu']+=1
+        # A provider/validation/budget failure must not erase a current technical
+        # observation.  The orchestrator is the source of truth for monitoring;
+        # AI is an additional opinion required only for promotion/publication.
+        if 'runtime' in tables:
+            watches=db.execute("SELECT payload,updated_at FROM runtime WHERE key LIKE 'orchestrator:%'").fetchall()
+            for watch in watches:
+                try:
+                    control=api.load_payload(watch['payload']);ticker=control['ticker']
+                    if (ticker in represented or ticker not in ticks or control.get('role')!=orchestrator.WATCH
+                        or control.get('direction')!='UP' or market!='Wszystkie' and
+                            (ticker.endswith('.WA'))!=(market=='GPW')):
+                        continue
+                    raw=db.execute("SELECT payload FROM observations WHERE ticker=? AND interval='1h' ORDER BY id DESC LIMIT 1",(ticker,)).fetchone()
+                    if not raw:continue
+                    snapshot=api.load_payload(raw[0]);at=stamp(snapshot.get('acquired_at'))
+                    if (not at or not 0<=(current-at).total_seconds()<=900
+                        or snapshot.get('ticker')!=ticker or snapshot.get('interval')!='1h'
+                        or stamp(control.get('as_of'))!=at):
+                        continue
+                    manifest=api.build_analysis_manifest({'snapshot':snapshot,'autonomous_assessment_version':1},{'sources':[]})
+                    score=(manifest.get('technical') or {}).get('directional_score')
+                    result['rising_watch'].append({'event_id':None,'ticker':ticker,'snapshot':snapshot,
+                        'analysis':None,'context':{},'manifest':manifest,'score':score,
+                        'orchestration':control,'evidence_review':None,'review_at':watch['updated_at'],
+                        'latest_at':snapshot.get('acquired_at'),'valid_until':min(
+                            at+timedelta(minutes=15),stamp(snapshot['candle_end'])).isoformat(),
+                        'batch_at':None,'technical_only':True})
+                    represented.add(ticker)
+                except (ValueError,TypeError,KeyError,OverflowError):
+                    excluded['Niepoprawny zapis obserwacji technicznej']+=1
     for bucket in ('cards','rising_watch','warnings'):
         result[bucket].sort(key=lambda c:(-(c['score'] if api.finite_number(c['score']) else -1),
             -stamp(c['snapshot']['acquired_at']).timestamp(),c['ticker']))
@@ -106,6 +142,16 @@ def table(rows):
     return ('<div class="ki-top5-table"><table><thead><tr>'+''.join('<th>'+escape(k)+'</th>' for k in keys)
             +'</tr></thead><tbody>'+''.join('<tr>'+''.join('<td>'+escape(str(row.get(k,'—')))+'</td>' for k in keys)
             +'</tr>' for row in rows)+'</tbody></table></div>')
+
+
+def without_embedded_style(value):
+    """Nested style tags are escaped by the card renderer; CSS is emitted once."""
+    text=str(value or '')
+    while '<style' in text.lower():
+        low=text.lower();start=low.find('<style');open_end=low.find('>',start);end=low.find('</style>',open_end)
+        if open_end<0 or end<0:break
+        text=text[:start]+text[end+8:]
+    return text
 
 
 def scenario_text(plan,now):
@@ -133,7 +179,7 @@ def full_html(api,card,now):
     html+=paragraph(api.activity_summary(s,ctx.get('previous_snapshot')),'ki-top5-note')
     html+='<h4>Wskaźniki — uzasadnienie AI</h4>'
     for item in a.get('technical',[]):html+=paragraph(api.polish_indicator(item['metric'])+': '+item['interpretation'])
-    html+='<h4>Wszystkie wskaźniki</h4>'+api.indicator_table_html(s)
+    html+='<h4>Wszystkie wskaźniki</h4>'+without_embedded_style(api.indicator_table_html(s))
     events=(m.get('technical_events') or {}).get('events') or []
     html+='<h4>Zdarzenia techniczne</h4>'
     for item in events:html+=paragraph(str(item.get('label',''))+' · '+str(item.get('evidence','')))
@@ -191,7 +237,9 @@ def cards_html(api,cards,now):
     content=[]
     for position,card in enumerate(cards,1):
         s=card['snapshot'];m=card['manifest'];a=card['analysis'];currency=s.get('currency') or ''
-        change=(s.get('price_matrix') or {}).get('change_pct');up=api.finite_number(change) and change>0
+        matrix=s.get('price_matrix') or {};movement=api.price_change_contract(s,matrix);daily=movement['daily']
+        change=daily.get('change_pct') if daily.get('status')=='READY' else None
+        up=api.finite_number(change) and change>0
         plan=m.get('trade_plan') or {};levels=level_values({'levels':{'plan':plan}})
         html='<article class="ki-top5-card '+('up' if up else 'down')+'"><header><span>'+str(position)+'. '+escape(card['ticker'])+'</span><b>'+('WZROST' if up else 'SPADEK')+'</b></header>'
         html+=paragraph(s.get('company_name') or card['ticker'],'ki-top5-note')
@@ -200,11 +248,24 @@ def cards_html(api,cards,now):
         if m.get('review_stage')=='PRELIMINARY':
             html+=paragraph('WSTĘPNA OCENA · '+str(s['price_matrix']['consecutive_reads'])+'/3 potwierdzeń w chwili oceny.','ki-top5-preliminary')
         html+='<div class="ki-top5-price">'+escape(number_text(s.get('price'),currency))+'</div>'
-        html+=paragraph('Od stałej bazy: '+number_text(change,'%',2)+' · '+('GPW' if card['ticker'].endswith('.WA') else 'USA'))
+        if daily.get('status')=='READY':
+            html+=paragraph('Zmiana dzienna: '+number_text(change,'%',2)+' · poprzednie zamknięcie '
+                +number_text(daily.get('reference_price'),currency,4)+' · sesja '+str(daily.get('reference_session')))
+        else:
+            html+=paragraph('Zmiana dzienna: brak potwierdzonego zamknięcia poprzedniej sesji.','ki-top5-preliminary')
+        tracking=movement.get('tracking') or {};tracking_change=tracking.get('change_pct')
+        if api.finite_number(tracking_change) and (not api.finite_number(change) or not math.isclose(tracking_change,change,abs_tol=1e-9,rel_tol=1e-9)):
+            html+=paragraph('Ruch matrycy technicznej: '+number_text(tracking_change,'%',2)
+                +' · cena odniesienia '+number_text(tracking.get('reference_price'),currency,4)
+                +' · nie jest zmianą dzienną.','ki-top5-note')
         html+=paragraph('Cena i analiza dotyczą odczytu: '+time_text(s.get('acquired_at')),'ki-top5-note')
         html+=paragraph('AI zakończono: '+time_text(card.get('review_at'))+' · aktualność najpóźniej do '+time_text(card['valid_until']),'ki-top5-note')
         narrative=(card.get('evidence_review') or {}).get('narrative')
-        if narrative:html+=company_narrative.html(narrative)
+        if card.get('technical_only'):
+            html+='<h4>Bieżąca obserwacja techniczna</h4>'+paragraph(
+                'Warunki techniczne obserwacji są spełnione. Ocena AI nie została jeszcze poprawnie zakończona; nie blokuje to dalszego monitorowania ceny, aktywności i poziomów.',
+                'ki-top5-preliminary')
+        elif narrative:html+=company_narrative.html(narrative)
         else:
             html+='<h4>Werdykt AI · dlaczego obserwować</h4>'+paragraph(a['final_review']['explanation'])
             if card.get('evidence_review'):html+=paragraph('Wcześniejsza ocena: AI wybrało werdykt i dowody; opis składa KI.','ki-top5-note')
@@ -216,11 +277,18 @@ def cards_html(api,cards,now):
         if plan.get('status')=='INDICATIVE':html+=paragraph('Potencjał/ryzyko do TP1: '+number_text(plan.get('rr1'),digits=2)+' · poziomy techniczne od ceny z oceny.','ki-top5-note')
         else:html+=paragraph('SL/TP: '+str(plan.get('reason') or 'Brak kompletu danych.'),'ki-top5-note')
         html+=paragraph('Punktacja automatu: '+number_text(card.get('score'),digits=0)+' / 100 · '+api.activity_summary(s,card['context'].get('previous_snapshot')),'ki-top5-note')
-        html+=full_html(api,card,now)+'</article>';content.append(html)
+        if card.get('technical_only'):
+            html+='<details class="ki-top5-full"><summary>Pełne dane techniczne · '+escape(card['ticker'])+'</summary>'
+            html+='<h4>Wszystkie wskaźniki</h4>'+without_embedded_style(api.indicator_table_html(s))
+            events=(m.get('technical_events') or {}).get('events') or []
+            html+='<h4>Zdarzenia techniczne</h4>'+(''.join(paragraph(str(x.get('label',''))+' · '+str(x.get('evidence',''))) for x in events) if events else paragraph('Brak zapisanych zdarzeń.','ki-top5-note'))
+            html+='</details>'
+        else:html+=full_html(api,card,now)
+        html+='</article>';content.append(html)
     return '''<style>
     .ki-top5-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
-    .ki-top5-card{box-sizing:border-box;min-width:0;background:#14202d;color:#edf2f7;border:1px solid #53677e;border-top:5px solid #4ade80;border-radius:12px;padding:18px;overflow-wrap:anywhere}
-    .ki-top5-card.down{border-top-color:#fb7185}.ki-top5-card header{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;font-size:1.25rem;font-weight:700}
+    .ki-top5-card{box-sizing:border-box;min-width:0;background:#14202d;color:#edf2f7;border:2px solid rgba(74,222,128,.95);border-top:6px solid #4ade80;border-radius:12px;padding:18px;overflow-wrap:anywhere;box-shadow:0 0 0 1px rgba(74,222,128,.18),0 0 20px rgba(34,197,94,.27),inset 0 0 18px rgba(34,197,94,.07)}
+    .ki-top5-card.down{border-color:rgba(251,113,133,.82);border-top-color:#fb7185;box-shadow:0 0 0 1px rgba(251,113,133,.10),0 0 16px rgba(244,63,94,.20),inset 0 0 18px rgba(244,63,94,.05)}.ki-top5-card header{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;font-size:1.25rem;font-weight:700}
     .ki-top5-card header b{font-size:.85rem;color:#a7f3d0}.ki-top5-card.down header b{color:#fecdd3}
     .ki-top5-card h4{font-size:1rem;margin:16px 0 6px;color:#edf2f7}.ki-top5-card p{font-size:1rem;line-height:1.55;margin:6px 0;white-space:pre-wrap}
     .ki-top5-card .ki-top5-note{font-size:.85rem;color:#c6d0dc}.ki-top5-price{font-size:1.6rem;font-weight:700;font-variant-numeric:tabular-nums;margin-top:10px}
@@ -240,7 +308,7 @@ def cards_html(api,cards,now):
 def render(api,store,auto_refresh=True):
     import streamlit as st
     st.subheader(VIEW)
-    st.caption('TOP 5: wyłącznie wzrosty z poprawną oceną AI i kompletnym technicznym planem SL/TP. Pozostałe obserwacje i ostrzeżenia spadkowe są pokazane osobno. Bez dodatkowych wywołań API.')
+    st.caption('TOP 5: wyłącznie wzrosty z poprawną oceną AI i kompletnym technicznym planem SL/TP. Ostrzeżenia spadkowe pozostają w Automacie i końcowych ocenach. Bez dodatkowych wywołań API.')
     market=st.radio('Rynek TOP 5',('Wszystkie','GPW','USA'),horizontal=True,key='top5_market')
     @st.fragment(run_every=60 if auto_refresh else None)
     def saved_view():
@@ -254,9 +322,20 @@ def render(api,store,auto_refresh=True):
                    +'Nowe dane i analizy powstają według cyklu skanera.')
         if view['cards']:st.markdown(cards_html(api,view['cards'],now),unsafe_allow_html=True)
         else:st.info('Brak aktualnych wzrostów z kompletnym planem SL/TP. Wcześniejsze sygnały pozostają w obserwacjach poniżej i w „Końcowych ocenach AI”.')
-        for bucket,title in (('rising_watch','Wzrosty do obserwacji · bez kompletnego planu'),('warnings','Ostrzeżenia spadkowe')):
+        import radar_ai
+        for card in view['cards']:
+            with st.expander('Aktualizowana ocena AI · '+card['ticker']):
+                radar_ai.render_latest(store,card['ticker'])
+        for bucket,title in (('rising_watch','Wzrosty do obserwacji · bez kompletnego planu'),):
             if view[bucket]:
                 st.subheader(title);st.markdown(cards_html(api,view[bucket],now),unsafe_allow_html=True)
+        if store is not None:
+            import large_movement
+            watches=large_movement.case_page(store,('TECHNICAL_WATCH',),market,None,1)
+            if watches['total']:
+                st.subheader('Trwałe obserwacje techniczne po wybiciu')
+                st.caption('To obserwacje, nie potwierdzone spółki Dużego potencjału. Brak wyższego oporu nie usuwa wykrycia; awans wymaga odrębnej pełnej oceny.')
+                st.markdown(large_movement.cards_html(api,watches['rows']),unsafe_allow_html=True)
         if view['excluded']:
             with st.expander('Dlaczego lista jest krótsza'):
                 for reason,count in view['excluded'].items():st.write(reason+': '+str(count))

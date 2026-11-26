@@ -114,7 +114,7 @@ class EarlyCompanyReviewTests(unittest.TestCase):
 
     def test_huma_measured_price_volume_gap_keeps_one_proof_but_allows_preliminary_assessment(self):
         # Real supplied prices/volumes; the coherent OHLC fixture is synthetic.
-        self.candidate();s=self.read(45,.58280998468399,6504423.)
+        self.candidate();s=self.read(50,.58280998468399,6504423.)
         self.assertEqual(s['price_matrix']['consecutive_reads'],1)
         self.assertAlmostEqual(s['price_matrix']['change_pct'],28.0901065,places=4)
         batch,s=self.prepare(s);self.assertTrue(batch)
@@ -251,7 +251,7 @@ class EarlyCompanyReviewTests(unittest.TestCase):
 
 
 class MixedLaneLimitTests(unittest.TestCase):
-    def test_preliminary_and_confirmed_share_six_jobs_and_one_batch(self):
+    def test_preliminary_and_confirmed_share_five_jobs_and_one_batch(self):
         from test_final_company_review_20261106 import FinalCompanyReviewTests,NOW
         f=FinalCompanyReviewTests();f.setUp();self.addCleanup(f.doCleanups)
         chosen=f.candidates(8)
@@ -264,12 +264,12 @@ class MixedLaneLimitTests(unittest.TestCase):
                 c.execute("UPDATE observations SET payload=? WHERE ticker=? AND acquired_at=?",(KI.json_text(snap),snap['ticker'],snap['acquired_at']))
         with patch.object(KI,'fetch_opportunity_spread',return_value={}) as quote:
             review.prepare(KI,f.store,'cycle',chosen,NOW)
-        self.assertEqual(quote.call_count,6)
-        self.assertEqual(len(f.rows('analysis_jobs')),6);self.assertEqual(len(f.rows('company_review_batches')),1)
+        self.assertEqual(quote.call_count,5)
+        self.assertEqual(len(f.rows('analysis_jobs')),5);self.assertEqual(len(f.rows('company_review_batches')),1)
         payload=KI.load_payload(f.rows('company_review_batches')[0]['payload'])
-        self.assertEqual(sum(x['state']=='CYCLE_LIMIT' for x in payload['pool']),2)
+        self.assertEqual(sum(x['state']=='CYCLE_LIMIT' for x in payload['pool']),3)
         for row in f.rows('opportunities'):
-            if row['sequence_id'] in {x['sequence_id'] for x in chosen[6:]}:self.assertEqual(row['state'],'CANDIDATE')
+            if row['sequence_id'] in {x['sequence_id'] for x in chosen[5:]}:self.assertEqual(row['state'],'CANDIDATE')
 
 
 if __name__=='__main__':unittest.main()

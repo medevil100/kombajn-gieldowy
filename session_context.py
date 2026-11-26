@@ -35,6 +35,43 @@ def valid_bar(row,at):
     return row['low']<=min(row['open'],row['close'])<=max(row['open'],row['close'])<=row['high']
 
 
+def strong_closed_hour_activity(snapshot,minimum_rvol=1.5,minimum_volume=1000,threshold_pct=2.):
+    """Return a same-session full hour with a price move and verified volume.
+
+    The reference is the 20 preceding closed full hours.  A quiet new candle
+    cannot erase activity already observed during the same market session.
+    """
+    at=stamp(snapshot.get('acquired_at'))
+    ticker=snapshot.get('ticker') or ''
+    matrix=snapshot.get('price_matrix') or {}
+    anchor=matrix.get('anchor_price')
+    if not at or not number(anchor,True) or not number(minimum_rvol,True) or not number(minimum_volume,True):return None
+    zone=ZoneInfo('Europe/Warsaw' if ticker.endswith('.WA') else 'America/New_York')
+    session_day=at.astimezone(zone).date()
+    history=sorted((row for row in snapshot.get('chart_history') or [] if isinstance(row,dict)),
+                   key=lambda row:stamp(row.get('time')) or datetime.min.replace(tzinfo=timezone.utc))
+    best=None
+    for index,row in enumerate(history):
+        start,end=stamp(row.get('time')),stamp(row.get('end'))
+        if not start or not end or start.astimezone(zone).date()!=session_day or end>at:
+            continue
+        if row.get('status')!='CLOSED' or (end-start).total_seconds()!=3600 or not valid_bar(row,at):continue
+        volume=row['volume'];change=(row['close']/anchor-1)*100
+        if volume<minimum_volume or abs(change)<=threshold_pct or (matrix.get('change_pct') or 0)*change<=0:continue
+        prior=[bar for bar in history[:index] if bar.get('status')=='CLOSED'
+               and stamp(bar.get('time')) and stamp(bar.get('end'))
+               and (stamp(bar['end'])-stamp(bar['time'])).total_seconds()==3600
+               and valid_bar(bar,at)][-20:]
+        if len(prior)!=20:continue
+        average=sum(bar['volume'] for bar in prior)/20
+        if average<=0:continue
+        rvol=volume/average
+        if rvol>=minimum_rvol and (best is None or end>stamp(best['end'])):
+            best={'time':start.isoformat(),'end':end.isoformat(),'volume':volume,
+                  'average_volume':average,'rvol':rvol,'close':row['close'],'change_pct':change}
+    return best
+
+
 def build(snapshot):
     """One OHLCV row per candle, including the actual unfinished tail.
 

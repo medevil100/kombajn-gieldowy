@@ -66,7 +66,8 @@ class ManualProviderTests(unittest.TestCase):
         label,url,key=KI.manual_provider('openai',{'OPENAI_API_KEY':'oa'},req)
         self.assertEqual((label,key),('OpenAI','oa'))
         self.assertEqual(url,'https://api.openai.com/v1/chat/completions')
-        self.assertEqual(req['model'],'gpt-4o-mini')
+        self.assertEqual(req['model'],'gpt-6-luna')
+        self.assertEqual(req['reasoning_effort'],'none')
         self.assertIn('json_schema',req['response_format'])
 
     def test_openai_does_not_require_deepseek_key(self):
